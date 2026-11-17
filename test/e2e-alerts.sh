@@ -254,7 +254,7 @@ check "7d static app started again: still nothing" eq "$(nmsg)" 0
 mark
 # to about 89 MB of 96 with the app itself: above 90% of the cap, below it (no swap). What the app
 # takes by itself differs by machine (about 14 MB on arm64, less on x86-64), so it is measured
-base=$(srv "sudo awk '/^(anon|shmem) / { s += \$2 } END { print int(s / 1048576) }' /sys/fs/cgroup/tando.slice/tando-hog.slice/tando-hog.service/memory.stat /sys/fs/cgroup/system.slice/tando-hog.service/memory.stat 2> /dev/null")
+base=$(srv "sudo awk '/^(anon|shmem) / { s += \$2 } END { print int(s / 1048576) }' /sys/fs/cgroup\$(systemctl show tando-hog -p ControlGroup --value)/memory.stat 2> /dev/null")
 case $base in ""|*[!0-9]*) base=14;; esac
 get hog "/grow?mb=$((89 - base))" > /dev/null
 wruns 2
@@ -299,6 +299,8 @@ HC="disk inodes load memory swap"
 if srv 'df --output=ipcent / | tail -1' | grep -q -- -; then
   HC="disk load memory swap"; echo "SKIP 11 host inodes: this filesystem ($(srv 'df --output=fstype / | tail -1' | tr -d ' ')) reports no inode counts"
 fi
+# (a server without swap has nothing to judge: GitHub's runners come with and without)
+[ "$(srv "awk '/^SwapTotal/ { print \$2 }' /proc/meminfo")" = 0 ] && { HC=${HC% swap}; echo "SKIP 11 host swap: this server has no swap"; }
 for c in $HC; do
   check "11a host $c fires once when over its threshold" eq "$(nev firing host $c)" 1
 done
