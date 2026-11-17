@@ -325,7 +325,8 @@ AOPTS=(-F /dev/null -p "$SP" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHos
        -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5)
 agent_socks() { srv "sudo find /tmp /var/tmp /home /opt -type s -user $1 2> /dev/null | wc -l" | tr -d ' '; }
 fwd_session() { # user key cmd: a session with agent forwarding, kept open for 8 s in the background
-  sleep 8 | ssh "${AOPTS[@]}" -i "$2" -o "ForwardAgent=$AD/s" -v "$1@127.0.0.1" "$3" > /dev/null 2> "$E/agentfwd.$1" &
+  # (the agent by SSH_AUTH_SOCK: OpenSSH 9.6 on Linux does not ask for forwarding with ForwardAgent=<path>)
+  sleep 8 | SSH_AUTH_SOCK="$AD/s" ssh "${AOPTS[@]}" -i "$2" -o ForwardAgent=yes -v "$1@127.0.0.1" "$3" > /dev/null 2> "$E/agentfwd.$1" &
 }
 fwd_session vmadmin "$ROOT/test/server/id_test" 'sleep 6'
 t_until 6 eval '[ "$(agent_socks vmadmin)" -ge 1 ]'

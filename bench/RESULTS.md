@@ -447,11 +447,41 @@ Method and raw output: `test/load/status-bench.sh`, `test/load/status-scale.sh`,
 docs/MONITORING.md ("Cost"), docs/LOGGING.md and docs/TOP.md. All the figures here are shell versus
 Go on the test container.
 
-## Go server programs on the real server
+## Go server programs on the real server, 17 Nov 2026
 
-Not measured yet: the Go programs have not run on the real server.
+The same x86-64 server as the earlier real-server trials (1 vCPU, 2 GB, Ubuntu, another production
+site on the same Caddy). The shell version was measured there first, then removed, and tando was set
+up again from the published code. This was the first run of the x86-64 builds on a real machine.
 
-Not measured yet. To fill in after `tando host setup` has put the Go programs on the real x86-64 VM
-(1 vCPU, 2 GB): the same measures as above (`status-bench.sh` and `status-scale.sh` against the
-installed apps, one monitoring minute, `tandod` resident memory over a day), and `tando ls` and
-`tando status` from the laptop before and after.
+`tando host setup` on that server: 24 s, 9 steps, Caddy and the other site untouched (same Caddy
+process before and after, 0 failed requests of the other site, asked every 2 s throughout). First
+deploys: 8.6 s (Node app), 8.3 s (static site), 15 s (Node app with a new PostgreSQL database).
+
+CPU and peak memory of one call on the server, 3 apps, 5 runs each (the median is given). Each call
+ran as its own systemd unit (`systemd-run --wait`), so the figures are the kernel's accounting for
+the whole process tree. The request log of the app had 19,500 lines for both versions.
+
+| Call | Shell CPU | Go CPU | Shell peak | Go peak |
+|---|---|---|---|---|
+| status, all apps | 372 ms | 24 ms | 7.3 MB | 1.7 MB |
+| status, one app | 380 ms | 21 ms | 7.9 MB | 1.7 MB |
+| one round of alert checks | 422 ms | 19 ms | 7.6 MB | 1.9 MB |
+| request errors, 7 days | 200 ms | 54 ms | 6.4 MB | 2.9 MB |
+| request summary, 7 days | 495 ms | 62 ms | 9.2 MB | 2.9 MB |
+| metrics sample | 67 ms | 31 ms | 3.4 MB | 2.1 MB |
+| history | 115 ms | 21 ms | 4.6 MB | 1.7 MB |
+
+The shell peak of the request summary was measured with `/usr/bin/time` (maximum resident size), the
+others by the unit's `memory.peak`.
+
+From the laptop, over ssh (median of 3, connection already open): `tando ls` 0.58 s, `tando status`
+0.55 s, `tando health` 0.52 s, `tando requests` 0.67 s, `tando history` 0.49 s, `tando host status`
+0.99 s. Most of that is the ssh round trip and the laptop's rendering.
+
+The monitoring daemon (`tandod`: checks, metrics and the log scan once a minute) over its first 27
+minutes with 3 apps, one of them frozen on purpose to raise an alert: 58 ms of CPU per minute (0.1%
+of the one CPU), 8 MB of memory, peak 17 MB, no restart. The shell version spent about 490 ms per
+minute on the same work (one round of checks plus one metrics sample, from the table above).
+The frozen app: the alert fired after 3 failed checks, about 3.5 minutes, and tando restarted the app.
+
+Not measured: a full day of the daemon, and more than 3 apps on this server.

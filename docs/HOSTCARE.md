@@ -91,7 +91,8 @@ off). On a server whose Caddy also serves sites tando does not manage, nothing i
   `apt-daily.timer` and `apt-daily-upgrade.timer`;
 - writes `/etc/apt/apt.conf.d/52tando-care`: daily package lists and upgrades, the allowed origins
   cleared and set to the security pockets only (`-security`, ESM apps and infra security), no
-  automatic reboot by unattended-upgrades (tando's window does that, if you allow it);
+  automatic reboot by unattended-upgrades (tando's window does that, if you allow it), and old
+  kernel packages that nothing uses any more are removed (`Remove-Unused-Kernel-Packages`);
 - writes `/etc/systemd/system/apt-daily-upgrade.service.d/tando-care.conf` with
   `NEEDRESTART_SUSPEND=1`: an upgrade restarts no service tando does not manage (Ubuntu's
   needrestart would); `tando host status` lists what still runs old code;

@@ -30,7 +30,10 @@ check "S3-3b Caddy strips the probe header and sets X-Real-IP for proxied apps" 
 
 # 4: requests Caddy 2.6 serves but would not log
 cu=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: BRAVO.LOCALHOST" "http://127.0.0.1:$HP/s3-case")
-printf 'GET /s3-halfclose HTTP/1.1\r\nHost: bravo.localhost\r\n\r\n' | nc -w 3 127.0.0.1 "$HP" > /dev/null 2>&1
+# (Linux nc half-closes at the end of its input only with -N; the one of macOS always does)
+# (whose -N means something else)
+NCN=""; nc -h 2>&1 | grep -qi -- '-N.*shutdown' && NCN=-N
+printf 'GET /s3-halfclose HTTP/1.1\r\nHost: bravo.localhost\r\n\r\n' | nc $NCN -w 3 127.0.0.1 "$HP" > /dev/null 2>&1
 sleep 2
 rt=$(srv 'sudo /opt/tando/bin/tando-logs req-tail bravo 50')
 check "S3-4a a Host in other letters is refused (got $cu), not served unlogged" t_eq "$cu" 400

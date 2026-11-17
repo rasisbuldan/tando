@@ -89,10 +89,12 @@ printf 'app = hello\nhost = vps\nrecipe = static\nout = ../../etc\n' > "$E/w/hel
 out=$(cd "$E/w/hello" && mv tando.conf tando.conf.keep && cp tando.conf.out tando.conf && "$R" deploy 2>&1; mv tando.conf.keep tando.conf); rc=$?
 check "8b out outside the project is refused" eval 'printf "%s" "$out" | grep -q "out must be a directory inside the project"'
 # under /bin/bash (3.2 on macOS), with set -u: host setup with no settings, against an ssh that
-# answers every call (an empty array expanded as "${a[@]}" was an "unbound variable" there)
+# answers every call (an empty array expanded as "${a[@]}" was an "unbound variable" there). The
+# stub drains its input through fd 3: a background command's own stdin is /dev/null in sh, and a
+# client writing into a pipe nobody reads is killed by SIGPIPE
 mkdir -p "$E/okbin"
 printf '%s\n' '#!/bin/sh' 'case "$*" in *"echo login=1"*) echo login=1; echo sudo=1;; *"uname -m"*) echo arch=aarch64;; esac' \
-  'cat > /dev/null 2>&1 &' 'exit 0' > "$E/okbin/ssh"
+  'exec 3<&0; cat <&3 > /dev/null 2>&1 &' 'exit 0' > "$E/okbin/ssh"
 chmod +x "$E/okbin/ssh"
 out=$(cd "$E/w/hello" && PATH="$E/okbin:$PATH" /bin/bash "$R" host setup vps 2>&1); rc=$?
 check "8c /bin/bash $(/bin/bash -c 'echo $BASH_VERSION' | cut -d. -f1-2): host setup with no settings runs through (rc=$rc)" \

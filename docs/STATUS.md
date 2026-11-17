@@ -56,7 +56,7 @@ Full suite on this tree, 17 Nov 2026 (`test/all.sh`, 21 suites, test containers 
 | Failing check | What it was | State |
 |---|---|---|
 | e2e-trial T3b | a doctor row wider than 80 columns | fixed, suite passes again |
-| e2e-faults m3 | the test expected 8 setup steps, there are 9 | test fixed; rerun pending |
+| e2e-faults m3 | the test expected 8 setup steps, there are 9 | test fixed, check passes again |
 | e2e 19j | stopped journal units that systemd had not unloaded yet were counted as leftovers of `destroy` | test fixed, check passes again |
 | e2e-alerts 27i | the check asked for the last run before the first run after the daemon tests | test fixed, suite passes (154 passed, 1 skipped) |
 
@@ -66,10 +66,18 @@ published ports reaching nothing. The alerts and fault suites restart it once mo
 happens. This cost several runs; it is not a tando fault (no connection arrives in the container,
 and tando's firewall does not touch port 22).
 
+The rerun of the fault suite then failed one other check, h2 (40 passed, 1 failed). That one was
+tando's: a deploy refused for lack of disk space kept its upload lease, so a second deploy within
+5 seconds was told "another deploy is uploading". The agent now gives the lease back when it refuses
+an activation; h2 passes alone. The whole fault suite has not been rerun since.
+
 On GitHub's runners (x86-64, the first place the amd64 server programs ran): lint, Go, the secret
-scan and the laptop-side jobs pass. In the server job 12 suites pass; the open failures there are
-in checks that depend on the runner (a pseudo-terminal, a forwarded ssh agent, a fake ssh for
-`host setup`, a half-closed request in the Caddy log) and are being worked through.
+scan and the laptop-side jobs pass. In the third run of the server job 14 suites passed and 4 had
+failing checks, 8 in all. All 8 were tests written for the laptop: an ssh client option OpenSSH 9.6
+on Linux ignores, a fake ssh that did not read its input, `nc` not half-closing on Linux, a memory
+figure calibrated for arm64, and one alert text that depends on timing. They are changed and pass
+on the laptop; two were reproduced and checked in a Linux container. The job has not yet passed
+as a whole on GitHub.
 
 Release check, 16 Nov (before the Go binaries were part of the archive; not repeated since): `test/portability.sh` 53 passed, 0 incompatibilities;
 `scripts/release.sh --check` reproducible (40 files, 292 KB); installed from the archive into an
@@ -110,13 +118,16 @@ floor. From the laptop `tando ls` went 582 -> 478 ms: ssh and rendering dominate
 
 **Not verified. Read this before relying on the new parts.**
 
-1. **The real server still runs the shell versions.** The x86-64 VM (14 and 15 Nov) has not been
-   updated. The Go binaries, including `tandod`, have never run there. The upgrade path (`tando host
-   setup` over the shell install, with keys, alert state and logs already in place) is tested on
-   containers only. The linux-amd64 binaries are built (`test/go.sh` g6) but only the arm64 ones
-   were executed; no x86-64 machine has run any of them.
-2. **Numbers are not the VM's.** Every performance figure above is arm64, 1 CPU, in a container on a
-   laptop. Ratios should transfer; milliseconds will not.
+1. **The real server now runs the Go versions, set up fresh.** On 17 Nov the old install was removed
+   from the x86-64 VM by hand and `tando host setup` run from this code: 24 s, the other site on the
+   same Caddy untouched (0 failed requests, same processes). Three apps deployed (Node, static, Node
+   with PostgreSQL), a deploy, a rollback, `ls`, `status`, `health`, `requests`, `history`, `host
+   status`, `doctor`, and an alert that fired and restarted a frozen app. Not done there: the upgrade
+   path over an existing shell install (containers only), host care with updates or reboots on,
+   offsite backup, CI deploy keys, a day-long soak.
+2. **The VM's numbers are in bench/RESULTS.md** ("Go server programs on the real server"): a status
+   call 372 -> 24 ms of server CPU, the monitoring daemon 58 ms of CPU per minute and 8 MB. The
+   figures above this list are still the container's.
 3. **Offsite is tested against a fake S3 only.** The fake (`srv/offsite/testdata/fakes3`) checks
    every SigV4 signature and the unit tests use AWS's published vectors, but no run against real R2
    has been made: `test/offsite-r2-check.sh` exists and has not been run. Real-provider behaviour

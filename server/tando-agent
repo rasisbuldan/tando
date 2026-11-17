@@ -2024,18 +2024,19 @@ cmd_activate() {
   local need free
   need=$(du -sk "$D/incoming" 2> /dev/null | cut -f1); need=$(( ${need:-0} + 8192 ))
   free=$(df -Pk "$D/releases" | awk 'NR == 2 { print $4 }')
-  ((free >= need)) || die "not enough disk space on <host> for this release: it needs $((need / 1024)) MB, $((free / 1024)) MB are free (tando doctor)"
+  # (a refusal from here on gives the lease back, so the next deploy need not wait for it to age)
+  ((free >= need)) || { rm -f "$D/upload"; die "not enough disk space on <host> for this release: it needs $((need / 1024)) MB, $((free / 1024)) MB are free (tando doctor)"; }
   # and as many free inodes as the upload has entries (a release of many small files)
   local nf ifree
   # (a file system without a fixed inode count, btrfs, reports 0 of 0: no limit)
   nf=$(find "$D/incoming" -xdev 2> /dev/null | wc -l); ifree=$(df -Pi "$D/releases" | awk 'NR == 2 { print ($2 > 0 ? $4 : "") }')
-  [[ $ifree =~ ^[0-9]+$ ]] && ((ifree < nf + 1000)) &&
+  [[ $ifree =~ ^[0-9]+$ ]] && ((ifree < nf + 1000)) && rm -f "$D/upload" &&
     die "not enough free inodes on <host> for this release: it has $nf files, $ifree inodes are free (tando doctor; old releases: tando releases)"
   base=$(date -u +%Y%m%d-%H%M%S); id=$base
   until mkdir "$D/releases/$id" 2> /dev/null; do
-    n=$((n + 1)); id="$base-$n"; ((n < 100)) || die "could not reserve a release id"
+    n=$((n + 1)); id="$base-$n"; ((n < 100)) || { rm -f "$D/upload"; die "could not reserve a release id"; }
   done
-  L[id]=$id; save "$D/upload" L || { rmdir "$D/releases/$id"; die "could not record the release (disk full?)"; }
+  L[id]=$id; save "$D/upload" L || { rmdir "$D/releases/$id"; rm -f "$D/upload"; die "could not record the release (disk full?)"; }
   # (its number in deploy order is given by the activation once it holds the app's lock: activate
   # itself never waits for another activation's soak; the client sees "queued" and says for what)
   local who=() w f
