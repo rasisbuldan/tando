@@ -1,0 +1,12 @@
+2026-11-14 14:03:12 ERR [systemd] Failed to start tando-hello.service - tando app hello.
+2026-11-14 14:03:12 [systemd] tando-hello.service: Triggering OnFailure= dependencies.
+2026-11-14 14:03:12 [journald] Received client request to sync journal (with offlining).
+2026-11-14 14:03:42 [systemd] Started tando-hello.service - tando app hello.
+2026-11-14 14:03:42 hello v2: crashing on purpose
+2026-11-14 14:03:42 [systemd] Stopping tando-hello.service - tando app hello...
+2026-11-14 14:03:42 [systemd] tando-hello.service: Main process exited, code=exited, status=1/FAILURE
+2026-11-14 14:03:42 WARN [systemd] tando-hello.service: Failed with result 'exit-code'.
+2026-11-14 14:03:42 [systemd] Stopped tando-hello.service - tando app hello.
+2026-11-14 14:03:42 [systemd] tando-hello.service: Triggering OnFailure= dependencies.
+2026-11-14 14:03:42 [systemd] Started tando-hello.service - tando app hello.
+2026-11-14 14:03:42 hello v2 on 4100

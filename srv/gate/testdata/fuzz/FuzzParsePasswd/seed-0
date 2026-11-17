@@ -1,0 +1,2 @@
+go test fuzz v1
+string("tando-d-alpha:x:990:990::/opt/tando/ci/alpha:/opt/tando/bin/tando-gate:extra\n")

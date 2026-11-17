@@ -1,0 +1,6 @@
+2026-11-15 06:10:01,100 INFO Starting unattended upgrades script
+2026-11-15 06:10:01,101 INFO Allowed origins are: o=Ubuntu,a=noble-security
+2026-11-15 06:10:09,500 INFO All upgrades installed
+2026-11-16 06:10:01,100 INFO Starting unattended upgrades script
+2026-11-16 06:10:05,000 ERROR Installing the upgrades failed!
+2026-11-16 06:10:05,001 ERROR error message: 'E:Could not get lock /var/lib/dpkg/lock-frontend'

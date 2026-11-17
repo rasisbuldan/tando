@@ -1,0 +1,2 @@
+go test fuzz v1
+string("rsync --server -ltprz --link-dest=/opt/tando/apps/bravo/incoming . /opt/tando/apps/alpha/incoming/")

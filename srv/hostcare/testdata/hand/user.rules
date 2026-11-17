@@ -1,0 +1,10 @@
+*filter
+:ufw-user-input - [0:0]
+### RULES ###
+
+### tuple ### limit tcp 22 0.0.0.0/0 any 0.0.0.0/0 in
+-A ufw-user-input -p tcp --dport 22 -j ufw-user-limit
+### tuple ### allow tcp 80,443 0.0.0.0/0 any 0.0.0.0/0 in
+### tuple ### allow tcp 60000:61000 0.0.0.0/0 any 0.0.0.0/0 in
+### tuple ### deny tcp 5432 0.0.0.0/0 any 0.0.0.0/0 in
+### END RULES ###

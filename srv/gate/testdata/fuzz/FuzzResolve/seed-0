@@ -1,0 +1,3 @@
+go test fuzz v1
+string("l>d/../../x\nd/\nd/e>/opt/tando/apps/alpha/incoming/../incoming/l")
+string("l")

@@ -1,0 +1,13 @@
+[38;5;242m╭─[0m [1malerts[0m [38;5;242m──────────────────────────────────────────────────────────────────────────────────[0m [2mprod[0m [38;5;242m─╮[0m
+[38;5;242m│[0m [2mchecks    [0m  [32m● running[0m  checks ran 39s ago; 1 firing[0m                                              [38;5;242m│[0m
+[38;5;242m│[0m [2mheartbeat [0m  [2mnone: the server cannot report its own death; see tando alerts heartbeat[0m[0m             [38;5;242m│[0m
+[38;5;242m├─[0m [1mactive (1 firing, 0 pending)[0m [38;5;242m──────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m
+[38;5;242m│[0m [2mAPP[0m    [2mCHECK[0m   [2mSTATE[0m      [2mSINCE[0m  [2mDETAIL[0m                                                         [0m [38;5;242m│[0m
+[38;5;242m│[0m hello  health  [31m✗ firing[0m  3m ago  health check hello.localhost/ no answer within 10 s (3 in a ro…[0m [38;5;242m│[0m
+[38;5;242m├─[0m [1mnotifiers[0m [38;5;242m─────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m
+[38;5;242m│[0m [2mNAME[0m  [2mTYPE[0m     [2mTARGET[0m                   [2mLAST OK[0m  [2mSTATE[0m  [2mQUEUED[0m[0m                                   [38;5;242m│[0m
+[38;5;242m│[0m team  webhook  http://127.0.0.1:9999/…  39s ago  [32m● ok[0m        0[0m                                   [38;5;242m│[0m
+[38;5;242m├─[0m [1mrecent[0m [38;5;242m────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m
+[38;5;242m│[0m [2mWHEN[0m     [2mEVENT[0m    [2mAPP[0m    [2mCHECK[0m   [2mDETAIL[0m                                                         [0m [38;5;242m│[0m
+[38;5;242m│[0m 39s ago  [31m✗ fired[0m  hello  health  health check hello.localhost/ no answer within 10 s (3 in a ro…[0m [38;5;242m│[0m
+[38;5;242m╰─[0m [1m[0m[2malerts history · set · silence · test[0m [38;5;242m───────────────────────────────────────────────[0m [2m14:03:40[0m [38;5;242m─╯[0m

@@ -1,0 +1,6 @@
+Hand-written fixtures (the formats they imitate are named in each test). ../ubuntu24 and
+../ubuntu26 are captured from ubuntu:24.04 and ubuntu:26.04 containers (apt-get -s dist-upgrade
+with LC_ALL=C after apt-get update, sshd -T, ss -H -tulpn and /proc/net with sshd on 22 and a
+python http.server on 0.0.0.0:8765, apt-config dump, needrestart -b -r l, dpkg --audit, the start
+of /var/lib/dpkg/status). Kernel log lines cannot be produced in a container: journal.json holds
+messages in the form the kernel prints them (EXT4, blk_update_request, the OOM killer).

@@ -1,0 +1,69 @@
+package metrics
+
+import (
+	"bufio"
+	"bytes"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// hostKey is the host's line in .state (an app name cannot start with a dot).
+const hostKey = ".host"
+
+// entry is one line of .state: what the next sample needs from the last one.
+type entry struct {
+	usec  int64 // the unit's cpu usage_usec at the last sample (-1: not known); the next line holds the difference
+	start int64 // when the current .tsv file began (0: not known yet)
+	lines int64 // lines in the current .tsv file
+}
+
+// state maps an app (or hostKey) to its entry.
+type state map[string]entry
+
+// loadState reads .state; a missing one is empty (the first sample). Fields that are not numbers
+// count as absent, as an empty one did in the shell (`${PU[$a]:-$usec}`).
+func loadState(path string) (state, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return state{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	st := state{}
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) == 0 {
+			continue
+		}
+		e := entry{usec: -1}
+		if len(f) > 1 {
+			if n, err := strconv.ParseInt(f[1], 10, 64); err == nil {
+				e.usec = n
+			}
+		}
+		if len(f) > 2 {
+			e.start, _ = strconv.ParseInt(f[2], 10, 64)
+		}
+		if len(f) > 3 {
+			e.lines, _ = strconv.ParseInt(f[3], 10, 64)
+		}
+		st[f[0]] = e
+	}
+	return st, nil
+}
+
+// format renders .state in the order of keys.
+func (st state) format(keys []string) []byte {
+	var b bytes.Buffer
+	for _, k := range keys {
+		e := st[k]
+		fmt.Fprintf(&b, "%s %d %d %d\n", k, e.usec, e.start, e.lines)
+	}
+	return b.Bytes()
+}

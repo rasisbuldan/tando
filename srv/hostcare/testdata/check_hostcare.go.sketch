@@ -1,0 +1,64 @@
+// SKETCH for srv/watch (not compiled here: the watch developer adds it as watch/check_hostcare.go).
+// It turns tando-host's summary file into host checks with the existing state machine.
+package watch
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+
+	"tando/srv/internal/bashread"
+)
+
+// hostcareChecks are the alert checks of tando-host (docs/HOSTCARE.md); their thresholds and
+// on/off live in /opt/tando/hostcare.conf (tando alerts set routes them to tando-host), so the
+// summary already says ok, bad or off.
+var hostcareChecks = []string{"updates", "reboot", "exposed", "ssh", "units", "readonly", "ioerr", "clock", "eol", "boot"}
+
+// checkHostcare reads /var/lib/tando/hostcare/summary (root 600, rewritten whole by tando-host
+// hourly) and samples one host check per "alert" row. A summary older than 3 hours, missing or of
+// another format holds every check (neither good nor bad): stale facts must not fire or resolve.
+func checkHostcare(t *tick) {
+	p := filepath.Join(t.w.Env.Lib, "hostcare", "summary")
+	fi, err := os.Lstat(p)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 1<<20 {
+		return
+	}
+	b, _ := os.ReadFile(p)
+	fresh := false
+	for _, l := range bashread.Lines(b) {
+		f := bashread.Fields(l, 8)
+		switch {
+		case f[0] == "summary":
+			fresh = f[1] == "1" && t.now-num(f[2], 0) <= 3*3600
+		case f[0] == "alert" && fresh && t.cfg.on(f[1], ""):
+			c := f[1]
+			if !known(c) {
+				continue
+			}
+			switch f[2] {
+			case "bad": // need 1: tando-host already applied its time thresholds
+				t.sample("_host."+c, "_host", c, bad, f[6], 1)
+			case "ok":
+				t.sample("_host."+c, "_host", c, ok, "", 1)
+			} // "off": left alone (resolves when turned off? see the note below)
+		}
+	}
+}
+
+func known(c string) bool {
+	for _, x := range hostcareChecks {
+		if x == c {
+			return true
+		}
+	}
+	return false
+}
+
+// AND, in check.go lastChecks(): hostFunc{"hostcare", checkHostcare},
+// in settings.go: lowSeverity(check) also true for "ssh" (no high priority); hostChecks gets
+// hostcareChecks appended ONLY for `<check>=off` handling if wanted (no new numeric settings).
+// in inbox.go: case p[0] == "care" && p[1] == "host": t.event("care", "_host", "hostcare", p[3])
+// (and text.go/notify.go: "CARE host: <text>", normal priority) — until then tando-host sends its
+// notices as kind "monitor".
+var _ = strings.Cut

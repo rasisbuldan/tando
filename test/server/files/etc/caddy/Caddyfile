@@ -1,0 +1,6 @@
+# tando test server. Apps are added as /etc/caddy/tando/<app>.caddy (http:// site blocks).
+:80 {
+	respond "tando-testvm: no such site" 404
+}
+
+import /etc/caddy/tando/*.caddy

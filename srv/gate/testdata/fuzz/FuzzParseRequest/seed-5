@@ -1,0 +1,2 @@
+go test fuzz v1
+string("rsync --server -ltpr . /opt/tando/apps/alpha/incoming/../../bravo/incoming/")

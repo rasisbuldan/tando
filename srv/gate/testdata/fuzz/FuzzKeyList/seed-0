@@ -1,0 +1,2 @@
+go test fuzz v1
+string("0123456789ab\tSHA256:x\t1\tssh-ed25519 AAAA\nrestrict\tx\n")

@@ -1,0 +1,44 @@
+package run
+
+// Programs is the allowlist of program basenames that Exec starts (see check.go), sorted. The
+// same names, per package, are in tools/srvlint/programs.txt; the lint fails when the two differ.
+// To add a program: add it here and run `go run ./tools/srvlint -list ./...` (from srv/) to
+// update programs.txt; the diff of both is what a reviewer reads.
+var Programs = []string{
+	"apt-config",
+	"apt-get",
+	"atq",
+	"atrm",
+	"caddy",
+	"crontab",
+	"dpkg",
+	"du",
+	"getent",
+	"groupdel",
+	"ipcrm",
+	"ipcs",
+	"journalctl",
+	"logger",
+	"loginctl",
+	"needrestart",
+	"nft",
+	"nice",
+	"node",
+	"python3",
+	"rsync",
+	"sendmail",
+	"sshd",
+	"sudo",
+	"systemctl",
+	"systemd-run",
+	"tando-agent",
+	"tando-gate",
+	"tando-logs",
+	"tando-metrics",
+	"tando-watch",
+	"uname",
+	"useradd",
+	"userdel",
+	"usermod",
+	"visudo",
+}

@@ -1,0 +1,124 @@
+daemon/daemon.go runShow	systemctl	systemctl show -P ActiveState <param unit: callers pass constants or validated values>
+gate/admin.go install	useradd	useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment "tando sshd reads CI keys as this user" -- tando-keys
+gate/gate.go log	logger	logger -p <param prio: callers pass constants or validated values> -t tando-gate -- <param msg: callers pass constants or validated values>
+gate/keymode.go agentRO	tando-agent	tando-agent deploy-status <valid:app> <valid:req.ID>
+gate/keymode.go agentRO	tando-agent	tando-agent history <valid:app> <valid:req.HistoryN>
+gate/keymode.go agentRO	tando-agent	tando-agent releases <valid:app>
+gate/keymode.go agentRO	tando-agent	tando-agent status <valid:app>
+gate/keymode.go info	uname	uname -m
+gate/keymode.go sudoRoot	sudo	sudo -n -- tando-gate root <after--:app> <param verb: callers pass constants or validated values>
+gate/procs.go evictUser	atq	atq
+gate/procs.go evictUser	atrm	atrm -- <after--:f[0]>
+gate/procs.go evictUser	crontab	crontab -r -u tando-d-<..>
+gate/procs.go evictUser	ipcrm	ipcrm <one of -m|-q|-s> <valid:f[1]>
+gate/procs.go evictUser	ipcs	ipcs <one of -m|-q|-s>
+gate/procs.go evictUser	loginctl	loginctl terminate-user -- tando-d-<..>
+gate/procs.go evictUser	systemctl	systemctl stop -- user@<..>
+gate/procs.go stopRx	systemctl	systemctl kill --signal=KILL -- <after--:rxPatterns(app)>
+gate/procs.go stopRx	systemctl	systemctl reset-failed -- <after--:rxPatterns(app)>
+gate/procs.go stopRx	systemctl	systemctl stop -- <after--:rxPatterns(app)>
+gate/receive.go receiveConfined	systemd-run	systemd-run --quiet --pipe --wait --collect --unit=<..> -p User=<..> -p Group=<..> -p UMask=0022 -p Environment=LC_ALL=C -p ProtectSystem=strict -p ReadWritePaths=<..> -p ProtectHome=yes -p PrivateTmp=yes -p PrivateDevices=yes -p PrivateNetwork=yes -p IPAddressDeny=any -p InaccessiblePaths=-/run/user -p NoNewPrivileges=yes -p RestrictSUIDSGID=yes -p CapabilityBoundingSet= -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p ProtectProc=invisible -p RestrictNamespaces=yes -p LockPersonality=yes -p MemoryMax=512M -p TasksMax=16 -p LimitFSIZE=<..> -p RuntimeMaxSec=<..> -- tando-gate rx <after--:app> <after--:nonce> <after--:req.Rsync>
+gate/receive.go rxFree	systemctl	systemctl reset-failed -- <after--:n>
+gate/receive.go rxUnits	systemctl	systemctl list-units --all --plain --no-legend --full -- <after--:rxPatterns(app)...>
+gate/rootmode.go agent	tando-agent	tando-agent activate <valid:app> <valid:p.Token> <valid:p.Build> <valid:p.Upload>
+gate/rootmode.go agent	tando-agent	tando-agent begin <valid:app> <param who: callers pass constants or validated values>
+gate/rootmode.go agent	tando-agent	tando-agent end <valid:app> <valid:l.Token>
+gate/rootmode.go agent	tando-agent	tando-agent end <valid:app> <valid:p.Token>
+gate/rootmode.go agent	tando-agent	tando-agent end <valid:app> <valid:string(m[1])>
+gate/sshd.go installSSHD	sshd	sshd -t
+gate/sshd.go installSSHD	systemctl	systemctl reload ssh
+gate/sshd.go installSSHD	systemctl	systemctl reload sshd
+gate/sudoers.go writeSudoers	visudo	visudo -c -q -f <value-of:-f:tmp>
+gate/users.go ensureUser	getent	getent group -- tando-m-<..>
+gate/users.go ensureUser	loginctl	loginctl disable-linger -- tando-d-<..>
+gate/users.go ensureUser	systemctl	systemctl mask --quiet -- user@<..>
+gate/users.go ensureUser	useradd	useradd --system --user-group --no-create-home --home-dir <value-of:--home-dir:h> --shell <value-of:--shell:g.P.Gate> -u <int> --comment "tando CI deploys for "<..> -- tando-d-<..>
+gate/users.go ensureUser	usermod	usermod -aG tando-m-<..> -- tando-d-<..>
+gate/users.go ensureUser	usermod	usermod -p * -- tando-d-<..>
+gate/users.go newUID	getent	getent group -- <int>
+gate/users.go newUID	getent	getent passwd -- <int>
+gate/users.go removeUser	getent	getent group -- tando-d-<..>
+gate/users.go removeUser	groupdel	groupdel -- tando-d-<..>
+gate/users.go removeUser	systemctl	systemctl unmask --quiet -- user@<..>
+gate/users.go removeUser	userdel	userdel -- tando-d-<..>
+hostcare/apt.go collectApt	apt-config	apt-config dump
+hostcare/apt.go collectApt	apt-get	apt-get -s -o Debug::NoLocking=1 dist-upgrade
+hostcare/apt.go collectApt	dpkg	dpkg --audit
+hostcare/apt.go collectApt	needrestart	needrestart -b -r l
+hostcare/care.go applyCareUpdates	apt-get	apt-get install -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold unattended-upgrades
+hostcare/care.go applyCareUpdates	apt-get	apt-get update -q
+hostcare/care.go applyCareUpdates	systemctl	systemctl daemon-reload
+hostcare/care.go applyCareUpdates	systemctl	systemctl enable -q --now apt-daily.timer apt-daily-upgrade.timer
+hostcare/care.go removeCareUpdates	systemctl	systemctl daemon-reload
+hostcare/facts.go sshd	/usr/sbin/sshd	/usr/sbin/sshd -T
+hostcare/facts.go systemd	systemctl	systemctl list-units --state=failed --plain --no-legend --no-pager --full
+hostcare/facts.go systemd	systemctl	systemctl show -p SystemState,NFailedUnits,Virtualization
+hostcare/journal.go journal	journalctl	journalctl --no-pager -q -o json --output-fields=MESSAGE,_TRANSPORT,SYSLOG_IDENTIFIER -n 5000 --after-cursor=<..> --since=-24h _TRANSPORT=kernel + SYSLOG_IDENTIFIER=sshd _UID=0 + SYSLOG_IDENTIFIER=sshd-session _UID=0
+hostcare/notify.go audit	/opt/tando/bin/tando-logs	/opt/tando/bin/tando-logs audit-write host-care - <res: 2 assignments, each constant-led or validated> "tando-host: "<..>
+hostcare/notify.go audit	/opt/tando/bin/tando-logs	/opt/tando/bin/tando-logs audit-write host-reboot - <res: 2 assignments, each constant-led or validated> "tando-host: "<..>
+hostcare/notify.go audit	/opt/tando/bin/tando-logs	/opt/tando/bin/tando-logs audit-write host-update - <res: 2 assignments, each constant-led or validated> "tando-host: "<..>
+hostcare/notify.go audit	/opt/tando/bin/tando-logs	/opt/tando/bin/tando-logs audit-write host-upgraded - <res: 2 assignments, each constant-led or validated> "tando-host: "<..>
+hostcare/notify.go notice	systemctl	systemctl start --no-block tando-watch.service
+hostcare/notify.go notice	systemctl	systemctl start tando-watch.service
+hostcare/units.go installUnits	systemctl	systemctl daemon-reload
+hostcare/units.go installUnits	systemctl	systemctl disable -q --now tando-host-window.timer
+hostcare/units.go installUnits	systemctl	systemctl enable -q --now tando-host-window.timer
+hostcare/units.go installUnits	systemctl	systemctl enable -q --now tando-host.timer
+hostcare/units.go installUnits	systemctl	systemctl enable -q tando-host-boot.service
+hostcare/units.go installUnits	systemctl	systemctl restart tando-host-window.timer
+hostcare/verbs.go Status	/opt/tando/bin/tando-watch	/opt/tando/bin/tando-watch doctor
+hostcare/verbs.go UpdateApply	apt-get	apt-get -s -o Debug::NoLocking=1 dist-upgrade
+hostcare/verbs.go UpdateApply	apt-get	apt-get upgrade -y -q --with-new-pkgs -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
+hostcare/verbs.go UpdateApply	dpkg	dpkg --configure -a
+hostcare/verbs.go UpdatePlan	apt-get	apt-get update -q
+hostcare/verbs.go autoremove	apt-get	apt-get autoremove -y -q --purge
+hostcare/verbs.go autoremove	apt-get	apt-get clean
+hostcare/verbs.go doReboot	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent backup-run <valid:app> manual
+hostcare/verbs.go doReboot	systemctl	systemctl --no-block reboot
+logs/audit.go AuditWrite	logger	logger -t tando-audit -- <msg: 2 assignments, each constant-led or validated>
+logs/doctor.go LogDoctor	journalctl	journalctl --disk-usage
+logs/query.go Query	journalctl	journalctl --no-pager -q -o json --output-fields=MESSAGE,PRIORITY,_SYSTEMD_UNIT,UNIT,_PID <valid:p.args...>
+logs/query.go Query	journalctl	journalctl --no-pager -q -o json --output-fields=MESSAGE,PRIORITY,_SYSTEMD_UNIT,UNIT,_PID <valid:p.args...> -r
+logs/query.go suppressedNote	journalctl	journalctl --no-pager -q -o cat --namespace=<..> -u systemd-journald@<..> --since=@<..> -g "^Suppressed [0-9]+ messages" --until=@<..>
+logs/scan.go readJournal	journalctl	journalctl --no-pager -q -o short-unix --show-cursor --namespace=<..> -u tando-<..> -u systemd-journald@<..> -n <int> <arg: 3 assignments, each constant-led or validated>
+logs/setup.go CaddyLog	caddy	caddy version
+logs/setup.go applyJournal	journalctl	journalctl -q --namespace=<..> --rotate
+logs/setup.go applyJournal	journalctl	journalctl -q --namespace=<..> --vacuum-size=<..> --vacuum-time=<..>
+logs/setup.go systemctl	systemctl	systemctl -q is-active systemd-journald@<..>
+logs/setup.go systemctl	systemctl	systemctl restart systemd-journald
+logs/setup.go systemctl	systemctl	systemctl restart systemd-journald@<..>
+logs/setup.go systemctl	systemctl	systemctl stop systemd-journald@<..> systemd-journald@<..> systemd-journald-varlink@<..> systemd-journald@<..>
+logs/stats.go updateStats	journalctl	journalctl --no-pager -q -a -o short-unix --show-cursor --namespace=<..> --after-cursor=<..> --since=@<..> -n <int>
+offsite/sync.go systemctl	systemctl	systemctl daemon-reload
+offsite/sync.go systemctl	systemctl	systemctl disable --now tando-offsite.timer
+offsite/sync.go systemctl	systemctl	systemctl enable --now tando-offsite.timer
+offsite/sync.go systemctl	systemctl	systemctl is-active -q tando-offsite.timer
+offsite/sync.go systemctl	systemctl	systemctl start --no-block tando-offsite.service
+status/rows.go briefOut	tando-watch	tando-watch brief <valid:name>
+status/rows.go logStatsOut	tando-logs	tando-logs log-stats <valid:name>
+status/rows.go trendOut	tando-metrics	tando-metrics read <valid:name> 16 60
+status/verb_deploy.go recover	tando-agent	tando-agent recover <valid:name>
+status/verb_info.go tool	caddy|node|python3	caddy|node|python3 --version
+status/verb_info.go tool	caddy|node|python3	caddy|node|python3 -I -c "import venv, sys; print(\"%d.%d\" % sys.version_info[:2])"
+status/verb_info.go tool	caddy|node|python3	caddy|node|python3 version
+watch/check_caddy.go checkCaddyConfig	caddy	caddy validate --config <valid:joined path .../Caddyfile> --adapter caddyfile
+watch/check_down.go countRestarts	journalctl	journalctl -q --no-pager -o cat -u tando-<..> --since=@<..> -g "process exited, code="
+watch/check_health.go liveness	systemd-run	systemd-run --quiet --collect --no-block --unit=tando-<..> -p "Description=tando-watch: restart "<..> tando-agent restart <valid:a.name>
+watch/check_health.go unitState	systemctl	systemctl show -P ActiveState <param unit: callers pass constants or validated values>
+watch/check_host.go checkFirewall	nft	nft -f <valid:joined path .../firewall.nft>
+watch/check_host.go checkFirewall	nft	nft list table inet tando
+watch/check_host.go checkFirewall	tando-logs	tando-logs audit-write fw-restore - 1 <det: 3 assignments, each constant-led or validated>
+watch/check_oom.go checkOOMSlices	journalctl	journalctl --since @<..> -o cat --no-pager -g "OOM killer killed"
+watch/events.go crashTail	journalctl	journalctl --no-pager -q -o short-unix --namespace=tando-<..> -u tando-<..> -n 10
+watch/notify_types.go Send	systemd-run	systemd-run --quiet --pipe --wait --collect -p "Description=tando-watch: email notification" /usr/sbin/sendmail|sendmail -t -oi
+watch/pretick.go ExecSample	tando-metrics	tando-metrics sample
+watch/pretick.go WatchScan	nice	nice tando-logs watch-scan
+watch/pretick.go agentOutside	systemd-run	systemd-run --quiet --wait --collect --unit=<..> -p "Description=tando-watch: "<..> tando-agent <param verb: callers pass constants or validated values>
+watch/verbs_install.go systemctl	systemctl	systemctl daemon-reload
+watch/verbs_install.go systemctl	systemctl	systemctl disable -q --now tando-watch.timer tandod.service
+watch/verbs_install.go systemctl	systemctl	systemctl enable -q --now tando-watch.timer
+watch/verbs_install.go systemctl	systemctl	systemctl enable -q tandod.service
+watch/verbs_install.go systemctl	systemctl	systemctl reset-failed tandod.service
+watch/verbs_install.go systemctl	systemctl	systemctl start tandod.service
+watch/verbs_install.go systemctl	systemctl	systemctl try-restart tandod.service
+# positions: 544 constant, 55 prefixed, 5 int, 46 validated, 3 value of an option, 10 after --, 0 other

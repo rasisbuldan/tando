@@ -1,0 +1,28 @@
+[38;5;242m╭─[0m [1mdoctor[0m [38;5;242m──────────────────────────────────────────────────────────────────────────────────[0m [2mprod[0m [38;5;242m─╮[0m
+[38;5;242m│[0m [2mCHECK[0m           [2mSTATE[0m   [2mDETAIL[0m                                                                  [0m [38;5;242m│[0m
+[38;5;242m│[0m agent           [32m● ok[0m    0.1.0, same as the client                                               [0m [38;5;242m│[0m
+[38;5;242m│[0m gate            [32m● ok[0m    0.1.0, same as the client                                               [0m [38;5;242m│[0m
+[38;5;242m│[0m logs            [32m● ok[0m    0.1.0, same as the client                                               [0m [38;5;242m│[0m
+[38;5;242m│[0m metrics         [32m● ok[0m    0.1.0, same as the client                                               [0m [38;5;242m│[0m
+[38;5;242m│[0m watch           [32m● ok[0m    0.1.0, same as the client                                               [0m [38;5;242m│[0m
+[38;5;242m│[0m metrics         [32m● ok[0m    sampled 23s ago                                                         [0m [38;5;242m│[0m
+[38;5;242m│[0m host.conf       [32m● ok[0m    *.localhost tls=off ports 4100-4199                                     [0m [38;5;242m│[0m
+[38;5;242m│[0m caddy log       [33m● warn[0m  Caddy 2.6.2 does not log requests whose Host has a port, and public_por…[0m [38;5;242m│[0m
+[38;5;242m│[0m caddy           [32m● ok[0m    2.6.2 running                                                           [0m [38;5;242m│[0m
+[38;5;242m│[0m caddy admin     [32m● ok[0m    unix socket /run/caddy/admin.sock (caddy and root only)                 [0m [38;5;242m│[0m
+[38;5;242m│[0m loopback rules  [32m● ok[0m    apps reach only their own ports (nftables table inet tando)             [0m [38;5;242m│[0m
+[38;5;242m│[0m caddy import    [32m● ok[0m    /etc/caddy/tando/*.caddy                                                [0m [38;5;242m│[0m
+[38;5;242m│[0m postgresql      [32m● ok[0m    accepting connections                                                   [0m [38;5;242m│[0m
+[38;5;242m│[0m ci keys         [32m● ok[0m    sshd reads deploy keys as tando-keys; 0 apps with keys                  [0m [38;5;242m│[0m
+[38;5;242m│[0m recover unit    [32m● ok[0m    enabled                                                                 [0m [38;5;242m│[0m
+[38;5;242m│[0m tools           [32m● ok[0m    curl rsync nft openssl                                                  [0m [38;5;242m│[0m
+[38;5;242m│[0m node            [32m● ok[0m    24.22.3                                                                 [0m [38;5;242m│[0m
+[38;5;242m│[0m swap            [32m● ok[0m    15.7G                                                                   [0m [38;5;242m│[0m
+[38;5;242m│[0m disk            [32m● ok[0m    28% used, 89 GB free                                                    [0m [38;5;242m│[0m
+[38;5;242m│[0m alerts          [32m● ok[0m    checks ran 23s ago; 0 firing                                            [0m [38;5;242m│[0m
+[38;5;242m│[0m apps            [32m● ok[0m    5 apps, ports used 5 of 100                                             [0m [38;5;242m│[0m
+[38;5;242m│[0m memory caps     [32m● ok[0m    800 MB of caps, 16040 MB RAM                                            [0m [38;5;242m│[0m
+[38;5;242m│[0m main journal    [32m● ok[0m    capped at 200M (16M used)                                               [0m [38;5;242m│[0m
+[38;5;242m│[0m app logs        [32m● ok[0m    5 apps in their own capped journals                                     [0m [38;5;242m│[0m
+[38;5;242m│[0m log caps        [32m● ok[0m    330 MB of app log caps, 91595 MB free                                   [0m [38;5;242m│[0m
+[38;5;242m╰─[0m [1m[0m[2m0 failed, 1 warnings[0m [38;5;242m──────────────────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m

@@ -1,0 +1,573 @@
+#!/bin/bash
+# tando: build on the laptop, upload by rsync, run under systemd behind Caddy.
+# Runs on macOS /bin/bash 3.2. See README.md.
+set -u -o pipefail
+# The whole program is one { ... } block: bash parses all of it before running any of it, so
+# this file replaced while a long command runs (git pull, install.sh) cannot feed it half a file.
+{
+self=$0
+while [ -L "$self" ]; do
+  l=$(readlink "$self")
+  case $l in /*) self=$l;; *) self=$(dirname "$self")/$l;; esac
+done
+TANDO_HOME=$(cd "$(dirname "$self")/.." && pwd -P)
+. "$TANDO_HOME/lib/ui.sh"
+. "$TANDO_HOME/lib/common.sh"
+. "$TANDO_HOME/lib/build.sh"
+. "$TANDO_HOME/lib/deploy.sh"
+. "$TANDO_HOME/lib/views.sh"
+
+# (rsync splits its -e command on spaces: a $TMPDIR with a space would break the ssh wrapper)
+_tb=${TMPDIR:-/tmp}; case $_tb in *[[:space:]]*) _tb=/tmp;; esac
+TMPD=$(mktemp -d "$_tb/tando.XXXXXX") || exit 1; unset _tb
+trap 'ui_frame_cleanup; rm -rf "$TMPD"' EXIT
+trap 'echo >&2; exit 130' INT   # Ctrl-C at a prompt: the next line starts clean
+trap 'exit 143' TERM
+ui_init
+
+. "$TANDO_HOME/lib/args.sh"
+
+# the flags every command shares (lib/args.sh has already refused the ones a command does not take)
+WATCH="" FOLLOW="" NLINES=100 ARGS=() ALL="" PURGE="" SHOW="" HELP="" JSON="" YES="" FORCE=""
+parse() {
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -a) APP=$2; shift 2;;
+      -H) HOST=$2; shift 2;;
+      --watch) { is_num "$2" && [ "$2" -ge 1 ]; } || usage_err "--watch needs seconds (1 or more)" "${ARGS[0]:-}"
+               WATCH=$2; shift 2;;
+      -f) FOLLOW=follow; shift;;
+      --all) ALL=1; shift;;
+      --purge) PURGE=1; shift;;
+      --show) SHOW=1; shift;;
+      --json|--yes|--force|--wait)   # plugins read these from ARGS themselves
+        # --wait: deploy/up wait out the soak (lib/deploy.sh); domain add polls DNS (lib/cmd-domain.sh)
+        case $1 in --json) JSON=1;; --yes) YES=1;; --force) FORCE=1;; --wait) WAIT_VERIFIED=1 DNS_WAIT=1;; esac
+        [ -n "${PLUGIN:-}" ] && ARGS+=("$1"); shift;;
+      -n) is_num "$2" || usage_err "-n needs a number" "${ARGS[0]:-}"; NLINES=$2; shift 2;;
+      --) shift; ARGS+=("$@"); break;;
+      *) ARGS+=("$1"); shift;;
+    esac
+  done
+}
+
+# everything tando runs on a server: the agent, its logging helper, the metrics sampler, the alert
+# checks and their daemon (tandod), the read-only verbs in Go (tando-status), the offsite backups
+# (tando-offsite) and the CI gate (their units and timers are written by `setup` and their own
+# installers; tando-offsite's by `tando backup offsite set`)
+install_agent() {
+  install_helpers tando-agent tando-logs tando-metrics tando-watch tandod tando-status tando-offsite tando-host tando-gate tando-install-recover ||
+    die "could not install tando on $HOST: $(agent_msgs < "$TMPD/err" | tail -2 | tr '\n' ' ')"
+  HELPERS_INSTALLED=1
+  # the agent ships with the client: record the version it came with
+  client_version | ssh "${SSHO[@]}" "$TARGET" 'sudo -n tee /opt/tando/VERSION > /dev/null' ||
+    die "could not write /opt/tando/VERSION"
+  . "$TANDO_HOME/lib/cmd-ci.sh"; ci_install_gate   # the CI gate (srv/gate, a Go binary) and sshd drop-in
+}
+
+client_version() {
+  local v
+  v=$(cat "$TANDO_HOME/VERSION" 2> /dev/null)
+  case $v in [0-9]*.[0-9]*.[0-9]*) case $v in *[!0-9.]*) v=unknown;; esac;; *) v=unknown;; esac
+  printf '%s\n' "$v"
+}
+
+cmd_version() {
+  echo "tando $(client_version)"
+  [ -n "$HOST" ] || [ -f tando.conf ] || [ "$(ls "$CFG"/hosts 2> /dev/null | wc -l)" -eq 1 ] || return 0
+  resolve 0
+  agent_raw info > "$TMPD/o" 2> /dev/null || { echo "agent ($HOST): unreachable"; return 0; }
+  kv_read "$TMPD/o" version
+  echo "agent $K_version ($HOST)"
+}
+
+# setup_steps total: the server's "step=<name> run|ok|skip <detail>" lines as box steps (2..).
+# On a terminal the running step is shown at once and its time ticks (a runtime install such as
+# PostgreSQL can take a minute or more); the finished line is written over it.
+setup_steps() {
+  local n=1 l name st d run="" tick=""
+  while IFS= read -r l; do
+    case $l in step=*) ;; *) continue;; esac
+    l=${l#step=}; name=${l%% *}; l=${l#"$name"}; l=${l# }; st=${l%% *}; d=${l#"$st"}; d=${d# }
+    setup_tick_stop "$tick"; tick=""
+    if [ "$st" = run ]; then
+      run=$name
+      if [ -t 1 ]; then setup_tick $((n + 1)) "$1" "$name" & tick=$!; fi
+      continue
+    fi
+    n=$((n + 1)); run=""
+    # a detail longer than the line ("a; b; c"): the first part on it, the others below, never cut
+    if [ ${#d} -gt $((UI_IN - ${#1} * 2 - UI_STEP_W - 16)) ] && case $d in *"; "*) true;; *) false;; esac; then
+      ui_step $n "$1" "$name" "$st" "${d%%; *}"
+      d=${d#*; }
+      while [ -n "$d" ]; do
+        box_say "$UI_DIM" "$(printf '%*s' $((${#1} * 2 + UI_STEP_W + 15)) '')${d%%; *}"
+        case $d in *"; "*) d=${d#*; };; *) d="";; esac
+      done
+    else ui_step $n "$1" "$name" "$st" "$d"; fi
+  done
+  setup_tick_stop "$tick"
+  [ -z "$run" ] || { ui_step $((n + 1)) "$1" "$run" fail ""; return 1; }
+  return 0
+}
+setup_tick() { # n total name: the running step, repainted every second until killed
+  local s=0 l what=working
+  case $3 in packages) what="installing packages";; caddy) what="installing or checking Caddy";;
+    postgres|podman|python|node*) what="installing $3 (can take a minute or two)";; esac
+  trap 'exit 0' TERM
+  while :; do
+    l=$(ui_step "$1" "$2" "$3" run "${s}s  $what")
+    printf '\r%s' "$l"
+    sleep 1; s=$((s + 1))
+  done
+}
+setup_tick_stop() { # pid: stop the ticker and return to the start of its line
+  [ -n "$1" ] || return 0
+  kill "$1" 2> /dev/null; wait "$1" 2> /dev/null
+  printf '\r'
+}
+
+# public_ip address: the address when it is a public IPv4 (a name is resolved here); fails for
+# private and loopback addresses, which sslip.io links could not reach from outside
+public_ip() {
+  local ip=$1
+  case $ip in *[!0-9.]*) ip=$(perl -MSocket -e 'my $a = inet_aton($ARGV[0]); print inet_ntoa($a) if $a' "$1" 2> /dev/null);; esac
+  case $ip in
+    ""|127.*|10.*|192.168.*|169.254.*|0.*) return 1;;
+    172.1[6-9].*|172.2[0-9].*|172.3[01].*|100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 1;;
+  esac
+  printf '%s' "$ip"
+}
+
+cmd_host() {
+  local kv feats=""
+  case ${1:-ls} in
+    add) shift; host_add "$@";;
+    ls) host_ls;;
+    rm) host_rm "$2";;
+    status|care|update|reboot)   # host care: the server itself (lib/hostcare.sh, docs/HOSTCARE.md)
+      . "$TANDO_HOME/lib/hostcare.sh"; "host_$1";;
+    setup)
+      host_use "$2"
+      shift 2
+      for kv in "$@"; do
+        case $kv in
+          apps_domain=*|tls=*|unit_drop=*|public_port=*) ;;
+          postgres=yes|podman=yes|python=yes|node=yes|node=[0-9][0-9]) feats="$feats ${kv%=yes}";;
+          swap=yes|swap=no|ufw=yes|ufw=no) ;;
+          domain_tls=auto|domain_tls=internal|domain_tls=off) ;;
+          journal_max=*|log_max=*|log_keep=*|log_rate=*|access_log=*|access_size=*|access_keep=*) ;;
+          access_keep_for=*|ci_max_mb=*|ci_max_files=*|ci_max_file_mb=*|app_max_mb=*) ;;
+          rate_limit=on|rate_limit=off|rate_limit=auto|conn_limit=*|conn_rate=*) ;;
+          request_log_max=*) ;;
+          care=on|care=off) ;;   # host care's security updates (tando-host install; not the agent's)
+          *) usage_err "bad setting: $kv" host;;
+        esac
+        case $kv in tls=*) case ${kv#tls=} in off|internal|auto) ;; *) usage_err "tls must be off, internal or auto" host;; esac;; esac
+      done
+      host_check > /dev/null 2>&1 || { host_check; exit 1; }   # connection and sudo, explained
+      ui_box_open "host setup $HOST" "$TARGET"
+      local t0 total n sargs=() care=""
+      for kv in "$@"; do case $kv in care=*) care=$kv;; *) sargs+=("$kv");; esac; done
+      total=$((9 + $(printf '%s' "$feats" | wc -w)))
+      t0=$(clock)
+      install_agent
+      ui_step 1 $total agent ok "$(client_version) in /opt/tando/bin"
+      # a host without apps_domain: <app>.<ip-with-dashes>.sslip.io, so a new server gives working
+      # https links with no DNS set up (sslip.io answers such names with the IP inside them)
+      agent info > "$TMPD/o"; kv_read "$TMPD/o" apps_domain
+      case " $* " in *" apps_domain="*) ;; *)
+        if [ -z "$K_apps_domain" ] && ip=$(public_ip "${TARGET#*@}"); then
+          sargs+=("apps_domain=$(printf '%s' "$ip" | tr . -).sslip.io")
+          case " $* " in *" tls="*) ;; *) sargs+=(tls=auto);; esac
+        fi;;
+      esac
+      # the server's steps, shown as they finish
+      if ! agent_raw sudo setup ${sargs[@]+"${sargs[@]}"} < /dev/null 2> "$TMPD/serr" | tee "$TMPD/o" | setup_steps $total; then
+        while IFS= read -r kv; do box_say "$UI_RED" "$kv"; done < "$TMPD/serr" 2> /dev/null
+        ui_box_close "setup stopped; fix that and run tando host setup $HOST again (it continues)"
+        exit 1
+      fi
+      . "$TANDO_HOME/lib/cmd-alerts.sh"           # alerts: tando-watch's units and its timer
+      alerts_install
+      ui_step $((total - 1)) $total checks ok "alert checks and metrics, every minute"
+      # host care (docs/HOSTCARE.md): its hourly check; on a server tando set up from empty (it
+      # installed Caddy) Ubuntu's security updates run by themselves unless care=off was given
+      agent sudo host install ${care:+"$care"} > "$TMPD/o"
+      kv_read "$TMPD/o" care_updates care_reboot caddy_ours
+      if [ "$K_care_updates" = on ]; then
+        ui_step $total $total care ok "security updates install themselves; reboots stay yours (tando host care)"
+      elif [ "$K_caddy_ours" = 0 ]; then
+        ui_step $total $total care ok "hints only (other sites here): tando host status $HOST"
+      else ui_step $total $total care ok "off: tando host care on --updates turns on security updates"; fi
+      agent info > "$TMPD/o"
+      kv_read "$TMPD/o" arch libc apps_domain tls caddy node python podman postgres public_port ip
+      local scheme=https f=""
+      [ "$K_tls" = off ] && scheme=http
+      ui_kv links "$scheme://<app>.$K_apps_domain${K_public_port:+:$K_public_port}  (tls $K_tls)"
+      case $K_apps_domain in
+        localhost|*.localhost) ;;
+        *.sslip.io) ui_kv_wrap dns "none needed (sslip.io); your own domain: tando domain add example.com";;
+        *) ui_kv_wrap dns "point  *.$K_apps_domain  (an A record) at ${K_ip:-this server}; open ports 80 and 443";;
+      esac
+      [ "$K_node" != no ] && f="node $K_node"
+      [ "$K_python" != no ] && f="${f:+$f ${UI_G_MID} }python $K_python"
+      [ "$K_podman" = yes ] && f="${f:+$f ${UI_G_MID} }podman"
+      [ "$K_postgres" = yes ] && f="${f:+$f ${UI_G_MID} }postgres"
+      ui_kv runtimes "${f:-none yet: tando up installs what an app needs}"
+      ui_kv took "$(ui_dur "$(since "$t0")")  ${UI_DIM}$K_arch, caddy $K_caddy${UI_NC}"
+      ui_box_close "next: cd your-app && tando up";;
+  esac
+}
+
+cmd_up() {
+  [ -f tando.conf ] || cmd_init
+  conf_load || no_conf
+  # the server is asked for once and remembered in tando.conf (also when given with -H)
+  if [ -z "$C_host" ] && [ -z "${TANDO_DEPLOY_KEY:-}" ]; then
+    [ -n "$HOST" ] || pick_host
+    [ -n "$HOST" ] && valid_host "$HOST" && [ -f "$CFG/hosts/$HOST" ] && conf_set_host "$HOST"
+  fi
+  resolve 1
+  [ -z "${DEPLOY_KEY:-}" ] || die "not allowed with a deploy key: configure (tando up changes the app's settings;" \
+    "the admin runs it, CI runs tando deploy)"
+  UP=1
+  if ! (do_deploy); then   # a subshell, so a failure that exits still reaches the hint
+    [ -f "$TMPD/created" ] && note "$APP exists on $HOST now, but nothing is live: fix the problem and run" \
+      "tando up again, or remove it with tando destroy"
+    exit 1
+  fi
+}
+cmd_deploy() { conf_load || no_conf; resolve 1; do_deploy; }
+
+cmd_rollback() {
+  resolve 1
+  local id=${ROLLBACK_ID:-}   # pos_app took it out of the arguments
+  agent_wait sudo rollback "$APP" $id < /dev/null > "$TMPD/o" || bail 1
+  kv_read "$TMPD/o" current from link
+  ui_box_open "rollback $APP" "$HOST"
+  ui_kv to "$K_current  $(ui_badge verified)"
+  if [ -n "$K_from" ]; then
+    ui_kv from "$K_from  $(ui_badge rolled-back)"
+    box_say "" "  back to it: tando rollback $K_from"
+  fi
+  ui_box_close "live  $K_link"
+}
+
+health_note() {
+  kv_read "$TMPD/o" healthy
+  if [ "$K_healthy" = 1 ]; then note "$1"
+  else note "$1, but the health check through Caddy fails: tando logs"; exit 1; fi
+}
+
+# env_import file: KEY=VALUE lines of a .env file (export, quotes and comments allowed)
+env_import() {
+  local f=${1:-.env} line k v n=0
+  [ -f "$f" ] || die "no such file: $f"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    case $line in ""|"#"*) continue;; esac
+    line=${line#export }
+    k=${line%%=*} v=${line#*=}
+    k=$(trim "$k")
+    case $line in *=*) ;; *) die "$f: not KEY=VALUE: $k";; esac
+    case $v in \"*\") v=${v#\"}; v=${v%\"};; \'*\') v=${v#\'}; v=${v%\'};; esac
+    printf '%s=%s\n' "$k" "$v"
+    n=$((n + 1))
+  done < "$f"
+  [ $n -gt 0 ] || die "$f has no KEY=VALUE lines"
+}
+
+cmd_env() {
+  resolve 1
+  local op=${ARGS[1]:-ls} a v
+  case $op in
+    ls) cmd_env_ls; return;;
+    import) env_import "${ARGS[2]:-}" > "$TMPD/env"; op="set";;
+    set|unset)
+      for a in ${ARGS[@]+"${ARGS[@]:2}"}; do
+        case $a in *$'\n'*) die "values cannot contain newlines";; esac
+        case $op:$a in
+          set:[A-Za-z_]*=*|unset:[A-Za-z_]*) ;;
+          set:[A-Za-z_]*)   # the value from the terminal (not echoed) or from stdin: not in argv
+            case $a in *[!A-Za-z0-9_]*) usage_err "bad key: $a" env;; esac
+            if [ -t 0 ]; then printf 'value of %s (not shown): ' "$a" >&2; IFS= read -rs v; echo >&2
+            else IFS= read -r v || [ -n "$v" ] || die "no value for $a on stdin"; fi
+            a="$a=$v";;
+          *) usage_err "bad argument: $a (KEY=VALUE)" env;;
+        esac
+        printf '%s\n' "$a"
+      done > "$TMPD/env";;
+  esac
+  # agent_wait (lib/deploy.sh): says what it waits for while a deploy of the app soaks
+  agent_wait sudo "env-$op" "$APP" < "$TMPD/env" > "$TMPD/o" || bail 1
+  kv_read "$TMPD/o" missing changed restarted why staged
+  [ -n "$K_missing" ] && note "not set, nothing to remove: $K_missing"
+  # before the first tando up: kept on the server, applied when the app is created
+  if [ "$K_staged" = 1 ]; then note "staged for $APP (not on $HOST yet): the first tando up applies it"; return 0; fi
+  if [ "$K_changed" = 0 ]; then note "nothing changed; $APP was not restarted"; return 0; fi
+  local what
+  what="$(grep -c . "$TMPD/env") $( [ "$op" = set ] && echo set || echo removed)"
+  if [ "$K_restarted" = 0 ]; then
+    case $K_why in
+      stopped) note "env updated ($what); $APP is stopped: tando start uses it";;
+      static) note "env updated ($what) (a static site has no process)";;
+      *) note "env updated ($what); nothing is running yet: the next deploy uses it";;
+    esac
+    return 0
+  fi
+  health_note "env updated ($what), $APP restarted"
+}
+
+cmd_logs() { . "$TANDO_HOME/lib/cmd-logx.sh"; logx_logs; }   # filters, follow with reconnect, pull
+cmd_svc() {
+  resolve 1
+  agent_wait sudo "$1" "$APP" < /dev/null > "$TMPD/o" || bail 1
+  kv_read "$TMPD/o" already
+  case $1:$K_already in
+    stop:1) note "$APP was already stopped (tando start brings it back)";;
+    start:1) note "$APP is already running";;
+    stop:*) health_note "$APP stopped: visitors get 503 \"$APP is stopped\" until tando start";;
+    start:*) health_note "$APP started";;
+    *) health_note "$APP restarted";;
+  esac
+}
+
+cmd_unlock() {
+  resolve 1
+  agent sudo unlock "$APP" > "$TMPD/o"
+  kv_read "$TMPD/o" held who age
+  if [ "$K_held" = 1 ]; then note "cleared the deploy lock held by $K_who for $(ui_dur "$K_age")"
+  else note "no deploy holds $APP"; fi
+}
+
+cmd_destroy() {
+  resolve 1
+  local what=""
+  agent sudo destroy "$APP" plan < /dev/null > "$TMPD/o"   # stdin is for the answer
+  kv_read "$TMPD/o" releases env data database backups jobs final
+  what="$(plural "${K_releases:-0}" release)"
+  [ "${K_env:-0}" -gt 0 ] && what="$what, $(plural "$K_env" "env key")"
+  [ -n "$K_data" ] && what="$what, its data ($(ui_bytes "$K_data"))"
+  [ -n "$K_database" ] && what="$what, its $K_database database"
+  [ "${K_jobs:-0}" -gt 0 ] && what="$what, $(plural "$K_jobs" job)"
+  what="$what, its user, unit and Caddy site"
+  if [ -n "$PURGE" ]; then [ "${K_backups:-0}" -gt 0 ] && what="$what, and $(plural "$K_backups" backup)"
+  elif [ "$K_final" = 1 ]; then what="$what. A final backup of the data is kept"; fi
+  confirm "This removes $APP from $HOST: $what." "$APP"
+  agent sudo destroy "$APP" ${PURGE:+purge} > "$TMPD/o"
+  kv_read "$TMPD/o" destroyed backup
+  if [ -n "$K_backup" ]; then
+    note "destroyed $K_destroyed; final backup ${K_backup##*/}: tando backup pull ${K_backup##*/} <file> -a $APP"
+  else note "destroyed $K_destroyed"; fi
+}
+
+cmd_backup() {
+  # offsite copies are the server's, not an app's (lib/offsite.sh, docs/BACKUP.md)
+  if [ "${ARGS[1]:-}" = offsite ]; then . "$TANDO_HOME/lib/offsite.sh"; cmd_backup_offsite; return; fi
+  resolve 1
+  local op=${ARGS[1]:-ls} id=${ARGS[2]:-} file=${ARGS[3]:-}
+  case $op in
+    now)
+      agent sudo backup-run "$APP" manual > "$TMPD/o"; kv_read "$TMPD/o" id
+      note "backed up $APP: $K_id (tando backup ls)";;
+    ls) cmd_backup_ls;;
+    restore)
+      valid_backup_id "$id" || usage_err "bad backup id: $id (tando backup ls lists them)" backup
+      confirm "This replaces the live data of $APP on $HOST with backup $id (the current data is kept as a safety backup; a backup only offsite is fetched and verified first)." "$APP"
+      agent sudo backup-restore "$APP" "$id" < /dev/null > "$TMPD/o"
+      kv_read "$TMPD/o" safety
+      health_note "restored $id; the data before the restore is in backup $K_safety";;
+    pull)
+      valid_backup_id "$id" || usage_err "bad backup id: $id (tando backup ls lists them)" backup
+      [ -e "$file" ] && die "$file exists"
+      # the dump holds the app's data and database: created readable by you only (600)
+      ( umask 077; set -C; : > "$file" ) 2> /dev/null || die "cannot create $file"
+      # lint: allow RL04 APP was checked by resolve, id by valid_backup_id
+      ssh "${SSHO[@]}" "$TARGET" "sudo -n $AGENT_BIN backup-cat $APP $id" >> "$file" 2> "$TMPD/err" ||
+        { rm -f "$file"; ssh_explain "$TMPD/err" || agent_msgs < "$TMPD/err" >&2; die "pull failed"; }
+      note "wrote $file ($(ui_bytes "$(wc -c < "$file" | tr -d ' ')"), a tar with data.tar.gz and/or db.dump)";;
+  esac
+}
+
+cmd_db() {
+  resolve 1
+  case ${ARGS[1]:-} in
+    psql) ssh -t "${SSHO[@]}" "$TARGET" "sudo -n $AGENT_BIN db-psql $APP";;
+    url)
+      [ -n "$SHOW" ] || die "this prints the database password: use tando db url --show"
+      agent sudo db-url "$APP" > "$TMPD/o"; kv_read "$TMPD/o" url
+      printf '%s\n' "$K_url";;
+  esac
+}
+
+# pos_app: the app named as a word instead of -a (tando logs shop, tando env ls shop). The rule
+# (lib/help.txt overview): an app name may follow a command, or its subcommand, that otherwise
+# takes no word there; it is taken out of ARGS into APP. Where the command has words of its own,
+# the app goes with -a: env set|unset|import, backup restore|pull, domain add|rm, logs pull,
+# jobs run.
+# rollback takes both, in either order: a release id (20261113-171442) is the id, anything else
+# the app. status, history, audit and ssh read their [app] themselves.
+pos_app() {
+  local i n=${#ARGS[@]} a flags pos=() sub="" k
+  case $cmd in
+    releases|start|stop|restart|destroy|unlock|logs|rollback|link|open|next) ;;
+    env|backup|db|domain|requests|jobs) sub=1;;
+    *) return 0;;
+  esac
+  flags=" $(spec "$cmd" flags) "
+  # the positional words (indexes into ARGS), skipping flags and the values of flags that take one
+  i=1
+  while [ $i -lt $n ]; do
+    a=${ARGS[i]}
+    case $a in
+      -?*) case $flags in *" $a= "*) i=$((i + 1));; esac;;
+      *) pos[${#pos[@]}]=$i;;
+    esac
+    i=$((i + 1))
+  done
+  [ ${#pos[@]} -gt 0 ] || return 0
+  k=""
+  if [ -n "$sub" ]; then
+    case $cmd:${ARGS[pos[0]]} in
+      env:ls|backup:ls|backup:now|db:psql|db:url|domain:ls|jobs:ls|requests:summary|requests:tail|requests:errors)
+        [ ${#pos[@]} -ge 2 ] && k=${pos[1]};;
+    esac
+  else
+    case $cmd in
+      logs) [ "${ARGS[pos[0]]}" = pull ] || k=${pos[0]};;
+      rollback)
+        for i in ${pos[@]+"${pos[@]}"}; do
+          if valid_id "${ARGS[i]}"; then
+            [ -z "${ROLLBACK_ID:-}" ] || usage_err "two release ids: $ROLLBACK_ID and ${ARGS[i]}" rollback
+            ROLLBACK_ID=${ARGS[i]}
+          elif case ${ARGS[i]} in [0-9]*) true;; *) false;; esac; then
+            usage_err "bad release id: ${ARGS[i]} (like 20261113-171442; tando releases lists them)" rollback
+          elif [ -z "$k" ]; then k=$i
+          else usage_err "rollback takes an app and a release id (tando releases lists the ids): ${ARGS[i]}?" rollback
+          fi
+        done;;
+      *) k=${pos[0]};;
+    esac
+  fi
+  [ -n "$k" ] || return 0
+  a=${ARGS[k]}
+  valid_app "$a" || usage_err "not an app name: $a (a-z, 0-9, -; 2-26 characters; tando ls lists them)" \
+    "$(spec_has "$cmd" && echo "$cmd")"
+  [ -z "$APP" ] || [ "$APP" = "$a" ] || usage_err "two apps: -a $APP and $a (give one)" "$cmd"
+  APP=$a
+  ARGS=("${ARGS[@]:0:k}" ${ARGS[@]+"${ARGS[@]:k+1}"})
+}
+
+# ssh_dashdash args...: tando ssh -- <command> runs it as this directory's app (tando.conf), the
+# same as tando ssh <app> -- <command>; parse drops the "--", so the app is set here (-a form)
+ssh_dashdash() {
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -a|-H) shift 2;;
+      --) [ -n "$APP" ] && return 0
+          conf_load 2> /dev/null && APP=$C_app
+          [ -n "$APP" ] || die "no tando.conf here to name the app: tando ssh <app> -- <command>"
+          return 0;;
+      *) return 0;;
+    esac
+  done
+}
+
+# pre_flag_err args...: a flag before the command that only works after it: the same command line
+# with the command first (tando -n 5 history -> tando history -n 5)
+pre_flag_err() {
+  local a c="" rest=""
+  for a in "$@"; do
+    if [ -z "$c" ] && is_cmd "$a"; then c=$a; else rest="$rest $a"; fi
+  done
+  [ -n "$c" ] || usage_err "unknown flag $1 (tando help lists the commands; flags go after the command)"
+  usage_err "$1 goes after the command: tando ${pre[*]:+${pre[*]} }$c$rest"
+}
+
+main() {
+  local cmd pre=()
+  # flags before the command (tando -H vps ls) count as if they came after it
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -a|-H) [ $# -ge 2 ] || usage_err "$1 needs a value"; pre+=("$1" "$2"); shift 2;;
+      -h|--help) HELP=1; shift;;
+      --version) set -- version "${@:2}"; break;;
+      --json|--yes|--force) pre+=("$1"); shift;;
+      -*) pre_flag_err "$@";;
+      *) break;;
+    esac
+  done
+  cmd=${1:-}
+  [ $# -gt 0 ] && shift
+  case $cmd in
+    "") help_overview
+        # a first run (no project here, no server yet): the wizard does all of it
+        set -- "$CFG"/hosts/*
+        [ -f tando.conf ] || [ -f "$1" ] ||
+          printf '\nNew here? tando go sets up your server and deploys this directory, step by step.\n'
+        exit 0;;
+    help)
+      case " $* " in *" -h "*|*" --help "*) command_help help; exit 0;; esac
+      check_args help "$@"
+      if [ -n "${1:-}" ]; then command_help "$1"; else help_overview; fi
+      exit 0;;
+  esac
+  case $cmd in *[!a-z0-9-]*|-*) unknown_cmd "$cmd";; esac
+  is_cmd "$cmd" || unknown_cmd "$cmd"
+  # `<command> --help` (or -h anywhere) prints help and never runs the command
+  for a in "$@"; do case $a in -h|--help) HELP=1;; --) break;; esac; done
+  if [ -n "$HELP" ]; then command_help "$cmd"; exit 0; fi
+  check_args "$cmd" ${pre[@]+"${pre[@]}"} "$@"
+  ARGS=("$cmd") PLUGIN=""
+  case $cmd in logs|top|ci|alerts|requests|audit|adopt) PLUGIN=1;; esac
+  spec_has "$cmd" || PLUGIN=1
+  parse ${pre[@]+"${pre[@]}"} "$@"
+  pos_app
+  [ "$cmd" = ssh ] && ssh_dashdash "$@"
+  case $cmd in
+    host) cmd_host ${ARGS[@]+"${ARGS[@]:1}"};;
+    doctor) cmd_doctor;;
+    init) cmd_init;;
+    recipes) cmd_recipes;;
+    version) cmd_version;;
+    up) cmd_up;;
+    deploy) cmd_deploy;;
+    rollback) cmd_rollback;;
+    releases) cmd_releases;;
+    env) cmd_env;;
+    logs) cmd_logs;;
+    start|stop|restart) cmd_svc "$cmd";;
+    ls) if [ -n "$ALL" ]; then cmd_ls_all; else cmd_ls; fi;;
+    unlock) cmd_unlock;;
+    destroy) cmd_destroy;;
+    backup) cmd_backup;;
+    db) cmd_db;;
+    jobs) cmd_jobs;;
+    status) [ -n "${ARGS[1]:-}" ] && APP=${ARGS[1]}; cmd_status;;
+    history) [ -n "${ARGS[1]:-}" ] && APP=${ARGS[1]}; cmd_history;;
+    *)
+      # plugin commands: lib/cmd-<name>.sh defines cmd_<name>, called with the original arguments
+      . "$TANDO_HOME/lib/cmd-$cmd.sh"
+      "cmd_$(printf '%s' "$cmd" | tr '-' '_')" ${pre[@]+"${pre[@]}"} "$@";;
+  esac
+}
+# a view piped into a reader that stops early (tando status | head): no "write error: Broken
+# pipe" lines (SIGPIPE is often ignored by the parent, so printf reports it instead of dying)
+piped_view() {
+  [ -p /dev/stdout ] || return 1
+  while [ $# -gt 0 ]; do
+    case $1 in -a|-H) shift; [ $# -gt 0 ] && shift; continue;; -*) shift; continue;; esac
+    case $1 in ls|status|history|releases|jobs|recipes|help|doctor|version|audit|requests|logs|alerts) return 0;;
+      host) case ${2:-ls} in ls|status) true;; *) false;; esac;; env|backup) [ "${2:-ls}" = ls ];; *) return 1;; esac
+    return
+  done
+  return 0   # tando alone: the overview
+}
+if piped_view "$@"; then
+  main "$@" 2> >(grep -v 'Broken pipe$' >&2)
+else
+  main "$@"
+fi
+exit $?
+}

@@ -1,0 +1,408 @@
+# lib/help.txt: the help of every command, and the flags and arguments each one accepts.
+# bin/tando reads it for `tando help`, `tando help <command>`, `<command> --help` and to refuse
+# unknown flags and extra arguments before anything runs; completions/gen.sh reads it too.
+#
+# A section starts with "@@ <command>". Its fields:
+#   flags: the flags it takes; "=" marks one that takes a value (-n= takes "-n 20")
+#   args:  how many positional arguments: "0", "0-1", "1+", "*"
+#   subs:  instead of args, the first argument is one of these words; each has its own count
+#          (word=count); "default=word" names the one used when none is given
+#   usage: one synopsis line (several allowed), shown first
+# Every other line is the description, printed as is. Lines stay under 80 columns.
+
+@@ overview
+tando: deploy apps to your own server
+
+Start here
+  tando go admin@203.0.113.7                or all four below, as a wizard
+  tando host add vps admin@203.0.113.7      register a server
+  tando host setup vps                      install everything it needs, once
+  cd my-app && tando up                     create, configure and deploy
+  tando domain add example.com              your domain, with HTTPS
+
+Deploy     up · deploy · rollback [id] · releases · history
+Run        status · logs [-f] · start · stop · restart · top
+Configure  env · jobs [run] · db · backup [offsite] · restore
+Observe    ls · health · errors · alerts · requests · audit
+Servers    host add|ls|setup|status|care|update|reboot|rm · domain · doctor
+CI         ci setup|ls|revoke|rotate|github|hook
+More       init · destroy · unlock · recipes · adopt
+
+tando help <command>: details and an example.  Something wrong? tando doctor
+The app: tando.conf here, or tando logs shop, tando env ls shop (-a shop where
+a command has words of its own: env set, domain add...). Flags: -H <host>,
+--json, --yes; only -a -H --json --yes --force before the command. Exit: 0 ok,
+1 failed, 2 usage error.
+
+@@ init
+flags: -H= --yes
+args: 0
+usage: tando init [-H host]
+Write tando.conf for the project in this directory. It detects the recipe
+(next, node, python, container, static: tando recipes), the start command and
+the health path, and lists the common options as comments. With one server
+registered (or -H), it also writes host = <name>.
+Next.js: offers to add output: "standalone" to next.config (--yes adds it).
+Example: tando init && cat tando.conf
+
+@@ up
+flags: -H= --yes --force --wait
+args: 0
+usage: tando up [-H host] [--yes] [--force] [--wait]
+Create the app on the server if it does not exist yet, apply tando.conf and
+deploy. Writes tando.conf first when there is none (see tando init). The app
+is created only after the build succeeded, so a failed first build leaves
+nothing behind on the server.
+--force deploys although the app was last deployed from another directory.
+Example: cd my-app && tando up
+
+@@ deploy
+flags: -a= -H= --force --yes --wait
+args: 0
+usage: tando deploy [-a app] [-H host] [--force] [--yes] [--wait]
+Build here, upload the changes, start the new release on a spare port, check
+its health, switch traffic to it and check again through Caddy; any failure
+rolls back to the release that was live. The new release then has to stay up
+for 30 s (soak = N in tando.conf); a crash in that window rolls back too.
+deploy returns once the release is live; --wait (or TANDO_WAIT=1, for CI) waits
+for that.
+Changes to tando.conf are applied too (memory, jobs, data...): deploy and up do
+the same for an existing app.
+--force deploys although the app was last deployed from another directory;
+--yes deploys although tando.conf now names another app or server than the
+last deploy from this directory (otherwise tando asks).
+Example: tando deploy
+
+@@ rollback
+flags: -a= -H=
+args: 0-2
+usage: tando rollback [app] [id] [-H host]
+Go back to the previous verified release, or to the release <id> (tando
+releases lists them). app and id may come in either order: a release id
+(20261113-171442) is the id, any other word the app. Undo it with
+tando rollback <the id you came from>.
+Example: tando rollback 20261113-171103
+
+@@ releases
+flags: -a= -H= --json
+args: 0-1
+usage: tando releases [app] [-H host] [--json]
+The releases kept on the server, newest first, with their state and age.
+Release ids are the UTC time of the deploy (20261113-171442 = 17:14:42 UTC).
+Example: tando releases --json
+
+@@ history
+flags: -a= -H= -n= --json
+args: 0-1
+usage: tando history [app] [-n N] [-H host] [--json]
+Deploys and rollbacks with their result and phase times, newest first. Without
+an app (and outside a project) it lists every app of the server.
+Example: tando history -n 10
+
+@@ status
+flags: -a= -H= --watch= --json
+args: 0-1
+usage: tando status [app] [--watch N] [-H host] [--json]
+One app in detail: state, release, memory, cpu, the last 16 minutes, logs,
+alerts, backups, releases and recent deploys. Outside a project and without
+an app it shows tando ls. --watch N repaints every N seconds (Ctrl-C stops).
+Example: tando status --watch 2
+
+@@ ls
+flags: -H= --all --watch= --json
+args: 0
+usage: tando ls [-H host] [--all] [--watch N] [--json]
+The apps of a server: state, when deployed, memory, cpu, uptime and link.
+--all shows every registered server.
+Example: tando ls --all
+
+@@ logs
+flags: -a= -H= -f -n= --since= --until= --grep= --regex -E -i --level= --release= --deploy= --json
+args: 0-2
+usage: tando logs [app] [-f] [-n N] [--since T] [--until T] [--grep TEXT [-i] [--regex|-E]]
+usage:            [--level L] [--json]
+usage: tando logs [app] --release ID | --deploy ID
+usage: tando logs pull <file> [--since T] [--until T]
+The app's output (stdout and stderr), from its own journal on the server.
+-f follows; -n N lines (default 100); --since 15m, 2h, 7d, "2026-11-13 14:30"
+(GMT, as the lines are shown);
+--level err|warning|notice|info|debug; --release ID: the lines from the time
+that release was live (for one that never was: its deploy log); --deploy ID:
+that deploy's own log and its start test;
+pull writes everything to a local file.
+Example: tando logs -f --grep error -i
+
+@@ start
+flags: -a= -H=
+args: 0-1
+usage: tando start [app] [-H host]
+Start a stopped app. Requests are held while it starts, so none is dropped.
+
+@@ stop
+flags: -a= -H=
+args: 0-1
+usage: tando stop [app] [-H host]
+Stop the app. Visitors get 503 "<app> is stopped" until tando start; jobs
+stop too. Nothing is removed.
+
+@@ restart
+flags: -a= -H=
+args: 0-1
+usage: tando restart [app] [-H host]
+Restart the app (requests are held meanwhile, so none is dropped).
+
+@@ top
+flags: -H= --watch= --read-only
+args: 0-1
+usage: tando top [host] [--watch N] [--read-only]
+A live full-screen dashboard of every registered server: apps, graphs, logs
+and history; start, stop, restart and rollback from the keyboard (not with
+--read-only). --watch N refreshes every N seconds (default 2). q quits.
+
+@@ env
+flags: -a= -H= --show
+subs: ls=0-1 set=1+ unset=1+ import=0-1 default=ls
+usage: tando env ls [app] [--show]
+usage: tando env set KEY=VALUE ...
+usage: tando env set KEY
+usage: tando env unset KEY ...
+usage: tando env import [.env]
+The app's environment variables, stored on the server (root, 640), never in
+the release or in git. set and unset restart the app once; set KEY alone reads
+the value from the terminal without echo (or from stdin). import sets every
+KEY=VALUE line of a file (.env by default); ls lists the keys (values hidden;
+--show prints them).
+Before the first tando up, set and import are staged on the server and applied
+when the app is created.
+Set by tando: PORT, HOME, TANDO_DATA_DIR (and DATABASE_URL with database =).
+Example: tando env set STRIPE_KEY        (paste, then Enter)
+
+@@ jobs
+flags: -a= -H=
+subs: ls=0-1 run=1 default=ls
+usage: tando jobs [ls [app]] [-H host]
+usage: tando jobs run <name>
+run <name> runs a scheduled job now and shows its output and exit code.
+The app's scheduled jobs (job.<name> = <schedule> | <command> in tando.conf):
+schedule, next run, last run and its result. A job is run once per schedule and
+not retried: tando cannot know whether a command may run twice. A job that calls
+its own app over HTTP can meet it restarting (a deploy, tando restart): retry in
+the job (curl --retry 5 --retry-connrefused).
+
+@@ db
+flags: -a= -H= --show
+subs: psql=0-1 url=0-1
+usage: tando db psql [app]
+usage: tando db url [app] --show
+The app's PostgreSQL database (database = postgres in tando.conf). psql opens a
+shell as the app's role; url prints DATABASE_URL, password included.
+
+@@ backup
+flags: -a= -H= --yes --show --saved --import --rotate
+subs: ls=0-1 now=0-1 restore=1 pull=2 offsite=0+ default=ls
+usage: tando backup ls [app]
+usage: tando backup now [app]
+usage: tando backup restore <id> [--yes]
+usage: tando backup pull <id> <file>
+usage: tando backup offsite [status|set|test|hosts|sync|off]
+usage: tando backup offsite key --show|--saved|--import|--rotate
+Backups of the app's data directory and database (daily when the app has one).
+restore replaces the live data and asks first (--yes skips the question); the
+data from before is kept as a safety backup. ls and pull also work for an app
+that was destroyed (its final backup).
+offsite: a copy of every backup in Cloudflare R2 or any S3 storage, encrypted
+on the server with a recovery key shown once (keep it: without it the copies
+cannot be read). set asks for the account id or endpoint, bucket and keys (or
+reads key=value lines on stdin) and checks them before saving. ls shows where
+each backup is (local, offsite, both); restore and pull fetch from offsite when
+the local copy is gone. A new server: tando restore --from-host (docs/BACKUP.md).
+Example: tando backup pull 20261113-171815-manual backup.tar
+Example: tando backup offsite set
+
+@@ restore
+flags: -a= -H= --yes --from-host= --all
+args: *
+usage: tando restore <backup id> [-a app] [--yes]
+usage: tando restore --from-host <host id> [app...|--all] [--yes]
+Put a backup back: the same as tando backup restore, and a backup that is only
+in offsite storage is fetched and verified first.
+--from-host recreates apps of another (lost) server on this one from the
+bucket: settings, env, domains, then data and database from the newest backup.
+The code is not in backups: deploy each app with tando up afterwards. Needs
+the same bucket and recovery key (tando backup offsite set, key --import);
+tando backup offsite hosts lists the servers.
+Example: tando restore --from-host 3f9a01c2b7de --all -H newvps
+
+@@ host
+flags: --port= --key= --insecure-test --no-check --deploy --force --yes --json --watch= --all --now --updates --reboot --window= --tz= --lead= --even-with-other-sites
+subs: add=2 ls=0 setup=1+ rm=1 status=0-1 care=0-3 update=0-1 reboot=0-1 default=ls
+usage: tando host add <name> <user@address> [--port N] [--key FILE] [--yes] [--force]
+usage:                [--no-check] [--deploy] [--insecure-test]
+usage: tando host setup <name> [apps_domain=D] [tls=auto|internal|off] [setting=value ...]
+usage: tando host ls
+usage: tando host rm <name>
+usage: tando host status [name] [--json] [--watch N]
+usage: tando host care [name]
+usage: tando host care on [name] [--updates] [--reboot] [--window 02:00-04:00]
+usage:                [--tz ZONE] [--lead MIN] [--even-with-other-sites]
+usage: tando host care off [name] [--updates] [--reboot] | care skip [name] [off]
+usage: tando host update [name] [--all] [--yes]
+usage: tando host reboot [name] [--now] [--yes] [--even-with-other-sites]
+add registers a server (a fresh Ubuntu 24.04+ with sshd and a login with
+passwordless sudo is enough), checks the connection and shows the server's key
+fingerprint to trust. setup installs and configures everything on it: rsync,
+curl, nftables, Caddy with tando's sites, the firewall unit, the timers and
+journals; app runtimes (Node, Python, Podman, PostgreSQL) come later, when the
+first app needs one. It is safe to run again (it changes only what differs).
+Without apps_domain, apps are <app>.<ip-with-dashes>.sslip.io with HTTPS (works
+with no DNS; it relies on the sslip.io service). With
+apps_domain=apps.example.com they are <app>.apps.example.com: point
+*.apps.example.com at the server.
+More settings: tls=auto|internal|off, public_port=N, node=24, python=yes,
+podman=yes, postgres=yes, swap=yes|no (a swap file is made under 2 GB of RAM),
+ufw=no (setup opens 80 and 443 when ufw is active), domain_tls=internal (the
+domains of tando domain add get certificates from Caddy's own local CA instead
+of Let's Encrypt: for a test server that the internet cannot reach; browsers
+do not trust them). public_port=N: the port links use when the server's port
+80 is mapped to another one (a container, a test VM).
+add saves the server only once tando logs in with it; run the same command again
+after fixing what it says (--yes trusts the host key without asking, --no-check
+saves it without connecting, --force replaces a different entry of that name).
+rm forgets a server here; nothing on the server changes.
+status is the server itself: OS, kernel, pending and security updates, a needed
+reboot, open ports, ssh, firewall, failed services, disks, clock, backups, and
+a to-do list with the command that fixes each item (docs/HOSTCARE.md).
+care turns on what tando may do by itself: --updates installs security updates
+every day (Ubuntu's unattended-upgrades; no service restarts), --reboot reboots
+in the window when an update needs it (after a notice; never during a deploy;
+never beside sites tando does not manage without --even-with-other-sites).
+care skip cancels the next automatic reboot. update installs the pending
+security updates now (--all: every update); reboot reboots safely: in the
+window, or at once with --now, then checks that every app answers again.
+host setup turns on security updates on a server it set up from empty
+(care=off keeps them off); beside other sites it only gives hints.
+Example: tando host setup vps apps_domain=apps.example.com tls=auto
+
+@@ domain
+flags: -a= -H= --www= --wait --force
+subs: add=1 rm=1 ls=0-1 default=ls
+usage: tando domain add <domain> [--www redirect|serve|off] [--wait] [--force] [-a app]
+usage: tando domain rm <domain> [-a app]
+usage: tando domain ls [app]
+Serve the app on your own domain with HTTPS (Let's Encrypt; Caddy renews it).
+add first checks DNS: the domain must point at the server, else it prints the
+exact records to create and stops (--wait polls until DNS is right, --force
+skips the check). Then it adds the domain to the app's site, checks the whole
+Caddy config before reloading (a rejected config is rolled back) and waits for
+the certificate. --www: www.<domain> redirects to the domain (the default for
+example.com and www.example.com), serves the same app, or is left alone (off).
+An app can have several domains; domain = a.com, b.com in tando.conf adds them
+at tando up. The app's own link (<app>.<apps_domain>) keeps working.
+Example: tando domain add example.com
+
+@@ doctor
+flags: -H=
+args: 0-1
+usage: tando doctor [host]
+Check a server: connection, sudo, every tando piece and its version, Caddy,
+DNS, disk, memory, timers and every app. Works on a server that is not set up
+yet (it then says what setup would do).
+
+@@ version
+flags: -H=
+args: 0
+usage: tando version [-H host]
+The client version, and the agent version of the server.
+
+@@ destroy
+flags: -a= -H= --purge --yes
+args: 0-1
+usage: tando destroy [app] [-H host] [--purge] [--yes]
+Remove the app from the server: its unit, Caddy site, user, releases, data and
+database. A final backup is kept (tando backup ls -a <app>) unless --purge.
+Asks you to type the app name; --yes skips that (for scripts).
+
+@@ unlock
+flags: -a= -H=
+args: 0-1
+usage: tando unlock [app] [-H host]
+Clear the lock of a deploy whose terminal went away. A deploy that is still
+running in another terminal fails at its next step.
+
+@@ recipes
+flags:
+args: 0
+usage: tando recipes
+What tando init detects, how each recipe runs and what it needs on the server.
+
+@@ ci
+flags: -a= -H= --ref= --repo= --branch= --node= --env= --force --remove
+subs: setup=0 rotate=0 ls=0 revoke=1 github=0 hook=0
+usage: tando ci setup | rotate | ls | revoke <id|SHA256:...|all>
+usage: tando ci github [--ref TAG|SHA] [--repo URL] [--branch B] [--node N] [--env NAME]
+usage:                 [--force]
+usage: tando ci hook [--branch B] [--force] | tando ci hook --remove
+Deploy keys for CI, run by the admin in the app's directory. setup creates a
+key that can deploy only this app and prints the CI secrets once; github writes
+.github/workflows/deploy.yml; hook installs a git pre-push hook. See docs/CI.md.
+
+@@ alerts
+flags: -a= -H= --watch= -n=
+subs: show=0 enable=0 disable=0 test=0-1 history=0-1 set=0+ silence=2 heartbeat=0-1 notifier=1+ notifiers=0+ default=show
+usage: tando alerts [--watch N] | enable | disable | test [name] | history [app] [-n N]
+usage: tando alerts set [key=value ...] | silence <app|all> <30m|2h|1d|off>
+usage: tando alerts notifier add <name> webhook|slack|telegram|ntfy|email | rm <name> | ls
+usage: tando alerts heartbeat [off]
+What is firing on the server, and where alerts are sent. Checks run every
+minute on the server (app down or unhealthy, 5xx answers, new errors after a
+deploy, restarts, memory, disk, certificates...). See docs/MONITORING.md.
+Example: tando alerts notifier add phone ntfy
+
+@@ health
+flags: -a= -H= --json
+args: 0-1
+usage: tando health [app] [--json]
+Is it up, and was it: uptime over 24 hours and 7 days, incidents (start,
+how long, cause), probe latency; for one app also the last lines it wrote
+before its last crash. Recorded once a minute by the alert checks.
+
+@@ errors
+flags: -a= -H= --since= --last= -n= --json
+args: 0-1
+usage: tando errors [app] [--since 24h] [-n N] [--json]
+The errors in the app's own log, grouped: a stack trace (Node, Python, Go)
+counts as one, grouped by exception type and the app's first frame. For each:
+how often, first and last seen, the release it appeared in, one sample.
+
+@@ requests
+flags: -a= -H= --last= --since= -n= -f --4xx
+subs: summary=0-1 tail=0-1 errors=0-1 default=summary
+usage: tando requests [summary [app]] [--since 15m|1h|24h]
+usage: tando requests tail [app] [-n N] [-f]
+usage: tando requests errors [app] [--since W] [--4xx]
+The app's request log as Caddy wrote it: counts, status codes, latency
+percentiles and the slowest paths; tail shows the last requests; errors the
+failing ones. (--last is the same as --since.)
+
+@@ audit
+flags: -a= -H= -n=
+args: 0-1
+usage: tando audit [app] [-n N] [-H host]
+Who changed what on the server: one row per deploy, env change, restart,
+backup... with the sudo login and its address.
+
+@@ adopt
+flags: -H= --health= --no-jobs --yes
+subs: plan=1 apply=1 undo=1 status=1
+usage: tando adopt plan|apply <unit> [--health /path] [--no-jobs] [--yes]
+usage: tando adopt undo|status <app>
+Take over an app that was deployed by hand (a systemd unit behind Caddy): plan
+shows what would change, apply does it with a backup, undo goes back.
+See docs/MIGRATION.md.
+
+@@ help
+flags:
+args: 0-3
+usage: tando help [command [subcommand]]
+The list of commands, or the help of one command (tando help alerts notifier
+shows the help of alerts).

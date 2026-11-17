@@ -1,0 +1,2 @@
+go test fuzz v1
+string("token=00000000-0000-0000-0000-000000000000\ncmd=id\n")

@@ -1,0 +1,13 @@
+service: s3
+region: us-east-1
+access: AKIAIOSFODNN7EXAMPLE
+secret: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+method: PUT
+host: examplebucket.s3.amazonaws.com
+path: /test$file.text
+header: Date: Fri, 24 May 2013 00:00:00 GMT
+header: x-amz-storage-class: REDUCED_REDUNDANCY
+header: x-amz-content-sha256: 44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072
+date: 20130524T000000Z
+payload: 44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072
+authz: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=date;host;x-amz-content-sha256;x-amz-date;x-amz-storage-class, Signature=98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd

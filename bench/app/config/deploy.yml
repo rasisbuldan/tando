@@ -1,0 +1,27 @@
+# Kamal 2 config for approach B (bench/run-b-kamal.sh). Server: container tando-bench-b.
+service: bench
+image: bench
+servers:
+  web:
+    hosts:
+      - 127.0.0.1
+proxy:
+  app_port: 3000
+  healthcheck:
+    path: /api/version
+    interval: 1
+    timeout: 5
+registry:
+  server: localhost:5412       # Kamal's local registry: pushed on the laptop, pulled via ssh tunnel
+builder:
+  arch: arm64
+  context: .
+ssh:
+  user: vmadmin
+  port: 2412
+  keys: [ /keys/id_bench ]
+  keys_only: true
+env:
+  clear:
+    NEXT_TELEMETRY_DISABLED: 1
+deploy_timeout: 30

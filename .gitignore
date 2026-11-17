@@ -1,0 +1,40 @@
+# --- credentials: never commit (scripts/secret-scan.sh checks what slips through) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+id_bench*
+id_replica*
+offsite.conf
+offsite.key
+.netrc
+.npmrc
+
+# --- tando state and build output ---
+.tando/
+.deploy/
+dist/
+node_modules/
+.next/
+.ready-*
+
+# --- test work directories and generated test keys ---
+test/.*/
+test/.e2e*
+test/.work-*
+test/server/.ready
+test/server/id_test
+test/server/id_test.pub
+
+# --- benchmark output (raw runs hold server addresses and paths: kept outside the repo) ---
+bench/raw/
+
+# --- OS ---
+.DS_Store

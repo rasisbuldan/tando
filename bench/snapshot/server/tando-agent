@@ -1,0 +1,396 @@
+#!/bin/bash
+# tando-agent: server side of tando. Installed as /opt/tando/bin/tando-agent (root 755).
+# Mutating verbs run as root via sudo; read-only verbs (info status releases history deploy-status
+# jobs) work as any user. Output: key=value lines or tab-separated rows; errors on stderr.
+set -uo pipefail
+umask 022
+R=/opt/tando AGENT=/opt/tando/bin/tando-agent KEEP=5
+declare -A C S H P   # app.conf, state, host.conf, activation progress
+
+die() { echo "tando-agent: $*" >&2; exit 1; }
+need_root() { [[ $EUID -eq 0 ]] || die "this needs root (sudo)"; }
+valid_app() { [[ $1 =~ ^[a-z][a-z0-9-]{1,25}$ ]]; }
+valid_id() { [[ $1 =~ ^[0-9]{8}-[0-9]{6}(-[0-9]{1,3})?$ ]]; }
+clean() { [[ $1 != *[[:cntrl:]]* ]]; }
+now() { printf '%(%s)T' -1; }
+ds() { local t=${EPOCHREALTIME/./}; echo $((t / 100000)); }        # deciseconds
+el() { local d=$(( $(ds) - $1 )); echo "$((d / 10)).$((d % 10))"; } # seconds since a ds mark
+row() { local x o=(); for x; do x=${x//$'\t'/ }; o+=("${x:--}"); done; local IFS=$'\t'; echo "${o[*]}"; }  # empty -> "-"
+
+# key=value files: load into an associative array, save atomically (temp + mv)
+load() { local -n _m=$2; _m=(); local k v; [[ -r $1 ]] || return 0
+  while IFS='=' read -r k v; do [[ -n $k ]] && _m[$k]=$v; done < "$1"; }
+save() { local -n _m=$2; local k t="$1.tmp.$$"
+  for k in "${!_m[@]}"; do printf '%s=%s\n' "$k" "${_m[$k]}"; done | sort > "$t" && mv -f "$t" "$1"; }
+st() { while (($#)); do S[$1]=$2; shift 2; done; save "$D/state" S; }
+pg() { while (($#)); do P[$1]=$2; shift 2; done; save "$D/activation" P; }
+
+app() { valid_app "${1:-}" || die "invalid app name"; A=$1 D=$R/apps/$1
+  [[ -f $D/app.conf ]] || die "no such app: $1"; load "$D/app.conf" C; load "$D/state" S; load "$R/host.conf" H; }
+link() { local s=https; [[ ${H[tls]:-off} == off ]] && s=http; echo "$s://$A.${H[apps_domain]:-localhost}${H[public_port]:+:${H[public_port]}}"; }
+lock() { exec 9>"$D/lock"; flock -w "${1:-300}" 9 || die "app is busy (another activation holds the lock)"; }
+cur_link() { local l; l=$(readlink "$D/current" 2>/dev/null) || return 0; echo "${l##*/}"; }
+
+# ---- unit rendering -------------------------------------------------------------------------
+props() { # port -> hardening properties, shared by the unit file and the pre-flight transient unit
+  local p=$1 x
+  for x in "User=tando-$A" "Group=tando-$A" NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes \
+      PrivateTmp=yes PrivateDevices=yes "ReadWritePaths=$D/shared" "SocketBindAllow=tcp:$p" \
+      SocketBindDeny=any "MemoryMax=${C[memory]:-256M}" "EnvironmentFile=$D/env" \
+      "Environment=PORT=$p HOME=$D/shared"; do
+    [[ ",${H[unit_drop]:-}," == *",${x%%=*},"* ]] || echo "$x"
+  done
+}
+write_unit() {
+  { printf '[Unit]\nDescription=tando app %s\nAfter=network.target\n\n[Service]\n' "$A"
+    printf 'ExecStart=%s exec-app %s\nWorkingDirectory=%s/current\nRestart=on-failure\nRestartSec=2\n' "$AGENT" "$A" "$D"
+    props "${C[port]}"; printf '\n[Install]\nWantedBy=multi-user.target\n'; } > "/etc/systemd/system/tando-$A.service"
+}
+write_caddy() {
+  local site="$A.${H[apps_domain]:-localhost}" f=/etc/caddy/tando/$A.caddy
+  case ${H[tls]:-off} in off) site="http://$site";; esac
+  { echo "$site {"; [[ ${H[tls]} == internal ]] && echo "	tls internal"
+    echo "	reverse_proxy 127.0.0.1:${C[port]}"; echo "}"; } > "$f.tmp"
+  cmp -s "$f.tmp" "$f" && { rm -f "$f.tmp"; return 0; }
+  [[ -f $f ]] && cp -p "$f" "$f.old"; mv -f "$f.tmp" "$f"
+  if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile &>/dev/null || ! systemctl reload caddy; then
+    if [[ -f $f.old ]]; then mv -f "$f.old" "$f"; else rm -f "$f"; fi; die "caddy rejected the site config"; fi
+  rm -f "$f.old"
+}
+
+# ---- health ---------------------------------------------------------------------------------
+probe() { # timeout unit curl-args... ; succeeds on a 2xx/3xx answer
+  local t=$1 u=$2 c end=$((SECONDS + $1)); shift 2
+  while :; do
+    c=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$@" 2>/dev/null) || c=000
+    [[ $c == [23]?? ]] && return 0
+    ((SECONDS < end)) || return 1
+    if [[ -n $u ]] && ! systemctl -q is-active "$u"; then return 1; fi
+    sleep 0.5
+  done
+}
+via_caddy() { # health check through Caddy, as a visitor would reach it
+  local h="$A.${H[apps_domain]:-localhost}" path=${C[health]:-/}
+  if [[ ${H[tls]:-off} == off ]]; then probe "${C[health_timeout]:-60}" "" -H "Host: $h" "http://127.0.0.1$path"
+  else probe "${C[health_timeout]:-60}" "" -k --resolve "$h:443:127.0.0.1" "https://$h$path"; fi
+}
+
+# ---- release switching ----------------------------------------------------------------------
+switch_to() { # id or "" (no release: stop the app)
+  if [[ -z $1 ]]; then systemctl stop "tando-$A"; rm -f "$D/current"; st current ""; return; fi
+  ln -sfn "releases/$1" "$D/current.tmp" && mv -Tf "$D/current.tmp" "$D/current"
+  st current "$1"; systemctl restart "tando-$A"
+}
+hist() { # id kind result note  (phase seconds from P)
+  row "$(now)" "$1" "$2" "$3" \
+    "$(( $(now) - ${P[started]:-$(now)} + ${P[t_build]:-0} + ${P[t_upload]:-0} ))" "${P[t_build]:-0}" \
+    "${P[t_upload]:-0}" "${P[t_copy]:-}" "${P[t_preflight]:-}" "${P[t_switch]:-}" "${P[t_verify]:-}" \
+    "$4" >> "$D/history.tsv"
+}
+prune() {
+  local ids=() i n=0 keep
+  mapfile -t ids < <(ls -1 "$D/releases" | sort -r)
+  for i in "${ids[@]}"; do
+    valid_id "$i" || continue; n=$((n + 1)); keep=0
+    ((n <= KEEP)) && keep=1
+    [[ $i == "${S[current]:-}" || $i == "${S[last_good]:-}" || $i == "${S[target]:-}" ]] && keep=1
+    [[ -z ${S[status_$i]:-} ]] && keep=1   # reserved for a queued activation
+    ((keep)) || { rm -rf "${D:?}/releases/$i"; unset "S[status_$i]"; }
+  done
+  save "$D/state" S
+}
+
+# finish a deploy or rollback whose release is live: verify it, or go back to the fallback
+finish() { # kind
+  local id=${S[target]} fb=${S[fallback]:-} kind=$1 t=$(ds)
+  pg phase verify
+  if via_caddy; then
+    S[status_$id]=verified; [[ $kind == rollback && -n ${S[prev]:-} ]] && S[status_${S[prev]}]=bad
+    st last_good "$id" phase idle; pg t_verify $(el $t) phase done result ok
+    hist "$id" "$kind" ok "${2:-}"; return 0
+  fi
+  pg t_verify $(el $t) phase rollback
+  [[ $kind == deploy ]] && S[status_$id]=bad
+  st phase rollback; switch_to "$fb"; st phase idle
+  pg phase done result rolledback message "health check through Caddy failed; back on ${fb:-nothing}"
+  hist "$id" "$kind" rolledback "${2:-health check failed after switch}"; return 1
+}
+
+# ---- verbs ----------------------------------------------------------------------------------
+cmd_info() { load "$R/host.conf" H
+  printf 'version=1\narch=%s\napps_domain=%s\ntls=%s\n' "$(uname -m)" "${H[apps_domain]:-}" "${H[tls]:-}"; }
+
+cmd_setup() { need_root
+  local kv; mkdir -p "$R/apps" /etc/caddy/tando; load "$R/host.conf" H
+  : "${H[apps_domain]:=localhost}" "${H[tls]:=off}" "${H[port_min]:=4100}" "${H[port_max]:=4199}"
+  for kv in "$@"; do case $kv in
+    apps_domain=*) [[ ${kv#*=} =~ ^[a-z0-9.-]+$ ]] && H[apps_domain]=${kv#*=};;
+    tls=off|tls=internal|tls=auto) H[tls]=${kv#*=};;
+    public_port=*) [[ ${kv#*=} =~ ^[0-9]{0,5}$ ]] && H[public_port]=${kv#*=};;
+    unit_drop=*) [[ ${kv#*=} =~ ^[A-Za-z,]*$ ]] && H[unit_drop]=${kv#*=};;
+    *) die "bad setting: $kv";; esac; done
+  save "$R/host.conf" H; chmod 644 "$R/host.conf"
+  grep -q '^import /etc/caddy/tando/\*\.caddy' /etc/caddy/Caddyfile 2>/dev/null ||
+    printf '\nimport /etc/caddy/tando/*.caddy\n' >> /etc/caddy/Caddyfile
+  printf '[Unit]\nDescription=tando: finish or revert interrupted activations\nAfter=network.target caddy.service\n\n[Service]\nType=oneshot\nExecStart=%s recover-all\n\n[Install]\nWantedBy=multi-user.target\n' "$AGENT" > /etc/systemd/system/tando-recover.service
+  systemctl daemon-reload && systemctl enable -q tando-recover.service && systemctl reload-or-restart caddy
+  echo ok=1
+}
+
+cmd_configure() { # app ; settings on stdin as key=value
+  need_root; valid_app "${1:-}" || die "invalid app name"; A=$1 D=$R/apps/$1
+  load "$R/host.conf" H; [[ -n ${H[port_min]:-} ]] || die "host not set up (tando host setup)"
+  local k v new=0 jobs=() u="${SUDO_USER:-root}"
+  if [[ ! -f $D/app.conf ]]; then
+    id "tando-$A" &>/dev/null && die "user tando-$A exists but was not created by tando"
+    new=1
+  else load "$D/app.conf" C; fi
+  while IFS='=' read -r k v; do
+    clean "$v" || die "control characters in $k"
+    case $k in
+      recipe) [[ $v =~ ^(node|static|next)$ ]] || die "bad recipe"; C[recipe]=$v;;
+      start) [[ -n $v ]] || die "empty start"; C[start]=$v;;
+      health) [[ $v =~ ^/[A-Za-z0-9._~/?=\&%-]*$ ]] || die "bad health path"; C[health]=$v;;
+      memory) [[ $v =~ ^[0-9]+[KMG]$ ]] || die "bad memory"; C[memory]=$v;;
+      health_timeout) [[ $v =~ ^[0-9]{1,3}$ ]] || die "bad health_timeout"; C[health_timeout]=$v;;
+      job.*) [[ ${k#job.} =~ ^[a-z][a-z0-9-]{0,20}$ && $v == *'|'* ]] || die "bad job $k"
+             jobs+=("${k#job.}");;
+      "") ;; *) die "unknown setting: $k";;
+    esac
+    [[ $k == job.* ]] && C[$k]=$v
+  done
+  if ((new)); then
+    exec 8>"$R/.ports.lock"; flock 8
+    local p used=" "; for f in "$R"/apps/*/app.conf; do [[ -f $f ]] && used+="$(grep -m1 '^port=' "$f" | cut -d= -f2) "; done
+    for ((p = H[port_min]; p <= H[port_max]; p++)); do
+      [[ $used != *" $p "* ]] && ! ss -Hltn "sport = :$p or sport = :$((p + 100))" | grep -q . && break; done
+    ((p <= H[port_max])) || die "no free port in ${H[port_min]}-${H[port_max]}"
+    C[port]=$p C[created]=$(now)
+    useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "tando-$A" ||
+      die "useradd failed"
+    install -d -m 755 -o root -g root "$D" "$D/releases"
+    install -d -m 755 -o "$u" "$D/incoming"
+    install -d -m 750 -o "tando-$A" -g "tando-$A" "$D/shared"
+    install -m 640 -o root -g "tando-$A" /dev/null "$D/env"
+    : > "$D/history.tsv"; save "$D/app.conf" C; save "$D/state" S; flock -u 8
+  else lock; fi
+  # drop jobs no longer configured
+  for k in "${!C[@]}"; do [[ $k == job.* && " ${jobs[*]} " != *" ${k#job.} "* ]] && unset "C[$k]"; done
+  save "$D/app.conf" C
+  write_unit; write_caddy; sync_jobs
+  systemctl daemon-reload; systemctl enable -q "tando-$A"
+  echo "port=${C[port]}"; echo "link=$(link)"; echo "created=$new"
+}
+
+cmd_activate() { # app build-seconds upload-seconds -> id ; activation runs detached
+  need_root; app "$1"; recover
+  local b=${2:-0} u=${3:-0} id base n=1
+  [[ $b =~ ^[0-9]+$ && $u =~ ^[0-9]+$ ]] || die "bad timings"
+  [[ -n $(ls -A "$D/incoming") ]] || die "nothing uploaded"
+  base=$(date -u +%Y%m%d-%H%M%S); id=$base
+  until mkdir "$D/releases/$id" 2>/dev/null; do n=$((n + 1)); id="$base-$n"; ((n < 100)) || die "no id"; done
+  if ! systemd-run --quiet --collect --unit="tando-$A-act-$id" -p Description="tando activation $A $id" \
+      "$AGENT" run-activation "$A" "$id" "$b" "$u"; then rmdir "$D/releases/$id"; die "systemd-run failed"; fi
+  echo "id=$id"
+}
+
+cmd_run_activation() { # app id build upload  (inside its own transient unit)
+  need_root; app "$1"; local id=$2 rel=$D/releases/$2 t l bad; valid_id "$id" || die "bad id"
+  lock 3600; load "$D/state" S
+  local fb=${S[last_good]:-}
+  P=([id]=$id [phase]=copy [result]=running [started]=$(now) [t_build]=$3 [t_upload]=$4); pg
+  st phase copy target "$id" kind deploy prev "${S[current]:-}" fallback "$fb"
+  fail() { S[status_$id]=bad; st phase idle; pg phase done result failed message "$1"; hist "$id" deploy failed "$1"; exit 1; }
+  # copy (no symlink following), make root-owned and read-only to the app, then inspect the copy
+  t=$(ds); rm -rf "$rel"
+  cp -a --no-dereference "$D/incoming" "$rel" || fail "copy failed"
+  chown -RhP "root:tando-$A" "$rel" && chmod -R a-st,u=rwX,g=rX,o= "$rel" || fail "chown failed"
+  while IFS= read -r -d '' l; do
+    bad=$(readlink -f "$l") || bad=/; [[ $bad == "$rel"/* ]] || fail "symlink leaves the release: ${l#"$rel"/}"
+  done < <(find "$rel" -type l -print0)
+  bad=$(find "$rel" -name '.env*' -print -quit); [[ -z $bad ]] || fail "secret file in release: ${bad#"$rel"/}"
+  pg t_copy $(el $t) phase preflight
+  # pre-flight: run the new release on a spare port beside the live app
+  t=$(ds); st phase preflight
+  local sp=$((C[port] + 100)) unit="tando-$A-pre-$id" args=() x
+  while IFS= read -r x; do args+=(-p "$x"); done < <(props "$sp")
+  systemd-run --quiet --collect --unit="$unit" "${args[@]}" -p "WorkingDirectory=$rel" \
+    "$AGENT" exec-app "$A" "$rel" || fail "could not start pre-flight unit"
+  if ! probe "${C[health_timeout]:-60}" "$unit" "http://127.0.0.1:$sp${C[health]:-/}"; then
+    journalctl -u "$unit" -n 8 --no-pager -o cat > "$D/activation.log" 2>&1
+    systemctl stop "$unit" 2>/dev/null; pg t_preflight $(el $t); fail "pre-flight health check failed"
+  fi
+  systemctl stop "$unit"; : > "$D/activation.log"
+  pg t_preflight $(el $t) phase switch
+  # switch, then verify through Caddy (finish rolls back to last_good on failure)
+  t=$(ds); st phase switch; switch_to "$id"; st phase verify; pg t_switch $(el $t)
+  finish deploy; local rc=$?; prune; exit $rc
+}
+
+recover() { # finish or revert an interrupted activation; skip when one is running
+  exec 9>"$D/lock"; flock -n 9 || return 0
+  load "$D/state" S; load "$D/activation" P
+  local ph=${S[phase]:-idle} id=${S[target]:-}
+  case $ph in
+    idle) ;;
+    copy|preflight)
+      systemctl stop "tando-$A-pre-$id" 2>/dev/null; S[status_$id]=bad; st phase idle
+      pg phase done result failed message "interrupted during $ph"; hist "$id" deploy failed "interrupted during $ph"
+      systemctl -q is-active "tando-$A" || { [[ -n ${S[current]:-} ]] && systemctl restart "tando-$A"; } ;;
+    switch|verify|rollback)
+      if [[ $(cur_link) == "$id" ]]; then systemctl restart "tando-$A"; finish "${S[kind]:-deploy}" "recovered after interruption"
+      else [[ ${S[kind]:-deploy} == deploy ]] && S[status_$id]=bad
+        if [[ $(cur_link) != "${S[fallback]:-}" ]]; then switch_to "${S[fallback]:-}"
+        elif [[ -n ${S[fallback]:-} ]]; then systemctl restart "tando-$A"; fi; st phase idle
+        pg phase done result rolledback message "interrupted before switch"; hist "$id" "${S[kind]}" rolledback "interrupted"; fi ;;
+  esac
+  flock -u 9
+}
+cmd_recover() { need_root; app "$1"; recover; echo "phase=${S[phase]:-idle}"; }
+cmd_recover_all() { need_root; local f; for f in "$R"/apps/*/app.conf; do
+  [[ -f $f ]] || continue; f=${f%/app.conf}; ( app "${f##*/}"; recover ) || true; done; }
+
+cmd_rollback() { # app [id]
+  need_root; app "$1"; recover; lock 120; load "$D/state" S
+  local cur=${S[current]:-} to=${2:-} i
+  if [[ -n $to ]]; then valid_id "$to" && [[ -d $D/releases/$to ]] || die "no such release: $to"
+  else for i in $(ls -1 "$D/releases" | sort -r); do
+      [[ $i < $cur && ${S[status_$i]:-} == verified ]] && { to=$i; break; }; done
+    [[ -n $to ]] || die "no earlier verified release to roll back to"; fi
+  [[ $to != "$cur" ]] || die "$to is already current"
+  P=([id]=$to [phase]=switch [result]=running [started]=$(now)); pg
+  st phase rollback target "$to" kind rollback prev "$cur" fallback "$cur"
+  local t=$(ds); switch_to "$to"; pg t_switch $(el $t)
+  st phase verify; finish rollback "from $cur" && echo "current=$to" || die "rollback health check failed; back on $cur"
+}
+
+cmd_deploy_status() { # app id
+  app "$1"; valid_id "${2:-}" || die "bad id"; local k l
+  load "$D/activation" P
+  if [[ ${P[id]:-} == "$2" ]]; then
+    for k in "${!P[@]}"; do printf '%s=%s\n' "$k" "${P[$k]}"; done; echo "link=$(link)"
+    [[ ${P[result]} == failed && -s $D/activation.log ]] && while IFS= read -r l; do echo "log=$l"; done < "$D/activation.log"
+  elif [[ -d $D/releases/$2 && -z ${S[status_$2]:-} ]]; then echo "phase=queued"; echo "result=running"
+  else echo "phase=done"; echo "result=${S[status_$2]:-unknown}"; fi
+}
+
+appinfo() { # one app row; systemd fields come from the batch in cmd_status
+  local -n _u=$1; local mem=0 max=${_u[MemoryMax]:-} up=0 mono=${_u[ActiveEnterTimestampMonotonic]:-0} k v
+  # memory shown = anon + shmem from the unit's cgroup (MemoryCurrent also counts reclaimable page cache)
+  [[ -r $CG/tando-$A.service/memory.stat ]] && while read -r k v; do
+    [[ $k == anon || $k == shmem ]] && mem=$((mem + v)); done < "$CG/tando-$A.service/memory.stat"
+  [[ $max =~ ^[0-9]+$ ]] || max=0
+  [[ ${_u[ActiveState]:-} == active && $mono != 0 ]] && up=$(( UPT - mono / 1000000 ))
+  local cpu=${_u[CPUUsageNSec]:-0}; [[ $cpu =~ ^[0-9]+$ ]] || cpu=0
+  local state=${_u[ActiveState]:-inactive}; [[ ${S[phase]:-idle} != idle ]] && state=deploying
+  row app "$A" "$state" "${C[port]}" "${S[current]:-}" \
+    "${S[status_${S[current]:-x}]:-}" "$mem" "$max" "$cpu" "${_u[NRestarts]:-0}" "$up" "$(link)" "${C[recipe]:-}"
+}
+cmd_status() { # [app] ; host row, app rows; with one app also releases and recent history
+  local l k v names=() units=() a; load "$R/host.conf" H
+  if [[ -n ${1:-} ]]; then app "$1"; names=("$1"); else
+    for a in "$R"/apps/*/app.conf; do [[ -f $a ]] && { a=${a%/app.conf}; names+=("${a##*/}"); }; done; fi
+  read -r UPT _ < /proc/uptime; UPT=${UPT%.*}; CG=/sys/fs/cgroup/system.slice
+  local la mt=0 ma=0 cpus; read -r la _ < /proc/loadavg
+  while read -r k v _; do case $k in MemTotal:) mt=$v;; MemAvailable:) ma=$v;; esac; done < /proc/meminfo
+  cpus=$(nproc); read -r _ dt du _ < <(df -Pk / | tail -1)
+  row host "$(hostname)" "$cpus" "$la" $((mt * 1024)) $(((mt - ma) * 1024)) $((dt * 1024)) $((du * 1024)) "$UPT"
+  ((${#names[@]})) || return 0
+  for a in "${names[@]}"; do units+=("tando-$a.service"); done
+  declare -A U; local i=0
+  while IFS= read -r l; do
+    if [[ -z $l ]]; then ( A=${names[i]} D=$R/apps/${names[i]}; load "$D/app.conf" C; load "$D/state" S; appinfo U ); U=(); i=$((i + 1)); continue; fi
+    U[${l%%=*}]=${l#*=}
+  done < <(systemctl show -p ActiveState,MemoryCurrent,MemoryMax,CPUUsageNSec,NRestarts,ActiveEnterTimestampMonotonic "${units[@]}"; echo)
+  [[ -n ${1:-} ]] && { cmd_releases "$1"; cmd_history "$1" 5; }
+}
+
+cmd_releases() { app "$1"; local i; for i in $(ls -1 "$D/releases" | sort -r); do valid_id "$i" || continue
+  row rel "$i" "${S[status_$i]:-pending}" "$([[ $i == "${S[current]:-}" ]] && echo 1 || echo 0)" \
+    "$([[ $i == "${S[last_good]:-}" ]] && echo 1 || echo 0)"; done; }
+
+cmd_history() { # [app] [n]
+  local n=${2:-20} a; [[ $n =~ ^[0-9]+$ ]] || die "bad count"
+  if [[ -n ${1:-} ]]; then valid_app "$1" || die "invalid app name"; set -- "$R/apps/$1/history.tsv"
+  else set -- "$R"/apps/*/history.tsv; fi
+  for a; do [[ -f $a ]] || continue; a=${a%/history.tsv}; tail -n "$n" "$a/history.tsv" | sed "s/^/hist\t${a##*/}\t/"; done
+}
+
+# ---- env: stored double-quoted with \ " ` $ escaped, which systemd's EnvironmentFile reads back verbatim
+env_load() { local -n _e=$1; local l k v o i c; _e=()
+  while IFS= read -r l; do k=${l%%=*} v=${l#*=}; v=${v#\"}; v=${v%\"}; o=""
+    for ((i = 0; i < ${#v}; i++)); do c=${v:i:1}; [[ $c == '\' ]] && { i=$((i + 1)); c=${v:i:1}; }; o+=$c; done
+    _e[$k]=$o; done < "$D/env"; }
+env_save() { local -n _e=$1; local k v t="$D/env.tmp"
+  install -m 640 -o root -g "tando-$A" /dev/null "$t"
+  for k in "${!_e[@]}"; do v=${_e[$k]//\\/\\\\}; v=${v//\"/\\\"}; v=${v//\`/\\\`}; v=${v//\$/\\\$}
+    printf '%s="%s"\n' "$k" "$v"; done | sort > "$t" && mv -f "$t" "$D/env"; }
+cmd_env() { # set|unset|ls app ; set reads KEY=VALUE lines, unset reads KEY lines, from stdin
+  need_root; local op=$1; app "${2:-}"; declare -A E; local l k
+  [[ $op == ls ]] || { recover; lock 120; }
+  env_load E
+  case $op in
+    ls) for k in "${!E[@]}"; do row env "$k" "${E[$k]}"; done | sort; return;;
+    set) while IFS= read -r l; do k=${l%%=*}
+        [[ $k =~ ^[A-Za-z_][A-Za-z0-9_]*$ && $l == *=* ]] || die "bad key: $k"
+        [[ $k != PORT && $k != HOME ]] || die "$k is set by tando"
+        clean "${l#*=}" || die "control characters in value of $k"; E[$k]=${l#*=}; done;;
+    unset) while IFS= read -r k; do [[ $k =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "bad key"; unset "E[$k]"; done;;
+    *) die "env: set, unset or ls";;
+  esac
+  env_save E; [[ -n ${S[current]:-} ]] || { echo healthy=1; return; }
+  systemctl restart "tando-$A"; via_caddy && echo healthy=1 || echo healthy=0
+}
+
+cmd_svc() { need_root; app "$2"; recover; [[ -n ${S[current]:-} ]] || die "nothing deployed yet"; systemctl "$1" "tando-$A" || die "systemctl $1 failed"
+  [[ $1 == stop ]] && echo healthy=1 || { via_caddy && echo healthy=1 || echo healthy=0; }; }
+cmd_logs() { app "$1"; local n=${2:-100} f=${3:-}; [[ $n =~ ^[0-9]+$ ]] || die "bad count"
+  [[ $f == follow ]] && f=-f || f=""; exec journalctl -u "tando-$A.service" -n "$n" --no-pager -o short-iso $f; }
+
+# exec-app: runs as the app user inside the unit; builds the argv itself, no shell
+cmd_exec_app() { app "$1"; local dir=${2:-$D/current} argv
+  [[ $dir == "$D/current" || $dir == "$D"/releases/* ]] || die "bad dir"
+  cd "$dir" || die "no release"
+  case ${C[recipe]} in
+    static) exec caddy file-server --listen "127.0.0.1:$PORT" --root "$dir";;
+    *) read -ra argv <<< "${C[start]}"; exec "${argv[@]}";;
+  esac
+}
+
+# ---- scheduled jobs: ExecStart is always this runner; the command lives only in app.conf ----
+sync_jobs() { local k n f cal want=" "
+  for k in "${!C[@]}"; do [[ $k == job.* ]] || continue; n=${k#job.} cal=${C[$k]%%|*}; want+="$n "
+    cal=${cal%"${cal##*[![:space:]]}"}; cal=${cal#"${cal%%[![:space:]]*}"}
+    systemd-analyze calendar "$cal" &>/dev/null || die "bad schedule for job $n: $cal"
+    f=/etc/systemd/system/tando-$A-job-$n
+    { printf '[Unit]\nDescription=tando job %s %s\n\n[Service]\nType=oneshot\nExecStart=%s run-job %s %s\n' "$A" "$n" "$AGENT" "$A" "$n"
+      printf 'WorkingDirectory=%s/current\n' "$D"; props "${C[port]}" | grep -v '^SocketBind'; } > "$f.service"
+    printf '[Unit]\nDescription=tando job timer %s %s\n\n[Timer]\nOnCalendar=%s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' "$A" "$n" "$cal" > "$f.timer"
+    systemctl daemon-reload; systemctl enable -q --now "tando-$A-job-$n.timer"
+  done
+  for f in /etc/systemd/system/tando-"$A"-job-*.timer; do [[ -f $f ]] || continue
+    n=${f##*/tando-"$A"-job-}; n=${n%.timer}; [[ $want == *" $n "* ]] && continue
+    systemctl disable -q --now "tando-$A-job-$n.timer"; rm -f "$f" "${f%.timer}.service"; done
+}
+cmd_run_job() { app "$1"; local c=${C[job.$2]:-}; [[ -n $c ]] || die "no such job"; c=${c#*|}
+  cd "$D/current" || die "no release"; exec /bin/bash -c "$c"; }
+cmd_jobs() { app "$1"; local k n l; declare -A U
+  for k in $(printf '%s\n' "${!C[@]}" | grep '^job\.' | sort); do n=${k#job.}; U=()
+    while IFS= read -r l; do U[${l%%=*}]=${l#*=}; done < <(systemctl show --timestamp=unix \
+      -p NextElapseUSecRealtime,LastTriggerUSec "tando-$A-job-$n.timer"; systemctl show -p Result,ExecMainStatus "tando-$A-job-$n.service")
+    row job "$n" "${C[$k]%%|*}" "${U[NextElapseUSecRealtime]#@}" "${U[LastTriggerUSec]#@}" \
+      "${U[Result]:-}" "${U[ExecMainStatus]:-}" "${C[$k]#*|}"; done; }
+
+v=${1:-}; shift || true
+case $v in
+  info) cmd_info;; setup) cmd_setup "$@";; configure) cmd_configure "$@";;
+  activate) cmd_activate "$@";; run-activation) cmd_run_activation "$@";;
+  recover) cmd_recover "$@";; recover-all) cmd_recover_all;;
+  rollback) cmd_rollback "$@";; deploy-status) cmd_deploy_status "$@";;
+  status) cmd_status "$@";; releases) cmd_releases "$@";; history) cmd_history "$@";;
+  env-set) cmd_env set "$@";; env-unset) cmd_env unset "$@";; env-ls) cmd_env ls "$@";;
+  start|stop|restart) cmd_svc "$v" "$@";; logs) cmd_logs "$@";;
+  exec-app) cmd_exec_app "$@";; run-job) cmd_run_job "$@";; jobs) cmd_jobs "$@";;
+  *) die "unknown verb: $v";;
+esac
+exit 0

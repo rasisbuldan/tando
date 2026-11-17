@@ -1,0 +1,5 @@
+The npm package name "tando-cli" has not been checked for availability (nothing was published).
+Before the first publish: `npm view tando-cli` must return 404, else pick another name here.
+scripts/package.sh npm fills "version" (VERSION), "files" (the top-level entries of the release
+archive), "license" (the SPDX id when LICENSE names one) and "homepage"/"repository" (TANDO_REPO).
+"scripts" stays empty on purpose: no postinstall, nothing runs at install time.

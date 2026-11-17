@@ -1,0 +1,808 @@
+#!/bin/bash
+# tando-gate: restricted deploys for CI. Installed as /opt/tando/bin/tando-gate (root, 755).
+#
+# One login user per app, tando-d-<app>. Its login shell is this program, its home is root's, and
+# sshd takes its keys from a root:tando-keys 0640 file through AuthorizedKeysCommand (the deploy
+# user cannot read its own key ids). Every key line is
+#   restrict,command="/opt/tando/bin/tando-gate key <keyid>" ssh-ed25519 ...
+# The app is derived from the caller's uid, never from the request. Entry points:
+#
+#   -c "<gate> key <id>"  (deploy user; sshd runs the login shell with the forced command) one
+#                        request per ssh session: upload, begin/end the lease, activate,
+#                        deploy-status, status, releases, history. Nothing else.
+#   root <app> <verb>    (root via sudo; sudoers names the exact argv per app) begin, end,
+#                        activate, receive. Bound to the calling ssh session: the key id and the
+#                        request are read from that session's processes, not from the caller.
+#   rx <app> <opts...>   (deploy user, inside the sandboxed unit tando-rx-<app>) the rsync receiver
+#   admin <verb> <app>   (root via the admin's sudo) install, key-add, key-ls, key-revoke, receive,
+#                        remove.
+#
+# Nothing from SSH_ORIGINAL_COMMAND reaches a shell: it is split into words (no globbing),
+# every word is matched against a whitelist, and this program builds each argv itself.
+set -uo pipefail
+set -f
+umask 022
+# nothing from the client's environment survives (sshd also forces LC_ALL=C for these users, so
+# bash's own startup never parses a client-chosen locale)
+for _v in $(compgen -e); do
+  case $_v in PATH|SSH_ORIGINAL_COMMAND|SUDO_UID|SUDO_USER|INVOCATION_ID) ;; *) unset "$_v";; esac
+done
+unset _v BASH_ENV ENV CDPATH GLOBIGNORE 2> /dev/null
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
+IFS=$' \t\n'
+
+R=/opt/tando
+GATE=$R/bin/tando-gate
+AGENT=$R/bin/tando-agent
+CI=$R/ci                      # CI=<root>/<app>: home of tando-d-<app>, root-owned
+KEYS_USER=tando-keys          # sshd reads the key files as this user (AuthorizedKeysCommandUser)
+SSHD_DROP=/etc/ssh/sshd_config.d/50-tando-ci.conf
+UPLOAD_TIMEOUT=900            # same as tando-agent: an older lease is abandoned
+
+die() {
+  echo "tando-gate: $*" >&2
+  # refusals of a deploy key go to the journal too (auth facility), for an audit trail
+  [[ -n ${KEYID:-} ]] && logger -p auth.notice -t tando-gate -- "tando-d-${A:-?} key $KEYID refused: $*" 2> /dev/null
+  exit 1
+}
+valid_app() { [[ $1 =~ ^[a-z][a-z0-9-]{1,25}$ ]]; }
+valid_keyid() { [[ $1 =~ ^[0-9a-f]{12}$ ]]; }
+valid_token() { [[ $1 =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; }
+valid_id() { [[ $1 =~ ^[0-9]{8}-[0-9]{6}(-[0-9]{1,3})?$ ]]; }
+valid_secs() { [[ $1 =~ ^[0-9]{1,6}(\.[0-9])?$ ]]; }
+now() { printf '%(%s)T' -1; }
+# for names in messages: control characters, including UTF-8 C1 (0xc2 0x80-0x9f), become "?"
+clean() { local s=${1//[[:cntrl:]]/?}; s=${s//$'\xc2'[$'\x80'-$'\x9f']/?}; printf '%s' "${s:0:160}"; }
+
+# key=value file (written by tando-agent or by us); values only, never evaluated
+kv() { # file key
+  local l k v
+  [[ -r $1 ]] || return 0
+  while IFS= read -r l; do
+    k=${l%%=*} v=${l#*=}
+    [[ $l == *=* && $k == "$2" ]] && { printf '%s' "$v"; return 0; }
+  done < "$1"
+}
+atomic() { # file mode [owner]: stdin to file via temp + mv
+  local t="$1.tmp.$$"
+  cat > "$t" && chmod "$2" "$t" && { [[ -z ${3:-} ]] || chown "$3" "$t"; } && mv -f "$t" "$1"
+}
+
+# upload limits, per app (host.conf may lower or raise them): total bytes and entries in incoming/
+# and the size of one file. Enforced while the upload runs (see receive_confined).
+limits() {
+  local mb files fmb
+  mb=$(kv "$R/host.conf" ci_max_mb) files=$(kv "$R/host.conf" ci_max_files) fmb=$(kv "$R/host.conf" ci_max_file_mb)
+  [[ $mb =~ ^[0-9]{1,7}$ ]] || mb=3072
+  [[ $files =~ ^[0-9]{1,8}$ ]] || files=200000
+  [[ $fmb =~ ^[0-9]{1,7}$ ]] || fmb=1024
+  MAX_BYTES=$((10#$mb * 1048576)) MAX_FILES=$((10#$files)) MAX_FILE=$((10#$fmb * 1048576))
+}
+
+# ==== key mode: runs as tando-d-<app> ========================================================
+
+# the app of the calling uid: tando-d-<app> whose passwd entry is exactly what we created
+caller_app() { # uid -> A
+  local name pw x home shell
+  pw=$(getent passwd "$1") || return 1
+  IFS=: read -r name x x x x home shell <<< "$pw"
+  [[ $name =~ ^tando-d-([a-z][a-z0-9-]{1,25})$ ]] || return 1
+  A=${BASH_REMATCH[1]}
+  [[ $home == "$CI/$A" && $shell == "$GATE" ]] || return 1
+  valid_app "$A" && [[ -f $R/apps/$A/app.conf ]]
+}
+
+# deploy-status, status, ... run tando-agent's read-only verbs as this user; rows of other apps
+# and application log lines (they can carry customer data) are dropped
+agent_ro() { "$AGENT" "$@" 2> >(head -c 2000 >&2); }
+
+# split and check a request (SSH_ORIGINAL_COMMAND) -> W
+parse_request() {
+  local cmd=$1
+  [[ -n $cmd ]] || die "a deploy key runs tando deploy commands only (no shell)"
+  ((${#cmd} <= 300)) || die "request too long"
+  [[ $cmd =~ ^[A-Za-z0-9_.:=/@,+\ -]+$ ]] || die "unexpected characters in the request"
+  read -r -a W <<< "$cmd"
+  ((${#W[@]} >= 1 && ${#W[@]} <= 12)) || die "bad request"
+}
+
+key_mode() {
+  local keyid=$1 w=() verb uid tok
+  valid_keyid "$keyid" || die "bad key id"
+  uid=$(id -u)
+  ((uid != 0)) || die "key mode never runs as root"
+  caller_app "$uid" || die "this login is not a tando deploy user"
+  KEYID=$keyid D=$R/apps/$A
+  parse_request "${SSH_ORIGINAL_COMMAND-}"
+  w=("${W[@]}")
+  if [[ ${w[0]} == rsync ]]; then
+    # checked here for a quick, clear refusal; root checks the session's request again, then
+    # runs the receiver confined. stdin and stdout are the rsync stream.
+    rsync_parse "${w[@]:1}"
+    # not exec: root mode identifies the session by this process (see session_bind)
+    sudo -n "$GATE" root "$A" receive
+    exit
+  fi
+  # the client calls "[sudo -n] /opt/tando/bin/tando-agent <verb> <app> [args]"
+  [[ ${w[0]} == sudo && ${w[1]:-} == -n ]] && w=("${w[@]:2}")
+  [[ ${w[0]:-} == "$AGENT" ]] || die "not allowed with a deploy key"
+  verb=${w[1]:-}
+  if [[ $verb == info ]]; then
+    ((${#w[@]} == 2)) || die "bad request"
+    echo "arch=$(uname -m)"
+    if compgen -G '/lib/ld-musl-*' > /dev/null; then echo libc=musl; else echo libc=glibc; fi
+    return 0
+  fi
+  case $verb in
+    begin|end|activate|deploy-status|releases|history|status) ;;
+    *) die "not allowed with a deploy key: $(clean "$verb") (a deploy key uploads, activates and reads the status of its own app; everything else is the admin's)";;
+  esac
+  [[ ${w[2]:-} == "$A" ]] || die "this key deploys $A only"
+  set -- "${w[@]:3}"
+  case $verb in
+    begin)          # who is ignored: the lease is held by this key
+      (($# == 1)) || die "bad request"
+      sudo -n "$GATE" root "$A" begin < /dev/null;;
+    end)
+      # the token as argument, or (current clients) on stdin so it stays out of process lists
+      (($# == 0)) && { IFS= read -r -t 10 -n 64 tok || tok=""; set -- "$tok"; }
+      (($# == 1)) && valid_token "$1" || die "bad request"
+      printf 'token=%s\n' "$1" | sudo -n "$GATE" root "$A" end;;
+    activate)
+      (($# == 2)) && { IFS= read -r -t 10 -n 64 tok || tok=""; set -- "$tok" "$@"; }
+      (($# == 3)) && valid_token "$1" && valid_secs "$2" && valid_secs "$3" || die "bad request"
+      printf 'token=%s\nbuild=%s\nupload=%s\n' "$1" "$2" "$3" | sudo -n "$GATE" root "$A" activate;;
+    deploy-status)
+      (($# == 1)) && valid_id "$1" || die "bad request"
+      agent_ro deploy-status "$A" "$1" |
+        awk '/^(id|phase|result|message|link|venv|started|soak|t_build|t_upload|t_copy|t_preflight|t_switch|t_verify|waiting_for|waiting_phase|waiting_left)=/';;
+    releases)
+      (($# == 0)) || die "bad request"
+      agent_ro releases "$A" | awk -F'\t' '$1 == "rel"';;
+    history)
+      (($# <= 1)) || die "bad request"
+      [[ -z ${1:-} || $1 =~ ^[0-9]{1,3}$ ]] || die "bad request"
+      agent_ro history "$A" "${1:-20}" | awk -F'\t' -v a="$A" '$1 == "hist" && $2 == a';;
+    status)
+      (($# == 0)) || die "bad request"
+      agent_ro status "$A" | awk -F'\t' -v a="$A" '$1 == "host" || $1 == "rel" ||
+        ($1 == "app" && $2 == a) || ($1 == "hist" && $2 == a)';;
+  esac
+}
+
+# rsync server arguments of an upload into $D/incoming/ -> RS_OPTS. The options must be on a
+# whitelist (what Apple's openrsync and GNU rsync 3.x send for tando' upload); the destination
+# must be the app's own incoming/ and is replaced by our own path.
+rsync_parse() {
+  local x dot=0 dest="" letters compat
+  RS_OPTS=()
+  [[ ${1:-} == --server ]] || die "rsync: server mode only"
+  shift
+  for x; do
+    case $x in
+      --delete|--delete-before|--delete-during|--delete-delay|--dirs|--stats) RS_OPTS+=("$x");;
+      -e*) die "rsync: option not allowed: $x";;
+      --*) die "rsync: option not allowed: $(clean "$x")";;
+      -*)
+        # GNU rsync packs short options and ends them with e.<capabilities> (-ltprcze.iLsfxCIvu)
+        letters=${x#-} compat=""
+        if [[ $letters == *e* ]]; then compat=${letters#*e}; letters=${letters%%e*}; fi
+        [[ $letters =~ ^[lptrczv]*$ ]] || die "rsync: option not allowed: $x"
+        [[ -z $compat || $compat =~ ^\.[A-Za-z]{0,16}$ ]] || die "rsync: option not allowed: $x"
+        [[ -n $letters || -n $compat ]] || die "rsync: option not allowed: $x"
+        RS_OPTS+=("$x");;
+      .) ((dot == 0 && ${#dest} == 0)) || die "rsync: bad arguments"; dot=1;;
+      *)
+        ((dot == 1)) && [[ -z $dest ]] || die "rsync: bad arguments"
+        dest=$x;;
+    esac
+  done
+  [[ $dot == 1 && ( $dest == "$D/incoming/" || $dest == "$D/incoming" ) ]] ||
+    die "rsync: a deploy key uploads to $D/incoming/ only"
+}
+
+# ==== rx mode: the receiver, as tando-d-<app>, inside the unit tando-rx-<app> ================
+#
+# The unit (see receive_confined) mounts everything read-only except incoming/, with private
+# /tmp and /dev, no /run/user and no network, so a symlink in the upload cannot carry a write
+# anywhere else. Symlinks that leave incoming/ are also removed before and after each receive.
+
+# remove symlinks under incoming/ whose target, resolved, is not inside incoming/
+drop_escaping_links() { # dir
+  local l t
+  while IFS= read -r -d '' l; do
+    t=$(readlink -f -- "$l" 2> /dev/null) || t=""
+    case $t in "$1"/*) ;; *) rm -f -- "$l";; esac
+  done < <(find "$1" -xdev -mindepth 1 -type l -print0 2> /dev/null)
+}
+
+rx_mode() {
+  local app=${1:-} rc
+  [[ -n ${INVOCATION_ID:-} ]] || die "rx runs inside its unit only"
+  caller_app "$(id -u)" && [[ $A == "$app" ]] || die "rx: wrong user"
+  shift
+  D=$R/apps/$A
+  cd "$D/incoming" || die "rx: no upload directory"
+  drop_escaping_links "$D/incoming"
+  /usr/bin/rsync --server "$@" . "$D/incoming/"
+  rc=$?
+  chmod 700 "$D/incoming"   # rsync -p gave it the mode of the client's directory
+  find "$D/incoming" -xdev -perm /6000 -type f -exec chmod ug-s {} + 2> /dev/null
+  drop_escaping_links "$D/incoming"
+  exit $rc
+}
+
+# ==== root mode: sudo from key mode ==========================================================
+
+# stdin: key=value lines; only whitelisted keys, each checked; nothing else is read
+read_params() {
+  local l k v n=0
+  P_token="" P_build="" P_upload=""
+  while IFS= read -r -n 200 l; do
+    k=${l%%=*} v=${l#*=}; [[ $l == *=* ]] || v=""
+    n=$((n + 1)); ((n <= 8)) || die "too many parameters"
+    case $k in
+      token) valid_token "$v" || die "bad token"; P_token=$v;;
+      build) valid_secs "$v" || die "bad timing"; P_build=$v;;
+      upload) valid_secs "$v" || die "bad timing"; P_upload=$v;;
+      "") ;;
+      *) die "unknown parameter";;
+    esac
+  done
+}
+
+key_active() { [[ -f $CI/$A/keys ]] && grep -q "^$1"$'\t' "$CI/$A/keys"; }
+
+ppid_of() { awk '/^PPid:/ { print $2 }' "/proc/$1/status" 2> /dev/null; }
+uids_of() { awk '/^Uid:/ { print $2, $3, $4, $5 }' "/proc/$1/status" 2> /dev/null; }
+sshd_exe() { # pid: the process runs OpenSSH's server binary (root-owned)
+  local e
+  e=$(readlink "/proc/$1/exe" 2> /dev/null) || return 1
+  case $e in /usr/lib/openssh/sshd-session|/usr/lib/openssh/sshd-auth|/usr/sbin/sshd) ;; *) return 1;; esac
+  [[ $(stat -c %u "$e") == 0 ]]
+}
+
+# Root mode works only for a process that sshd started for this deploy user with a key's forced
+# command: walking up from here past root (this program, sudo), the first other process must be
+# the gate as login shell, "<bash> <gate> -c <gate> key <id>", running entirely as the caller's
+# uid, whose parent is the user's sshd session process and grandparent sshd's privileged root
+# process. The key id and the request come from that process (its command line, set by sshd from
+# the root-owned key file, and its initial environment), never from the caller. A process of the
+# deploy user that sshd did not start for a key (any foothold) is refused.
+session_bind() { # uid -> SK_KEYID SK_CMD
+  local uid=$1 p=$$ k p1 p2 a=() e
+  while :; do
+    p=$(ppid_of "$p")
+    [[ $p =~ ^[0-9]+$ ]] && ((p > 1)) || die "root mode: not called from a deploy key's ssh session"
+    [[ $(uids_of "$p") == "0 0 0 0" || $(uids_of "$p") == "$uid 0 0 0" ]] || break
+  done
+  k=$p
+  [[ $(uids_of "$k") == "$uid $uid $uid $uid" ]] || die "root mode: not called from a deploy key's ssh session"
+  case $(readlink "/proc/$k/exe") in /usr/bin/bash|/bin/bash) ;; *) die "root mode: not called from a deploy key's ssh session";; esac
+  mapfile -d '' a < "/proc/$k/cmdline"
+  ((${#a[@]} == 4)) && [[ ${a[0]} == /bin/bash || ${a[0]} == /usr/bin/bash ]] &&
+    [[ ${a[1]} == "$GATE" && ${a[2]} == -c && ${a[3]} =~ ^$GATE\ key\ ([0-9a-f]{12})$ ]] ||
+    die "root mode: not called from a deploy key's ssh session"
+  SK_KEYID=${BASH_REMATCH[1]}
+  p1=$(ppid_of "$k"); p2=$(ppid_of "$p1")
+  [[ $(uids_of "$p1") == "$uid $uid $uid $uid" ]] && sshd_exe "$p1" &&
+    [[ $(uids_of "$p2") == "0 0 0 0" ]] && sshd_exe "$p2" ||
+    die "root mode: not called from a deploy key's ssh session"
+  SK_CMD=""
+  while IFS= read -r -d '' e; do
+    [[ $e == SSH_ORIGINAL_COMMAND=* ]] && SK_CMD=${e#SSH_ORIGINAL_COMMAND=}
+  done < "/proc/$k/environ"
+}
+
+stop_rx() { # the confined receiver of this app, if any
+  systemctl kill --signal=KILL "tando-rx-$A.service" 2> /dev/null
+  systemctl stop "tando-rx-$A.service" 2> /dev/null
+  systemctl reset-failed "tando-rx-$A.service" 2> /dev/null
+  return 0
+}
+cg_kill() { [[ -w $1/cgroup.kill ]] && echo 1 > "$1/cgroup.kill" 2> /dev/null; return 0; }
+cg_of() { sed -n 's/^0:://p' "/proc/$1/cgroup" 2> /dev/null; }
+
+# End everything of the deploy user except this call's own ancestors (the session that asked,
+# which waits for us): the receiver unit, every other session's cgroup (cgroup.kill: atomic,
+# forks included), then any process of the uid left anywhere else, repeated until none is left.
+end_sessions() { # uid
+  local uid=$1 p anc=" " left _ own s n
+  p=$$
+  while ((p > 1)); do
+    anc+="$p "
+    p=$(ppid_of "$p"); [[ $p =~ ^[0-9]+$ ]] || break
+  done
+  stop_rx
+  own=$(cg_of $$)
+  # (set -f is on: compgen -G expands the pattern anyway)
+  n=0
+  while IFS= read -r s; do
+    [[ -d $s ]] || continue
+    s=${s%/}
+    [[ ${s#/sys/fs/cgroup} == "$own" ]] && continue
+    cg_kill "$s"; n=$((n + 1))
+  done < <(compgen -G "/sys/fs/cgroup/user.slice/user-$uid.slice/*/")
+  ((n == 0)) || logger -p auth.info -t tando-gate -- "tando-d-$A: ended $n other session(s)" 2> /dev/null
+  for _ in $(seq 1 50); do
+    left=()
+    for p in $(pgrep -u "$uid"); do
+      [[ $anc == *" $p "* ]] && continue
+      [[ $(sed 's/.*) //' "/proc/$p/stat" 2> /dev/null) == Z* ]] && continue   # exited already
+      left+=("$p")
+    done
+    ((${#left[@]})) || return 0
+    kill -KILL "${left[@]}" 2> /dev/null
+    sleep 0.1
+  done
+  return 1
+}
+
+# check the frozen upload before root copies it: only plain files, directories and symlinks
+# owned by the deploy user; no hardlinks (the copy would read their other name as root), no
+# setuid/setgid/sticky, no symlink that resolves outside incoming/ (a container upload: no
+# symlink at all); bounded size. Root only reads names and metadata here, never contents.
+scan_upload() { # dir uid
+  local dir=$1 uid=$2 bad n bytes l t
+  bad=$(find "$dir" -xdev -mindepth 1 \( ! -type f ! -type d ! -type l \) -print -quit)
+  [[ -z $bad ]] || { echo "special file in the upload: $(clean "${bad#"$dir"/}")"; return 1; }
+  bad=$(find "$dir" -xdev -mindepth 1 ! -type d -links +1 -print -quit)
+  [[ -z $bad ]] || { echo "hardlink in the upload: $(clean "${bad#"$dir"/}")"; return 1; }
+  bad=$(find "$dir" -xdev -mindepth 1 \( ! -uid "$uid" -o -perm /7000 \) -print -quit)
+  [[ -z $bad ]] || { echo "foreign owner or setuid/setgid bit in the upload: $(clean "${bad#"$dir"/}")"; return 1; }
+  bad=$(find "$dir" -xdev -mindepth 1 -type l -lname '/*' -print -quit)
+  [[ -z $bad ]] || { echo "absolute symlink in the upload: $(clean "${bad#"$dir"/}")"; return 1; }
+  if [[ $(kv "$R/apps/$A/app.conf" recipe) == container ]]; then
+    bad=$(find "$dir" -xdev -mindepth 1 -type l -print -quit)
+    [[ -z $bad ]] || { echo "symlink in a container upload: $(clean "${bad#"$dir"/}")"; return 1; }
+  fi
+  while IFS= read -r -d '' l; do
+    t=$(readlink -f -- "$l" 2> /dev/null) || t=""
+    case $t in "$dir"/*) ;; *) echo "symlink leaves the upload: $(clean "${l#"$dir"/}")"; return 1;; esac
+  done < <(find "$dir" -xdev -mindepth 1 -type l -print0)
+  n=$(find "$dir" -xdev -mindepth 1 | wc -l)
+  ((n <= MAX_FILES)) || { echo "too many files in the upload ($n)"; return 1; }
+  bytes=$(du -sxb "$dir" | cut -f1)
+  ((bytes <= MAX_BYTES)) || { echo "the upload is larger than $((MAX_BYTES >> 20)) MB"; return 1; }
+  return 0
+}
+
+# The lease of this upload: L_token L_who L_id L_remain (seconds left), read as root
+lease_read() {
+  L_token=$(kv "$D/upload" token) L_who=$(kv "$D/upload" who) L_id=$(kv "$D/upload" id)
+  local started; started=$(kv "$D/upload" started)
+  [[ $started =~ ^[0-9]+$ ]] || started=0
+  L_remain=$((UPLOAD_TIMEOUT - ($(now) - started) - 5))
+}
+
+# Run the rsync receiver as the deploy user in the transient unit tando-rx-<app> (one per app,
+# so one receiver per lease), with stdin/stdout passed through. Root watches incoming/ meanwhile
+# and kills the unit when it holds more than the app's limit of bytes or entries (checked every
+# second or more, depending on how long a walk takes: the overshoot is what the receiver writes in
+# one interval); one file is capped by the kernel
+# (LimitFSIZE). The unit also ends with the lease (RuntimeMaxSec).
+receive_confined() { # remaining-seconds rsync-options...
+  local remain=$1 u=tando-d-$A unit=tando-rx-$A pid bytes n why=""
+  shift
+  limits
+  systemctl reset-failed "$unit.service" 2> /dev/null
+  exec 3<&0
+  systemd-run --quiet --pipe --wait --collect --unit="$unit" \
+    -p User="$u" -p Group="$u" -p UMask=0022 -p Environment=LC_ALL=C \
+    -p ProtectSystem=strict -p ReadWritePaths="$D/incoming" -p ProtectHome=yes \
+    -p PrivateTmp=yes -p PrivateDevices=yes -p PrivateNetwork=yes -p IPAddressDeny=any \
+    -p InaccessiblePaths=-/run/user -p NoNewPrivileges=yes -p RestrictSUIDSGID=yes \
+    -p CapabilityBoundingSet= -p ProtectKernelTunables=yes -p ProtectKernelModules=yes \
+    -p ProtectControlGroups=yes -p ProtectProc=invisible -p RestrictNamespaces=yes \
+    -p LockPersonality=yes -p MemoryMax=512M -p TasksMax=16 -p LimitFSIZE="$MAX_FILE" \
+    -p RuntimeMaxSec="$remain" \
+    "$GATE" rx "$A" "$@" <&3 7>&- &
+  pid=$!
+  exec 3<&-
+  # the unit is running (or has finished) before the lease lock is given back: an activation
+  # that freezes the lease afterwards stops it
+  for _ in $(seq 1 50); do
+    systemctl is-active --quiet "$unit.service" && break
+    kill -0 "$pid" 2> /dev/null || break
+    sleep 0.1
+  done
+  exec 7>&-
+  local t0 t1 iv=1
+  while kill -0 "$pid" 2> /dev/null; do
+    sleep "$iv"
+    # one walk for bytes and entries; the next check waits at least 4x as long as this one took,
+    # so the watchdog uses at most a fifth of a core even near the file limit
+    t0=${EPOCHREALTIME/./}
+    read -r bytes n < <(find "$D/incoming" -xdev -printf '%s\n' 2> /dev/null |
+      awk '{ b += $1; n++ } END { printf "%d %d\n", b, n }')
+    t1=${EPOCHREALTIME/./}
+    iv=$(( (t1 - t0) * 4 / 1000000 + 1 ))
+    if ((${bytes:-0} > MAX_BYTES)); then why="more than $((MAX_BYTES >> 20)) MB"
+    elif ((${n:-0} > MAX_FILES + 1)); then why="more than $MAX_FILES files"; fi
+    if [[ -n $why ]]; then
+      stop_rx
+      echo "tando-gate: upload stopped: incoming/ holds $why (the app's limit)" >&2
+      logger -p auth.notice -t tando-gate -- "tando-d-$A upload stopped: $why" 2> /dev/null
+      break
+    fi
+  done
+  wait "$pid"; local rc=$?
+  [[ -z $why ]] || rc=1
+  return $rc
+}
+
+root_mode() {
+  local app=${1:-} verb=${2:-} uid out msg w=()
+  ((EUID == 0)) || die "root mode runs through sudo"
+  (($# == 2)) || die "bad call"
+  valid_app "$app" || die "bad app"
+  [[ ${SUDO_UID:-} =~ ^[0-9]+$ ]] && ((SUDO_UID != 0)) || die "root mode is for deploy users"
+  uid=$SUDO_UID
+  caller_app "$uid" && [[ $A == "$app" ]] || die "the caller is not the deploy user of $app"
+  D=$R/apps/$A
+  session_bind "$uid"
+  KEYID=$SK_KEYID
+  key_active "$KEYID" || die "this key is not registered (revoked?)"
+  limits
+  case $verb in
+    receive)
+      parse_request "$SK_CMD"; w=("${W[@]}")
+      [[ ${w[0]} == rsync ]] || die "receive: the session did not ask for rsync"
+      rsync_parse "${w[@]:1}"
+      exec 7> "$D/lease.lock"; flock -w 30 7 || die "lease lock busy"
+      lease_read
+      [[ -n $L_token && $L_who == "ci-$KEYID" && -z $L_id ]] ||
+        die "rsync: no upload lease held by this key (tando deploy takes one)"
+      [[ $(kv "$CI/$A/frozen" token) != "$L_token" ]] || die "rsync: this upload is being activated; it can no longer change"
+      ((L_remain > 0)) || die "rsync: the upload lease expired"
+      systemctl is-active --quiet "tando-rx-$A.service" && die "rsync: another upload of $A is running"
+      receive_confined "$L_remain" "${RS_OPTS[@]}"
+      exit;;
+    begin)
+      out=$("$AGENT" begin "$A" "ci-$KEYID") || exit 1
+      # the lease is new: sessions left from an earlier upload must not write into this one
+      end_sessions "$uid" || { "$AGENT" end "$A" "$(sed -n 's/^token=//p' <<< "$out")" > /dev/null; die "could not stop the other sessions of this key"; }
+      sed -n 's/^token=\([0-9a-f-]*\)$/token=\1/p' <<< "$out"
+      install -d -m 700 "$CI/$A/state"
+      printf 'used=%s\n' "$(now)" | atomic "$CI/$A/state/used-$KEYID" 600;;
+    end)
+      read_params
+      valid_token "$P_token" || die "bad token"
+      # the lease must be this key's, with this token, before anything is stopped
+      exec 7> "$D/lease.lock"; flock -w 30 7 || die "lease lock busy"
+      lease_read
+      [[ $L_token == "$P_token" && $L_who == "ci-$KEYID" && -z $L_id ]] ||
+        die "end: no upload lease of this key with that token"
+      exec 7>&-
+      end_sessions "$uid" || die "could not stop the other sessions of this key"
+      "$AGENT" end "$A" "$P_token" > /dev/null || exit 1
+      echo ok=1;;
+    activate)
+      read_params
+      valid_token "$P_token" && valid_secs "$P_build" && valid_secs "$P_upload" || die "bad parameters"
+      # 1. freeze: this key's lease, not yet activated; a receiver started from now is refused
+      exec 7> "$D/lease.lock"; flock -w 30 7 || die "lease lock busy"
+      lease_read
+      [[ $L_token == "$P_token" && $L_who == "ci-$KEYID" && -z $L_id ]] ||
+        die "this upload no longer holds $A's upload lease (another deploy took it over after this one stopped writing, or it is older than $((UPLOAD_TIMEOUT / 60)) min); nothing was activated: run the deploy again"
+      [[ $(kv "$CI/$A/frozen" token) != "$P_token" ]] || die "this upload is already being activated"
+      printf 'token=%s\n' "$P_token" | atomic "$CI/$A/frozen" 600
+      exec 7>&-
+      # 2. stop the receiver and every other session of this user: nothing writes incoming/ now
+      end_sessions "$uid" || { "$AGENT" end "$A" "$P_token" > /dev/null; die "could not stop the other sessions of this key"; }
+      # 3. check the frozen upload; tando-agent then copies it and checks the root-owned copy
+      chmod 700 "$D/incoming"
+      if ! msg=$(scan_upload "$D/incoming" "$uid"); then
+        "$AGENT" end "$A" "$P_token" > /dev/null
+        die "$msg"
+      fi
+      out=$("$AGENT" activate "$A" "$P_token" "$P_build" "$P_upload") || exit 1
+      sed -n 's/^id=\([0-9-]*\)$/id=\1/p; s/^same=1$/same=1/p' <<< "$out";;
+    *) die "bad verb";;
+  esac
+}
+
+# ==== admin mode: root, through the admin's sudo ============================================
+
+host_keys() { # known_hosts material: the server's host public keys
+  local f
+  for f in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub; do
+    [[ -r $f ]] && echo "hostkey=$(cut -d' ' -f1,2 "$f")"
+  done
+}
+
+deny_list() { # file user add|del: /etc/cron.deny, /etc/at.deny
+  local f=$1 u=$2
+  if [[ $3 == add ]]; then
+    [[ -f $f ]] || install -m 644 -o root -g root /dev/null "$f"
+    grep -qx -- "$u" "$f" || printf '%s\n' "$u" >> "$f"
+  elif [[ -f $f ]]; then
+    grep -vx -- "$u" "$f" | atomic "$f" 644
+  fi
+}
+
+# host-wide pieces: the user sshd reads key files as, and the sshd drop-in
+admin_install() {
+  [[ $(stat -c '%U %a' "$GATE") == "root 755" ]] || die "$GATE must be root-owned, mode 755"
+  install -d -m 755 -o root -g root "$CI"
+  getent passwd "$KEYS_USER" > /dev/null || useradd --system --user-group --no-create-home \
+    --home-dir /nonexistent --shell /usr/sbin/nologin --comment "tando sshd reads CI keys as this user" \
+    "$KEYS_USER" || die "useradd $KEYS_USER failed"
+  local want a A=${A:-}   # A is the caller's app (key-add): the refresh below must not change it
+  want=$(cat <<EOF
+# tando CI deploy users: keys from a file they cannot read, no forwarding, no tty, no client
+# locale (managed by tando-gate)
+Match User tando-d-*
+	AuthenticationMethods publickey
+	PubkeyAuthentication yes
+	PasswordAuthentication no
+	KbdInteractiveAuthentication no
+	AuthorizedKeysFile none
+	AuthorizedKeysCommand /usr/bin/cat %h/.ssh/authorized_keys
+	AuthorizedKeysCommandUser $KEYS_USER
+	DisableForwarding yes
+	PermitTTY no
+	PermitUserRC no
+	PermitTunnel no
+	X11Forwarding no
+	AllowAgentForwarding no
+	AllowTcpForwarding no
+	AllowStreamLocalForwarding no
+	SetEnv LC_ALL=C LANG=C
+	MaxSessions 4
+EOF
+)
+  if [[ -d ${SSHD_DROP%/*} ]] && [[ $(cat "$SSHD_DROP" 2> /dev/null) != "$want" ]]; then
+    [[ -f $SSHD_DROP ]] && cp -p "$SSHD_DROP" "$SSHD_DROP.old"
+    printf '%s\n' "$want" > "$SSHD_DROP.tmp"
+    mv -f "$SSHD_DROP.tmp" "$SSHD_DROP"
+    if ! sshd -t 2> /dev/null; then
+      if [[ -f $SSHD_DROP.old ]]; then mv -f "$SSHD_DROP.old" "$SSHD_DROP"; else rm -f "$SSHD_DROP"; fi
+      die "sshd rejected the tando drop-in"
+    fi
+    rm -f "$SSHD_DROP.old"
+    systemctl reload ssh 2> /dev/null || systemctl reload sshd 2> /dev/null || echo "warning=could not reload sshd" >&2
+  fi
+  # existing deploy users get the current layout too
+  while IFS= read -r a; do
+    [[ -f $a ]] || continue
+    a=${a%/keys}; A=${a##*/}
+    valid_app "$A" && [[ -f $R/apps/$A/app.conf ]] && ( ensure_user && write_keys )
+  done < <(compgen -G "$CI/*/keys")
+  echo ok=1
+}
+
+# a system uid no user or group has, and that no removed user had (tando-agent's new_uid: files a
+# removed user left where tando does not clean must never belong to a later one)
+new_uid() {
+  local u
+  for ((u = 999; u >= 200; u--)); do
+    getent passwd "$u" > /dev/null || getent group "$u" > /dev/null && continue
+    grep -qx "$u" "$R/retired-uids" 2> /dev/null && continue
+    echo "$u"; return 0
+  done
+  die "no free system uid left (200-999)"
+}
+
+# the deploy user, its root-owned home and key file, its exact sudo rule, no user manager, no
+# cron or at, and ownership of the app's persistent incoming/
+ensure_user() {
+  local u=tando-d-$A h=$CI/$A sf=/etc/sudoers.d/tando-d-$A uid
+  if ! getent passwd "$u" > /dev/null; then
+    useradd --system --user-group --no-create-home --home-dir "$h" --shell "$GATE" -u "$(new_uid)" \
+      --comment "tando CI deploys for $A" "$u" || die "useradd failed"
+    usermod -p '*' "$u"   # no password, but not "locked": sshd may still accept its keys
+  fi
+  uid=$(id -u "$u")
+  caller_app "$uid" || die "user $u exists but was not created by tando-gate"
+  # the app's metadata group (tando-agent): status, releases and history of its own app only
+  getent group "tando-m-$A" > /dev/null && usermod -aG "tando-m-$A" "$u"
+  # home: traversable, not listable; .ssh: the key file, readable by root and sshd's key reader
+  install -d -m 711 -o root -g root "$h"
+  install -d -m 711 -o root -g root "$h/.ssh"
+  install -d -m 700 -o root -g root "$h/state"
+  [[ -f $h/keys ]] || install -m 600 -o root -g root /dev/null "$h/keys"
+  [[ -f $h/.ssh/authorized_keys ]] || install -m 640 -o root -g "$KEYS_USER" /dev/null "$h/.ssh/authorized_keys"
+  chown root:"$KEYS_USER" "$h/.ssh/authorized_keys" && chmod 640 "$h/.ssh/authorized_keys"
+  [[ ! -f $h/frozen ]] || chmod 600 "$h/frozen"
+  # sudo-rs (Ubuntu 26.04) does not know requiretty and rejects the whole file; classic sudo
+  # needs it switched off where a distribution turns it on. Try with it, then without.
+  local tty ok=0
+  for tty in '!requiretty, ' ''; do
+    cat > "$sf.tmp" <<EOF
+# tando CI deploy user for $A: exact commands, nothing else (managed by tando-gate)
+Defaults:$u ${tty}env_reset, !lecture
+$u ALL=(root) NOPASSWD: $GATE root $A begin, $GATE root $A end, $GATE root $A activate, $GATE root $A receive
+EOF
+    chmod 440 "$sf.tmp"
+    if visudo -cqf "$sf.tmp" 2> /dev/null; then ok=1; break; fi
+  done
+  [[ $ok = 1 ]] || { rm -f "$sf.tmp"; die "visudo rejected the rule"; }
+  mv -f "$sf.tmp" "$sf"
+  # nothing runs as the deploy user outside its ssh requests: no systemd user manager (it would
+  # load units from /run/user/<uid>), no lingering, no cron, no at
+  systemctl mask --quiet "user@$uid.service" 2> /dev/null
+  loginctl disable-linger "$u" 2> /dev/null
+  deny_list /etc/cron.deny "$u" add
+  deny_list /etc/at.deny "$u" add
+  # incoming/ is handed over once, while it is still the admin's: root never walks a tree the
+  # deploy user can already change (-h -P: symlinks themselves, never followed)
+  if [[ $(stat -c %U "$R/apps/$A/incoming") != "$u" ]]; then
+    chown -RhP "$u:$u" "$R/apps/$A/incoming" || die "could not hand incoming/ to $u"
+  fi
+  chmod 700 "$R/apps/$A/incoming"
+}
+
+# authorized_keys is rebuilt from the keys list: one line per active key
+write_keys() {
+  local id pub
+  while IFS=$'\t' read -r id _ _ pub _; do
+    valid_keyid "$id" || continue
+    printf 'restrict,command="%s key %s" %s tando-ci-%s-%s\n' "$GATE" "$id" "$pub" "$A" "$id"
+  done < "$CI/$A/keys" | atomic "$CI/$A/.ssh/authorized_keys" 640 "root:$KEYS_USER"
+}
+
+# Evict everything of a deploy user: sessions (logind and cgroup.kill, which also takes forks),
+# the receiver, any process left anywhere, its crontab and at jobs, IPC objects and its files in
+# the world-writable temporary directories. Nothing of the user runs while this cleans.
+evict_user() {
+  local u=tando-d-$A uid p j _
+  uid=$(id -u "$u" 2> /dev/null) || return 0
+  loginctl terminate-user "$u" 2> /dev/null
+  cg_kill "/sys/fs/cgroup/user.slice/user-$uid.slice"
+  systemctl stop "user@$uid.service" 2> /dev/null
+  stop_rx
+  for _ in $(seq 1 50); do
+    p=$(pgrep -u "$uid" | tr '\n' ' ')
+    [[ -n ${p// /} ]] || break
+    # shellcheck disable=SC2086  # a list of pids
+    kill -KILL $p 2> /dev/null; sleep 0.1
+  done
+  [[ -z $(pgrep -u "$uid") ]] || echo "warning=processes of $u survived the eviction" >&2
+  command -v crontab > /dev/null && crontab -r -u "$u" 2> /dev/null
+  if command -v atq > /dev/null; then
+    for j in $(atq 2> /dev/null | awk -v u="$u" '$NF == u { print $1 }'); do atrm "$j" 2> /dev/null; done
+  fi
+  for j in $(ipcs -m 2> /dev/null | awk -v u="$u" '$3 == u { print $2 }'); do ipcrm -m "$j" 2> /dev/null; done
+  for j in $(ipcs -q 2> /dev/null | awk -v u="$u" '$3 == u { print $2 }'); do ipcrm -q "$j" 2> /dev/null; done
+  for j in $(ipcs -s 2> /dev/null | awk -v u="$u" '$3 == u { print $2 }'); do ipcrm -s "$j" 2> /dev/null; done
+  # no process of the user exists any more, so nothing can race this; find never follows links
+  find /tmp /var/tmp /dev/shm -xdev -mindepth 1 -uid "$uid" -delete 2> /dev/null
+  [[ -d /run/user/$uid ]] && find "/run/user/$uid" -xdev -mindepth 1 -uid "$uid" -delete 2> /dev/null
+  return 0
+}
+
+# the lease of a revoked key ends with it (tando-agent end, with the token root reads)
+end_lease_of() { # keyid... ("" = any ci- lease)
+  local id t w
+  t=$(kv "$R/apps/$A/upload" token) w=$(kv "$R/apps/$A/upload" who)
+  [[ -n $t && $w == ci-* ]] || return 0
+  if (($#)); then
+    for id; do [[ $w == "ci-$id" ]] && "$AGENT" end "$A" "$t" > /dev/null 2>&1; done
+  else
+    "$AGENT" end "$A" "$t" > /dev/null 2>&1
+  fi
+  return 0
+}
+
+admin_key_add() { # [rotate]; stdin: one ssh-ed25519 public key line
+  local line pub fp id old=() u=tando-d-$A
+  IFS= read -r -n 600 line || [[ -n $line ]] || die "no public key on stdin"
+  [[ $line =~ ^(ssh-ed25519\ AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43})(\ [A-Za-z0-9_.@:-]{0,80})?$ ]] ||
+    die "expected one ssh-ed25519 public key"
+  pub=${BASH_REMATCH[1]}
+  fp=$(ssh-keygen -lf - <<< "$pub" 2> /dev/null | awk '$NF == "(ED25519)" { print $2 }')
+  [[ $fp =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || die "not a valid ed25519 key"
+  admin_install > /dev/null
+  ensure_user
+  grep -q $'\t'"$fp"$'\t' "$CI/$A/keys" && die "this key is already registered"
+  [[ ${1:-} == rotate ]] && read -r -a old <<< "$(cut -f1 "$CI/$A/keys" | tr '\n' ' ')"
+  id=$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
+  {
+    [[ ${1:-} == rotate ]] || cat "$CI/$A/keys"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$fp" "$(now)" "$pub" "${SUDO_USER:-root}"
+  } | atomic "$CI/$A/keys.new" 600
+  mv -f "$CI/$A/keys.new" "$CI/$A/keys"
+  write_keys
+  if ((${#old[@]})); then end_lease_of "${old[@]}"; evict_user; fi   # rotated keys stop now
+  echo "keyid=$id"; echo "fingerprint=$fp"; echo "user=$u"; echo "revoked=${#old[@]}"
+  host_keys
+}
+
+admin_key_ls() {
+  local id fp created pub who used
+  [[ -f $CI/$A/keys ]] || return 0
+  while IFS=$'\t' read -r id fp created pub who; do
+    valid_keyid "$id" || continue
+    used=$(kv "$CI/$A/state/used-$id" used)
+    printf 'key\t%s\t%s\t%s\t%s\t%s\n' "$id" "$fp" "$created" "${used:--}" "$who"
+  done < "$CI/$A/keys"
+}
+
+admin_key_revoke() { # stdin: keyid, fingerprint or "all"
+  local sel n ids=()
+  IFS= read -r -n 100 sel || [[ -n $sel ]] || die "nothing to revoke"
+  [[ -f $CI/$A/keys ]] || die "$A has no deploy keys"
+  if [[ $sel == all ]]; then
+    n=$(grep -c . "$CI/$A/keys")
+    read -r -a ids <<< "$(cut -f1 "$CI/$A/keys" | tr '\n' ' ')"
+    : | atomic "$CI/$A/keys" 600
+  else
+    [[ $sel =~ ^([0-9a-f]{12}|SHA256:[A-Za-z0-9+/]{43})$ ]] || die "give a key id, a SHA256: fingerprint or all"
+    n=$(awk -F'\t' -v s="$sel" '$1 == s || $2 == s' "$CI/$A/keys" | grep -c .)
+    ((n > 0)) || die "no such key: $sel (tando ci ls)"
+    read -r -a ids <<< "$(awk -F'\t' -v s="$sel" '$1 == s || $2 == s { print $1 }' "$CI/$A/keys" | tr '\n' ' ')"
+    awk -F'\t' -v s="$sel" '$1 != s && $2 != s' "$CI/$A/keys" | atomic "$CI/$A/keys" 600
+  fi
+  write_keys
+  ((${#ids[@]})) && end_lease_of "${ids[@]}"
+  # everything of the deploy user ends now (other keys' uploads restart)
+  evict_user
+  echo "revoked=$n"
+}
+
+admin_remove() { # the app is being destroyed: deploy user, sudo rule, home
+  local u=tando-d-$A uid
+  rm -f "/etc/sudoers.d/tando-d-$A"
+  if getent passwd "$u" > /dev/null; then
+    caller_app "$(id -u "$u")" 2> /dev/null || [[ ! -f $R/apps/$A/app.conf ]] ||
+      die "user $u was not created by tando-gate"
+    uid=$(id -u "$u")
+    evict_user
+    systemctl unmask --quiet "user@$uid.service" 2> /dev/null
+    deny_list /etc/cron.deny "$u" del; deny_list /etc/at.deny "$u" del
+    userdel "$u" 2> /dev/null; getent group "$u" > /dev/null && groupdel "$u" 2> /dev/null
+    grep -qx "$uid" "$R/retired-uids" 2> /dev/null || echo "$uid" >> "$R/retired-uids"
+  fi
+  rm -rf "${CI:?}/$A"
+  echo "removed=$u"
+}
+
+# the admin's upload (lib/deploy.sh: --rsync-path="sudo -n <gate> admin receive <app> rsync"):
+# the same confined receiver, during the admin's own lease
+admin_receive() { # rsync --server ...
+  [[ ${1:-} == rsync ]] || die "receive: rsync only"
+  shift
+  D=$R/apps/$A
+  rsync_parse "$@"
+  exec 7> "$D/lease.lock"; flock -w 30 7 || die "lease lock busy"
+  lease_read
+  [[ -n $L_token && $L_who != ci-* && -z $L_id ]] || die "rsync: no upload lease of the admin (tando deploy takes one)"
+  ((L_remain > 0)) || die "rsync: the upload lease expired"
+  systemctl is-active --quiet "tando-rx-$A.service" && die "rsync: another upload of $A is running"
+  [[ $(stat -c %U "$D/incoming") == "tando-d-$A" ]] || die "incoming/ of $A does not belong to tando-d-$A"
+  receive_confined "$L_remain" "${RS_OPTS[@]}"
+}
+
+admin_mode() {
+  local verb=${1:-} app=${2:-}
+  ((EUID == 0)) || die "admin mode needs root (sudo)"
+  # a deploy user can never get here (its sudo rule names root mode only); refuse it anyway
+  [[ ${SUDO_USER:-} != tando-d-* ]] || die "not for deploy users"
+  if [[ $verb == install ]]; then admin_install; return; fi
+  valid_app "$app" || die "bad app name"
+  A=$app
+  [[ -f $R/apps/$A/app.conf || $verb == remove ]] || die "no such app: $A"
+  case $verb in
+    key-add) admin_key_add "${3:-}";;
+    key-ls) admin_key_ls;;
+    key-revoke) admin_key_revoke;;
+    receive) shift 2; admin_receive "$@"; exit;;
+    remove) admin_remove;;
+    *) die "unknown admin verb";;
+  esac
+}
+
+# ==== dispatch ===============================================================================
+
+case ${1:-} in
+  -c)
+    # as the login shell: sshd runs "<shell> -c <forced command>"; anything else is refused
+    (($# == 2)) && [[ $2 =~ ^$GATE\ key\ ([0-9a-f]{12})$ ]] || die "a deploy key runs tando deploy commands only (no shell)"
+    key_mode "${BASH_REMATCH[1]}";;
+  root) shift; root_mode "$@";;
+  rx) shift; rx_mode "$@";;
+  admin) shift; admin_mode "$@";;
+  *) die "a deploy key runs tando deploy commands only (no shell)";;
+esac
+exit   # with the status of the verb (pipelines: pipefail)

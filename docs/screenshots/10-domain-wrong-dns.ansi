@@ -1,0 +1,4 @@
+tando: DNS for shop.test does not point at prod yet. At your DNS provider, create:
+  A     shop.test                     ->  192.168.215.10   (now 203.0.113.9)
+  A     www.shop.test                 ->  192.168.215.10
+then run this again (--wait polls until it is right; --force skips the check)

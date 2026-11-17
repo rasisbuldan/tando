@@ -1,0 +1,2 @@
+go test fuzz v1
+string("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKRO/QSS+GTRv49Pb0jaMuX8rDtMJ9Wk/9WZTW3oWJT0 x,command=\"id\"")

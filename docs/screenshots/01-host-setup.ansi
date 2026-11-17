@@ -1,0 +1,13 @@
+[38;5;242m╭─[0m [1mhost setup prod[0m [38;5;242m────────────────────────────────────────────────────────────[0m [2mvmadmin@127.0.0.1[0m [38;5;242m─╮[0m
+[38;5;242m│[0m [32m✓[0m [2m1/8[0m  agent     [0m  [2m        0.1.0 in /opt/tando/bin[0m[0m                                               [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m2/8[0m  packages  [0m  [2m        installed rsync curl nftables[0m[0m                                         [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m3/8[0m  caddy     [0m  [2m        2.6.2 (installed now)[0m[0m                                                 [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m4/8[0m  config    [0m  [2m        tando sites imported; admin API on a unix socket[0m[0m                      [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m5/8[0m  firewall  [0m  [2m        loopback rules per app[0m[0m                                                [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m6/8[0m  system    [0m  [2m        units, journals[0m[0m                                                       [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m7/8[0m  apps      [0m  [2m        0 apps[0m[0m                                                                [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m8/8[0m  checks    [0m  [2m        alert checks and metrics, every minute[0m[0m                                [38;5;242m│[0m
+[38;5;242m│[0m [2mlinks     [0m  http://<app>.localhost:8378  (tls off)[0m                                               [38;5;242m│[0m
+[38;5;242m│[0m [2mruntimes  [0m  none yet: tando up installs what an app needs[0m                                        [38;5;242m│[0m
+[38;5;242m│[0m [2mtook      [0m  2m 7s  [2maarch64, caddy 2.6.2[0m[0m                                                          [38;5;242m│[0m
+[38;5;242m╰─[0m [1m[0m[2mnext: cd your-app && tando up[0m [38;5;242m─────────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m

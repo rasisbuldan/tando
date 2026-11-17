@@ -1,0 +1,4 @@
+#!/bin/bash
+# counts ssh invocations (one per round trip over the ControlMaster) for test/load/client-watch.sh
+[ -n "${SSH_COUNT_FILE:-}" ] && printf '%s %s\n' "$(date +%s)" "${*: -1}" | cut -c1-120 >> "$SSH_COUNT_FILE"
+exec /usr/bin/ssh "$@"

@@ -1,0 +1,90 @@
+#!/bin/bash
+# tando-install-recover: finish or undo an install of the helpers in /opt/tando/bin that was cut off
+# between its renames. Installed as /opt/tando/bin/tando-install-recover (root, 755); run at boot by
+# tando-recover.service, and by tando-agent before a mutating verb when /opt/tando/bin/.install.pending
+# exists. With no journal it does nothing (one test).
+#
+# One implementation: the region between ">>> shared" and "<<< shared" is also what the client sends
+# inside the install script (install_helpers_script in lib/common.sh, which takes it from this file),
+# so an install and a recovery can never disagree. It is bash 5 and has no single quote anywhere,
+# because the install script travels inside single quotes (test/install-test.sh checks that).
+#
+# The journal $J lists one line per file of a switch: name mode sum had_old. It exists only while
+# files are being renamed into place, together with every .name.new (verified, final mode) and
+# .name.old (a hard link to the version being replaced, so a rename never loses it).
+set -u
+# >>> shared
+B=/opt/tando/bin J=/opt/tando/bin/.install.pending
+sha() { sha256sum < "$1" 2> /dev/null | cut -d" " -f1; }
+# forward: every file is already new, or its .new is still here and still has the journal sum.
+forward() {
+  local n m s o
+  while read -r n m s o; do
+    [ "$(sha "$B/$n")" = "$s" ] && continue
+    [ -f "$B/.$n.new" ] && [ "$(sha "$B/.$n.new")" = "$s" ] || return 1
+  done < "$J"
+  while read -r n m s o; do
+    [ -f "$B/.$n.new" ] || continue
+    chown root:root "$B/.$n.new" && chmod "$m" "$B/.$n.new" && mv -f "$B/.$n.new" "$B/$n" || return 1
+  done < "$J"
+}
+rollback() {   # every file back to the version it had (a file that was new is removed)
+  local n m s o r=0
+  while read -r n m s o; do
+    if [ -e "$B/.$n.old" ]; then   # (the same inode: this file was never replaced)
+      if [ "$B/.$n.old" -ef "$B/$n" ]; then rm -f "$B/.$n.old"; else mv -f "$B/.$n.old" "$B/$n" || r=1; fi
+    elif [ "$o" = 0 ] && [ "$(sha "$B/$n")" = "$s" ]; then rm -f "$B/$n"; fi
+    rm -f "$B/.$n.new"
+  done < "$J"
+  return $r
+}
+finish() {   # the switch is done (or undone): drop the journal first, then the saved copies
+  local n m s o fs=()
+  while read -r n m s o; do fs+=("$B/.$n.old" "$B/.$n.new"); done < "$J"
+  rm -f "$J"; sync "$B" 2> /dev/null
+  rm -f "${fs[@]}"
+}
+mixed() {   # which files of an unfinished journal are old, which new
+  local n m s o old="" new=""
+  while read -r n m s o; do
+    if [ "$(sha "$B/$n")" = "$s" ]; then new="$new $n"; else old="$old $n"; fi
+  done < "$J"
+  echo "old:${old:- none}; new:${new:- none}"
+}
+# .versions: the SHA-256 of every helper, written whole and renamed, after a complete set was
+# installed. tando-agent hands status, releases and the other read verbs to tando-status only
+# while neither it nor tando-status is newer than this file (a bash file test, no fork), so a new
+# agent never meets an old tando-status that lacks a verb.
+manifest_refresh() {
+  [ -f "$B/tando-agent" ] && [ -f "$B/tando-status" ] || return 0
+  if [ -f "$B/.versions" ] && [ ! "$B/tando-agent" -nt "$B/.versions" ] &&
+     [ ! "$B/tando-status" -nt "$B/.versions" ]; then return 0; fi
+  ( cd "$B" && sha256sum tando* > .versions.tmp ) 2> /dev/null &&
+    chmod 644 "$B/.versions.tmp" && sync "$B/.versions.tmp" 2> /dev/null &&
+    mv -f "$B/.versions.tmp" "$B/.versions" && sync "$B" 2> /dev/null
+}
+# recover: the caller holds /opt/tando/.install.lock. Sets RECOVERED; returns 1 when it cannot repair.
+recover() {
+  RECOVERED=""
+  [ -f "$J" ] || return 0
+  if forward; then RECOVERED="finished an install that an earlier run had cut off"; finish
+  elif rollback; then RECOVERED="undid an install that an earlier run had cut off (the old files are back)"; finish
+  else
+    echo "an earlier install was cut off and could not be repaired ($(mixed)); free disk space or fix /opt/tando/bin, then run tando host setup again" >&2
+    return 1
+  fi
+  manifest_refresh
+  return 0
+}
+# <<< shared
+
+if [ "${BASH_SOURCE[0]:-}" = "$0" ]; then   # run as a program (not inside the install script)
+  [ -e "$J" ] || exit 0
+  [ "$(id -u)" = 0 ] || { echo "tando-install-recover: this needs root (sudo)" >&2; exit 1; }
+  umask 077; set -u
+  exec 9> /opt/tando/.install.lock
+  flock -w 300 9 || { echo "tando-install-recover: an install has held the lock for 5 minutes" >&2; exit 1; }
+  recover; rc=$?
+  [ -z "$RECOVERED" ] || echo "tando-install-recover: $RECOVERED" >&2
+  exit $rc
+fi

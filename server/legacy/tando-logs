@@ -1,0 +1,1338 @@
+#!/bin/bash
+# tando-logs: the logging side of tando on the server. Installed as /opt/tando/bin/tando-logs
+# (root, 755) next to tando-agent, which calls it. Nothing here keeps running between calls.
+#
+#   per-app journal     each app unit logs into its own journald namespace "tando-<app>" with its
+#                       own size cap and retention (/etc/systemd/journald@tando-<app>.conf), so a
+#                       noisy app can only evict its own lines. A per-unit rate limit bounds floods.
+#   request log         Caddy writes JSON lines to /var/log/tando/<app>/access.log (caddy:tando-<app>
+#                       0640 in a 2750 directory), rotated by Caddy itself by size. Request headers,
+#                       response headers, TLS details and query strings are never written.
+#   audit trail         /var/log/tando/audit.log, one tab-separated line per mutating agent verb.
+#
+# Verbs (the agent passes logs, log-*, req-* and audit-read through; the rest it calls itself):
+#   logs <app> spec               query the app's log; options as key=value lines on stdin
+#   logs <app> [n] [follow]       the old form (last n lines, optionally following)
+#   log-stats [app]               per-app log disk use and lines/bytes per hour over 24 h (cached)
+#   req-summary <app> <secs>      one-pass summary of the request log over a window
+#   req-tail <app> <n> [follow]   newest requests;  req-errors <app> <secs> <n> [4xx]
+#   audit-read [app] [n]          audit rows;  audit-write <verb> <app> <rc> [note]; audit-origin
+#   host-setup [k=v...]           host defaults, main journal cap, directories
+#   app-setup <app>, app-remove <app>, unit-props <app>, caddy-log <app>, valid <key> <value>
+#   log-doctor                    check rows for `tando doctor`
+#
+# Output: key=value lines or tab-separated rows whose first field names the row type. Every argv
+# below is built here; text from the client (a grep pattern, a cursor) is read from stdin, checked
+# against a whitelist and handed to awk through the environment, never to a shell.
+set -uo pipefail
+umask 022
+shopt -s nullglob
+
+R=/opt/tando
+LOGDIR=/var/log/tando
+AUDIT=$LOGDIR/audit.log
+CACHE=/var/cache/tando-logs
+LCONF=$R/logs.conf
+AUDIT_MAX=$((4 * 1024 * 1024))   # audit.log is rotated to audit.log.1 .. .4 beyond this size
+STATS_TTL=60                     # seconds a log-stats result is reused
+STATS_MAX=300000                 # journal entries read per app per log-stats refresh at most
+
+die() { echo "tando-logs: $*" >&2; exit 1; }
+# grepq: grep -q for the end of a pipeline. grep -q exits at the first match, the writer can
+# then die of SIGPIPE, and with pipefail a match reads as "no match". This one reads to the end.
+grepq() { grep "$@" > /dev/null; }
+need_root() { [[ $EUID -eq 0 ]] || die "this needs root (sudo)"; }
+valid_app() { [[ $1 =~ ^[a-z][a-z0-9-]{1,25}$ ]]; }
+valid_id() { [[ $1 =~ ^[0-9]{8}-[0-9]{6}(-[0-9]{1,3})?$ ]]; }
+now() { printf '%(%s)T' -1; }
+row() { local x out=(); for x; do x=${x//$'\t'/ }; out+=("${x:--}"); done; local IFS=$'\t'; echo "${out[*]}"; }
+
+# built-in defaults. log_max 2G is only the upper bound of the default: an app without its own
+# log_max (and no host default) gets min(2G, 5% of the log file system), so the defaults of many apps
+# cannot fill a small disk (fair_share). The request log's budget (request_log_max) defaults to
+# min(log_max / 4, 256M); its retention follows log_keep (access_keep_for at the host overrides)
+declare -A C H D=([journal_max]=200M [log_max]=2G [log_keep]=30d [log_rate]=5000/30s
+  [access_log]=on [request_log_max]=auto)
+FAIR_PCT=5
+
+load() { # file array
+  local -n _m=$2
+  local k v
+  [[ -r $1 ]] || return 0
+  local line
+  # split at the first "=" only: IFS='=' read would drop a trailing "=" of the value
+  # shellcheck disable=SC2004  # an associative array's key needs its $
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line == *=* ]] || continue
+    k=${line%%=*} v=${line#*=}
+    [[ -n $k ]] && _m[$k]=$v
+  done < "$1"
+}
+
+# value checks shared by host and app settings
+valid() { # key value
+  local k=$1 v=$2
+  case $k in
+    journal_max|log_max|request_log_max) [[ $v =~ ^[0-9]{1,6}[KMG]$ ]] && (( $(bytes "$v") >= 4194304 ));;
+    log_keep|access_keep_for) [[ $v =~ ^[0-9]{1,4}[hdw]$ ]] && (( 10#${v%?} >= 1 && $(hours "$v") <= 87600 ));;
+    log_rate) [[ $v == off ]] || { [[ $v =~ ^[0-9]{1,6}/[0-9]{1,4}s$ ]] && (( 10#${v%/*} >= 1 )); };;
+    access_log) [[ $v == on || $v == off ]];;
+    access_size) [[ $v =~ ^[0-9]{1,3}$ ]] && ((10#$v >= 1));;       # MiB per file
+    access_keep) [[ $v =~ ^[0-9]{1,2}$ ]];;                          # rolled files kept
+    *) return 1;;
+  esac
+}
+bytes() { local v=$1 n=$((10#${1%[KMG]})); case $v in *K) echo $((n * 1024));; *M) echo $((n * 1048576));;
+  *G) echo $((n * 1073741824));; *) echo "$n";; esac; }
+hours() { local n=$((10#${1%[hdw]})); case $1 in *h) echo "$n";; *d) echo $((n * 24));; *w) echo $((n * 168));; esac; }
+
+# a checked value with its numbers in plain decimal: "08" -> "8", "09d" -> "9d", "0500/030s" -> "500/30s"
+# (bash reads a leading 0 as octal, and Caddy rejects "roll_keep_for h")
+norm() { # value (already valid)
+  local v=$1
+  if [[ $v =~ ^([0-9]+)/([0-9]+)s$ ]]; then echo "$((10#${BASH_REMATCH[1]}))/$((10#${BASH_REMATCH[2]}))s"
+  elif [[ $v =~ ^([0-9]+)([A-Za-z]?)$ ]]; then echo "$((10#${BASH_REMATCH[1]}))${BASH_REMATCH[2]}"
+  else echo "$v"; fi
+}
+
+# effective setting for app $A: app.conf, then the host defaults, then the built-in ones. A stored
+# value that does not pass `valid` (an older file, a hand edit) falls back to the next level.
+setting() {
+  local k=$1 v
+  for v in "${C[$k]:-}" "${H[$k]:-}"; do
+    [[ -n $v ]] && valid "$k" "$v" && { norm "$v"; return; }
+  done
+  case $k in
+    log_max) fair_share;;
+    request_log_max) v=$(( $(bytes "$(setting log_max)") / 4 / 1048576 )); ((v > 256)) && v=256
+                     ((v < 4)) && v=4; echo "${v}M";;
+    access_keep_for) setting log_keep;;
+    *) echo "${D[$k]:-}";;
+  esac
+}
+# the default journal cap: min(2G, FAIR_PCT % of the file system that holds the journals), in MB
+fair_share() {
+  local tot m
+  read -r _ tot _ < <(df -Pk /var/log 2> /dev/null | tail -1)
+  [[ $tot =~ ^[0-9]+$ ]] || { echo 256M; return; }
+  m=$(( tot * FAIR_PCT / 100 / 1024 ))
+  ((m > 2048)) && m=2048
+  ((m < 16)) && m=16
+  if ((m == 2048)); then echo 2G; else echo "${m}M"; fi
+}
+# where the default came from, for status and doctor: app, host or auto
+setting_src() { # key
+  local v
+  v=${C[$1]:-}; [[ -n $v ]] && valid "$1" "$v" && { echo app; return; }
+  v=${H[$1]:-}; [[ -n $v ]] && valid "$1" "$v" && { echo host; return; }
+  echo auto
+}
+app() {
+  valid_app "${1:-}" || die "invalid app name"
+  A=$1
+  [[ -f $R/apps/$A/app.conf ]] || die "no such app: $A"
+  C=(); load "$R/apps/$A/app.conf" C
+  H=(); load "$LCONF" H
+}
+ns() { echo "tando-$A"; }
+ns_conf() { echo "/etc/systemd/journald@tando-$A.conf"; }
+ns_dir() { echo "/var/log/journal/$(< /etc/machine-id).tando-$A"; }
+
+# write a file only when its content changes; returns 0 when it changed
+put() { # path mode owner:group < content
+  local tmp="$1.tmp.$$"
+  cat > "$tmp" || return 2
+  if cmp -s "$tmp" "$1"; then rm -f "$tmp"; return 1; fi
+  chmod "$2" "$tmp"; chown "$3" "$tmp"; mv -f "$tmp" "$1"
+}
+
+# ---- host and app setup ---------------------------------------------------------------------
+
+cmd_host_setup() { # [key=value ...] host defaults
+  need_root
+  local kv k v a changed=0
+  H=(); load "$LCONF" H
+  for kv in "$@"; do
+    k=${kv%%=*} v=${kv#*=}
+    if [[ $kv != *=* ]] || ! valid "$k" "$v"; then die "bad log setting: $kv"; fi
+    H[$k]=$(norm "$v")
+  done
+  for k in "${!H[@]}"; do printf '%s=%s\n' "$k" "${H[$k]}"; done | sort | put "$LCONF" 644 root:root
+  install -d -m 755 -o root -g root "$LOGDIR"
+  install -d -m 700 -o root -g root "$CACHE"
+  [[ -f $AUDIT ]] || install -m 640 -o root -g adm /dev/null "$AUDIT"
+  # the main journal (system services, activations, Caddy) gets a fixed cap too
+  install -d -m 755 /etc/systemd/journald.conf.d
+  printf '%s\n' "# written by tando-logs: cap of the main journal (apps log into their own namespaces)" \
+    "[Journal]" "SystemMaxUse=${H[journal_max]:-${D[journal_max]}}" "RuntimeMaxUse=64M" |
+    put /etc/systemd/journald.conf.d/tando.conf 644 root:root && changed=1
+  ((changed)) && systemctl restart systemd-journald
+  for a in "$R"/apps/*/app.conf; do
+    a=${a%/app.conf}; ( app "${a##*/}"; app_setup ) || echo "warning=log setup of ${a##*/} failed" >&2
+  done
+  echo ok=1
+}
+
+# journald namespace config, request log directory; called by the agent's configure
+app_setup() {
+  local max keep rate grp="tando-$A" dir=$LOGDIR/$A fmin kh
+  max=$(setting log_max) keep=$(setting log_keep) rate=$(setting log_rate)
+  # retention removes whole journal files: a file is closed after MaxFileSec, so it must be short
+  # against log_keep or a 1h retention would keep a day. A quarter of log_keep, 15 min to 1 day
+  kh=$(hours "$keep"); fmin=$(( kh * 15 )); ((fmin < 15)) && fmin=15; ((fmin > 1440)) && fmin=1440
+  {
+    echo "# written by tando-logs for app $A: its own journal, capped (tando.conf log_max, log_keep)"
+    echo "# circular: when the files reach SystemMaxUse, journald deletes the oldest to make room"
+    echo "[Journal]"
+    echo "Storage=persistent"
+    echo "SystemMaxUse=$max"
+    echo "RuntimeMaxUse=8M"
+    echo "MaxRetentionSec=${kh}h"
+    echo "MaxFileSec=${fmin}min"
+    echo "Compress=yes"
+    # per service in this namespace: the app, its pre-flight and its jobs. (A unit's own
+    # LogRateLimitIntervalSec=0 would mean "journald's default", not "off".)
+    if [[ $rate == off ]]; then
+      echo "RateLimitIntervalSec=0"
+    else
+      echo "RateLimitIntervalSec=${rate#*/}"
+      echo "RateLimitBurst=${rate%/*}"
+    fi
+  } | put "$(ns_conf)" 644 root:root && apply_journal "$max" "$kh"
+  if id caddy &> /dev/null && getent group "$grp" > /dev/null; then
+    install -d -m 755 -o root -g root "$LOGDIR"
+    # Caddy writes, the app's group reads; the setgid bit gives rolled files the same group
+    install -d -m 2750 -o caddy -g "$grp" "$dir"
+    local f
+    for f in "$dir"/access*.log "$dir"/access*.log.gz; do [[ -L $f ]] || { chown caddy:"$grp" "$f"; chmod 640 "$f"; }; done
+    # created here: `caddy validate` (as root) would otherwise create it root-owned
+    [[ -f $dir/access.log ]] || install -m 640 -o caddy -g "$grp" /dev/null "$dir/access.log"
+  fi
+}
+cmd_app_setup() { need_root; app "$1"; app_setup; echo ok=1; }
+
+# a changed namespace config takes effect when that journald instance restarts. The app keeps
+# running and keeps its stdout/stderr: journald hands its stream sockets to systemd's file
+# descriptor store (FileDescriptorStoreMax in systemd-journald@.service) and takes them back, so
+# no line is lost (measured: 13 of 13 once-a-second lines across two restarts). Then the limits
+# are applied now instead of at the next file rotation: vacuum to the size cap and retention
+apply_journal() { # max keep_hours
+  systemctl -q is-active "systemd-journald@$(ns).service" || return 0
+  systemctl restart "systemd-journald@$(ns).service" || return 0
+  journalctl -q "--namespace=$(ns)" --rotate 2> /dev/null
+  journalctl -q "--namespace=$(ns)" "--vacuum-size=$1" "--vacuum-time=${2}h" 2> /dev/null
+  return 0
+}
+
+cmd_app_remove() { # app: the app's journal namespace, request logs and caches
+  need_root
+  valid_app "${1:-}" || die "invalid app name"
+  A=$1
+  systemctl stop "systemd-journald@$(ns).service" "systemd-journald@$(ns).socket" \
+    "systemd-journald-varlink@$(ns).socket" "systemd-journald@$(ns)-varlink.socket" 2> /dev/null
+  rm -f "$(ns_conf)"
+  rm -rf "$(ns_dir)" "/run/log/journal/$(< /etc/machine-id).tando-$A" "${LOGDIR:?}/$A"
+  rm -f "$CACHE/$A.stats" "$CACHE/$A.reqlog"
+  echo removed=1
+}
+
+# unit properties for the app unit, its pre-flight and its jobs (one per line); the size cap
+# and the rate limit live in the namespace's journald@tando-<app>.conf
+cmd_unit_props() {
+  app "$1"
+  echo "LogNamespace=$(ns)"
+}
+
+# the log block of the app's Caddy site (tab-indented for the site block)
+cmd_caddy_log() {
+  app "$1"
+  [[ $(setting access_log) == on ]] || return 0
+  local keep_for size keep mode="" cv x file
+  keep_for=$(hours "$(setting access_keep_for)")
+  req_roll
+  size=$RSIZE keep=$RKEEP
+  for x in "$keep_for" "$size" "$keep"; do
+    [[ $x =~ ^(0|[1-9][0-9]*)$ ]] || die "internal: bad request log setting ($x)"   # never write a broken site
+  done
+  file=$(req_path "$size $keep $keep_for")
+  # `output file { mode }` exists from Caddy 2.8; older ones keep the mode of the file we create
+  cv=$(caddy version 2> /dev/null); cv=${cv#v}; cv=${cv%% *}
+  if [[ $cv =~ ^([0-9]+)\.([0-9]+) ]] && (( BASH_REMATCH[1] > 2 || BASH_REMATCH[2] >= 8 )); then
+    mode=$'\n\t\t\tmode 0640'
+  fi
+  local probe   # the secret of tando's own health checks; a random never-sent value until it exists
+  probe=$(sed -n 's/^X-Tando-Probe: \([0-9a-f]\{32,64\}\)$/\1/p' /opt/tando/probe.header 2> /dev/null)
+  [[ -n $probe ]] || probe=none-$RANDOM$RANDOM
+  cat <<EOF
+	# tando's own health checks (from this host, with the root-only secret header of
+	# /opt/tando/probe.header) stay out of the request log and its statistics
+	@tandoprobe {
+		header X-Tando-Probe $probe
+		remote_ip 127.0.0.1 ::1
+	}
+	skip_log @tandoprobe
+	log {
+		output file $file {$mode
+			roll_size ${size}MiB
+			roll_keep $keep
+			roll_keep_for ${keep_for}h
+		}
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+				request>tls delete
+				resp_headers delete
+				user_id delete
+				request>uri regexp \?.*$ ?-
+			}
+		}
+	}
+EOF
+}
+
+# rotation of the request log from its budget (request_log_max, default min(log_max/4, 256M)):
+# files of a 1/8 of it, at most 32 MiB, and as many rolled files as fit. Caddy gzips rolled files
+# (about 20x smaller for these lines, measured), so the budget holds even if nothing compressed and
+# the history is far longer than the budget suggests. Host settings access_size/access_keep (older
+# tando) still win when set. -> RSIZE (MiB per file), RKEEP (rolled files kept), RMAX (bytes)
+req_roll() {
+  local mb
+  mb=$(( $(bytes "$(setting request_log_max)") / 1048576 ))
+  RSIZE=$(( mb / 8 )); ((RSIZE > 32)) && RSIZE=32; ((RSIZE < 1)) && RSIZE=1
+  RKEEP=$(( mb / RSIZE - 1 )); ((RKEEP < 1)) && RKEEP=1; ((RKEEP > 99)) && RKEEP=99
+  if [[ -n ${H[access_size]:-} ]] && valid access_size "${H[access_size]}"; then RSIZE=$(norm "${H[access_size]}"); fi
+  if [[ -n ${H[access_keep]:-} ]] && valid access_keep "${H[access_keep]}"; then RKEEP=$(norm "${H[access_keep]}"); fi
+  RMAX=$(( RSIZE * (RKEEP + 1) * 1048576 ))
+}
+# the file name Caddy gets. Caddy keeps one log writer per file name across config reloads, so a
+# changed roll_size/roll_keep would wait for a restart of Caddy (every site's connections). The
+# name alternates between dir/access.log and dir/./access.log (the same file) whenever the
+# rotation changes: the reload then opens a new writer with the new rotation, no restart
+req_path() { # "size keep keep_for"
+  local f=$CACHE/$A.reqlog cur="" var=1
+  # no record (an app from before this, whose site Caddy may run with other values): the "./" name
+  [[ -f $f ]] && read -r var cur < "$f"
+  [[ $var == 0 ]] || var=1
+  if [[ -n $cur && $cur != "${1// /,}" ]]; then var=$((1 - var)); fi
+  if [[ $cur != "${1// /,}" && $EUID -eq 0 ]]; then
+    install -d -m 700 "$CACHE"; echo "$var ${1// /,}" > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+  fi
+  if ((var)); then echo "$LOGDIR/$A/./access.log"; else echo "$LOGDIR/$A/access.log"; fi
+}
+
+cmd_valid() { valid "${1:-}" "${2:-}" || die "bad value for ${1:-?}: ${2:-}"; }
+
+# ---- journal queries --------------------------------------------------------------------------
+
+# awk program: reads `journalctl -o json` lines, keeps the app's own entries, filters, formats.
+# Messages are shown with control characters neutralised: C0 as ^X, DEL as ^?, bytes that are
+# not printable UTF-8 (C1 controls included) as \xHH. Environment:
+#   UNITS "unit=role ..." (exact unit names), FMT text|json, LVL max priority or "",
+#   PAT/PMODE grep (fixed|ifixed|regex|iregex), N stop after N matches (0: no limit),
+#   RANGES "from:to,..." in microseconds, CUR 1: prefix each line with the entry cursor,
+#   CURF file that receives the first entry's cursor, TZOFF seconds, TZS "+07:00", FLUSH 1/0
+read -r -d '' AWK_JOURNAL <<'AWK'
+function jraw(key,   p, r, k) {
+  k = "\"" key "\":"
+  p = index($0, "," k)
+  if (p) p += length(k) + 1
+  else if (substr($0, 1, length(k) + 1) == "{" k) p = length(k) + 2
+  else return ""
+  r = substr($0, p)
+  if (substr(r, 1, 1) == "\"") { if (match(r, /^"([^"\\]|\\.)*"/)) return substr(r, 1, RLENGTH); return "" }
+  if (substr(r, 1, 1) == "[") { if (match(r, /^\[[0-9,]*\]/)) return substr(r, 1, RLENGTH); return "" }
+  if (match(r, /^[^,}]*/)) return substr(r, 1, RLENGTH)
+  return ""
+}
+function jstr(key,   v) { v = jraw(key); if (substr(v, 1, 1) == "\"") return substr(v, 2, length(v) - 2); return v }
+function hexval(h,   i, c, n) {
+  n = 0; h = tolower(h)
+  for (i = 1; i <= length(h); i++) {
+    c = index("0123456789abcdef", substr(h, i, 1)); if (!c) return -1; n = n * 16 + c - 1
+  }
+  return n
+}
+function cpdisp(cp) {
+  if (cp < 0) return "?"
+  if (cp == 9) return "\t"
+  if (cp < 32) return "^" sprintf("%c", cp + 64)
+  if (cp == 127) return "^?"
+  if (cp < 127) return sprintf("%c", cp)
+  if (cp < 160) return sprintf("\\x%02x", cp)
+  if (cp < 2048) return sprintf("%c%c", 192 + int(cp / 64), 128 + cp % 64)
+  if (cp >= 55296 && cp <= 57343) return "?"
+  return sprintf("%c%c%c", 224 + int(cp / 4096), 128 + int(cp / 64) % 64, 128 + cp % 64)
+}
+# JSON string content -> display text
+function unesc(s,   out, i, c) {
+  if (index(s, "\\") == 0) return s
+  out = ""
+  while ((i = index(s, "\\")) > 0) {
+    out = out substr(s, 1, i - 1); c = substr(s, i + 1, 1); s = substr(s, i + 2)
+    if (c == "n") out = out "\\n"
+    else if (c == "r") out = out "\\r"
+    else if (c == "t") out = out "\t"
+    else if (c == "b") out = out "^H"
+    else if (c == "f") out = out "^L"
+    else if (c == "u") { out = out cpdisp(hexval(substr(s, 1, 4))); s = substr(s, 5) }
+    else out = out c
+  }
+  return out s
+}
+# JSON byte array (journald's form for messages that are not printable UTF-8) -> display text
+function arrdisp(a,   n, i, j, b, k, need, cp, ok, out) {
+  gsub(/[\[\]]/, "", a); n = split(a, B, ","); out = ""
+  for (i = 1; i <= n; i++) {
+    b = B[i] + 0
+    if (b == 9) out = out "\t"
+    else if (b < 32) out = out "^" sprintf("%c", b + 64)
+    else if (b == 127) out = out "^?"
+    else if (b < 128) out = out sprintf("%c", b)
+    else {
+      need = (b >= 194 && b <= 223) ? 1 : (b >= 224 && b <= 239) ? 2 : (b >= 240 && b <= 244) ? 3 : 0
+      ok = need > 0 && i + need <= n
+      if (ok) {
+        cp = (need == 1) ? b - 192 : (need == 2) ? b - 224 : b - 240
+        for (j = 1; j <= need; j++) {
+          k = B[i + j] + 0; if (k < 128 || k > 191) { ok = 0; break }
+          cp = cp * 64 + k - 128
+        }
+      }
+      # C1 controls, overlong forms, surrogates and values beyond U+10FFFF are not printable UTF-8
+      if (ok && (cp < 160 || (need == 2 && cp < 2048) || (need == 3 && cp < 65536) ||
+          cp > 1114111 || (cp >= 55296 && cp <= 57343))) ok = 0
+      if (ok) { for (j = 0; j <= need; j++) out = out sprintf("%c", B[i + j] + 0); i += need }
+      else out = out sprintf("\\x%02x", b)
+    }
+  }
+  return out
+}
+function jesc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/\t/, "\\t", s); return s }
+function wordlvl(w) {
+  w = tolower(w)
+  if (w ~ /^(emerg|emergency|alert|fatal|panic|crit|critical)$/) return 2
+  if (w ~ /^(err|error)$/) return 3
+  if (w ~ /^(warn|warning)$/) return 4
+  if (w == "notice") return 5
+  if (w == "info") return 6
+  if (w ~ /^(debug|trace)$/) return 7
+  return -1
+}
+# level written in the text: JSON loggers ("level":"error", pino's "level":50), LEVEL words
+function textlvl(m,   h, w) {
+  h = substr(m, 1, 300)
+  if (match(h, /"(level|severity|lvl)": *"[A-Za-z]+"/)) {
+    w = substr(h, RSTART, RLENGTH); sub(/.*: *"/, "", w); sub(/"$/, "", w); return wordlvl(w)
+  }
+  if (match(h, /"level": *[0-9]+/)) { w = substr(h, RSTART, RLENGTH); sub(/.*: */, "", w); w += 0
+    return w >= 60 ? 2 : w >= 50 ? 3 : w >= 40 ? 4 : w >= 30 ? 6 : 7 }
+  if (match(h, /(^|[^A-Za-z])(FATAL|PANIC|CRITICAL|CRIT|ERROR|WARNING|WARN|NOTICE|INFO|DEBUG|TRACE)([^A-Za-z]|$)/)) {
+    w = substr(h, RSTART, RLENGTH); gsub(/[^A-Z]/, "", w); return wordlvl(w) }
+  if (match(h, /^\[?(fatal|error|warn|warning|info|debug)[]:]/)) {
+    w = substr(h, RSTART, RLENGTH); gsub(/[^a-z]/, "", w); return wordlvl(w)
+  }
+  if (h ~ /^(Uncaught |Unhandled |[A-Z][A-Za-z]*Error: )/) return 3
+  return -1
+}
+function ts_iso(us, frac,   s) {
+  s = int(us / 1000000)
+  return strftime("%Y-%m-%d" (FMT == "json" ? "T" : " ") "%H:%M:%S", s + TZOFF, 1) \
+    (frac ? sprintf(".%03d", int(us / 1000) % 1000) TZS : "")
+}
+BEGIN {
+  n = split(ENVIRON["UNITS"], U, " ")
+  for (i = 1; i <= n; i++) { p = index(U[i], "="); ROLE[substr(U[i], 1, p - 1)] = substr(U[i], p + 1) }
+  FMT = ENVIRON["FMT"]; LVL = ENVIRON["LVL"]; PAT = ENVIRON["PAT"]; PMODE = ENVIRON["PMODE"]
+  N = ENVIRON["N"] + 0; CUR = ENVIRON["CUR"] == "1"; CURF = ENVIRON["CURF"]; FLUSH = ENVIRON["FLUSH"] == "1"
+  OLDF = ENVIRON["OLDF"]
+  TZOFF = ENVIRON["TZOFF"] + 0; TZS = ENVIRON["TZS"]
+  if (PMODE == "ifixed" || PMODE == "iregex") PAT = tolower(PAT)
+  if (PMODE == "regex" || PMODE == "iregex") { if ("" ~ PAT) {} }   # a bad regex fails here, before any output
+  nr = split(ENVIRON["RANGES"], RG, ",")
+  for (i = 1; i <= nr; i++) { split(RG[i], x, ":"); RF[i] = x[1] + 0; RT[i] = x[2] + 0 }
+  split("emerg alert crit err warning notice info debug", x, " ")
+  for (i = 0; i < 8; i++) LV[i] = x[i + 1]
+  count = 0
+}
+{
+  if (NR == 1 && CURF != "") { print jstr("__CURSOR") > CURF; close(CURF) }
+  u = jstr("_SYSTEMD_UNIT"); src = (u in ROLE) ? ROLE[u] : ""
+  if (src == "") {
+    if (jstr("_PID") != "1") next
+    u = jstr("UNIT"); if (!(u in ROLE)) next
+    src = "systemd"
+  }
+  us = jstr("__REALTIME_TIMESTAMP") + 0
+  if (nr > 0) { ok = 0; for (i = 1; i <= nr; i++) if (us >= RF[i] && us < RT[i]) { ok = 1; break }; if (!ok) next }
+  m = jraw("MESSAGE")
+  if (substr(m, 1, 1) == "[") m = arrdisp(m); else m = unesc(substr(m, 2, length(m) - 2))
+  pri = jstr("PRIORITY"); pri = (pri == "") ? 6 : pri + 0
+  eff = pri
+  if (src != "systemd") { t = textlvl(m); if (t >= 0 && t < eff) eff = t }
+  if (LVL != "" && eff > LVL + 0) next
+  if (PMODE == "fixed") { if (!index(m, PAT)) next }
+  else if (PMODE == "ifixed") { if (!index(tolower(m), PAT)) next }
+  else if (PMODE == "regex") { if (m !~ PAT) next }
+  else if (PMODE == "iregex") { if (tolower(m) !~ PAT) next }
+  if (FMT == "json")
+    line = "{\"time\":\"" ts_iso(us, 1) "\",\"usec\":" sprintf("%.0f", us) ",\"src\":\"" src \
+      "\",\"unit\":\"" u "\",\"priority\":" eff ",\"level\":\"" LV[eff] "\",\"msg\":\"" jesc(m) "\"}"
+  else {
+    gsub(/\t/, "  ", m)
+    line = ts_iso(us, 0) " " (eff <= 3 ? "ERR " : eff == 4 ? "WARN " : "") (src == "app" ? "" : "[" src "] ") m
+  }
+  if (CUR) line = jstr("__CURSOR") "\t" line
+  print line
+  if (OLDF != "" && (oldest == 0 || us < oldest)) oldest = us
+  if (FLUSH) fflush()
+  if (N > 0 && ++count >= N) exit
+}
+END { if (OLDF != "" && oldest > 0) { printf "%.0f\n", oldest > OLDF; close(OLDF) } }
+AWK
+
+# reads the query spec (key=value lines) from stdin into Q, with whitelisted keys and values
+read_spec() {
+  local line k v n=0
+  while IFS= read -r line; do
+    n=$((n + 1)); ((n <= 30)) || die "spec too long"
+    k=${line%%=*} v=${line#*=}
+    [[ $line == *=* ]] || die "bad spec line"
+    [[ $v != *[[:cntrl:]]* ]] || die "control characters in $k"
+    case $k in
+      n) [[ $v =~ ^([0-9]{1,7}|all)$ ]];;
+      since|until) [[ $v =~ ^(@[0-9]{1,11}|-[0-9]{1,10})$ ]];;
+      grep) ((${#v} >= 1 && ${#v} <= 256));;
+      grep_mode) [[ $v =~ ^(fixed|ifixed|regex|iregex)$ ]];;
+      level) [[ $v =~ ^[0-7]$ ]];;
+      release|deploy) valid_id "$v";;
+      format) [[ $v == text || $v == json ]];;
+      follow|cursor) [[ $v == 1 || $v == 0 ]];;
+      after) [[ $v =~ ^[a-z]=[0-9a-f]{1,64}(\;[a-z]=[0-9a-f]{1,64}){1,9}$ ]];;
+      tz) [[ $v =~ ^[+-][0-9]{4}$ ]];;
+      *) die "unknown spec key: $k";;
+    esac || die "bad value for $k"
+    Q[$k]=$v
+  done
+}
+
+tsec() { # @epoch | -seconds -> epoch
+  case $1 in @*) echo "${1#@}";; -*) echo $(( $(now) - ${1#-} ));; esac
+}
+
+# periods during which release $1 was current, as "from:to" microseconds, from history.tsv
+# rows: time id kind result total build upload copy preflight switch verify note. A row's time is
+# when verify ended (whole seconds), so the switch is time - verify, to within a second.
+release_ranges() {
+  local id=$1
+  awk -F'\t' -v id="$id" -v now="$(now)" '
+    function sw(t, r) { n++; T[n] = t; I[n] = r }
+    $4 == "ok" && ($3 == "deploy" || $3 == "rollback") { v = $11 + 0; sw($1 - v, $2); good = $2; next }
+    $4 == "rolledback" { v = $11 + 0; sw($1 - v, $2); sw($1 + 0, good); next }
+    END {
+      out = ""
+      for (i = 1; i <= n; i++) if (I[i] == id) {
+        to = (i < n) ? T[i + 1] : now + 1
+        if (to > T[i]) out = out (out == "" ? "" : ",") sprintf("%.0f:%.0f", T[i] * 1000000, to * 1000000)
+      }
+      print out
+    }' "$R/apps/$A/history.tsv"
+}
+
+# the exact units of the app: the service and its jobs (pre-flight and activation units only
+# with --deploy). Globs are never used: another app's name could match them.
+app_units() {
+  local k
+  echo "tando-$A.service=app"
+  echo "systemd-journald@tando-$A.service=journald"   # its "Suppressed N messages" notices
+  for k in "${!C[@]}"; do [[ $k == job.* ]] && echo "tando-$A-job-${k#job.}.service=job:${k#job.}"; done
+}
+
+cmd_logs() {
+  app "${1:-}"
+  local -A Q=([n]=100 [format]=text [follow]=0 [cursor]=0)
+  if [[ ${2:-} == spec ]]; then
+    read_spec
+  else  # the old form: logs <app> [n] [follow]
+    [[ -z ${2:-} || ${2:-} =~ ^[0-9]{1,7}$ ]] || die "bad count"
+    Q[n]=${2:-100}; [[ ${3:-} == follow ]] && Q[follow]=1
+  fi
+  [[ ${Q[n]} == 0 && ${Q[follow]} == 0 ]] && return 0   # -n 0: nothing (journalctl would print all)
+  local jc=(journalctl --no-pager -q -o json "--output-fields=MESSAGE,PRIORITY,_SYSTEMD_UNIT,UNIT,_PID")
+  local units="" u tz=${Q[tz]:-+0000} ranges="" since="" until="" id
+  [[ -f $(ns_conf) ]] && jc+=("--namespace=+$(ns)")
+  # a release that never went live (it failed its pre-flight, or was rolled back before it
+  # verified...) has no live period: show what its deploy logged instead, which is what a
+  # failure box points to
+  local norel=""
+  if [[ -n ${Q[release]:-} ]]; then
+    ranges=$(release_ranges "${Q[release]}")
+    if [[ -z $ranges ]]; then Q[deploy]=${Q[release]}; unset 'Q[release]'; norel=1; fi
+  fi
+  if [[ -n ${Q[deploy]:-} ]]; then
+    id=${Q[deploy]}
+    [[ -d $R/apps/$A/releases/$id ]] || grepq "	$id	" "$R/apps/$A/history.tsv" 2> /dev/null ||
+      die "no such release: $id"
+    units="tando-$A-act-$id.service=act tando-$A-venv-$id.service=venv tando-$A-pre-$id.service=pre"
+    if [[ ${Q[format]} == text ]]; then
+      [[ -n $norel ]] && echo "# release $id was never live: its deploy log (activation, build, pre-flight)"
+      awk -F'\t' -v id="$id" '$2 == id { printf "# %s %s: %s (%ss: copy %s, pre-flight %s, switch %s, verify %s)%s\n",
+        $3, $2, $4, $5, $8, $9, $10, $11, ($12 == "" || $12 == "-") ? "" : " - " $12 }' "$R/apps/$A/history.tsv" |
+        LC_ALL=C tr -d '\000-\010\013-\037\177'
+    fi
+  else
+    units=$(app_units | tr '\n' ' ')
+  fi
+  for u in $units; do jc+=(-u "${u%%=*}"); done
+  if [[ -n ${Q[release]:-} ]]; then
+    since=$(( ${ranges%%:*} / 1000000 )); until=${ranges##*:}; until=$(( until / 1000000 ))
+    [[ ${Q[format]} == text ]] && echo "# release ${Q[release]} was live: $(
+      local r; for r in ${ranges//,/ }; do printf '%s..%s ' "$(date -d "@$(( ${r%%:*} / 1000000 ))" '+%F %T')" \
+        "$(date -d "@$(( ${r##*:} / 1000000 ))" '+%F %T')"; done)(server time)"
+  fi
+  [[ -n ${Q[since]:-} ]] && since=$(tsec "${Q[since]}")
+  [[ -n ${Q[until]:-} ]] && until=$(tsec "${Q[until]}")
+  [[ -n $since ]] && jc+=("--since=@$since")
+  [[ -n $until && ${Q[follow]} == 0 ]] && jc+=("--until=@$until")
+  local sign=${tz:0:1} off=$(( 10#${tz:1:2} * 3600 + 10#${tz:3:2} * 60 ))
+  [[ $sign == - ]] && off=$((-off))
+  export UNITS=$units FMT=${Q[format]} LVL=${Q[level]:-} PAT=${Q[grep]:-} PMODE="" RANGES=$ranges
+  export CUR=${Q[cursor]} TZOFF=$off TZS="${tz:0:3}:${tz:3:2}" CURF="" FLUSH=0 N=0
+  [[ -n $PAT ]] && PMODE=${Q[grep_mode]:-fixed}
+  # A fixed string is also handed to journalctl -g as an escaped literal: it skips the JSON
+  # formatting of lines that cannot match (measured 2.0 s -> 0.2 s for a scan of 100k entries).
+  # awk still makes the exact decision. Not when the pattern could match our ^X / \xHH notation.
+  export LC_ALL=C
+  if [[ $PMODE == fixed || $PMODE == ifixed ]] && [[ $PAT =~ ^[\ -~]+$ && $PAT != *['^\[?']* &&
+        ! $PAT =~ [xX][0-9a-fA-F] ]]; then
+    local lit="" i c
+    for ((i = 0; i < ${#PAT}; i++)); do
+      c=${PAT:i:1}
+      if [[ $c == [A-Za-z0-9] ]]; then lit+=$c; else lit+="\\$c"; fi
+    done
+    jc+=("--grep=$lit" "--case-sensitive=$([[ $PMODE == fixed ]] && echo yes || echo no)")
+  fi
+  # a runaway pattern or query is stopped by a CPU limit (follow mode reads only new lines)
+  [[ ${Q[follow]} == 1 ]] || ulimit -t 120
+  if [[ -n $PAT && $PMODE == *regex ]] && ! awk 'BEGIN { if ("" ~ ENVIRON["PAT"]) {} }' 2> /dev/null; then
+    die "bad regular expression"
+  fi
+  if [[ ${Q[follow]} == 1 ]]; then
+    local cf
+    cf=$(mktemp) || die "mktemp failed"
+    trap 'rm -f "$cf"' EXIT
+    if [[ -n ${Q[after]:-} ]]; then
+      echo "${Q[after]}" > "$cf"
+    elif [[ ${Q[n]} != 0 ]]; then
+      N=${Q[n]} CURF=$cf
+      "${jc[@]}" -r | awk "$AWK_JOURNAL" | tac
+    fi
+    N=0 CURF="" FLUSH=1
+    # mawk reads pipes in blocks unless told otherwise; a followed line must not wait for more
+    local aw=(awk)
+    awk -W version 2>&1 | grepq mawk && aw+=(-W interactive)
+    if [[ -s $cf ]]; then
+      "${jc[@]}" -f --lines=all "--after-cursor=$(< "$cf")" | "${aw[@]}" "$AWK_JOURNAL"
+    else
+      "${jc[@]}" -f -n 0 | "${aw[@]}" "$AWK_JOURNAL"
+    fi
+  else
+    local of=""
+    if [[ ${Q[format]} == text && -z ${Q[deploy]:-} ]]; then
+      of=$(mktemp) || die "mktemp failed"
+      trap 'rm -f "$of"' EXIT
+    fi
+    if [[ ${Q[n]} == all ]]; then
+      OLDF=$of "${jc[@]}" | OLDF=$of awk "$AWK_JOURNAL"
+    else
+      N=${Q[n]}
+      "${jc[@]}" -r | OLDF=$of awk "$AWK_JOURNAL" | tac
+    fi
+    [[ -n $of ]] && suppressed_note "$of" "$until"
+  fi
+  return 0
+}
+
+# "# note" after the lines shown when journald dropped lines of the app (its rate limit, log_rate)
+# between the oldest line shown and the end of the window: those lines are gone for good
+suppressed_note() { # file-with-oldest-usec until-epoch|""
+  local from="" n jc
+  [[ -s $1 ]] && read -r from < "$1"
+  [[ $from =~ ^[0-9]+$ ]] || return 0
+  jc=(journalctl --no-pager -q -o cat "--namespace=$(ns)" -u "systemd-journald@$(ns).service"
+    "--since=@$(( from / 1000000 ))" -g "^Suppressed [0-9]+ messages")
+  [[ -n $2 ]] && jc+=("--until=@$2")
+  n=$("${jc[@]}" 2> /dev/null | head -n 10000 | awk '{ n += $2 } END { print n + 0 }')
+  ((n > 0)) || return 0
+  echo "# note: journald dropped $n lines in this window (over log_rate $(setting log_rate))"
+}
+
+# ---- log stats: per-app disk use, lines and bytes per hour over the last 24 hours -------------
+
+# Counts are kept per hour in $CACHE/<app>.stats with the cursor of the last entry read; a refresh
+# reads only the entries written since (at most STATS_MAX), so the cost follows the log rate.
+# input: journalctl -a -o short-unix --show-cursor ("<epoch.usec> <host> <ident>[pid]: <message>");
+# JSON output would cost about 6x more CPU (2.2 s against 0.33 s for 100k entries, measured)
+read -r -d '' AWK_STATS <<'AWK'
+/^-- cursor: / { c = substr($0, 12); next }
+{
+  h = int($1 / 3600) * 3600
+  p = index($0, "]: "); if (p == 0) p = index($0, ": ") - 1
+  if ($3 ~ /^systemd-journald/) {
+    if (match($0, /Suppressed [0-9]+ messages/)) S[h] += substr($0, RSTART + 11, RLENGTH - 20)
+    next
+  }
+  L[h]++; B[h] += length($0) - p - 2
+}
+END {
+  for (h in L) print "H", h, L[h], B[h] + 0
+  for (h in S) print "S", h, S[h]
+  if (c != "") print "C", c
+}
+AWK
+
+app_stats() { # prints the logs row for app $A
+  local f=$CACHE/$A.stats t cur="" upd=0 k a b c hour0 dir jb=- ab=0 cap
+  local -A L B S
+  t=$(now); hour0=$(( t / 3600 * 3600 - 23 * 3600 ))
+  if [[ -f $f ]]; then
+    while read -r k a b c; do
+      case $k in
+        cursor) cur=$a;; updated) upd=$a;;
+        H) ((a >= hour0)) && { L[$a]=$b; B[$a]=$c; };;
+        S) ((a >= hour0)) && S[$a]=$b;;
+      esac
+    done < "$f"
+  fi
+  if ((t - upd >= STATS_TTL)) && [[ -f $(ns_conf) ]]; then
+    local jc=(journalctl --no-pager -q -a -o short-unix --show-cursor "--namespace=$(ns)")
+    if [[ -n $cur ]]; then jc+=("--after-cursor=$cur"); else jc+=("--since=@$hour0"); fi
+    while read -r k a b c; do
+      case $k in
+        H) ((a >= hour0)) && { L[$a]=$(( ${L[$a]:-0} + b )); B[$a]=$(( ${B[$a]:-0} + c )); };;
+        S) ((a >= hour0)) && S[$a]=$(( ${S[$a]:-0} + b ));;
+        C) cur=$a;;
+      esac
+    done < <(LC_ALL=C "${jc[@]}" -n "$STATS_MAX" 2> /dev/null | LC_ALL=C awk "$AWK_STATS")
+    {
+      echo "cursor $cur"; echo "updated $t"
+      for k in "${!L[@]}"; do echo "H $k ${L[$k]} ${B[$k]}"; done
+      for k in "${!S[@]}"; do echo "S $k ${S[$k]}"; done
+    } > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+    upd=$t
+  fi
+  dir=$(ns_dir)
+  [[ -d $dir ]] && jb=$(du -sB1 "$dir" | cut -f1)
+  [[ -d $LOGDIR/$A ]] && ab=$(du -sB1 "$LOGDIR/$A" | cut -f1)
+  cap=$(bytes "$(setting log_max)")
+  local lines=0 by=0 sup=0 hl="" hb="" h
+  for ((h = hour0; h <= hour0 + 23 * 3600; h += 3600)); do
+    lines=$((lines + ${L[$h]:-0})); by=$((by + ${B[$h]:-0})); sup=$((sup + ${S[$h]:-0}))
+    hl+="${hl:+,}${L[$h]:-0}"; hb+="${hb:+,}${B[$h]:-0}"
+  done
+  req_roll
+  # (then: retention in hours, the request log's budget, and where the journal cap comes from)
+  row logs "$A" "$jb" "$cap" "$ab" "$lines" "$by" "$sup" "$hl" "$hb" "$((t - upd))" \
+    "$(hours "$(setting log_keep)")" "$RMAX" "$(setting_src log_max)"
+}
+
+cmd_log_stats() { # [app]
+  need_root
+  local a
+  install -d -m 700 "$CACHE"
+  if [[ -n ${1:-} ]]; then app "$1"; app_stats; return; fi
+  for a in "$R"/apps/*/app.conf; do
+    a=${a%/app.conf}; ( app "${a##*/}"; app_stats )
+  done
+}
+
+# ---- request log ------------------------------------------------------------------------------
+
+# fields of one Caddy access log line (JSON written by Caddy, headers removed by its filter)
+read -r -d '' AWK_REQLIB <<'AWK'
+function num(key,   p, r) {
+  p = index($0, ",\"" key "\":"); if (!p) return ""
+  r = substr($0, p + length(key) + 4, 32)
+  if (match(r, /^-?[0-9.eE+-]+/)) return substr(r, 1, RLENGTH)
+  return ""
+}
+function str(key,   p, r, q) {
+  p = index($0, ",\"" key "\":\""); if (!p) return ""
+  r = substr($0, p + length(key) + 5, 4096)
+  q = index(r, "\"")
+  if (q && !index(substr(r, 1, q), "\\")) return substr(r, 1, q - 1)   # no escapes: the common case
+  if (match(r, /^([^"\\]|\\.)*"/)) return substr(r, 1, RLENGTH - 1)
+  return ""
+}
+function hexval(h,   i, c, n) {
+  n = 0; h = tolower(h)
+  for (i = 1; i <= length(h); i++) {
+    c = index("0123456789abcdef", substr(h, i, 1)); if (!c) return -1; n = n * 16 + c - 1
+  }
+  return n
+}
+function cpdisp(cp) {
+  if (cp < 0) return "?"
+  if (cp < 32) return "^" sprintf("%c", cp + 64)
+  if (cp == 127) return "^?"
+  if (cp < 127) return sprintf("%c", cp)
+  if (cp < 160) return sprintf("\\x%02x", cp)
+  if (cp < 2048) return sprintf("%c%c", 192 + int(cp / 64), 128 + cp % 64)
+  if (cp >= 55296 && cp <= 57343) return "?"
+  return sprintf("%c%c%c", 224 + int(cp / 4096), 128 + int(cp / 64) % 64, 128 + cp % 64)
+}
+function unesc(s,   out, i, c) {
+  if (index(s, "\\") == 0) return s
+  out = ""
+  while ((i = index(s, "\\")) > 0) {
+    out = out substr(s, 1, i - 1); c = substr(s, i + 1, 1); s = substr(s, i + 2)
+    if (c == "u") { out = out cpdisp(hexval(substr(s, 1, 4))); s = substr(s, 5) }
+    else if (c == "n" || c == "r" || c == "t" || c == "b" || c == "f") out = out "\\" c
+    else out = out c
+  }
+  return out s
+}
+# printable text for a cell: no tabs, no control bytes, no C1 (Caddy's JSON escapes the rest)
+function clean(s) {
+  if (s ~ /^[ -~]*$/ && !index(s, "\\")) return s
+  s = unesc(s); gsub(/[\001-\037\177]/, "?", s); gsub(/\302[\200-\237]/, "?", s); return s
+}
+# /users/123/orders/9f86d081884c7d65 -> /users/:n/orders/:id ; query strings are already gone
+function normpath(u,   n, i, P, out, s) {
+  sub(/\?.*$/, "", u)
+  n = split(u, P, "/"); out = ""
+  for (i = 2; i <= n; i++) {
+    s = P[i]
+    if (s ~ /^[0-9]+$/) s = ":n"
+    else if (length(s) >= 16 && s ~ /^[0-9A-Fa-f-]+$/) s = ":id"
+    out = out "/" s
+  }
+  if (out == "") out = "/"
+  if (length(out) > 80) out = substr(out, 1, 79) "~"
+  return out
+}
+AWK
+
+# one pass over the window: totals, status codes, per-bucket counts, a log-scale latency
+# histogram (5% wide bins, so percentiles are within about 2.5%) and per-path aggregates.
+read -r -d '' AWK_SUMMARY <<'AWK'
+BEGIN {
+  W = ENVIRON["W"] + 0; NOW = ENVIRON["NOW"] + 0; FROM = NOW - W; NB = ENVIRON["NB"] + 0; BW = W / NB
+  LG = log(1.05); MAXP = 2000
+}
+{
+  t = num("ts") + 0
+  if (t > 0 && (oldest == 0 || t < oldest)) oldest = t
+  if (t < FROM || t > NOW + 1) { skipped++; next }
+  st = num("status") + 0; d = num("duration") + 0
+  # status 0: the client closed its side before the answer (Caddy 2.6 logs no status), but the
+  # app ran the request: counted as "aborted", never dropped. Unparsed only without a method
+  if (st == 0 && str("method") == "") { bad++; next }
+  tot++; code[st == 0 ? "aborted" : st]++; cls = int(st / 100); C[cls]++
+  b = int((t - FROM) / BW); if (b >= NB) b = NB - 1; rpm[b]++; if (cls == 5) e5[b]++
+  us = d * 1000000; bin = (us <= 10) ? 0 : int(log(us / 10) / LG) + 1; hist[bin]++; if (bin > maxbin) maxbin = bin
+  if (d > dmax) dmax = d
+  dsum += d
+  k = str("method") " " normpath(clean(str("uri")))
+  if (!(k in pc)) { if (np >= MAXP) k = "* (other paths)"; else np++ }
+  pc[k]++; ps[k] += d; if (d > pm[k]) pm[k] = d; if (cls == 5) p5[k]++
+}
+function pct(p,   need, cum, i) {
+  if (tot == 0) return 0
+  need = p * tot; cum = 0
+  for (i = 0; i <= maxbin; i++) { cum += hist[i]; if (cum >= need) return (i == 0) ? 0.01 : 0.01 * exp((i - 0.5) * LG) }
+  return dmax * 1000
+}
+END {
+  printf "window=%d\nfrom=%d\nto=%d\nbucket=%g\ntotal=%d\n", W, FROM, NOW, BW, tot
+  for (i = 1; i <= 5; i++) printf "c%dxx=%d\n", i, C[i]
+  printf "p50_ms=%.2f\np95_ms=%.2f\np99_ms=%.2f\n", pct(0.5), pct(0.95), pct(0.99)
+  printf "max_ms=%.2f\navg_ms=%.2f\n", dmax * 1000, tot ? dsum * 1000 / tot : 0
+  s = ""; e = ""; for (i = 0; i < NB; i++) { s = s (i ? "," : "") rpm[i] + 0; e = e (i ? "," : "") e5[i] + 0 }
+  printf "counts=%s\ncounts_5xx=%s\nunparsed=%d\npaths=%d\n", s, e, bad, np
+  # the request log may hold less than the window (rotation by size): oldest line read
+  printf "oldest=%d\n", oldest
+  for (c in code) printf "code\t%s\t%d\n", c, code[c]
+  for (k in pc) printf "path\t%s\t%d\t%.2f\t%.2f\t%d\n", k, pc[k], ps[k] * 1000 / pc[k], pm[k] * 1000, p5[k]
+}
+AWK
+
+read -r -d '' AWK_REQROWS <<'AWK'
+BEGIN {
+  FROM = ENVIRON["FROM"] + 0; MINST = ENVIRON["MINST"] + 0; N = ENVIRON["N"] + 0; FLUSH = ENVIRON["FLUSH"] == "1"
+}
+{
+  t = num("ts") + 0; st = num("status") + 0
+  # status 0 (client half-closed; Caddy 2.6): the app ran it, shown as "aborted", also in errors
+  if (t < FROM || (st < MINST && st != 0) || (st == 0 && str("method") == "")) next
+  line = sprintf("req\t%.3f\t%s\t%.2f\t%s\t%s\t%s\t%s", t, st ? st : "aborted", num("duration") * 1000, clean(str("method")),
+    clean(str("uri")), num("size") + 0, clean((ip = str("client_ip")) != "" ? ip : str("remote_ip")))
+    # (client_ip exists from Caddy 2.7)
+  if (FLUSH) { print line; fflush(); next }
+  R[++n] = line; if (n > N) delete R[n - N]
+}
+END { if (!FLUSH) for (i = (n > N ? n - N + 1 : 1); i <= n; i++) print R[i] }
+AWK
+
+# access log files that may hold lines newer than $1, oldest first: rolled files (gzip'd by Caddy
+# once rolled; a fresh roll may still be plain) and the current one. A file's mtime is its newest line
+req_files() {
+  local since=$1 f m
+  for f in "$LOGDIR/$A"/access-*.log "$LOGDIR/$A"/access-*.log.gz "$LOGDIR/$A"/access.log; do
+    [[ -f $f && ! -L $f ]] || continue
+    m=$(stat -c %Y "$f")
+    ((m >= since)) && echo "$m $f"
+  done | sort -n -k1,1 | cut -d' ' -f2-
+}
+# req_cat files...: their lines, oldest file first, decompressing the gzip'd ones
+req_cat() { zcat -f -- "$@" 2> /dev/null; }
+
+cmd_req_summary() { # app seconds
+  need_root; app "${1:-}"
+  local w=${2:-900} nb files=()
+  if [[ ! $w =~ ^[0-9]{1,6}$ ]] || ((w < 60 || w > 604800)); then die "bad window"; fi
+  nb=$((w / 60)); ((nb > 60)) && nb=60
+  mapfile -t files < <(req_files $(( $(now) - w )))
+  echo "files=${#files[@]}"
+  ((${#files[@]})) || { W=$w NOW=$(now) NB=$nb LC_ALL=C awk "$AWK_REQLIB$AWK_SUMMARY" < /dev/null; return 0; }
+  req_cat "${files[@]}" | W=$w NOW=$(now) NB=$nb LC_ALL=C awk "$AWK_REQLIB$AWK_SUMMARY"
+}
+
+cmd_req_tail() { # app n [follow]
+  need_root; app "${1:-}"
+  local n=${2:-20} f=$LOGDIR/$A/access.log
+  [[ $n =~ ^[0-9]{1,5}$ ]] || die "bad count"
+  [[ -f $f ]] || die "no request log for $A (access_log = off, or no request yet)"
+  export LC_ALL=C FROM=0 MINST=0 N=$n
+  if [[ ${3:-} == follow ]]; then
+    local aw=(awk)
+    awk -W version 2>&1 | grepq mawk && aw+=(-W interactive)
+    tail -n "$n" -F "$f" 2> /dev/null | FLUSH=1 "${aw[@]}" "$AWK_REQLIB$AWK_REQROWS"
+  else
+    # the newest n across the current file and the newest rolled one (a roll just happened)
+    local files=() all=()
+    mapfile -t all < <(req_files 0)
+    files=("${all[@]}"); ((${#all[@]} > 2)) && files=("${all[@]: -2}")   # (a slice past the start is empty)
+    req_cat "${files[@]}" | tail -n "$n" | FLUSH=0 awk "$AWK_REQLIB$AWK_REQROWS"
+  fi
+}
+
+cmd_req_errors() { # app seconds n [4xx]
+  need_root; app "${1:-}"
+  local w=${2:-3600} n=${3:-20} files=()
+  [[ $w =~ ^[0-9]{1,6}$ && $n =~ ^[0-9]{1,4}$ ]] || die "bad window or count"
+  mapfile -t files < <(req_files $(( $(now) - w )))
+  ((${#files[@]})) || return 0
+  req_cat "${files[@]}" | LC_ALL=C FROM=$(( $(now) - w )) MINST=$([[ ${4:-} == 4xx ]] && echo 400 || echo 500) N=$n \
+    FLUSH=0 awk "$AWK_REQLIB$AWK_REQROWS"
+}
+
+# ---- error and request scan: incremental, once a minute (tando-watch) and for tando errors -----
+
+# Per app in $SCAN/<app>/ (root 700): the journal cursor, the request log position, the error
+# groups (groups.tsv, at most GROUPS_MAX) and one sample per group (samples/<id>, at most 30 lines
+# of 240 characters). A scan reads only what was written since the last one, at most SCAN_LINES
+# journal entries and SCAN_BYTES of request log (beyond that the oldest part is skipped and
+# counted), so its cost follows the log rate and has a ceiling.
+SCAN=/var/lib/tando/logscan
+SCAN_LINES=20000
+SCAN_BYTES=$((8 * 1048576))
+GROUPS_MAX=200
+
+# awk: groups the app's journal lines (journalctl -o short-unix --show-cursor) into error events.
+# An event is a line that looks like an error (level words, JSON levels, error/exception/panic/
+# traceback/unhandled/fatal) plus the lines of its stack trace that follow from the same process
+# within 2 s: Node ("    at f (file:l:c)"), Python ("Traceback ...", '  File "f", line n, in g',
+# the code lines, the final "KeyError: ..."), Go ("panic: ...", "goroutine 1 [running]:", functions
+# and "\t/file.go:42 +0x1d"). Fingerprint: exception type + first frame of the app's own code
+# (not node_modules, node:internal, site-packages, runtime.), numbers, hex and ids replaced, line
+# numbers dropped, so a group survives redeploys; plain error lines: the message, normalised.
+# Output: E ts id kind label fingerprint title | L id line (sample, first event of an id) |
+# S suppressed-count | C cursor | N lines-read
+read -r -d '' AWK_ERRSCAN <<'AWK'
+function hx(s,   h, i) { h = 5381; for (i = 1; i <= length(s); i++) h = (h * 33 + ORD[substr(s, i, 1)]) % 4294967296
+  return sprintf("%08x", h) }
+function ishexrun(s) { return s ~ /[0-9]/ && s ~ /^[0-9a-fA-F]+$/ }
+function norm(s,   out, w, i, n, P, c) {
+  gsub(/0x[0-9a-fA-F]+/, "<hex>", s)
+  # words of 8+ hex digits with a digit in them (ids, hashes, uuids' parts) -> <id>
+  n = split(s, P, /[^0-9A-Za-z]/); out = s
+  for (i = 1; i <= n; i++) if (length(P[i]) >= 8 && ishexrun(P[i])) { c = index(out, P[i]); if (c) out = substr(out, 1, c - 1) "<id>" substr(out, c + length(P[i])) }
+  s = out
+  gsub(/<id>-<id>(-<id>)*/, "<id>", s)
+  gsub(/[0-9]+/, "<n>", s)
+  return s
+}
+function cleanl(s) { gsub(/[\001-\037\177]/, "?", s); if (length(s) > 240) s = substr(s, 1, 239) "~"; return s }
+function isstart(m,   l) {
+  if (m ~ /^Traceback \(most recent call last\):/) return "py"
+  if (m ~ /^(panic: |fatal error: )/) return "go"
+  if (m ~ /^(Uncaught |Unhandled )?([A-Za-z_$][A-Za-z0-9_$]*\.)*[A-Za-z_$][A-Za-z0-9_$]*(Error|Exception)( \[[A-Z_]+\])?(: |:$|$)/) return "node"
+  l = tolower(substr(m, 1, 400))
+  if (l ~ /(^|[^a-z])(error|exception|panic|traceback|unhandled|fatal|critical)([^a-z]|$)/) return "line"
+  if (l ~ /"level": *(50|60)[,}]/) return "line"
+  # an exception name after a logger's prefix ("12:00:01 [api] TypeError: x"): "typeerror" has no
+  # word break before "error", so the rule above does not see it
+  if (m ~ /(^|[^A-Za-z0-9_])[A-Z][A-Za-z0-9_]*(Error|Exception)(: |:$)/) return "line"
+  return ""
+}
+function iscont(m) {
+  if (m ~ /^[ \t]+at / || m ~ /^  File "/ || m ~ /^\t/ || m ~ /^    /) return 1
+  if (K == "py" && (m ~ /^During handling of the above exception/ || m ~ /^The above exception was/)) { PYEND = 0; return 1 }
+  if (K == "py" && !PYEND && m ~ /^Traceback \(most/) return 1
+  if (K == "py" && m !~ /^ / && m ~ /^[A-Za-z_][A-Za-z0-9_.]*(: |:$|$)/ && !PYEND) { PYEND = 1; PYT = m; return 1 }
+  if (K == "go" && (m == "" || m ~ /^goroutine [0-9]+ \[/ || m ~ /^[A-Za-z0-9_.\/*()-]+\(.*\)$/ || m ~ /^exit status [0-9]+$/ || m ~ /^\[signal / || m ~ /^created by /)) return 1
+  if (K == "line" && NL == 1 && m ~ /^Traceback \(most recent call last\):/) { K = "py"; PYEND = 0; return 1 }   # logging.exception
+  if (m ~ /^Caused by: /) return 1
+  return 0
+}
+function flush(   typ, fr, i, l, lab, fp, id, title) {
+  if (NL == 0) return
+  typ = ""; fr = ""
+  if (K == "node") {
+    typ = EV[1]; sub(/^(Uncaught |Unhandled )/, "", typ); sub(/:.*/, "", typ)
+    for (i = 2; i <= NL; i++) { l = EV[i]
+      if (l ~ /^[ \t]+at / && l !~ /node_modules|node:|\(internal\/|\(<anonymous>\)/) { fr = l; sub(/^[ \t]+at /, "", fr); break } }
+  } else if (K == "py") {
+    typ = PYT; sub(/:.*/, "", typ); if (typ == "") typ = "Traceback"
+    for (i = 1; i <= NL; i++) { l = EV[i]
+      if (l ~ /^  File "/ && l !~ /site-packages|dist-packages|lib\/python[0-9.]*\//) {
+        fr = l; sub(/^  File "/, "", fr); sub(/", line [0-9]+, in /, ":", fr) } }
+  } else if (K == "go") {
+    typ = "Go panic"; fpx = EV[1]; sub(/^(panic|fatal error): /, "", fpx)
+    for (i = 2; i <= NL; i++) { l = EV[i]
+      if (l ~ /^[A-Za-z0-9_.\/*()-]+\(.*\)$/ && l !~ /^runtime\./) { fr = l; sub(/\(.*$/, "", fr); break } }
+  }
+  if (fr != "") { gsub(/file:\/\//, "", fr); gsub(/\/opt\/tando\/apps\/[a-z0-9-]+\/(releases\/[0-9-]+\/)?/, "", fr); gsub(/\/releases\/[0-9-]+\//, "/", fr); gsub(/:[0-9]+(:[0-9]+)?/, "", fr); fr = norm(fr) }
+  if (length(fr) > 100) fr = "~" substr(fr, length(fr) - 98)
+  if (K == "line") { lab = "error line"; fp = "line|" substr(norm(EV[1]), 1, 140) }
+  else { lab = typ (fr != "" ? " at " fr : ""); fp = K "|" typ "|" fr (K == "go" ? "|" substr(norm(fpx), 1, 80) : "") }
+  gsub(/[\t]/, " ", lab); gsub(/[\t]/, " ", fp)
+  id = hx(fp)
+  title = cleanl(EV[1]); gsub(/\t/, " ", title)
+  print "E\t" T0 "\t" id "\t" K "\t" cleanl(lab) "\t" cleanl(fp) "\t" title; nev++
+  if (!(id in SEEN) && nsamp < 50) { SEEN[id] = 1; nsamp++; for (i = 1; i <= NL && i <= 30; i++) { l = cleanl(EV[i]); gsub(/\t/, "    ", l); print "L\t" id "\t" l } }
+  NL = 0; K = ""; PYEND = 0; PYT = ""
+}
+BEGIN { for (i = 1; i < 256; i++) ORD[sprintf("%c", i)] = i }
+/^-- cursor: / { cur = substr($0, 12); next }
+{
+  nread++
+  ts = $1 + 0; p = index($0, "]: "); if (p == 0) next
+  hdr = substr($0, 1, p); m = substr($0, p + 3, 4000)
+  pid = hdr; sub(/^.*\[/, "", pid); sub(/\]$/, "", pid)
+  if (hdr ~ / systemd-journald\[/) { if (match(m, /^Suppressed [0-9]+ messages/)) sup += substr(m, 12, RLENGTH - 20); next }
+  if (NL > 0 && pid == EP && ts - TL <= 2 && NL < 400 && iscont(m)) { if (NL < 30) EV[NL + 1] = m; NL++; TL = ts; next }
+  flush()
+  k = isstart(m)
+  if (k != "") { K = k; NL = 1; EV[1] = m; EP = pid; T0 = int(ts); TL = ts; PYEND = 0; PYT = "" }
+}
+END { flush(); SUMF = ENVIRON["SUMF"]
+  printf "S %d\nN %d\nV %d\n", sup, nread, nev > SUMF; if (cur != "") print "C " cur > SUMF; close(SUMF) }
+AWK
+
+# awk: merges this scan's events into groups.tsv. Columns: id count first last release kind label
+# fingerprint title hours ("hour:count,..." for the last 7 days). Prints the new table to OUT and
+# "NEW id ts" for groups that did not exist (unless BASE=1: the first scan of an app only learns)
+read -r -d '' AWK_ERRMERGE <<'AWK'
+BEGIN { FS = OFS = "\t"; REL = ENVIRON["REL"]; NOW = ENVIRON["NOW"] + 0; H0 = int(NOW / 3600) * 3600 - 167 * 3600
+  nrl = split(ENVIRON["RELS"], RL, ",")
+  OUT = ENVIRON["OUT"]; BASE = ENVIRON["BASE"] == "1"; MAX = ENVIRON["MAX"] + 0 }
+FILENAME == ARGV[1] { if (NF >= 10) { G[$1] = $0; ORDER[++n] = $1 } next }
+$1 == "E" {
+  id = $3; t = $2 + 0; h = int(t / 3600) * 3600
+  if (!(id in G)) { G[id] = id OFS 0 OFS t OFS t OFS relat(t) OFS $4 OFS $5 OFS $6 OFS $7 OFS ""; ORDER[++n] = id
+    if (!BASE) NEWT[id] = t }
+  split(G[id], F, "\t"); F[2]++; if (t < F[3]) F[3] = t; if (t > F[4]) F[4] = t
+  F[10] = addh(F[10], h)
+  G[id] = F[1]; for (i = 2; i <= 10; i++) G[id] = G[id] OFS F[i]
+  CNT[id]++
+}
+# the release live at time t: the last switch at or before it ("epoch:id" pairs, oldest first)
+function relat(t,   i, q, r) { r = ""; for (i = 1; i <= nrl; i++) { split(RL[i], q, ":"); if (q[1] + 0 <= t + 1) r = q[2] }
+  return r != "" ? r : (REL == "" ? "-" : REL) }
+function addh(s, h,   n, P, i, out, done, q) {
+  n = split(s, P, ","); out = ""; done = 0
+  for (i = 1; i <= n; i++) { split(P[i], q, ":"); if (q[1] + 0 < H0) continue
+    if (q[1] + 0 == h) { q[2]++; done = 1 }
+    out = out (out == "" ? "" : ",") q[1] ":" q[2] }
+  if (!done) out = out (out == "" ? "" : ",") h ":1"
+  return out
+}
+END {
+  # newest last-seen first, at most MAX groups
+  m = 0; for (i = 1; i <= n; i++) { id = ORDER[i]; if (id in DONE) continue; DONE[id] = 1; split(G[id], F, "\t"); L[++m] = F[4] "\t" id }
+  for (i = 2; i <= m; i++) { x = L[i]; j = i - 1; while (j >= 1 && (L[j] + 0) < (x + 0)) { L[j + 1] = L[j]; j-- } L[j + 1] = x }
+  for (i = 1; i <= m && i <= MAX; i++) { split(L[i], q, "\t"); print G[q[2]] > OUT; KEEP[q[2]] = 1 }
+  for (i = MAX + 1; i <= m; i++) { split(L[i], q, "\t"); print "DROP\t" q[2] }
+  for (id in NEWT) if (id in KEEP) { split(G[id], F, "\t"); print "NEW\t" id "\t" NEWT[id] "\t" CNT[id] "\t" F[6] "\t" F[7] }
+  for (id in CNT) if (id in KEEP) { split(G[id], F, "\t"); print "CNT\t" id "\t" CNT[id] "\t" F[7] }
+}
+AWK
+
+# awk: the requests of a chunk of request log: count, 5xx, p95 latency, top failing paths
+read -r -d '' AWK_REQSCAN <<'AWK'
+BEGIN { LG = log(1.05); CH = ENVIRON["CH"] + 0 }
+# one line behind: the last one counts only if it ended with a newline (all CH bytes are lines)
+{ if (havep) { nb += length(prev) + 1; line = $0; $0 = prev; one(); $0 = line } prev = $0; havep = 1 }
+END { if (havep && nb + length(prev) + 1 <= CH) { nb += length(prev) + 1; $0 = prev; one() } done() }
+function one() {
+  st = num("status") + 0
+  if (st == 0 && str("method") == "") return
+  tot++; d = num("duration") * 1000000
+  bin = (d <= 10) ? 0 : int(log(d / 10) / LG) + 1; hist[bin]++; if (bin > maxbin) maxbin = bin
+  if (st >= 500) { e5++; k = clean(str("method")) " " normpath(clean(str("uri"))); gsub(/\t/, " ", k); FC[k]++; FST[k] = st }
+}
+function done(   p95, need, c, i, r, best, bc, k) {
+  printf "B\t%d\n", nb
+  p95 = 0
+  if (tot > 0) { need = 0.95 * tot; c = 0; for (i = 0; i <= maxbin; i++) { c += hist[i]; if (c >= need) { p95 = (i == 0) ? 0.01 : 0.01 * exp((i - 0.5) * LG); break } } }
+  printf "Q\t%d\t%d\t%d\n", tot, e5, p95 + 0.5
+  for (r = 1; r <= 3; r++) { best = ""; bc = 0; for (k in FC) if (FC[k] > bc) { bc = FC[k]; best = k }
+    if (best == "") break; printf "T\t%d\t%d\t%s\n", bc, FST[best], best; delete FC[best] }
+}
+AWK
+
+# every switch of the live release (from history.tsv), oldest first, as "epoch:id,..." (last 50)
+release_switches() {
+  awk -F'\t' '$4 == "ok" && ($3 == "deploy" || $3 == "rollback") { s[++n] = int($1 - ($11 + 0)) ":" $2 }
+    END { for (i = (n > 50 ? n - 49 : 1); i <= n; i++) printf "%s%s", (i > (n > 50 ? n - 49 : 1) ? "," : ""), s[i] }' \
+    "$R/apps/$A/history.tsv" 2> /dev/null
+}
+# the release that went live last, and when (from history.tsv): "id epoch" or nothing
+live_release() {
+  awk -F'\t' '$4 == "ok" && ($3 == "deploy" || $3 == "rollback") { id = $2; t = $1 - ($11 + 0) }
+    $4 == "rolledback" { t = $1 } END { if (id != "") printf "%s %d\n", id, t }' "$R/apps/$A/history.tsv" 2> /dev/null
+}
+
+# scan the app $A: journal since the cursor, request log since the position. Prints for tando-watch:
+#   scan <app> <journal lines read> <error events> <suppressed> <requests> <5xx> <p95 ms> <skipped>
+#   top <app> <count> <status> <method path>          (up to 3 failing paths)
+#   newerr <app> <id> <first ts> <count> <kind> <label>   (a group seen for the first time)
+#   release <app> <id> <live since>
+app_scan() {
+  local d=$SCAN/$A lf cur="" base=0 jc k a b c e f rel="" relt="" nread=0 nev=0 sup=0 skip=0 nc=""
+  # (every fork counts: this runs for every app once a minute on a 1-vCPU server)
+  [[ -d $d/samples ]] || install -d -m 700 "$SCAN" "$d" "$d/samples"
+  exec {lf}> "$d/lock"; flock -w 20 "$lf" || return 0
+  [[ -f $d/cursor ]] && read -r cur < "$d/cursor"
+  # ---- journal
+  if [[ -f $(ns_conf) ]]; then
+    jc=(journalctl --no-pager -q -o short-unix --show-cursor "--namespace=$(ns)" -u "tando-$A.service"
+      -u "systemd-journald@$(ns).service" -n "$SCAN_LINES")
+    # the first scan learns what is already there (24 h) without reporting it as new
+    if [[ $cur =~ ^[A-Za-z0-9=\;_-]+$ ]]; then jc+=("--after-cursor=$cur"); else base=1; jc+=(--since=-24h); fi
+    : > "$d/sum.$$"
+    LC_ALL=C "${jc[@]}" 2> /dev/null | SUMF=$d/sum.$$ LC_ALL=C awk "$AWK_ERRSCAN" > "$d/scan.$$"
+    while read -r k a; do
+      case $k in C) nc=$a;; N) nread=$a;; S) sup=$a;; V) nev=$a;; esac
+    done < "$d/sum.$$"
+    rm -f "$d/sum.$$"
+    if ((nev > 0)) || [[ ! -f $d/groups.tsv ]]; then
+      read -r rel relt < <(live_release) || true
+      touch "$d/groups.tsv"
+      OUT=$d/groups.tsv.new REL=$rel RELS=$(release_switches) NOW=$(now) BASE=$base MAX=$GROUPS_MAX LC_ALL=C \
+        awk "$AWK_ERRMERGE" "$d/groups.tsv" "$d/scan.$$" > "$d/merge.$$"
+      [[ -f $d/groups.tsv.new ]] || : > "$d/groups.tsv.new"
+      mv -f "$d/groups.tsv.new" "$d/groups.tsv"
+      # samples: the first event's lines of a group without one; dropped groups lose theirs
+      awk -F'\t' -v dir="$d/samples" '$1 == "L" && $2 ~ /^[0-9a-f]+$/ { f = dir "/" $2
+        if (!($2 in chk)) { chk[$2] = 1; have[$2] = (getline x < f) > 0; close(f); if (!have[$2]) printf "" > f }
+        if (!have[$2]) { print $3 >> f; close(f) } }' "$d/scan.$$"
+      local tc=0 tl=""
+      while IFS=$'\t' read -r k a b c e f; do
+        case $k in
+          DROP) [[ $a =~ ^[0-9a-f]{8}$ ]] && rm -f "$d/samples/$a";;
+          NEW) row newerr "$A" "$a" "$b" "$c" "$e" "$f";;
+          CNT) ((b > tc)) && { tc=$b; tl="$c [$a]"; };;
+        esac
+      done < "$d/merge.$$"
+      ((tc > 0 && !base)) && row errtop "$A" "$tc" "$tl"
+      [[ -n $rel ]] && row release "$A" "$rel" "${relt:-0}"
+      rm -f "$d/merge.$$"
+    fi
+    rm -f "$d/scan.$$"
+    [[ -n $nc ]] && { echo "$nc" > "$d/cursor.tmp" && mv -f "$d/cursor.tmp" "$d/cursor"; }
+  fi
+  # ---- request log: from the saved position of the current file (a rolled file: from its start)
+  local f=$LOGDIR/$A/access.log ino size pos=0 pino="" tot=0 e5=0 p95=0
+  if [[ -f $f && ! -L $f ]]; then
+    read -r ino size < <(stat -c '%i %s' "$f")
+    [[ -f $d/req ]] && read -r pino pos < "$d/req"
+    [[ $pino == "$ino" && $pos =~ ^[0-9]+$ ]] && ((pos <= size)) || pos=0
+    [[ -z $pino ]] && pos=$size    # first scan: start at the end
+    if ((size - pos > SCAN_BYTES)); then skip=$((size - pos - SCAN_BYTES)); pos=$((size - SCAN_BYTES)); fi
+    if ((size > pos)); then
+      # exactly the bytes up to the size seen; a last line still being written (no newline yet)
+      # is left for the next scan (awk reports the bytes of whole lines: B)
+      while IFS=$'\t' read -r k a b c; do
+        case $k in Q) tot=$a e5=$b p95=$c;; T) row top "$A" "$a" "$b" "$c";; B) size=$((pos + a));; esac
+      done < <(tail -c "+$((pos + 1))" "$f" | head -c "$((size - pos))" |
+        CH=$((size - pos)) LC_ALL=C awk "$AWK_REQLIB$AWK_REQSCAN")
+    fi
+    [[ $pino == "$ino" && $size == "$pos" ]] || { echo "$ino $size" > "$d/req.tmp" && mv -f "$d/req.tmp" "$d/req"; }
+  fi
+  row scan "$A" "${nread:-0}" "${nev:-0}" "${sup:-0}" "$tot" "$e5" "$p95" "$skip"
+  flock -u "$lf"
+}
+
+cmd_watch_scan() { # [app...]: every app with a release when none is named
+  need_root
+  local a f
+  if (($#)); then for a; do ( app "$a"; app_scan ); done; return 0; fi
+  for f in "$R"/apps/*/state; do
+    a=${f%/state}; a=${a##*/}
+    valid_app "$a" && grepq '^current=.' "$f" || continue
+    ( app "$a"; app_scan )   # (static sites: only their request log)
+  done
+}
+
+# errors <app> <seconds> [n]: scan first, then the groups seen within the window, newest first:
+#   err <id> <count in window> <count total> <first> <last> <release> <kind> <label> <title>
+#   sample <id> <line>        (the sample of each group shown, at most 30 lines)
+cmd_errors() {
+  need_root; app "${1:-}"
+  local w=${2:-86400} n=${3:-20} d=$SCAN/$A
+  [[ $w =~ ^[0-9]{1,8}$ && $n =~ ^[0-9]{1,3}$ ]] || die "bad window or count"
+  app_scan > /dev/null
+  [[ -s $d/groups.tsv ]] || return 0
+  awk -F'\t' -v from=$(( $(now) - w )) -v n="$n" '
+    { if ($4 < from) next
+      c = 0; k = split($10, P, ","); for (i = 1; i <= k; i++) { split(P[i], q, ":"); if (q[1] + 3600 > from) c += q[2] }
+      if (c == 0) c = 1
+      r[++m] = $4 "\t" $1 "\t" c "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7 "\t" $9 }
+    END { for (i = 2; i <= m; i++) { x = r[i]; j = i - 1; while (j >= 1 && (r[j] + 0) < (x + 0)) { r[j + 1] = r[j]; j-- } r[j + 1] = x }
+      for (i = 1; i <= m && i <= n; i++) { sub(/^[^\t]*\t/, "", r[i]); print "err\t" r[i] } }' "$d/groups.tsv" > "$d/out.$$"
+  local k id
+  cat "$d/out.$$"
+  while IFS=$'\t' read -r k id _; do
+    [[ $id =~ ^[0-9a-f]{8}$ && -f $d/samples/$id ]] && sed "s/^/sample\t$id\t/" "$d/samples/$id"
+  done < "$d/out.$$"
+  rm -f "$d/out.$$"
+}
+
+# ---- audit trail ------------------------------------------------------------------------------
+
+# who and from where: the sudo user and the ssh client address of the calling session (found in
+# the environment of an ancestor process); internal runs (timers, boot) are "system".
+audit_origin() {
+  local p=$PPID e ip=""
+  WHO=${SUDO_USER:-}
+  while ((p > 1)); do
+    if [[ -r /proc/$p/environ ]]; then
+      while IFS= read -r -d '' e; do
+        [[ $e == SSH_CONNECTION=* ]] && { e=${e#SSH_CONNECTION=}; ip=${e%% *}; break; }
+      done < "/proc/$p/environ" 2> /dev/null
+      [[ -n $ip ]] && break
+    fi
+    local st=""
+    read -r st < "/proc/$p/stat" 2> /dev/null || break
+    st=${st##*) }; st=${st#* }; p=${st%% *}             # "pid (comm) state ppid ..."
+    [[ $p =~ ^[0-9]+$ ]] || break
+  done
+  # an activation runs in its own unit: the agent passes the requester along
+  if [[ -z $WHO && -z $ip ]]; then
+    WHO=${TANDO_AUDIT_WHO:-system}; ip=${TANDO_AUDIT_FROM:-local}
+  fi
+  [[ $WHO =~ ^[A-Za-z0-9_.@-]{1,64}$ ]] || WHO=unknown
+  [[ $ip =~ ^[0-9A-Fa-f.:]{1,45}$ || $ip == local ]] || ip=unknown
+  FROM=${ip:-local}
+}
+
+cmd_audit_write() { # verb app rc|result [note]
+  need_root
+  local verb=${1:-} app=${2:--} rc=${3:-} note=${4:-} res t fd
+  [[ $verb =~ ^[a-z][a-z0-9-]{0,30}$ ]] || die "bad verb"
+  [[ $app == - ]] || valid_app "$app" || app=-
+  case $rc in
+    0) res=ok;; [0-9]*) res="fail($rc)";; ok|failed|rolledback|started) res=$rc;; *) res=unknown;;
+  esac
+  note=$(printf '%s' "$note" | LC_ALL=C tr '\t\n' '  ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-300)
+  audit_origin
+  t=$(now)
+  install -d -m 755 -o root -g root "$LOGDIR"
+  [[ -f $AUDIT ]] || install -m 640 -o root -g adm /dev/null "$AUDIT"
+  exec {fd}>> "$AUDIT"
+  flock -w 10 "$fd" || die "audit log busy"
+  if (( $(stat -c %s "$AUDIT") > AUDIT_MAX )); then
+    local i
+    for ((i = 3; i >= 1; i--)); do [[ -f $AUDIT.$i ]] && mv -f "$AUDIT.$i" "$AUDIT.$((i + 1))"; done
+    mv -f "$AUDIT" "$AUDIT.1"
+    install -m 640 -o root -g adm /dev/null "$AUDIT"
+    exec {fd}>> "$AUDIT"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$t" "$WHO" "$FROM" "$verb" "$app" "$res" "${note:--}" >&"$fd"
+  # a second copy in the main journal, out of reach of a plain edit of the file
+  logger -t tando-audit -- "who=$WHO from=$FROM verb=$verb app=$app result=$res${note:+ note=$note}" 2> /dev/null
+  return 0
+}
+
+cmd_audit_origin() { audit_origin; echo "$WHO $FROM"; }   # for the agent's activate
+
+cmd_audit_read() { # [app] [n]
+  need_root
+  local app=${1:-} n=${2:-50} f
+  [[ -z $app || $app == - ]] || valid_app "$app" || die "invalid app name"
+  [[ $n =~ ^[0-9]{1,5}$ ]] || die "bad count"
+  local files=()
+  for f in "$AUDIT".4 "$AUDIT".3 "$AUDIT".2 "$AUDIT".1 "$AUDIT"; do [[ -f $f ]] && files+=("$f"); done
+  ((${#files[@]})) || return 0
+  cat "${files[@]}" | awk -F'\t' -v app="${app:--}" -v n="$n" '
+    NF >= 7 && (app == "-" || $5 == app) { r[++k] = "audit\t" $0; if (k > n) delete r[k - n] }
+    END { for (i = (k > n ? k - n + 1 : 1); i <= k; i++) print r[i] }' | LC_ALL=C tr -d '\000-\010\013-\037\177'
+}
+
+# ---- doctor ---------------------------------------------------------------------------------
+
+cmd_log_doctor() {
+  local a n=0 sum=0 miss=() avail used
+  H=(); load "$LCONF" H
+  if [[ -f /etc/systemd/journald.conf.d/tando.conf ]]; then
+    used=$(journalctl --disk-usage 2> /dev/null | grep -o '[0-9.]*[KMGT]' | head -1)
+    row check ok "main journal" "capped at ${H[journal_max]:-${D[journal_max]}} (${used:-?} used)"
+  else row check warn "main journal" "no tando cap: run tando host setup"; fi
+  for a in "$R"/apps/*/app.conf; do
+    a=${a%/app.conf}; a=${a##*/}; n=$((n + 1))
+    ( app "$a"; [[ -f $(ns_conf) ]] ) || { miss+=("$a"); continue; }
+    sum=$(( sum + $( app "$a"; bytes "$(setting log_max)") ))
+    sum=$(( sum + $( app "$a"; req_roll; echo "$RMAX") ))
+  done
+  if ((${#miss[@]})); then row check warn "app logs" "no log cap yet for: ${miss[*]} (tando up applies it)"
+  else row check ok "app logs" "$n apps in their own capped journals"; fi
+  # the caps can only fill what is still free: compare what the logs may still grow by (the caps
+  # minus what they hold now) with the free space
+  local held=0 d
+  for d in /var/log/journal/*.tando-* "$LOGDIR"/*/; do
+    [[ -d $d ]] && held=$(( held + $(du -sB1 "$d" 2> /dev/null | cut -f1) ))
+  done
+  read -r _ _ _ avail _ < <(df -Pk /var/log | tail -1)
+  if ((sum - held > avail * 1024)); then
+    row check warn "log caps" "app log caps $((sum / 1048576)) MB: they may still grow by $(( (sum - held) / 1048576 )) MB, only $((avail / 1024)) MB free (lower log_max in tando.conf)"
+  else row check ok "log caps" "$((sum / 1048576)) MB of app log caps ($((held / 1048576)) MB used), $((avail / 1024)) MB free"; fi
+}
+
+# ---- dispatch -------------------------------------------------------------------------------
+
+verb=${1:-}
+shift || true
+case $verb in
+  logs) cmd_logs "$@";;
+  log-stats) cmd_log_stats "$@";;
+  log-doctor) cmd_log_doctor;;
+  req-summary) cmd_req_summary "$@";;
+  req-tail) cmd_req_tail "$@";;
+  req-errors) cmd_req_errors "$@";;
+  watch-scan) cmd_watch_scan "$@";;
+  errors) cmd_errors "$@";;
+  audit-read) cmd_audit_read "$@";;
+  audit-write) cmd_audit_write "$@";;
+  audit-origin) cmd_audit_origin;;
+  host-setup) cmd_host_setup "$@";;
+  app-setup) cmd_app_setup "$@";;
+  app-remove) cmd_app_remove "$@";;
+  unit-props) cmd_unit_props "$@";;
+  caddy-log) cmd_caddy_log "$@";;
+  valid) cmd_valid "$@";;
+  *) die "unknown verb: $verb";;
+esac
+exit 0

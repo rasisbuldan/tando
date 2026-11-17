@@ -1,0 +1,5 @@
+{
+  "name": "tando-notes-example",
+  "private": true,
+  "dependencies": { "pg": "8.16.3" }
+}

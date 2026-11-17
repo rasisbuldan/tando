@@ -1,0 +1,901 @@
+# tando-adopt: the server side of `tando adopt` (docs/MIGRATION.md). Not run on its own: the client
+# installs it on demand as /opt/tando/bin/tando-adopt (root, 644) before an adopt command, and
+# tando-agent sources it for the adopt-* verbs, so it uses the agent's functions (row, die, load,
+# save, props, write_unit, probe, via_caddy, link_shared, make_writable, env_save, hist, ...).
+# Kept out of the agent: it is one-off migration code, about 650 lines.
+#
+# What production depends on stays: the port, the app's user, its data directory, its env file
+# (referenced by the unit, never copied or printed), the hand-written Caddy site (caddy=external),
+# and the path Caddy serves files from (<root>/current becomes a link to tando's current release).
+# What changes: the unit (tando-<app> with tando's sandbox), releases under /opt/tando/apps/<app>,
+# and timers that call the app become tando jobs, handed over so that no run is doubled or lost.
+# Everything is recorded and backed up first. `adopt-undo` converges back to the recorded state;
+# a failed `adopt-apply` does the same before it reports.
+
+AD=$R/adopt
+# the client installs this file from its own tree on every adopt call; the agent on the server may
+# be older and lack helpers used here: refuse with the way out instead of failing half-way
+for _f in lockfile fw_sync lock_mark app_slice; do
+  declare -F "$_f" > /dev/null ||
+    die "the tando agent on this server is older than this adopt helper: run tando host setup <host> first"
+done
+unset _f
+declare -A F J0
+ROWS=() BLOCKS=() JOBS=()
+
+sp() { systemctl show -P "$2" "$1" 2> /dev/null; }
+sha() { if [[ -e $1 ]]; then sha256sum < "$1" | cut -c1-16; else echo absent; fi; }
+to_mb() { # systemd byte value -> 650M; nothing for infinity
+  [[ $1 =~ ^[0-9]+$ ]] || return 0
+  if (( $1 % 1073741824 == 0 )); then echo "$(( $1 / 1073741824 ))G"; else echo "$(( $1 / 1048576 ))M"; fi
+}
+argv_of() { sed -n 's/.*argv\[\]=\([^;]*\) ;.*/\1/p' <<< "$1" | head -1 | sed 's/ *$//'; }
+ad_row() { ROWS+=("$(row "$@")"); }
+block() { BLOCKS+=("$1"); }
+unit_of_pid() { local c; c=$(grep -o '[^/]*\.service' "/proc/$1/cgroup" 2> /dev/null | tail -1); echo "${c:-pid $1}"; }
+# unit_env unit: the unit's own Environment= entries, one per line. systemctl prints them as words
+# separated by spaces, a word with spaces in double quotes, \" and \\ escaped. Read character by
+# character: the text is data and is never evaluated (N6: an eval here ran an app's command as root).
+unit_env() {
+  local in c w="" q=0 i
+  in=$(sp "$1" Environment)
+  for ((i = 0; i < ${#in}; i++)); do
+    c=${in:i:1}
+    if [[ $c == '\' ]]; then i=$((i + 1)); w+=${in:i:1}; continue; fi
+    if [[ $c == '"' ]]; then q=$((1 - q)); continue; fi
+    if [[ $c == ' ' && $q == 0 ]]; then [[ -n $w ]] && printf '%s\n' "$w"; w=""; continue; fi
+    w+=$c
+  done
+  [[ -n $w ]] && printf '%s\n' "$w"
+  return 0
+}
+
+# root_safe path: prints why the file cannot be trusted as root's input, or nothing. It must be owned
+# by root and not writable by group or others, and so must every directory above it (a symlink is
+# followed first). Otherwise whoever can write it controls what root reads (N6, N5).
+root_safe() {
+  local f d m o
+  f=$(readlink -f "$1" 2> /dev/null) || { echo "$1 cannot be resolved"; return; }
+  [[ -e $f ]] || { echo "$f does not exist"; return; }
+  for d in "$f" $(d=$f; while [[ $d != / ]]; do d=$(dirname "$d"); echo "$d"; done); do
+    read -r o m < <(stat -c '%U %a' "$d")
+    [[ $o == root ]] || { echo "$d is owned by $o"; return; }
+    (( 8#$m & 8#022 )) && [[ ! ( -d $d && $d == /tmp ) ]] && { echo "$d is writable by group or others (mode $m)"; return; }
+  done
+}
+
+# envfile_names file: variable names only (values never leave this function)
+envfile_names() { sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2/p' "$1" | sort -u | paste -sd, -; }
+# env_digest pid names: digest of NAME=value for the listed names in a process environment
+env_digest() {
+  local pid=$1 names=",$2," l
+  tr '\0' '\n' < "/proc/$pid/environ" 2> /dev/null | while IFS= read -r l; do
+    [[ $names == *",${l%%=*},"* ]] && printf '%s\n' "$l"
+  done | sort | sha256sum | cut -c1-16
+}
+
+# adopt_user_checks user unit: the app's user must have no way out of the sandbox and serve no one
+# else (N12): no privileged group, no login, no crontab, not the user of another unit or process.
+adopt_user_checks() {
+  local u=$1 unit=$2 g sh other p
+  for g in $(id -nG "$u" 2> /dev/null); do
+    case $g in sudo|adm|wheel|admin|docker|lxd|root|systemd-journal|shadow|disk|staff|sys)
+      block "user $u is in the privileged group $g. Fix: gpasswd -d $u $g";;
+    esac
+  done
+  sh=$(getent passwd "$u" | cut -d: -f7)
+  case $sh in */nologin|*/false|"") ;;
+    *) if compgen -G "$(getent passwd "$u" | cut -d: -f6)/.ssh/authorized_keys*" > /dev/null; then
+         block "user $u can log in (shell $sh and ssh keys). Fix: usermod -s /usr/sbin/nologin $u and remove its authorized_keys"
+       else
+         ad_row risk medium "user $u has a login shell ($sh). Fix: usermod -s /usr/sbin/nologin $u"
+       fi;;
+  esac
+  [[ -e /var/spool/cron/crontabs/$u ]] && block "user $u has a crontab. Fix: move it to a timer of the app (or remove it): crontab -u $u -l, then crontab -u $u -r"
+  other=$(grep -lsx "User=$u" /etc/systemd/system/*.service /lib/systemd/system/*.service /usr/lib/systemd/system/*.service |
+    sed 's#.*/##' | grep -vx "$unit.service" | head -3 | paste -sd' ' -)
+  [[ -n $other ]] && block "user $u also runs $other. Fix: give that service its own user (useradd --system), so tando's sandbox and port rules apply to $unit alone"
+  for p in $(pgrep -u "$u" 2> /dev/null); do
+    grep -q "/$unit.service\(/\|$\)" "/proc/$p/cgroup" 2> /dev/null && continue
+    block "user $u runs processes outside $unit.service ($(unit_of_pid "$p")). Fix: give them their own user"
+    break
+  done
+  return 0
+}
+
+# adopt_scan unit [health]: read-only. Fills F (facts), C (the app.conf adopt would write), J0
+# (timers), ROWS (chg/keep/risk/job/cron rows) and BLOCKS (reasons it cannot go ahead).
+adopt_scan() {
+  local unit=${1%.service} health=${2:-/} l k v f p t
+  [[ $unit =~ ^[A-Za-z0-9_.@-]+$ ]] || die "bad unit name"
+  [[ $(sp "$unit.service" LoadState) == loaded ]] || die "no such unit: $unit.service"
+  A=$unit D=$R/apps/$unit
+  valid_app "$A" || die "unit name $unit is not a valid tando app name"
+  load "$R/host.conf" H
+  C=() F=() J0=() ROWS=() BLOCKS=() JOBS=()
+  F[unit]=$unit F[app]=$A F[health]=$health
+  F[unit_file]=$(sp "$unit.service" FragmentPath)
+  F[dropins]=$(sp "$unit.service" DropInPaths)
+  F[enabled]=$(systemctl is-enabled "$unit.service" 2> /dev/null)
+  F[active]=$(sp "$unit.service" ActiveState)
+  F[pid]=$(sp "$unit.service" MainPID)
+  F[user]=$(sp "$unit.service" User)
+  f=$(sp "$unit.service" WorkingDirectory); F[workdir]=${f#[-!]}
+  F[exec]=$(argv_of "$(sp "$unit.service" ExecStart)")
+  F[restart]=$(sp "$unit.service" Restart)
+  F[memory]=$(to_mb "$(sp "$unit.service" MemoryMax)")
+  F[memory_high]=$(to_mb "$(sp "$unit.service" MemoryHigh)")
+  F[rw]=$(sp "$unit.service" ReadWritePaths)
+  F[env_files]=$(sp "$unit.service" EnvironmentFiles | awk '{print $1}' | paste -sd' ' -)
+  [[ -f $R/host.conf ]] || block "tando is not set up on this host: run tando host setup <host> first"
+  if [[ -f $D/app.conf ]]; then
+    if grep -q '^adopted_from=' "$D/app.conf"; then block "$A is already adopted (tando adopt undo returns it)"
+    else block "tando already has an app named $A"; fi
+  fi
+  [[ ${F[active]} == active ]] || block "$unit.service is ${F[active]}: adopt only takes over a running app"
+  [[ -z ${F[dropins]} ]] || block "$unit.service has drop-ins (${F[dropins]}): fold them into the unit first"
+  for f in "${F[unit_file]}" ${F[dropins]}; do
+    l=$(root_safe "$f")
+    [[ -z $l ]] || block "the unit file is not safe for root to read: $l. Fix: install it as root:root 644 in /etc/systemd/system (not linked from the app's directory), then systemctl daemon-reload"
+  done
+  [[ -n ${F[user]} && ${F[user]} != root ]] || block "$unit.service runs as root: tando runs apps as an unprivileged user"
+  [[ -n ${F[user]} && ${F[user]} != root ]] && adopt_user_checks "${F[user]}" "$unit"
+
+  # environment of the unit itself (not secret: unit files are world-readable)
+  local extra=()
+  while IFS= read -r l; do
+    k=${l%%=*} v=${l#*=}
+    case $k in PORT) F[port]=$v;; HOSTNAME) F[hostname]=$v;; *) extra+=("$k");; esac
+  done < <(unit_env "$unit.service")
+  F[env_extra]=$(IFS=,; echo "${extra[*]}")
+  # the port the process really listens on
+  if [[ ${F[pid]:-0} != 0 ]]; then
+    p=$(ss -Hltnp | grep "pid=${F[pid]}," | awk '{print $4}' | sed 's/.*://' | sort -u | head -1)
+    [[ -n $p && -n ${F[port]:-} && $p != "${F[port]}" ]] && block "PORT=${F[port]} in the unit but the process listens on $p"
+    : "${F[port]:=$p}"
+  fi
+  [[ ${F[port]:-} =~ ^[0-9]+$ ]] || block "cannot tell the app's port"
+
+  # release layout: <root>/current -> <root>/releases/<id>
+  if [[ -L ${F[workdir]} ]]; then
+    F[link]=${F[workdir]} F[link_target]=$(readlink "${F[workdir]}") F[release]=$(readlink -f "${F[workdir]}")
+    F[root]=$(dirname "${F[link]}")
+  else
+    block "WorkingDirectory ${F[workdir]} is not a symlink to a release: adopt needs the <root>/current -> releases/<id> layout"
+    F[release]=${F[workdir]} F[root]=${F[workdir]}
+  fi
+  local rel=${F[release]}
+  if [[ -f $rel/server.js && -d $rel/.next ]]; then F[recipe]=next; else block "$rel is not a Next.js standalone release (no server.js and .next)"; fi
+  # what the register step refuses in its copy, refused here already (plan and apply agree)
+  local l x
+  if [[ -d $rel ]]; then
+    while IFS= read -r -d '' l; do
+      x=$(readlink -f "$l") || x=/
+      [[ $x == "$rel"/* ]] || { block "symlink leaves the release: ${l#"$rel"/} -> $(readlink "$l"). Fix: make it relative inside the release, or remove it"; break; }
+    done < <(find "$rel" -path "$rel/.next/cache" -prune -o -type l -print0 2> /dev/null)
+    x=$(find "$rel" -path "$rel/.next/cache" -prune -o \( ! -type f ! -type d ! -type l \) -print -quit 2> /dev/null)
+    [[ -z $x ]] || block "special file in the release: ${x#"$rel"/}. Fix: remove it"
+    x=$(find "$rel" -path "$rel/.next/cache" -prune -o -name '.env*' -print -quit 2> /dev/null)
+    [[ -z $x ]] || block "a .env file is in the live release: ${x#"$rel"/}. Fix: move it out (into the unit's EnvironmentFile)"
+  fi
+  F[path]=$(grep -o '"basePath": *"[^"]*"' "$rel/.next/required-server-files.json" 2> /dev/null | head -1 | sed 's/.*: *"\(.*\)"/\1/')
+  F[release_owner]=$(stat -c %U:%G "$rel" 2> /dev/null)
+  # start command: the unit's argv with the release path made relative
+  F[start]=$(sed "s#${F[link]:-//}/##g; s#$rel/##g" <<< "${F[exec]}")
+  [[ ${F[start]} =~ ^[A-Za-z0-9_./=:,@+\ -]+$ ]] || block "cannot express the start command without a shell: ${F[exec]}"
+
+  # data: writable paths outside the app root; environment names that point at them
+  local datas=() inrel=()
+  for p in ${F[rw]}; do
+    p=${p#-}
+    if [[ $p == "${F[root]}" || $p == "${F[root]}"/* ]]; then inrel+=("$p"); else datas+=("$p"); fi
+  done
+  ((${#datas[@]} <= 1)) || block "several writable data directories (${datas[*]}): adopt supports one"
+  F[data_dir]=${datas[0]:-}
+  if [[ -n ${F[data_dir]} && -d ${F[data_dir]} ]]; then
+    F[data_owner]=$(stat -c '%U:%G %a' "${F[data_dir]}")
+    F[data_size]=$(du -sb "${F[data_dir]}" | cut -f1)
+    F[data_files]=$(find "${F[data_dir]}" -type f | wc -l)
+  fi
+  if [[ ${F[pid]:-0} != 0 && -r /proc/${F[pid]}/environ ]]; then
+    local dn=() rn=()
+    while IFS= read -r l; do
+      k=${l%%=*} v=${l#*=}
+      [[ -n ${F[data_dir]} && ( $v == "${F[data_dir]}" || $v == "${F[data_dir]}"/* ) ]] && dn+=("$k")
+      [[ $v == "${F[root]}"/* && $k != PWD && $k != OLDPWD ]] && rn+=("$k")
+    done < <(tr '\0' '\n' < "/proc/${F[pid]}/environ")
+    F[data_env]=$(IFS=,; echo "${dn[*]}")
+    ((${#rn[@]})) && ad_row risk high "variables ${rn[*]} point inside the release directory: data there would be lost on every deploy"
+    [[ -n ${F[data_dir]} && ${#dn[@]} == 0 ]] && ad_row risk medium "no variable of the running app points at ${F[data_dir]}: check where it really writes"
+  fi
+  [[ -e $rel/data ]] && ad_row risk high "the live release contains data/: tando refuses releases that ship a data directory"
+  # files the app wrote into its release after it was deployed (other than ISR pages and image cache)
+  # ISR output goes to .next/server/app and, from Next 16, .next/server/route-cache: each such
+  # directory becomes a per-release writable copy; anything else written there is a risk
+  F[writable]=.next/server/app
+  if ((${#inrel[@]})); then
+    for l in $(find "$rel/.next/server" -mindepth 1 -maxdepth 1 -type d ! -name app 2> /dev/null); do
+      [[ -n $(find "$l" -type f -newermc "$rel/server.js" -print -quit) ]] && F[writable]+=",.next/server/${l##*/}"
+    done
+    l=$(find "$rel" -type f -newermc "$rel/server.js" ! -path "$rel/.next/cache/*" ! -path "$rel/.next/server/*" 2> /dev/null | head -3 | sed "s#^$rel/##" | paste -sd' ' -)
+    [[ -n $l ]] && ad_row risk medium "the app wrote into its release outside .next/server and .next/cache ($l): those paths are read-only under tando"
+    [[ ${F[writable]} == *,* ]] && ad_row risk medium "the app writes regenerated pages to ${F[writable]#.next/server/app,} as well as .next/server/app: adopt makes those per-release writable copies too (tando's default covers only .next/server/app)"
+  fi
+
+  # env file: path, owner and mode, variable names; never values
+  local ef=()
+  read -ra ef <<< "${F[env_files]}"
+  ((${#ef[@]} <= 1)) || block "several env files (${F[env_files]}): adopt supports one"
+  F[env_file]=${ef[0]:-}
+  F[env_names]=""   # (a unit without an EnvironmentFile has none: set, so it is never unbound)
+  if [[ -n ${F[env_file]} ]]; then
+    [[ -f ${F[env_file]} ]] || block "env file ${F[env_file]} is missing"
+    l=$(root_safe "${F[env_file]}")
+    [[ -n $l ]] && ad_row risk medium "${F[env_file]} is not root-safe ($l): adopt copies its values into $D/env, so the app cannot swap the file for another one later (it would be read by root at every restart)"
+    F[env_mode]=$(stat -c '%U:%G %a' "${F[env_file]}" 2> /dev/null)
+    F[env_names]=$(envfile_names "${F[env_file]}")
+  fi
+
+  # Caddy: the site that proxies to the port, and files it serves from the release path
+  local cf=/etc/caddy/Caddyfile site="" pub=() r
+  while IFS=$'\t' read -r k p v r; do
+    case $k in
+      proxy) site=$v;;
+      files) r=${r#*root }; r=${r#\* }; r=${r%% *}; r=${r#"${F[link]:-${F[root]}}"/}
+             [[ $r =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ ]] && pub+=("$r");;
+      import) [[ $v == /etc/caddy/tando/* ]] || ad_row risk low "the Caddyfile imports $v, which adopt does not read";;
+    esac
+  done < <(awk -v port="${F[port]:-x}" -v link="${F[link]:-${F[root]}}" '
+    { l = $0; sub(/(^|[[:space:]])#.*/, "", l) }
+    depth == 0 && l ~ /\{[[:space:]]*$/ { a = l; sub(/[[:space:]]*\{[[:space:]]*$/, "", a); sub(/^[[:space:]]+/, "", a) }
+    l ~ ("(127\\.0\\.0\\.1|localhost):" port "([^0-9]|$)") { print "proxy\t" NR "\t" a }
+    index(l, link "/") && l ~ /root/ { print "files\t" NR "\t" a "\t" l }
+    l ~ /^[[:space:]]*import[[:space:]]/ { i = l; sub(/^[[:space:]]+/, "", i); split(i, w, /[[:space:]]+/); print "import\t" NR "\t" w[2] }
+    { o = gsub(/\{/, "{", l); c = gsub(/\}/, "}", l); depth += o - c }' "$cf")
+  F[caddy_site]=$site
+  if [[ -z $site ]]; then
+    block "no site in $cf proxies to port ${F[port]:-?}"
+  else
+    t=${site%%[, ]*}
+    case $t in http://*) F[check_url]=$t;; https://*) F[check_url]=$t;; *:80) F[check_url]="http://${t%:80}";;
+      *.*) F[check_url]="https://$t";; *) F[check_url]="http://$t";; esac
+    t=${F[check_url]#*://}; F[check_url]="${F[check_url]%%://*}://${t%%[:/]*}"
+    [[ ${F[check_url]} =~ ^https?://[A-Za-z0-9.-]+$ ]] || block "cannot derive the site address from: $site"
+  fi
+  F[public_dirs]=$(printf '%s\n' "${pub[@]}" | grep . | sort -u | paste -sd, -)
+  if [[ -n ${F[public_dirs]} ]]; then
+    ad_row risk medium "Caddy serves files from the release path (${F[public_dirs]//,/, }): tando releases are closed to other users, so adopt makes these directories world-readable, and every health check fetches one of their files through Caddy (R1)"
+    if [[ ,${F[public_dirs]}, == *,public,* ]]; then
+      l=$(cd "$rel/public" 2> /dev/null && find . -type f \( -name '*.jpg' -o -name '*.png' -o -name '*.webp' -o -name '*.svg' -o -name '*.txt' \) | sort | head -1)
+      [[ -n $l ]] && F[check_static]=${l#.}
+    fi
+  fi
+
+  # timers that call the app (by port, path or unit name), and how each maps to a tando job
+  local tm svc cal mono acc rnd pers cmd n why lt val
+  while read -r tm _; do
+    [[ $tm == *.timer && $tm != tando-* ]] || continue
+    svc=$(sp "$tm" Unit)
+    cmd=$(argv_of "$(sp "$svc" ExecStart)")
+    [[ $cmd == *":${F[port]:-x}/"* || $cmd == *":${F[port]:-x} "* || $cmd == *"${F[root]}/"* || " $cmd " == *[/\ ]"$unit"[\ .]* ]] || continue
+    cal=$(sp "$tm" TimersCalendar | grep -o 'OnCalendar=[^;]*' | sed 's/OnCalendar=//; s/ *$//')
+    mono=$(sp "$tm" TimersMonotonic); acc=$(sp "$tm" AccuracyUSec); rnd=$(sp "$tm" RandomizedDelayUSec)
+    pers=$(sp "$tm" Persistent)
+    lt=$(systemctl show --timestamp=unix -P LastTriggerUSec "$tm" | tr -d @)
+    f=$(sp "$svc" FragmentPath)
+    cmd=$(grep -m1 '^ExecStart=' "$f" 2> /dev/null | sed 's/^ExecStart=[-@+!:]*//')
+    n=${tm%.timer}; n=${n#"$unit"-}; n=${n#cron-}
+    why=""
+    [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ ]] || why="name $n is not a valid job name"
+    [[ -z $mono ]] || why="monotonic timer (OnBootSec/OnUnitActiveSec)"
+    [[ $(sp "$tm" TimersCalendar | grep -o 'OnCalendar=' | wc -l) == 1 ]] || why="not exactly one OnCalendar"
+    [[ $acc == 1min && $rnd == 0 ]] || why="AccuracySec=$acc RandomizedDelaySec=$rnd (tando jobs use the defaults)"
+    [[ $(grep -c '^Exec' "$f") == 1 ]] || why="the service has more than one Exec line"
+    [[ $cmd == *%* ]] && why="the command uses systemd specifiers (%)"
+    [[ $(systemctl is-enabled "$tm" 2> /dev/null) == enabled && $(sp "$tm" ActiveState) == active ]] ||
+      why="the timer is not enabled and running (a tando job would start it)"
+    l=$(sp "$svc" EnvironmentFiles | awk '{print $1}' | paste -sd' ' -)
+    [[ -z $l || $l == "${F[env_file]}" ]] || why="the service reads another env file ($l)"
+    l=$(sp "$svc" User); [[ -z $l || $l == root || $l == "${F[user]}" ]] || why="the service runs as $l"
+    for l in "$(sp "$tm" FragmentPath)" "$f"; do
+      [[ -z $(root_safe "$l") ]] || why="its unit file is not safe for root to read ($(root_safe "$l"))"
+    done
+    if [[ -z $why && -n ${F[env_file]} ]]; then  # a literal secret in the command would end up in app.conf
+      while IFS= read -r val; do
+        val=${val#*=}; val=${val#\"}; val=${val%\"}
+        ((${#val} >= 8)) && [[ $cmd == *"$val"* ]] && { why="the command contains a value from ${F[env_file]}"; break; }
+      done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "${F[env_file]}")
+    fi
+    J0[$n.timer]=$tm J0[$n.cal]=$cal J0[$n.persistent]=$pers J0[$n.last]=$lt J0[$n.cmd]=$cmd
+    J0[$n.enabled]=$(systemctl is-enabled "$tm" 2> /dev/null) J0[$n.active]=$(sp "$tm" ActiveState)
+    J0[$n.stamp]=$(stat -c %Y "/var/lib/systemd/timers/stamp-$tm" 2> /dev/null || echo none)
+    if [[ -z $why ]]; then
+      JOBS+=("$n")
+      ad_row job "$n" "$tm" "$cal" yes "$cmd"
+      [[ $pers == yes ]] || ad_row risk low "$tm has no Persistent=true: as a tando job it also catches up a run missed while the server was off"
+    else
+      ad_row job "$n" "$tm" "$cal" no "$why"
+      ad_row risk medium "$tm stays hand-managed: $why"
+    fi
+  done < <(systemctl list-unit-files --type=timer --no-legend --plain 2> /dev/null)
+  F[jobs]=$(IFS=,; echo "${JOBS[*]}")
+
+  # cron entries and scripts touching the app; the backup that covers its data (R9)
+  local cfile word dests a newest cnt miss words=()
+  for cfile in /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/*; do
+    [[ -f $cfile ]] || continue
+    while IFS= read -r l; do
+      [[ $l =~ ^[[:space:]]*(#|$|[A-Z_]+=) ]] && continue
+      read -ra words <<< "$l"           # no pathname expansion of "*" in cron fields
+      for word in "${words[@]}"; do
+        [[ $word == /* && -f $word && ! $word =~ ^/(usr/)?bin/ ]] || continue
+        if grep -qsF -e "${F[data_dir]:-//}" -e "${F[root]}" "$word" || grepq -sw -- "$unit" "$word"; then
+          ad_row cron "$cfile" "$word"
+          if [[ -n ${F[data_dir]} ]] && grep -qsw 'tar' "$word" && { grep -qsF "${F[data_dir]}" "$word" ||
+               grepq -sE "$(dirname "${F[data_dir]}")/? +${F[data_dir]##*/}( |\$)" "$word"; }; then
+            F[backup_script]=$word F[backup_cron]=$cfile
+          fi
+          grep -qsE "systemctl.*[[:space:]]$unit([[:space:]]|\.service|\$)" "$word" &&
+            ad_row risk medium "$word runs systemctl on $unit: after adoption the app is tando-$A.service"
+        fi
+      done
+    done < "$cfile"
+  done
+  if [[ -n ${F[backup_script]:-} ]]; then
+    dests=$(grep -o '/var/backups/[A-Za-z0-9._/-]*' "${F[backup_script]}" | head -1)
+    while [[ -n $dests && ! -d $dests ]]; do dests=$(dirname "$dests"); done
+    newest=$(ls -1t "${dests:-/nonexistent}"/*.tar.gz 2> /dev/null | head -1)
+    if [[ -n $newest ]]; then
+      cnt=$(tar -tzf "$newest" 2> /dev/null | grep -vc '/$')
+      miss="" l=""
+      for a in $(ls -1 "${F[data_dir]}" 2> /dev/null); do
+        tar -tzf "$newest" 2> /dev/null | grepq "/$a\(/\|\$\)" && continue
+        # an entry newer than the archive cannot be in it yet; one older than it should be
+        if [[ ${F[data_dir]}/$a -nt $newest ]]; then l+=" $a"; else miss+=" $a"; fi
+      done
+      [[ -n $l ]] && ad_row risk low "created after the newest ${F[backup_script]##*/} archive, so not in it yet:$l"
+      F[backup_newest]=$newest F[backup_files]=$cnt F[backup_age_h]=$(( ( $(now) - $(stat -c %Y "$newest") ) / 3600 ))
+      if [[ -n $miss ]]; then ad_row risk high "the newest ${F[backup_script]} archive ($newest) lacks:$miss (R9)"
+      else ad_row keep backup "${F[backup_script]} (${F[backup_cron]}) still covers ${F[data_dir]}: newest archive has $cnt files, ${F[backup_age_h]} h old"; fi
+    else
+      ad_row risk high "${F[backup_script]} backs up ${F[data_dir]} but no archive was found in ${dests:-?} (R9)"
+    fi
+  elif [[ -n ${F[data_dir]} ]]; then
+    ad_row risk high "no existing backup of ${F[data_dir]} found; tando takes one before every deploy, and backup=daily adds a nightly one"
+  fi
+
+  # ports: tando's default pre-flight port is port + 100; adopt picks a free one from tando's range
+  p=$(( ${F[port]:-0} + 100 ))
+  l=$(ss -Hltnp "sport = :$p" | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
+  [[ -n $l ]] && ad_row risk medium "tando's default pre-flight port $p (port + 100) is taken by $(unit_of_pid "$l"): adopt sets preflight_port instead"
+  local used=" "
+  for f in "$R"/apps/*/app.conf; do [[ -f $f ]] && used+="$(sed -n 's/^port=//p;s/^preflight_port=//p' "$f" | tr '\n' ' ') "; done
+  for ((p = ${H[port_min]:-4100}; p <= ${H[port_max]:-4199}; p++)); do
+    [[ $used == *" $p "* ]] && continue
+    ss -Hltn "sport = :$p" | grepq . || break
+  done
+  ((p <= ${H[port_max]:-4199})) || block "no free pre-flight port in ${H[port_min]:-4100}-${H[port_max]:-4199}. Fix: widen port_min/port_max in /opt/tando/host.conf"
+  F[preflight_port]=$p
+  [[ -d ${F[root]}/incoming ]] && F[incoming]=${F[root]}/incoming
+  F[ready_ms]=$(journalctl -u "$unit.service" -n 300 --no-pager -o short-unix 2> /dev/null |
+    awk '/systemd\[1\]: Started / { s = $1 } / Ready in / && s { r = int(($1 - s) * 1000); s = 0 } END { if (r) print r }')
+
+  # the app.conf adopt writes
+  C=([recipe]=next [port]=${F[port]:-} [start]=${F[start]} [health]=$health [path]=${F[path]}
+     [memory]=${F[memory]:-512M} [health_timeout]=60 [writable]=${F[writable]} [user]=${F[user]}
+     [caddy]=external [check_url]=${F[check_url]:-} [next_cache]=release [preflight_port]=${F[preflight_port]}
+     [adopted_from]=$unit [created]=$(now))
+  for n in "${JOBS[@]}"; do C[job.$n]="${J0[$n.cal]} | ${J0[$n.cmd]}"; done
+  [[ -n ${F[memory_high]} ]] && C[memory_high]=${F[memory_high]}
+  [[ -n ${F[data_dir]} ]] && C[data_dir]=${F[data_dir]}
+  [[ -n ${F[public_dirs]} ]] && C[public_dirs]=${F[public_dirs]}
+  [[ -n ${F[check_static]:-} ]] && C[check_static]=${F[check_static]}
+  [[ -n ${F[memory]} ]] || ad_row risk medium "$unit.service has no MemoryMax: tando needs one, adopt sets 512M"
+  app_vars
+
+  # the plan
+  ad_row chg unit "$unit.service (${F[enabled]}, ${F[active]})" "tando-$A.service, same user ${F[user]}; $unit.service stopped and disabled, its file kept"
+  ad_row chg releases "${F[root]}/releases" "$D/releases; the live release is copied in unchanged, without .next/cache"
+  ad_row chg link "${F[link]:-?} -> ${F[link_target]:-?}" "${F[link]:-?} -> $D/current (Caddy keeps its paths)"
+  ad_row chg ownership "release ${F[release_owner]}" "root:${F[user]}, app-writable ${F[writable]//,/, } and .next/cache${F[public_dirs]:+; world-readable ${F[public_dirs]//,/, }}"
+  [[ -n ${F[env_extra]} ]] && ad_row chg environment "${F[env_extra]//,/, } as Environment= in the unit" "$D/env (same values)"
+  [[ -n ${F[env_file]} ]] && ad_row chg "env file" "${F[env_file]} read by systemd at every start" "its values copied into $D/env (root:${F[user]} 640), taken from the running process, never printed; ${F[env_file]} itself is left as it is (undo needs it); tando env ls shows them on request"
+  ad_row chg "new variables" "-" "MALLOC_ARENA_MAX=2, HOME=$D/home (read-only; caches in $D/shared/.cache), TANDO_DATA_DIR=${F[data_dir]:-$D/shared/data}"
+  ad_row chg restart "Restart=${F[restart]}" "Restart=on-failure, RestartSec=2"
+  ad_row chg sandbox "ReadWritePaths=${F[rw]}" "ReadWritePaths=$D/shared ${F[data_dir]} $D/releases; PrivateDevices, binds only tcp:${F[port]:-?}"
+  for n in "${JOBS[@]}"; do ad_row chg "timer $n" "${J0[$n.timer]}" "tando-$A-job-$n.timer, same OnCalendar, Persistent=true, as ${F[user]}"; done
+  [[ -n ${F[incoming]:-} ]] && ad_row chg incoming "${F[incoming]} (upload directory)" "a file saying tando manages $A: the old deploy script stops at its first step"
+  ad_row chg logs "journalctl -u $unit" "tando logs (journalctl -u tando-$A); older entries stay under $unit"
+  ad_row keep port "${F[port]:-?}: the Caddy site and anything else calling it are unchanged"
+  ad_row keep user "${F[user]}"
+  [[ -n ${F[data_dir]} ]] && ad_row keep data "${F[data_dir]} in place, ${F[data_owner]:-?}, $(( ${F[data_size]:-0} / 1024 )) KB in ${F[data_files]:-0} files${F[data_env]:+ (${F[data_env]//,/, })}"
+  [[ -n ${F[env_file]} ]] && ad_row keep "env values" "the same values of ${F[env_names]:-} (checked by a digest after the switch)"
+  ad_row keep caddy "the site ${F[caddy_site]:-?} in $cf, byte for byte (tando does not render it: caddy=external)"
+  ad_row keep memory "MemoryMax=${C[memory]}${F[memory_high]:+, MemoryHigh=${F[memory_high]}}"
+  ad_row keep node "${F[start]}"
+  ad_row keep "image cache" ".next/cache per release, as today (next_cache=release)"
+  for n in "${!J0[@]}"; do
+    [[ $n == *.timer ]] || continue; n=${n%.timer}
+    [[ " ${JOBS[*]} " == *" $n "* ]] || ad_row keep "timer $n" "${J0[$n.timer]} stays hand-managed"
+  done
+  ad_row keep firewall "unchanged (the app listens on 127.0.0.1)"
+}
+
+adopt_print() {
+  local k r
+  for k in unit app port user root link link_target release recipe path start data_dir data_owner data_size \
+           data_files data_env env_file env_mode env_names env_extra memory memory_high check_url caddy_site \
+           public_dirs check_static preflight_port jobs incoming ready_ms backup_script backup_newest writable; do
+    echo "$k=${F[$k]:-}"
+  done
+  echo "health=${C[health]}"
+  echo "blocked=$(( ${#BLOCKS[@]} > 0 ))"
+  for r in "${BLOCKS[@]}"; do row block "$r"; done
+  printf '%s\n' "${ROWS[@]}"
+}
+
+cmd_adopt_scan() { # unit [health=/path]: read-only; the plan as rows, the baseline through Caddy
+  need_root
+  local health=/
+  [[ ${2:-} == health=* ]] && health=${2#health=}
+  [[ $health =~ ^/[A-Za-z0-9._~/-]*$ ]] || die "bad health path"
+  adopt_scan "$1" "$health"
+  adopt_print
+  C[health_timeout]=10
+  if via_caddy ""; then echo "baseline=ok"; else echo "baseline=failing: $PROBE_WHY"; fi
+}
+
+# ---- adopt: the record of the hand-managed state, and convergence back to it --------------
+
+fingerprint() { # the hand-managed state adopt promises to return to
+  local n
+  echo "unit_file $(sha "${F[unit_file]}")"
+  echo "unit_state $(systemctl is-enabled "${F[unit]}.service" 2> /dev/null) $(sp "${F[unit]}.service" ActiveState)"
+  echo "link $(readlink "${F[link]}" 2> /dev/null)"
+  [[ -n ${F[env_file]} ]] && echo "env_file $(sha "${F[env_file]}") $(stat -c '%U:%G %a' "${F[env_file]}")"
+  echo "caddyfile $(sha /etc/caddy/Caddyfile)"
+  [[ -n ${F[data_dir]} ]] && echo "data_dir $(stat -c '%U:%G %a' "${F[data_dir]}")"
+  echo "incoming $(stat -c '%F %U' "${F[root]}/incoming" 2> /dev/null || echo absent)"
+  echo "user $(id "${F[user]}" 2> /dev/null)"
+  for n in ${F[alltimers]:-}; do
+    echo "timer $n $(sha "$(sp "$n" FragmentPath)") $(systemctl is-enabled "$n" 2> /dev/null) $(sp "$n" ActiveState)"
+  done
+  [[ -n ${F[backup_cron]:-} ]] && echo "cron $(sha "${F[backup_cron]}") $(sha "${F[backup_script]}")"
+  echo "tando_units $(own_units | grep -c .)"
+  echo "tando_app $([[ -d $R/apps/${F[app]} ]] && echo present || echo absent)"
+}
+
+rec_save() { # facts and timers, enough to return to the hand-managed state
+  local k
+  { for k in "${!F[@]}"; do printf 'f.%s=%s\n' "$k" "${F[$k]}"; done
+    for k in "${!J0[@]}"; do printf 'j.%s=%s\n' "$k" "${J0[$k]}"; done; } | sort > "$AD/$A/record.tmp" &&
+    [[ -s $AD/$A/record.tmp ]] && mv -f "$AD/$A/record.tmp" "$AD/$A/record" ||
+    { rm -f "${AD:?}/${A:?}/record.tmp"; die "could not write the adoption record (disk full?); the old one is kept"; }
+}
+rec_load() {
+  local k v
+  F=() J0=()
+  [[ -f $AD/$1/record ]] || die "no adoption record for $1"
+  local l
+  while IFS= read -r l; do   # not IFS='=': that drops a trailing "=" from a value
+    k=${l%%=*} v=${l#*=}
+    case $k in f.*) F[${k#f.}]=$v;; j.*) J0[${k#j.}]=$v;; esac
+  done < "$AD/$1/record"
+}
+
+# own_units: the unit files tando has for this app, by exact name. Never tando-<app>-*: app names
+# may contain "-", so that glob also matches another app (hello and hello-2).
+own_units() {
+  local n f jobs=" ${F[jobs]//,/ } "
+  for n in "${!C[@]}"; do [[ $n == job.* ]] && jobs+="${n#job.} "; done
+  for f in "tando-$A.service" "tando-$A-backup.service" "tando-$A-backup.timer"; do
+    [[ -e /etc/systemd/system/$f ]] && echo "$f"
+  done
+  for n in $jobs; do
+    for f in "tando-$A-job-$n.service" "tando-$A-job-$n.timer"; do [[ -e /etc/systemd/system/$f ]] && echo "$f"; done
+  done
+  return 0
+}
+# own transient units (pre-flight, adopt and undo runs), matched exactly
+own_transient() { # kind regex: pre | adopt
+  local re
+  case $1 in
+    pre) re="^tando-$A-pre-[0-9]{8}-[0-9]{6}(-[0-9]+)?\.service\$";;
+    adopt) re="^tando-(un)?adopt-$A-[0-9]+\.service\$";;
+  esac
+  systemctl list-units --all --plain --no-legend 'tando-*' 2> /dev/null | awk '{print $1}' | grep -E "$re"
+  return 0
+}
+
+ap_step() { row step "$@" >> "$AD/$A/progress"; }   # n name state secs detail
+ap_result() { # result message
+  fw_sync > /dev/null 2>&1 || true   # adopted or given back: the loopback rules follow app.conf
+  printf 'result=%s\nmessage=%s\n' "$1" "$2" > "$AD/$A/result.tmp" && mv -f "$AD/$A/result.tmp" "$AD/$A/result" ||
+    echo "tando-adopt: could not write the result: $1 $2" >&2
+}
+
+# Timers move in two halves around the switch (R8): pause the old timer (once its service is idle)
+# before the app restarts, resume the new one after the app is healthy, with the old one's last
+# trigger as its stamp. With Persistent=true, systemd then runs an elapse that fell in between
+# exactly once, after the app is back; a target without Persistent gets that run started by hand.
+timer_pause() { # timer -> prints its last trigger (epoch); "now" when it never triggered while running
+  local t=$1 last i
+  last=$(systemctl show --timestamp=unix -P LastTriggerUSec "$t" | tr -d @)
+  [[ $last =~ ^[0-9]+$ && $last != 0 ]] || last=$(now)
+  systemctl stop "$t" 2> /dev/null
+  for ((i = 0; i < 240; i++)); do
+    [[ $(sp "$(sp "$t" Unit)" ActiveState) == activ* ]] || break
+    sleep 0.5
+  done
+  systemctl disable -q "$t" 2> /dev/null
+  echo "$last"
+}
+timer_resume() { # timer persistent calendar last enable(yes|no) [stamp|none]: stamp restores an exact one
+  local t=$1 pers=$2 cal=$3 last=$4 en=$5 st=${6:-} next
+  if [[ $pers == yes ]]; then   # only Persistent timers read a stamp
+    install -d /var/lib/systemd/timers
+    case $st in
+      none) rm -f "/var/lib/systemd/timers/stamp-${t:?}";;
+      [0-9]*) touch -d "@$st" "/var/lib/systemd/timers/stamp-$t";;
+      *) touch -d "@$last" "/var/lib/systemd/timers/stamp-$t";;
+    esac
+  fi
+  [[ $en == yes ]] || return 0
+  systemctl enable -q --now "$t" || return 1
+  if [[ $pers != yes ]]; then
+    # in UTC, as plain "YYYY-MM-DD HH:MM:SS": a local zone name (WIB) does not parse back
+    next=$(TZ=UTC systemd-analyze calendar --base-time="@$last" "$cal" 2> /dev/null |
+      sed -n 's/^ *Next elapse: *[A-Za-z]* \([0-9-]* [0-9:]*\).*/\1/p' | head -1)
+    next=$(TZ=UTC date -u -d "$next" +%s 2> /dev/null || echo 0)
+    if ((next > 0 && next <= $(now))); then systemctl start --no-block "$(sp "$t" Unit)"; fi
+  fi
+}
+
+# stop a unit, but not for longer than the given seconds: then SIGKILL. A hand-written unit keeps
+# systemd's 90 s stop timeout, and a Next server does not always exit on SIGTERM (seen on the replica).
+stop_within() { # unit seconds
+  local u=$1 i
+  systemctl stop --no-block "$u" 2> /dev/null
+  for ((i = 0; i < $2 * 10; i++)); do      # every 0.1 s: this wait is part of the downtime
+    case $(sp "$u" ActiveState) in inactive|failed) return 0;; esac
+    sleep 0.1
+  done
+  systemctl kill -s SIGKILL "$u" 2> /dev/null
+  for ((i = 0; i < 100; i++)); do
+    case $(sp "$u" ActiveState) in inactive|failed) return 0;; esac
+    sleep 0.1
+  done
+}
+
+# converge to the recorded hand-managed state (undo, and a failed apply). Idempotent.
+adopt_restore() {
+  local n tm rt lt st hp resume=()
+  # 1. timers: pause whichever side holds each job before the app restarts. A job that never ran
+  #    under tando gives the old timer its recorded stamp back, so the state is exactly as it was.
+  for n in ${F[jobs]//,/ }; do
+    tm=${J0[$n.timer]} rt=tando-$A-job-$n.timer
+    if [[ -f /etc/systemd/system/$rt ]] && systemctl -q is-active "$rt"; then
+      lt=$(systemctl show --timestamp=unix -P LastTriggerUSec "$rt" | tr -d @) st=""
+      [[ -n ${J0[$n.handed]:-} && $lt == "${J0[$n.handed]}" ]] && st=${J0[$n.stamp]:-}
+      resume+=("$n $(timer_pause "$rt") ${st:--}")
+    elif [[ -n ${J0[$n.paused]:-} ]] && ! systemctl -q is-active "$tm"; then
+      resume+=("$n ${J0[$n.paused]} ${J0[$n.stamp]:--}")    # paused for the switch, never handed over
+    fi
+  done
+  # 2. the link Caddy serves files through
+  if [[ -n ${F[link]:-} && $(readlink "${F[link]}") != "${F[link_target]}" ]]; then
+    ln -sfn "${F[link_target]}" "${F[link]}.tando-tmp" && mv -Tf "${F[link]}.tando-tmp" "${F[link]}"
+  fi
+  # 3. the unit: stop tando's, start the hand-written one, wait until it answers
+  systemctl disable -q "tando-$A.service" 2> /dev/null
+  stop_within "tando-$A.service" 20
+  own_transient pre | xargs -r systemctl stop 2> /dev/null
+  [[ ${F[enabled]} == enabled ]] && systemctl enable -q "${F[unit]}.service"
+  if [[ ${F[active]} == active ]]; then
+    systemctl reset-failed "${F[unit]}.service" 2> /dev/null; systemctl start "${F[unit]}.service"
+    hp=${F[path]:-}${F[health]:-/}; [[ -n ${F[path]:-} && ${F[health]:-/} == / ]] && hp=${F[path]}
+    probe 60 "${F[unit]}.service" "http://127.0.0.1:${F[port]}$hp" || true
+  fi
+  # 4. the hand-written timers again, now that the app answers (a run due meanwhile runs once now)
+  for n in "${resume[@]}"; do
+    set -- $n
+    st=$3; [[ $st == - ]] && st=""
+    timer_resume "${J0[$1.timer]}" "${J0[$1.persistent]}" "${J0[$1.cal]}" "$2" \
+      "$([[ ${J0[$1.enabled]} == enabled ]] && echo yes || echo no)" "$st"
+  done
+  for n in "${!J0[@]}"; do   # every recorded timer back to its recorded state
+    [[ $n == *.timer ]] || continue
+    n=${n%.timer}; tm=${J0[$n.timer]}
+    if [[ ${J0[$n.enabled]} == enabled ]] && ! systemctl -q is-enabled "$tm"; then systemctl enable -q "$tm"; fi
+    if [[ ${J0[$n.active]} == active ]] && ! systemctl -q is-active "$tm"; then systemctl start "$tm"; fi
+  done
+  # 5. the upload directory of the old deploy script
+  if [[ -n ${F[incoming]:-} && -d ${F[incoming]}.pre-tando ]]; then
+    [[ -f ${F[incoming]} ]] && rm -f "${F[incoming]:?}"
+    mv -T "${F[incoming]}.pre-tando" "${F[incoming]}"
+  fi
+  # 6. tando's side of the app (the adopt backup under /var/backups/tando stays)
+  local units=() u
+  while IFS= read -r u; do units+=("$u"); done < <(own_units)
+  for u in "${units[@]}"; do
+    [[ $u == *.timer ]] && { systemctl disable -q --now "$u" 2> /dev/null; rm -f "/var/lib/systemd/timers/stamp-${u:?}"; }
+    rm -f "/etc/systemd/system/${u:?}"
+  done
+  rm -f "/etc/systemd/system/$(app_slice)"   # the app's slice (tando-agent write_slice)
+  systemctl daemon-reload
+  systemctl reset-failed "${units[@]}" "tando-$A.service" "tando-down@tando-$A.service" 2> /dev/null
+  systemctl stop "$(app_slice)" 2> /dev/null; systemctl reset-failed "$(app_slice)" 2> /dev/null
+  [[ -d $D ]] && rm -rf "${D:?}"
+  groupdel "tando-m-$A" 2> /dev/null   # app_perms' metadata group (its user leaves it with it)
+  return 0
+}
+
+# ---- adopt: apply (detached, like an activation) --------------------------------------------
+
+cmd_adopt_apply() { # unit [health=/path] [jobs=no]: start the detached adoption
+  need_root
+  local unit=${1%.service} health=/ jobs=yes a
+  for a in "${@:2}"; do
+    case $a in
+      health=*) health=${a#health=};;
+      jobs=yes|jobs=no) jobs=${a#jobs=};;
+      *) die "bad option: $a";;
+    esac
+  done
+  [[ $health =~ ^/[A-Za-z0-9._~/-]*$ ]] || die "bad health path"
+  adopt_scan "$unit" "$health"
+  ((${#BLOCKS[@]} == 0)) || die "adopt is blocked: ${BLOCKS[0]}"
+  install -d -m 700 "$AD" "$AD/$A"
+  lockfile "$AD/$A/lock"; exec 6>"$AD/$A/lock"; flock -n 6 || die "an adopt or undo of $A is running"
+  [[ -f $AD/$A/record ]] && die "$A has an adoption record: tando adopt undo first"
+  rm -f "${AD:?}/${A:?}/progress" "${AD:?}/${A:?}/result"
+  flock -u 6
+  systemd-run --quiet --collect --unit="tando-adopt-$A-$(date +%s)" -p Description="tando adopt $A" \
+    "$AGENT" adopt-run "$unit" "$health" "$jobs" "${SUDO_USER:-root}" || die "systemd-run failed"
+  echo "app=$A"
+}
+
+cmd_adopt_run() { # unit health jobs owner (inside its own transient unit)
+  need_root
+  local unit=$1 health=$2 jobs=$3 owner=${4:-root} t t0 id rel n tm f l dt pid digest stage=check
+  trap '' HUP PIPE
+  adopt_scan "$unit" "$health"
+  lockfile "$AD/$A/lock"; exec 6>"$AD/$A/lock"; flock -n 6 || exit 1
+  : > "$AD/$A/progress"
+  [[ $jobs == yes ]] || { for n in "${JOBS[@]}"; do unset "C[job.$n]"; done; JOBS=(); F[jobs]=""; }
+  afail() { # n name message: converge back when anything was changed, then report
+    ap_step "$1" "$2" fail "$(el "$t")" "$3"
+    if [[ $stage != check && $stage != backup ]]; then
+      adopt_restore
+      C[check_static]=${F[check_static]:-}
+      if via_caddy "${F[unit]}.service"; then ap_result rolledback "$3; back to the hand-managed state, healthy"
+      else ap_result rolledback "$3; back to the hand-managed state, but its health check fails: $PROBE_WHY"; fi
+      mv -f "$AD/$A/record" "$AD/$A/record.failed-$(date -u +%Y%m%d-%H%M%S)"
+    else
+      ap_result failed "$3; nothing was changed"
+    fi
+    exit 1
+  }
+
+  # 1. check: healthy through Caddy now, static files included
+  t=$(ds); ap_step 1 check run "" ""
+  ((${#BLOCKS[@]} == 0)) || afail 1 check "${BLOCKS[0]}"
+  C[health_timeout]=15
+  via_caddy "$unit.service" || afail 1 check "not healthy through Caddy before adoption: $PROBE_WHY"
+  C[health_timeout]=60
+  pid=${F[pid]}
+  digest=$(env_digest "$pid" "${F[env_names]:-}")
+  F[alltimers]=$(for n in "${!J0[@]}"; do [[ $n == *.timer ]] && echo "${J0[$n]}"; done | sort | paste -sd' ' -)
+  ap_step 1 check ok "$(el "$t")" "healthy through ${F[check_url]}$(health_path), static files included"
+
+  # 2. backup: data (as its owner), every hand-written file adopt touches, the record
+  stage=backup; t=$(ds); ap_step 2 backup run "" ""
+  id=$(date -u +%Y%m%d-%H%M%S)
+  f=$BK/$A/$id-adopt
+  install -d -m 700 -o root -g root "$BK" "$BK/$A" "$f"
+  if [[ -n ${F[data_dir]} ]]; then
+    l=$(cd "${F[data_dir]}" && find . -type f | sort)
+    runuser -u "${F[user]}" -- tar -C "${F[data_dir]}" -czf - . > "$f/data.tar.gz" || afail 2 backup "data archive failed"
+    n=$(comm -23 <(printf '%s\n' "$l" | grep .) <(tar -tzf "$f/data.tar.gz" | grep -v '/$' | sort) | wc -l)
+    ((n == 0)) || afail 2 backup "$n data files missing from the archive"
+  fi
+  local files=("${F[unit_file]#/}" etc/caddy)
+  [[ -n ${F[env_file]} ]] && files+=("${F[env_file]#/}")
+  for n in ${F[alltimers]}; do files+=("$(sp "$n" FragmentPath | sed 's#^/##')" "$(sp "$(sp "$n" Unit)" FragmentPath | sed 's#^/##')"); done
+  [[ -n ${F[backup_cron]:-} ]] && files+=("${F[backup_cron]#/}" "${F[backup_script]#/}")
+  tar -C / -czf "$f/config.tar.gz" "${files[@]}" 2> /dev/null || afail 2 backup "config archive failed"
+  chmod 600 "$f"/*.tar.gz
+  F[backup]=$f F[release_id]=$id
+  rec_save
+  fingerprint > "$AD/$A/fingerprint"
+  cp -p "$AD/$A/record" "$AD/$A/fingerprint" "$f/"
+  printf 'kind=adopt\ncreated=%s\n' "$(now)" > "$f/meta"
+  ap_step 2 backup ok "$(el "$t")" "$f ($(du -sh "$f" | cut -f1))"
+
+  # 3. register: tando's app directory, the live release copied in, the unit (not started)
+  stage=register; t=$(ds); ap_step 3 register run "" ""
+  install -d -m 755 -o root -g root "$D" "$D/releases"
+  install -d -m 750 -o "$AU" -g "$AU" "$D/shared"
+  install -m 640 -o root -g "$AU" /dev/null "$D/env"
+  # the upload directory, seeded with the live release so the first tando upload is a delta
+  id "$owner" &> /dev/null || owner=root
+  # (rsync -a keeps the hand release's modes: other users, every app among them, read nothing)
+  rsync -a --exclude=/.next/cache "${F[release]}/" "$D/incoming/" && chown -R "$owner" "$D/incoming" &&
+    chmod -R go-rwx "$D/incoming" || afail 3 register "could not prepare $D/incoming"
+  : > "$D/history.tsv"
+  save "$D/app.conf" C
+  fw_sync > /dev/null 2>&1 || true   # its loopback rules from the start, like a configured app
+  S=(); save "$D/state" S
+  app_perms   # tando-m-<app>: the app's metadata readable by its user (and a deploy user) only
+  local -A E=()
+  while IFS= read -r l; do case ${l%%=*} in PORT|HOSTNAME) ;; *) E[${l%%=*}]=${l#*=};; esac; done < <(unit_env "$unit.service")
+  # the env file's values exactly as systemd gave them to the running app (no re-parsing of the file)
+  while IFS= read -r -d '' l; do
+    [[ ,${F[env_names]:-}, == *,"${l%%=*}",* ]] || continue
+    no_ctrl "${l#*=}" || afail 3 register "a value in ${F[env_file]} has control characters; it cannot be copied"
+    E[${l%%=*}]=${l#*=}
+  done < "/proc/$pid/environ"
+  env_save E
+  rel=$D/releases/$id
+  cp -a --no-dereference "${F[release]}" "$rel" || afail 3 register "copy of the live release failed"
+  rm -rf "${rel:?}/.next/cache"
+  fail() { afail 3 register "$1"; }
+  chown -RhP "root:$AU" "$rel" && chmod -R a-st,u=rwX,g=rX,o= "$rel" || fail "chown failed"
+  open_public "$rel"
+  while IFS= read -r -d '' l; do
+    [[ $(readlink -f "$l") == "$rel"/* ]] || fail "symlink leaves the release: ${l#"$rel"/}"
+  done < <(find "$rel" -type l -print0)
+  [[ -z $(find "$rel" -name '.env*' -print -quit) ]] || fail "a .env file is in the live release"
+  link_shared "$rel"
+  make_writable "$rel"
+  ln -sfn "releases/$id" "$D/current"
+  write_unit; sync_backup_timer; systemctl daemon-reload
+  # pre-flight: the copy, in tando's sandbox, on the pre-flight port
+  local spare=${C[preflight_port]} pu="tando-$A-pre-$id" args=() x
+  ss -Hltn "sport = :$spare" | grepq . && fail "pre-flight port $spare is in use"
+  while IFS= read -r x; do args+=(-p "$x"); done < <(props "$spare")
+  systemd-run --quiet --collect --unit="$pu" "${args[@]}" -p "WorkingDirectory=$rel" \
+    "$AGENT" exec-app "$A" "$rel" || fail "could not start the pre-flight unit"
+  if ! probe 60 "$pu" "http://127.0.0.1:$spare$(health_path)"; then
+    l=$(journalctl --namespace="tando-$A" -u "$pu" -n 3 --no-pager -o cat 2> /dev/null | tr '\n' ' ')
+    [[ -n $l ]] || l=$(journalctl -u "$pu" -n 3 --no-pager -o cat | tr '\n' ' ')   # no LogNamespace
+    systemctl stop "$pu" 2> /dev/null
+    fail "pre-flight in tando's sandbox: $PROBE_WHY ($l)"
+  fi
+  systemctl stop "$pu"
+  # R1 before the switch: the web server's user must be able to read what it serves from disk
+  l=$(sp caddy.service User); l=${l:-root}
+  for x in ${F[public_dirs]//,/ }; do
+    tm=$(find "$rel/$x" -type f -print -quit)
+    [[ -z $tm ]] || runuser -u "$l" -- test -r "$tm" || fail "$l cannot read $x/ in the release (R1)"
+  done
+  ap_step 3 register ok "$(el "$t")" "release $id, pre-flight healthy on port $spare in tando's sandbox"
+
+  # 4. switch: timers paused (none may fire into the restart), Caddy's file path (same files), then
+  #    the unit: the only downtime. The old unit gets 20 s to stop, like tando's own units.
+  stage=switch; t=$(ds); ap_step 4 switch run "" ""
+  for n in "${JOBS[@]}"; do J0[$n.paused]=$(timer_pause "${J0[$n.timer]}"); rec_save; done
+  ln -sfn "$D/current" "${F[link]}.tando-tmp" && mv -Tf "${F[link]}.tando-tmp" "${F[link]}"
+  C[health_timeout]=15
+  via_caddy "" || afail 4 switch "after the link switch: $PROBE_WHY"
+  t0=$(ds)
+  stop_within "$unit.service" 20
+  systemctl reset-failed "tando-$A.service" 2> /dev/null
+  systemctl start "tando-$A.service" || afail 4 switch "tando-$A.service did not start"
+  C[health_timeout]=60
+  via_caddy "tando-$A.service" || afail 4 switch "tando-$A.service: $PROBE_WHY"
+  dt=$(( ( $(ds) - t0 ) * 100 ))
+  systemctl disable -q "$unit.service"
+  systemctl reset-failed "$unit.service" 2> /dev/null   # Next exits 143 on stop; the unit has no SuccessExitStatus
+  systemctl enable -q "tando-$A.service"
+  if [[ -n ${F[incoming]:-} ]]; then
+    mv -T "${F[incoming]}" "${F[incoming]}.pre-tando"
+    printf 'This app is deployed by tando since %s (tando deploy). To go back: tando adopt undo.\n' \
+      "$(date -u +%FT%TZ)" > "${F[incoming]}"
+  fi
+  S=([current]=$id [last_good]=$id [phase]=idle [status_$id]=verified); save "$D/state" S
+  ap_step 4 switch ok "$(el "$t")" "tando-$A.service serving; stop to healthy through Caddy ${dt} ms"
+
+  # 5. jobs: each paused timer's schedule resumes as a tando job, now that the app answers (R8)
+  stage=jobs; t=$(ds); ap_step 5 jobs run "" ""
+  for n in "${JOBS[@]}"; do
+    tm=${J0[$n.timer]}
+    sync_jobs_one "$n" || afail 5 jobs "could not write the job $n"
+    J0[$n.handed]=${J0[$n.paused]}; rec_save
+    timer_resume "tando-$A-job-$n.timer" yes "${J0[$n.cal]}" "${J0[$n.paused]}" yes ||
+      afail 5 jobs "could not start tando-$A-job-$n.timer"
+    systemctl -q is-active "tando-$A-job-$n.timer" && ! systemctl -q is-active "$tm" ||
+      afail 5 jobs "timer handoff $tm -> tando-$A-job-$n.timer did not settle"
+  done
+  ap_step 5 jobs ok "$(el "$t")" "${#JOBS[@]} timers handed over${JOBS[*]:+: ${JOBS[*]}}"
+
+  # 6. verify: health and files through Caddy, data writable, the environment the app sees
+  stage=verify; t=$(ds); ap_step 6 verify run "" ""
+  via_caddy "tando-$A.service" || afail 6 verify "$PROBE_WHY"
+  [[ -z ${F[data_dir]} ]] || runuser -u "$AU" -- test -w "${F[data_dir]}" || afail 6 verify "${F[data_dir]} is not writable by $AU"
+  pid=$(sp "tando-$A.service" MainPID)
+  [[ $(env_digest "$pid" "${F[env_names]:-}") == "$digest" ]] || afail 6 verify "the app does not see the same values from ${F[env_file]}"
+  P=([started_ds]=$(ds)); hist "$id" adopt ok "from $unit.service"
+  rec_save
+  ap_step 6 verify ok "$(el "$t")" "same values from ${F[env_file]:-no env file}, data writable, healthy through Caddy"
+  ap_result ok "adopted $unit.service as tando-$A; restart gap $dt ms; backup $f"
+}
+
+# one job's units, not enabled (the handoff enables it; sync_jobs would start them all at once)
+sync_jobs_one() { # name
+  local n=$1 cal f=/etc/systemd/system/tando-$A-job-$1
+  cal=$(trim "${C[job.$n]%%|*}")
+  {
+    printf '[Unit]\nDescription=tando job %s %s\n\n[Service]\nType=oneshot\n' "$A" "$n"
+    printf 'ExecStart=%s run-job %s %s\nWorkingDirectory=%s/current\n' "$AGENT" "$A" "$n" "$D"
+    props - job                     # jobs bind no port at all (SocketBindDeny=any), like the agent's
+  } > "$f.service"
+  printf '[Unit]\nDescription=tando job timer %s %s\n\n[Timer]\nOnCalendar=%s\nPersistent=true\n' \
+    "$A" "$n" "$cal" > "$f.timer"
+  printf '\n[Install]\nWantedBy=timers.target\n' >> "$f.timer"
+  systemctl daemon-reload
+}
+
+cmd_adopt_status() { # app: progress of the latest adopt or undo
+  need_root
+  valid_app "${1:-}" || die "invalid app name"
+  A=$1
+  [[ -f $AD/$A/progress ]] || die "no adoption of $A"
+  cat "$AD/$A/progress"
+  if [[ -f $AD/$A/result ]]; then cat "$AD/$A/result"
+  elif own_transient adopt | grepq .; then echo result=running
+  elif [[ -f $AD/$A/result ]]; then cat "$AD/$A/result"   # finished between the two checks above
+  else echo result=interrupted; echo "message=the run stopped without a result: tando adopt undo returns to the recorded state"; fi
+  [[ -f $AD/$A/record ]] && sed -n 's/^f\.\(backup\|release_id\|unit\|link_target\)=/\1=/p' "$AD/$A/record"
+  return 0
+}
+
+# ---- adopt: undo ----------------------------------------------------------------------------
+
+cmd_adopt_undo() { # app: start the detached undo
+  need_root
+  valid_app "${1:-}" || die "invalid app name"
+  A=$1 D=$R/apps/$1
+  rec_load "$A"
+  if [[ -f $D/app.conf ]]; then
+    load "$D/state" S
+    # (no current release: the adopt stopped before its switch; undo just goes back)
+    [[ -z ${S[current]:-} || ${S[current]} == "${F[release_id]}" ]] ||
+      die "$A runs release ${S[current]:-none}, not the adopted one: tando rollback ${F[release_id]} first, so undo returns the code that was live before adoption"
+    [[ ${S[phase]:-idle} == idle ]] || die "an activation of $A is in phase ${S[phase]}"
+  fi
+  lockfile "$AD/$A/lock"; exec 6>"$AD/$A/lock"; flock -n 6 || die "an adopt or undo of $A is running"
+  rm -f "${AD:?}/${A:?}/result"; : > "$AD/$A/progress"
+  flock -u 6
+  systemd-run --quiet --collect --unit="tando-unadopt-$A-$(date +%s)" -p Description="tando adopt undo $A" \
+    "$AGENT" adopt-undo-run "$A" || die "systemd-run failed"
+  echo "app=$A"
+}
+
+cmd_adopt_undo_run() {
+  need_root
+  local t diffs
+  A=$1 D=$R/apps/$1
+  trap '' HUP PIPE
+  rec_load "$A"
+  lockfile "$AD/$A/lock"; exec 6>"$AD/$A/lock"; flock -w 60 6 || exit 1
+  if [[ -f $D/app.conf ]]; then load "$D/app.conf" C; lock 300; fi
+  load "$R/host.conf" H
+  app_vars
+  t=$(ds); ap_step 1 restore run "" ""
+  adopt_restore
+  ap_step 1 restore ok "$(el "$t")" "${F[unit]}.service running, ${F[link]} -> ${F[link_target]}"
+  t=$(ds); ap_step 2 verify run "" ""
+  C=([check_url]=${F[check_url]} [path]=${F[path]} [health]=${F[health]:-/} [health_timeout]=60
+     [check_static]=${F[check_static]:-})
+  if ! via_caddy "${F[unit]}.service"; then
+    ap_step 2 verify fail "$(el "$t")" "$PROBE_WHY"; ap_result failed "hand-managed state restored but unhealthy: $PROBE_WHY"; exit 1
+  fi
+  diffs=$(diff <(fingerprint) "$AD/$A/fingerprint" | grep '^[<>]' | tr '\n' ';')
+  if [[ -n $diffs ]]; then
+    ap_step 2 verify fail "$(el "$t")" "differs from the record: $diffs"; ap_result failed "state differs from before adoption: $diffs"; exit 1
+  fi
+  ap_step 2 verify ok "$(el "$t")" "healthy; unit, env file, Caddyfile, link, timers, cron, data owner as recorded"
+  mv -f "$AD/$A/record" "$AD/$A/record.undone-$(date -u +%Y%m%d-%H%M%S)"
+  ap_result ok "back to the hand-managed ${F[unit]}.service; the adopt backup stays in ${F[backup]}"
+}

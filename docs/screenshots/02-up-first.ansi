@@ -1,0 +1,14 @@
+wrote tando.conf (node, host prod)
+installing node 24 on prod (the first app that needs it; up to a minute)...
+  node 24.22.3 (installed now)
+[38;5;242m╭─[0m [1mdeploy hello[0m [38;5;242m────────────────────────────────────────────────────────────────────────────[0m [2mprod[0m [38;5;242m─╮[0m
+[38;5;242m│[0m [2m–[0m [2m1/7[0m  [2mbuild     [0m  [2m          nothing to build (no build in tando.conf)[0m[0m                           [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m2/7[0m  stage     [0m  [2m  0.0s  2 files[0m[0m                                                               [38;5;242m│[0m
+[38;5;242m│[0m         created hello on prod: user tando-hello, port 4100[0m                                       [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m3/7[0m  upload    [0m  [2m  0.1s  2 files changed, 984 B sent[0m[0m                                           [38;5;242m│[0m
+[38;5;242m│[0m         release 20261114-065351[0m                                                                  [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m4/7[0m  copy      [0m  [2m  0.1s[0m[0m                                                                        [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m5/7[0m  preflight [0m  [2m  0.6s[0m[0m                                                                        [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m6/7[0m  switch    [0m  [2m  0.1s[0m[0m                                                                        [38;5;242m│[0m
+[38;5;242m╰─[0m [1m[0m[2mlive in 1.9s  http://hello.localhost:8378[0m [38;5;242m─────────────────────────────────────────────────────[0m[38;5;242m─╯[0m
+the server watches it for 30 s more and rolls back if it falls over (tando status; --wait waits)

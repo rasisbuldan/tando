@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="876" height="385" viewBox="0 0 876 385">
+<style>text{font-family:'SF Mono','Menlo','DejaVu Sans Mono','Consolas','Liberation Mono',monospace;font-size:14px;white-space:pre;fill:#d4d7dd}.b{font-weight:700}.i{font-style:italic}</style>
+<rect width="876" height="385" rx="10" fill="#16181d"/>
+<rect width="876" height="34" rx="10" fill="#24272e"/><rect y="24" width="876" height="10" fill="#24272e"/>
+<circle cx="20" cy="17.0" r="6" fill="#ff5f57"/>
+<circle cx="40" cy="17.0" r="6" fill="#febc2e"/>
+<circle cx="60" cy="17.0" r="6" fill="#28c840"/>
+<text x="438.0" y="22.0" text-anchor="middle" style="font-size:12px;fill:#8b919c">tando requests -a nextdemo</text>
+<text x="18.0" y="60.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">╭─</text>
+<text x="43.2" y="60.6" textLength="142.8" lengthAdjust="spacingAndGlyphs" class="b">requests nextdemo</text>
+<text x="194.4" y="60.6" textLength="512.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">─────────────────────────────────────────────────────────────</text>
+<text x="715.2" y="60.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">prod</text>
+<text x="765.6" y="60.6" textLength="67.2" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">last 15m</text>
+<text x="841.2" y="60.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">─╮</text>
+<text x="18.0" y="77.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="77.6" textLength="67.2" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">requests</text>
+<text x="135.6" y="77.6" textLength="33.6" lengthAdjust="spacingAndGlyphs">1977</text>
+<text x="194.4" y="77.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">rate</text>
+<text x="236.4" y="77.6" textLength="58.8" lengthAdjust="spacingAndGlyphs">131/min</text>
+<text x="320.4" y="77.6" textLength="50.4" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">errors</text>
+<text x="379.2" y="77.6" textLength="75.6" lengthAdjust="spacingAndGlyphs">0.00% 5xx</text>
+<text x="480.0" y="77.6" textLength="84.0" lengthAdjust="spacingAndGlyphs">33.33% 4xx</text>
+<text x="849.6" y="77.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="94.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="94.6" textLength="58.8" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">per min</text>
+<text x="135.6" y="94.6" textLength="126.0" lengthAdjust="spacingAndGlyphs" class="b" style="fill:#56b6c2">▁▁▁▁▁▁▁▁▁▁▇▆▇▇█</text>
+<text x="286.8" y="94.6" textLength="184.8" lengthAdjust="spacingAndGlyphs" style="fill:#e5c07b">log starts 11-14 14:05</text>
+<text x="849.6" y="94.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="111.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="111.6" textLength="58.8" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">latency</text>
+<text x="135.6" y="111.6" textLength="84.0" lengthAdjust="spacingAndGlyphs">p50 2.4 ms</text>
+<text x="244.8" y="111.6" textLength="84.0" lengthAdjust="spacingAndGlyphs">p95 7.1 ms</text>
+<text x="354.0" y="111.6" textLength="75.6" lengthAdjust="spacingAndGlyphs">p99 17 ms</text>
+<text x="454.8" y="111.6" textLength="25.2" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">max</text>
+<text x="488.4" y="111.6" textLength="50.4" lengthAdjust="spacingAndGlyphs">103 ms</text>
+<text x="849.6" y="111.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="128.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">├─</text>
+<text x="43.2" y="128.6" textLength="100.8" lengthAdjust="spacingAndGlyphs" class="b">status codes</text>
+<text x="152.4" y="128.6" textLength="705.6" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">───────────────────────────────────────────────────────────────────────────────────┤</text>
+<text x="18.0" y="145.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="145.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">CODE</text>
+<text x="85.2" y="145.6" textLength="42.0" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">COUNT</text>
+<text x="144.0" y="145.6" textLength="42.0" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">SHARE</text>
+<text x="849.6" y="145.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="162.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="162.6" textLength="25.2" lengthAdjust="spacingAndGlyphs">200</text>
+<text x="93.6" y="162.6" textLength="33.6" lengthAdjust="spacingAndGlyphs">1318</text>
+<text x="144.0" y="162.6" textLength="92.4" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">━━━━━━━━━━━</text>
+<text x="236.4" y="162.6" textLength="42.0" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">─────</text>
+<text x="295.2" y="162.6" textLength="42.0" lengthAdjust="spacingAndGlyphs">66.7%</text>
+<text x="849.6" y="162.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="179.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="179.6" textLength="25.2" lengthAdjust="spacingAndGlyphs">404</text>
+<text x="102.0" y="179.6" textLength="25.2" lengthAdjust="spacingAndGlyphs">659</text>
+<text x="144.0" y="179.6" textLength="42.0" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">━━━━━</text>
+<text x="186.0" y="179.6" textLength="92.4" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">───────────</text>
+<text x="295.2" y="179.6" textLength="42.0" lengthAdjust="spacingAndGlyphs">33.3%</text>
+<text x="849.6" y="179.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="196.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">├─</text>
+<text x="43.2" y="196.6" textLength="168.0" lengthAdjust="spacingAndGlyphs" class="b">slowest paths (mean)</text>
+<text x="219.6" y="196.6" textLength="638.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">───────────────────────────────────────────────────────────────────────────┤</text>
+<text x="18.0" y="213.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="213.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">PATH</text>
+<text x="228.0" y="213.6" textLength="42.0" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">COUNT</text>
+<text x="303.6" y="213.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">MEAN</text>
+<text x="379.2" y="213.6" textLength="25.2" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">MAX</text>
+<text x="421.2" y="213.6" textLength="25.2" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">5XX</text>
+<text x="849.6" y="213.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="230.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="230.6" textLength="75.6" lengthAdjust="spacingAndGlyphs">GET /demo</text>
+<text x="244.8" y="230.6" textLength="25.2" lengthAdjust="spacingAndGlyphs">659</text>
+<text x="286.8" y="230.6" textLength="50.4" lengthAdjust="spacingAndGlyphs">3.4 ms</text>
+<text x="362.4" y="230.6" textLength="42.0" lengthAdjust="spacingAndGlyphs">54 ms</text>
+<text x="438.0" y="230.6" textLength="8.4" lengthAdjust="spacingAndGlyphs">0</text>
+<text x="849.6" y="230.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="247.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="247.6" textLength="176.4" lengthAdjust="spacingAndGlyphs">GET /demo/api/version</text>
+<text x="244.8" y="247.6" textLength="25.2" lengthAdjust="spacingAndGlyphs">659</text>
+<text x="286.8" y="247.6" textLength="50.4" lengthAdjust="spacingAndGlyphs">3.2 ms</text>
+<text x="362.4" y="247.6" textLength="42.0" lengthAdjust="spacingAndGlyphs">38 ms</text>
+<text x="438.0" y="247.6" textLength="8.4" lengthAdjust="spacingAndGlyphs">0</text>
+<text x="849.6" y="247.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="264.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="264.6" textLength="142.8" lengthAdjust="spacingAndGlyphs">GET /demo/missing</text>
+<text x="244.8" y="264.6" textLength="25.2" lengthAdjust="spacingAndGlyphs">659</text>
+<text x="286.8" y="264.6" textLength="50.4" lengthAdjust="spacingAndGlyphs">3.2 ms</text>
+<text x="354.0" y="264.6" textLength="50.4" lengthAdjust="spacingAndGlyphs">103 ms</text>
+<text x="438.0" y="264.6" textLength="8.4" lengthAdjust="spacingAndGlyphs">0</text>
+<text x="849.6" y="264.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="281.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">├─</text>
+<text x="43.2" y="281.6" textLength="117.6" lengthAdjust="spacingAndGlyphs" class="b">most requested</text>
+<text x="169.2" y="281.6" textLength="688.8" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">─────────────────────────────────────────────────────────────────────────────────┤</text>
+<text x="18.0" y="298.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="298.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">PATH</text>
+<text x="228.0" y="298.6" textLength="42.0" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">COUNT</text>
+<text x="303.6" y="298.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">MEAN</text>
+<text x="379.2" y="298.6" textLength="25.2" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">MAX</text>
+<text x="421.2" y="298.6" textLength="25.2" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">5XX</text>
+<text x="849.6" y="298.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="315.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="315.6" textLength="75.6" lengthAdjust="spacingAndGlyphs">GET /demo</text>
+<text x="244.8" y="315.6" textLength="25.2" lengthAdjust="spacingAndGlyphs">659</text>
+<text x="286.8" y="315.6" textLength="50.4" lengthAdjust="spacingAndGlyphs">3.4 ms</text>
+<text x="362.4" y="315.6" textLength="42.0" lengthAdjust="spacingAndGlyphs">54 ms</text>
+<text x="438.0" y="315.6" textLength="8.4" lengthAdjust="spacingAndGlyphs">0</text>
+<text x="849.6" y="315.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="332.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="332.6" textLength="176.4" lengthAdjust="spacingAndGlyphs">GET /demo/api/version</text>
+<text x="244.8" y="332.6" textLength="25.2" lengthAdjust="spacingAndGlyphs">659</text>
+<text x="286.8" y="332.6" textLength="50.4" lengthAdjust="spacingAndGlyphs">3.2 ms</text>
+<text x="362.4" y="332.6" textLength="42.0" lengthAdjust="spacingAndGlyphs">38 ms</text>
+<text x="438.0" y="332.6" textLength="8.4" lengthAdjust="spacingAndGlyphs">0</text>
+<text x="849.6" y="332.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="349.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="349.6" textLength="142.8" lengthAdjust="spacingAndGlyphs">GET /demo/missing</text>
+<text x="244.8" y="349.6" textLength="25.2" lengthAdjust="spacingAndGlyphs">659</text>
+<text x="286.8" y="349.6" textLength="50.4" lengthAdjust="spacingAndGlyphs">3.2 ms</text>
+<text x="354.0" y="349.6" textLength="50.4" lengthAdjust="spacingAndGlyphs">103 ms</text>
+<text x="438.0" y="349.6" textLength="8.4" lengthAdjust="spacingAndGlyphs">0</text>
+<text x="849.6" y="349.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="366.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">╰─</text>
+<text x="43.2" y="366.6" textLength="655.2" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">1 log files; paths with ids folded to :n and :id; query strings are not logged</text>
+<text x="706.8" y="366.6" textLength="151.2" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">─────────────────╯</text>
+</svg>

@@ -1,0 +1,85 @@
+# Deploys @APP@ with a tando deploy key on every push to @BRANCH@. Written by `tando ci github`.
+# Secrets (in the environment "@ENV@", restricted to the branch @BRANCH@):
+#   TANDO_DEPLOY_KEY, TANDO_HOST, TANDO_PORT, TANDO_KNOWN_HOSTS   (printed by `tando ci setup`)
+# The key can upload and activate @APP@ only; settings, env and rollback stay with the admin.
+name: deploy @APP@
+
+on:
+  push:
+    branches: ["@BRANCH@"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# one deploy of this app at a time; a newer push waits instead of cutting an upload short
+concurrency:
+  group: tando-deploy-@APP@
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/@BRANCH@'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: @ENV@
+    defaults:
+      run:
+        shell: bash
+        working-directory: "@WDIR@"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # @if lock
+      - name: Set up Node (npm cache)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "@NODE@"
+          cache: npm
+          cache-dependency-path: "@WDIR@/package-lock.json"
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      # @end
+      # @if nolock
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "@NODE@"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      # @end
+
+      - name: Install tando @REF@
+        env:
+          TANDO_REPO: "@REPO@"
+          TANDO_FETCH: "@FETCH@"
+          TANDO_SHA: "@SHA@"
+        run: |
+          d="$RUNNER_TEMP/tando"
+          git init -q "$d"
+          git -C "$d" fetch -q --depth 1 "$TANDO_REPO" "$TANDO_FETCH"
+          git -C "$d" checkout -q --detach FETCH_HEAD
+          got=$(git -C "$d" rev-parse HEAD)
+          if [ -n "$TANDO_SHA" ] && [ "$got" != "$TANDO_SHA" ]; then
+            echo "tando $TANDO_FETCH is $got, expected $TANDO_SHA" >&2
+            exit 1
+          fi
+          command -v rsync > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq rsync; }
+          echo "$d/bin" >> "$GITHUB_PATH"
+          echo "tando $got"
+
+      - name: Build and deploy
+        env:
+          TANDO_DEPLOY_KEY: ${{ secrets.TANDO_DEPLOY_KEY }}
+          TANDO_HOST: ${{ secrets.TANDO_HOST }}
+          TANDO_PORT: ${{ secrets.TANDO_PORT }}
+          TANDO_KNOWN_HOSTS: ${{ secrets.TANDO_KNOWN_HOSTS }}
+          TANDO_PLAIN: "1"
+        # runs the build from tando.conf, uploads, activates; prints phases, never app logs
+        # --yes: no prompt in CI; the deploy key can only ship this app anyway
+        run: tando deploy --yes

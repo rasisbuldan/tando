@@ -1,0 +1,12 @@
+Package: tando
+Version: @VERSION@
+Architecture: all
+Maintainer: @MAINTAINER@
+Depends: bash, openssh-client, rsync
+Section: admin
+Priority: optional
+Homepage: https://github.com/@REPO@
+Description: deploy apps from your laptop to your own Linux server over ssh
+ tando builds on the laptop, uploads by rsync and runs each app under systemd behind Caddy.
+ The Linux server programs (amd64 and arm64) travel inside this package and are installed on
+ a server over ssh by `tando host setup`; this package runs nothing on its own.

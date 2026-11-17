@@ -1,0 +1,5 @@
+Listing...
+libc-bin/resolute-updates,resolute-security 2.43-2ubuntu2.7 arm64 [upgradable from: 2.43-2ubuntu2.4]
+libc-gconv-modules-extra/resolute-updates,resolute-security 2.43-2ubuntu2.7 arm64 [upgradable from: 2.43-2ubuntu2.4]
+libc6/resolute-updates,resolute-security 2.43-2ubuntu2.7 arm64 [upgradable from: 2.43-2ubuntu2.4]
+perl-base/resolute-updates,resolute-security 5.40.1-7ubuntu0.4 arm64 [upgradable from: 5.40.1-7ubuntu0.3]

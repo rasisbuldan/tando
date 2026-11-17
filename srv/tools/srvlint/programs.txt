@@ -1,0 +1,54 @@
+daemon	systemctl
+gate	atq
+gate	atrm
+gate	crontab
+gate	getent
+gate	groupdel
+gate	ipcrm
+gate	ipcs
+gate	logger
+gate	loginctl
+gate	rsync
+gate	sshd
+gate	sudo tando-gate
+gate	systemctl
+gate	systemd-run tando-gate
+gate	tando-agent
+gate	uname
+gate	useradd
+gate	userdel
+gate	usermod
+gate	visudo
+hostcare	apt-config
+hostcare	apt-get
+hostcare	dpkg
+hostcare	journalctl
+hostcare	needrestart
+hostcare	sshd
+hostcare	systemctl
+hostcare	tando-agent
+hostcare	tando-logs
+hostcare	tando-watch
+internal/systemd	systemctl
+logs	caddy
+logs	journalctl
+logs	logger
+logs	systemctl
+offsite	systemctl
+status	caddy
+status	node
+status	python3
+status	tando-agent
+status	tando-logs
+status	tando-metrics
+status	tando-watch
+watch	caddy
+watch	du
+watch	journalctl
+watch	nft
+watch	nice tando-logs
+watch	systemctl
+watch	systemd-run sendmail
+watch	systemd-run tando-agent
+watch	tando-logs
+watch	tando-metrics

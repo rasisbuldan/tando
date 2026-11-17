@@ -1,0 +1,1701 @@
+#!/bin/bash
+# tando-watch: alert checks for a tando host. Installed as /opt/tando/bin/tando-watch (root 755).
+#
+# `run` is started once a minute by tando-watch.timer: one short process checks every app and
+# the host, moves each (app, check) through ok -> pending -> firing -> resolved, and queues
+# notifications. Nothing stays resident. See docs/MONITORING.md.
+#
+# Files:
+#   /opt/tando/alerts.conf            settings, key=value; "<app>.<key>" overrides per app (644)
+#   /opt/tando/alerts.d/              notifier secrets and the heartbeat URL (root 700, files 600)
+#   /var/lib/tando/watch/state        alert state, written (temp file + rename) only on change (600)
+#   /var/lib/tando/watch/history.tsv  one line per transition (600)
+#   /var/lib/tando/watch/out/<name>/  queued messages per notifier (root 700; no secrets)
+#   /run/tando-watch/                 volatile per-run data (tmpfs, root 700)
+# Secrets are read only from root-only files and given to curl on stdin (-K -), never in argv.
+# Output is key=value lines or tab-separated rows; the client never evaluates it.
+set -uo pipefail
+umask 022
+export LC_ALL=C
+
+R=/opt/tando
+SELF=$R/bin/tando-watch
+CONF=$R/alerts.conf
+SEC=$R/alerts.d
+V=/var/lib/tando/watch
+RUN=/run/tando-watch
+CG=/sys/fs/cgroup
+
+# durable state, volatile state, host.conf, app.conf, app state, activation, settings
+declare -A W=() VS=() H=() C=() S=() P=() CF=()
+DIRTY=0 VDIRTY=0 NOW=0
+
+die() { echo "tando-watch: $*" >&2; exit 1; }
+# lockfile <path>: root-owned 0600 regular file before `exec N> path; flock` (as tando-agent's: a
+# lock any user can open is one any app can hold, and every run would wait for it)
+lockfile() {
+  local f=$1
+  [[ -L $f || ( -e $f && ! -f $f ) ]] && die "lock file $f is not a regular file"
+  [[ -e $f && $(stat -c %u "$f") != 0 ]] && rm -f "$f"
+  [[ -e $f ]] || (umask 077; : >> "$f") || die "could not create $f"
+  [[ $(stat -c %a "$f") == 600 ]] || chmod 600 "$f"
+}
+need_root() { [[ $EUID -eq 0 ]] || die "this needs root (sudo)"; }
+valid_app() { [[ $1 =~ ^[a-z][a-z0-9-]{1,25}$ ]]; }
+valid_name() { [[ $1 =~ ^[a-z][a-z0-9-]{0,19}$ ]]; }
+now() { printf '%(%s)T' -1; }
+# one safe line: no control characters, no bidi overrides (U+200E/F, U+202A-E, U+2066-9, U+061C)
+BIDI=($'\xe2\x80\x8e' $'\xe2\x80\x8f' $'\xe2\x80\xaa' $'\xe2\x80\xab' $'\xe2\x80\xac' $'\xe2\x80\xad'
+  $'\xe2\x80\xae' $'\xe2\x81\xa6' $'\xe2\x81\xa7' $'\xe2\x81\xa8' $'\xe2\x81\xa9' $'\xd8\x9c')
+clean() {
+  local s=$1 b
+  if [[ $s == *[$'\xd8\xe2']* ]]; then for b in "${BIDI[@]}"; do s=${s//"$b"/}; done; fi   # (bytes, LC_ALL=C)
+  local LC_ALL=C.UTF-8
+  s=${s//[[:cntrl:]]/ }
+  printf '%s' "${s:0:300}"
+}
+row() {
+  local x out=()
+  for x; do x=${x//[[:cntrl:]]/ }; out+=("${x:--}"); done
+  local IFS=$'\t'
+  echo "${out[*]}"
+}
+dur() { # seconds -> 1m 31s, 2h 05m, 3d 4h
+  local s=$1
+  if ((s < 60)); then echo "${s}s"; elif ((s < 3600)); then echo "$((s / 60))m $((s % 60))s"
+  elif ((s < 86400)); then printf '%dh %02dm\n' $((s / 3600)) $((s % 3600 / 60))
+  else echo "$((s / 86400))d $((s % 86400 / 3600))h"; fi
+}
+
+load() { # file array
+  local -n _m=$2
+  _m=()
+  local k v
+  [[ -r $1 ]] || return 0
+  local l   # split at the first "=" ourselves: IFS='=' read drops a trailing "=" of the value
+  while IFS= read -r l; do
+    [[ $l == *=* ]] || continue
+    k=${l%%=*} v=${l#*=}
+    [[ -n $k && $k != \#* ]] && _m[$k]=$v
+  done < "$1"
+}
+save() { # file array [mode]: temp file + rename
+  local -n _m=$2
+  local k tmp="$1.tmp.$$"
+  { for k in "${!_m[@]}"; do printf '%s=%s\n' "$k" "${_m[$k]}"; done; } > "$tmp" &&
+    chmod "${3:-600}" "$tmp" && mv -f "$tmp" "$1"
+}
+# durable / volatile state setters that remember whether anything changed
+ws() { [[ ${W[$1]-} == "$2" ]] || { W[$1]=$2; DIRTY=1; }; }
+wu() { [[ -v W[$1] ]] && { unset "W[$1]"; DIRTY=1; }; return 0; }
+vs() { [[ ${VS[$1]-} == "$2" ]] || { VS[$1]=$2; VDIRTY=1; }; }
+
+# ---- settings ------------------------------------------------------------------------------
+
+# key default description; production defaults (a "sample" is one run, once a minute)
+DEFAULTS='down_after 2 samples with the unit not running or restarting before firing
+health_fails 3 failed health probes in a row before firing
+health_timeout 10 seconds per health probe
+mem_pct 90 app memory (anon+shmem) as % of its MemoryMax
+mem_for 5 samples above mem_pct before firing
+restarts_max 3 automatic restarts within restarts_window minutes before firing
+restarts_window 15 minutes
+oom_quiet 30 minutes without a new OOM kill before an oom alert resolves
+disk_pct 90 % of disk space used on /, /var or /opt/tando
+inode_pct 90 % of inodes used
+mem_avail_pct 5 host MemAvailable below this % of RAM counts as memory pressure
+psi_pct 30 host memory pressure (PSI some avg60, when the kernel has it) at or above this %
+swap_pct 80 % of swap used
+host_for 5 samples for host memory pressure and swap before firing
+load_pct 100 5-minute load average as % of the CPU count
+load_for 15 samples above load_pct before firing
+tls_pct 20 fire when a certificate has less than this % of its lifetime left
+tls_every 360 minutes between certificate checks
+backup_hours 50 hours since the last daily backup before firing
+disk_every 10 minutes between measurements of the disk use of each app (shared/, data, releases) against app_max_mb
+disk_stop_pct 95 an app over app_max_mb is stopped when its file system is this % full (0 = never)
+liveness 3 failed health probes in a row, with the unit of the app running, after which tando-watch restarts the app (at most 3 times an hour, then only alerts); 0 = never
+stuck_min 20 minutes an activation may run before it counts as stuck
+http_min 5 answers with HTTP 5xx within 5 minutes (real requests, from the request log) before http fires, if also http_pct
+http_pct 10 % of the requests within 5 minutes answered 5xx before http fires
+slow_ms 3000 p95 latency in ms of real requests within a minute above which the minute counts as slow
+slow_min 10 requests a minute needed to judge latency (fewer: not judged)
+slow_for 5 slow minutes in a row before slow fires
+err_spike 20 error events in the app log within 5 minutes before errors fires, if also 5x its usual rate
+err_new_min 30 minutes after a deploy during which an error type never seen before is reported once, naming the release
+logs_quiet 15 minutes without lines dropped by journald before a logs alert resolves
+include_log_lines off on: notifications carry log lines (the last lines before a crash, error messages); off: only types, counts and ids (log lines can hold secrets)
+caddy_every 5 minutes between validations of the Caddy config (only after a file under /etc/caddy changed)
+resolve_after 2 good samples in a row before a firing alert resolves
+remind_hours 6 hours between reminders while an alert keeps firing (0 = never)
+flap_max 3 firings within flap_window minutes that count as flapping
+flap_window 60 minutes
+deploy_grace 120 seconds after an activation during which the app is not checked
+boot_grace 180 seconds after the host (systemd) started during which apps are not checked
+heartbeat_every 5 minutes between heartbeat pings (the URL is set with tando alerts heartbeat)
+notify_reboot yes yes: one notification when the host has restarted
+name - host name used in messages (default: the hostname)'
+CHECKS_APP="down health memory oom restarts tls backup stuck disk http slow errors logs"
+LOW_CHECKS=" logs "   # low severity: no high priority in ntfy, "(low)" in the text
+CHECKS_HOST="disk inodes host_memory swap load host_oom caddy caddy_config firewall"
+
+conf_load() {
+  local k v d l
+  CF=()
+  while read -r k v d; do CF[$k]=$v; done <<< "$DEFAULTS"
+  [[ ${CF[name]} == - ]] && CF[name]=""
+  if [[ -r $CONF ]]; then
+    while IFS= read -r l; do
+      [[ $l == *=* ]] || continue
+      k=${l%%=*} v=${l#*=}
+      [[ -n $k && $k != \#* ]] && CF[$k]=$v
+    done < "$CONF"
+  fi
+}
+# cfg key [app]: per-app override first; numbers fall back to the default when malformed
+cfg() {
+  local v=${CF[${2:+$2.}$1]-${CF[$1]-}}
+  if [[ $1 != name && $1 != notify_reboot && $1 != include_log_lines ]]; then
+    if [[ $v =~ ^[0-9]{1,9}$ ]]; then v=$((10#$v))   # "08" is 8, not an octal error
+    else v=$(sed -n "s/^$1 \([^ ]*\) .*/\1/p" <<< "$DEFAULTS"); fi
+  fi
+  echo "$v"
+}
+# the same without a fork, into a variable: cfgv var key [app]
+cfgv() {
+  local -n _o=$1
+  _o=${CF[${3:+$3.}$2]-${CF[$2]-0}}
+  if [[ $_o =~ ^[0-9]{1,9}$ ]]; then _o=$((10#$_o)); else _o=$(cfg "$2"); fi
+}
+enabled() { [[ ${CF[${2:+$2.}$1]-${CF[$1]-on}} != off ]]; }   # check [app]
+
+# ---- state machine -------------------------------------------------------------------------
+
+# sample <key> <app> <check> <result> <detail> <needed bad samples>
+# result: bad | ok | hold (not evaluated this run: leaves the state alone)
+sample() {
+  local k=$1 a=$2 c=$3 r=$4 det=$5 need=$6 st n lt ra ap=${2/#_host/}
+  [[ $r == hold ]] && return 0
+  st=${W[$k.st]:-ok}
+  if [[ $r == bad ]]; then
+    case $st in
+      ok|pending)
+        n=${W[$k.n]:-0} lt=${W[$k.lt]:-0}
+        ((NOW - lt > 300)) && n=0            # samples more than 5 min apart do not add up
+        n=$((n + 1))
+        if ((n >= need)); then
+          ws "$k.st" firing; ws "$k.since" "${W[$k.since]:-$NOW}"; ws "$k.det" "$det"
+          wu "$k.n"; wu "$k.lt"; wu "$k.okn"
+          event fire "$a" "$c" "$det"
+          silenced "${a/#_host/host}" || flap_note "$k" "$a" "$c"
+        else
+          ws "$k.st" pending; ws "$k.n" "$n"; ws "$k.lt" "$NOW"
+          [[ $st == ok ]] && ws "$k.since" "$NOW"
+          ws "$k.det" "$det"
+        fi;;
+      firing) wu "$k.okn";;
+    esac
+  else
+    case $st in
+      pending) wu "$k.st"; wu "$k.n"; wu "$k.lt"; wu "$k.since"; wu "$k.det";;
+      firing)
+        cfgv ra resolve_after "$ap"
+        [[ -n ${RECOVER[$k]:-} ]] && ra=${RECOVER[$k]}   # health_recover of the app (tando.conf)
+        n=$((${W[$k.okn]:-0} + 1))
+        if ((n >= ra)); then
+          RESOLVED[$k]="after $(dur $((NOW - ${W[$k.since]:-$NOW}))) (was: ${W[$k.det]:-})"
+          event resolve "$a" "$c" "${RESOLVED[$k]}"
+          ws "$k.st" ok; wu "$k.okn"; wu "$k.since"; wu "$k.det"
+        else ws "$k.okn" "$n"; fi;;
+    esac
+  fi
+}
+
+# remember firing times; three firings within flap_window make the check "flapping"
+flap_note() {
+  local k=$1 fl=${W[$1.fl]:-} t out="" n=0 max win
+  cfgv max flap_max "${2/#_host/}"; cfgv win flap_window "${2/#_host/}"
+  for t in ${fl//,/ } "$NOW"; do
+    ((NOW - t < win * 60)) && { out+="${out:+,}$t"; n=$((n + 1)); }
+  done
+  ws "$k.fl" "$out"
+  if ((n >= max)) && [[ ${W[$k.flap]:-0} != 1 ]]; then
+    ws "$k.flap" 1
+    event flap "$2" "$3" "fired $n times within $win min; notifications for it pause until it is stable"
+  fi
+}
+
+# history and the list of transitions of this run
+EVENTS=()
+event() { # kind app check detail
+  local a=${2/#_host/host}
+  EVENTS+=("$1"$'\t'"$a"$'\t'"$3"$'\t'"$(clean "$4")")
+  printf '%s\t%s\t%s\t%s\t%s\n' "$NOW" "$1" "$a" "$3" "$(clean "$4")" >> "$V/history.tsv"
+  HIST_N=$((${HIST_N:-0} + 1))
+  [[ $a != host ]] && incident "$1" "$a" "$3" "$4"
+}
+
+# per-app incidents (for tando health): $V/incidents/<app>.tsv, "start end check cause", end "-"
+# while it lasts; at most 200 lines. Availability checks only, and liveness restarts (no end).
+incident() { # kind app check detail
+  local k=$1 a=$2 c=$3 f=$V/incidents/$2.tsv n
+  case $c in down|health|oom|restarts|http|slow|errors) ;; *) return 0;; esac
+  [[ $k == fire || $k == resolve || $k == restart ]] || return 0
+  [[ -d $V/incidents ]] || install -d -m 700 "$V/incidents"
+  case $k in
+    fire) printf '%s\t-\t%s\t%s\n' "$NOW" "$c" "$(clean "$4")" >> "$f"
+          [[ $c == down || $c == restarts || $c == oom ]] && crash_tail "$a";;
+    restart) printf '%s\t%s\trestart\t%s\n' "$NOW" "$NOW" "$(clean "$4")" >> "$f"; crash_tail "$a";;
+    resolve) [[ -f $f ]] || return 0
+      awk -F'\t' -v OFS='\t' -v c="$c" -v now="$NOW" '{ L[NR] = $0; if ($3 == c && $2 == "-") last = NR }
+        END { for (i = 1; i <= NR; i++) { if (i == last) { split(L[i], F, "\t"); F[2] = now
+          L[i] = F[1]; for (j = 2; j <= 4; j++) L[i] = L[i] OFS F[j] } print L[i] } }' "$f" > "$f.tmp" &&
+        mv -f "$f.tmp" "$f";;
+  esac
+  n=$(wc -l < "$f")
+  ((n > 250)) && { tail -n 200 "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"; }
+  chmod 600 "$f"
+  return 0
+}
+
+# the last 10 lines the app wrote, when it crashed or was restarted: $V/tail/<app> (root 600),
+# control characters replaced, 200 characters a line. Shown by tando health; sent to notifiers only
+# with include_log_lines=on (log lines can hold secrets)
+crash_tail() { # app
+  local a=$1
+  [[ -d $V/tail ]] || install -d -m 700 "$V/tail"
+  timeout 10 journalctl --no-pager -q -o short-unix "--namespace=tando-$a" -u "tando-$a.service" -n 10 2> /dev/null |
+    LC_ALL=C awk '{ p = index($0, "]: "); m = p ? substr($0, p + 3) : $0; gsub(/[\001-\037\177]/, "?", m)
+      if (length(m) > 200) m = substr(m, 1, 199) "~"; printf "%d\t%s\n", $1, m }' > "$V/tail/$a.tmp" &&
+    chmod 600 "$V/tail/$a.tmp" && mv -f "$V/tail/$a.tmp" "$V/tail/$a"
+  return 0
+}
+
+# signal number -> name (the common ones)
+signame() { case $1 in 1) echo SIGHUP;; 2) echo SIGINT;; 6) echo SIGABRT;; 9) echo SIGKILL;; 11) echo SIGSEGV;;
+  13) echo SIGPIPE;; 15) echo SIGTERM;; *) echo "signal $1";; esac; }
+
+silenced() { # app
+  local u=${W[_sil.$1]:-0} v=${W[_sil.all]:-0}
+  ((u > NOW || v > NOW))
+}
+
+# Decide what to tell the notifiers: the last notified state (ns) follows the true state unless
+# the app is silenced or the check is flapping; reminders while it keeps firing.
+OUT=()
+reconcile() {
+  local key k a c st ns flap rem fl t last
+  for key in "${!W[@]}"; do
+    [[ $key == *.st ]] || continue
+    k=${key%.st}; a=${k%%.*}; c=${k#*.}
+    # a check that was turned off resolves (once, if it had been sent) instead of staying stuck
+    local sw=$c ap=$a; [[ $a == _host ]] && { ap=""; [[ $c == memory || $c == oom ]] && sw=host_$c; }
+    if [[ ${W[$key]} != ok ]] && ! enabled "$sw" "$ap"; then
+      RESOLVED[$k]="the check was turned off"
+      [[ ${W[$key]} == firing ]] && event resolve "$a" "$c" "${RESOLVED[$k]}"
+      W[$key]=ok; DIRTY=1; unset "W[$k.n]" "W[$k.lt]" "W[$k.okn]" "W[$k.since]" "W[$k.det]" "W[$k.flap]"
+    fi
+    st=${W[$key]} ns=${W[$k.ns]:-ok} flap=${W[$k.flap]:-0}
+    [[ $st == pending ]] && continue
+    if [[ $flap == 1 ]]; then
+      fl=${W[$k.fl]:-}; last=${fl##*,}
+      cfgv t flap_window "${a/#_host/}"
+      if ((NOW - ${last:-0} >= t * 60)); then ws "$k.flap" 0; flap=0; else continue; fi
+    fi
+    silenced "${a/#_host/host}" && continue
+    if [[ $st == firing && $ns != firing ]]; then
+      OUT+=("firing"$'\t'"${a/#_host/host}"$'\t'"$c"$'\t'"${W[$k.det]:-}"$'\t'"${W[$k.since]:-$NOW}")
+      ws "$k.ns" firing; ws "$k.nt" "$NOW"
+    elif [[ $st == ok && $ns == firing ]]; then
+      OUT+=("resolved"$'\t'"${a/#_host/host}"$'\t'"$c"$'\t'"${RESOLVED[$k]:-}"$'\t'"$NOW")
+      wu "$k.ns"; wu "$k.nt"
+    elif [[ $st == firing ]]; then
+      cfgv rem remind_hours "${a/#_host/}"
+      if ((rem > 0 && NOW - ${W[$k.nt]:-0} >= rem * 3600)); then
+        t="${W[$k.det]:-} (since $(dur $((NOW - ${W[$k.since]:-$NOW}))))"
+        OUT+=("still firing"$'\t'"${a/#_host/host}"$'\t'"$c"$'\t'"$t"$'\t'"${W[$k.since]:-$NOW}")
+        ws "$k.nt" "$NOW"
+      fi
+    fi
+    # an ok check with nothing left to remember is dropped from the state file
+    if [[ $st == ok && -z ${W[$k.ns]:-} && ${W[$k.flap]:-0} == 0 ]]; then
+      fl=${W[$k.fl]:-}; last=${fl##*,}
+      cfgv t flap_window "${a/#_host/}"
+      if [[ -z $fl ]] || ((NOW - last >= t * 60)); then wu "$k.st"; wu "$k.fl"; wu "$k.flap"; fi
+    fi
+  done
+}
+
+# the state file, with every value checked: states are words, everything else numbers or lists
+# of numbers, except details (text) and the OOM counter pair; anything else is dropped
+load_state() {
+  local k
+  load "$V/state" W
+  for k in "${!W[@]}"; do
+    case $k in
+      *.st) [[ ${W[$k]} =~ ^(ok|pending|firing)$ ]];;
+      *.det|_host.oom_d|_nf.*.err) true;;
+      _oomc) [[ ${W[$k]} =~ ^[0-9]+:[0-9]+(:[0-9]+)?$ ]];;
+      *.ns) [[ ${W[$k]} == firing ]];;
+      *) [[ ${W[$k]} =~ ^[0-9]+(,[0-9]+)*$ ]];;
+    esac || { unset "W[$k]"; DIRTY=1; }
+  done
+}
+
+# ---- facts ---------------------------------------------------------------------------------
+
+ncpu() {
+  local l n=0 p a b
+  while read -r p l; do [[ $p == Cpus_allowed_list: ]] && break; done < /proc/self/status
+  [[ -n $l ]] || { echo 1; return; }
+  for p in ${l//,/ }; do
+    if [[ $p == *-* ]]; then a=${p%-*} b=${p#*-}; n=$((n + b - a + 1)); else n=$((n + 1)); fi
+  done
+  echo $((n > 0 ? n : 1))
+}
+
+# PID 1 start time (epoch): changes when the host (or the test container) restarts
+boot_time() {
+  local up st f
+  read -r up _ < /proc/uptime; up=${up%.*}
+  read -r f < /proc/1/stat; f=${f##*) }
+  read -ra st <<< "$f"
+  echo $((NOW - up + ${st[19]} / 100))
+}
+
+memstat() { # cgroup dir -> MEM (anon+shmem bytes)
+  local k v
+  MEM=0
+  [[ -r $1/memory.stat ]] || return 0
+  while read -r k v; do
+    case $k in anon) MEM=$((MEM + v));; shmem) MEM=$((MEM + v)); break;; esac   # shmem is after file
+  done < "$1/memory.stat"
+}
+evcount() { # file key -> value
+  local k v
+  [[ -r $1 ]] || { echo 0; return; }
+  while read -r k v; do [[ $k == "$2" ]] && { echo "$v"; return; }; done < "$1"
+  echo 0
+}
+
+# ---- run -----------------------------------------------------------------------------------
+
+cmd_run() {
+  need_root
+  lockfile "$V/lock"; exec 8> "$V/lock"; flock -w 30 8 || die "another run holds the lock"
+  NOW=$(now)
+  conf_load
+  load_state
+  mkdir -p "$RUN" && chmod 700 "$RUN"
+  load "$RUN/vstate" VS
+  load "$R/host.conf" H
+  declare -gA RESOLVED=() HOLDA=() PL=() HX=() HF=() HR=() RECOVER=()
+  local a names=() units=() hold_all=0 bt boot_age t
+
+  inbox
+
+  # ---- host restarted? hold app checks while it settles; one notification
+  bt=$(boot_time); boot_age=$((NOW - bt))
+  if [[ -n ${W[_boot]:-} ]] && (( bt - ${W[_boot]} > 60 || W[_boot] - bt > 60 )); then
+    [[ $(cfg notify_reboot) == yes ]] && event reboot _host reboot "the host restarted $(dur "$boot_age") ago"
+    ws _boot "$bt"
+  elif [[ -z ${W[_boot]:-} ]]; then ws _boot "$bt"; fi
+  cfgv t boot_grace; ((boot_age < t)) && hold_all=1
+
+  # static apps have no unit (Caddy serves them): only their health and backups are checked
+  local un=() f
+  for f in "$R"/apps/*/app.conf; do
+    [[ -f $f ]] || continue
+    a=${f%/app.conf}; a=${a##*/}
+    valid_app "$a" || continue
+    names+=("$a")
+    grep -q '^recipe=static$' "$f" || { un+=("$a"); units+=("tando-$a.service"); }
+  done
+
+  # ---- one systemctl call for every app unit and Caddy (last). If it fails or times out,
+  # nothing that depends on it is judged this run (an empty answer is not "everything is down").
+  declare -A U=() ; local l i=0 sysout appunits=" ${units[*]} "
+  un+=(_caddy); units+=(caddy.service)
+  if sysout=$(timeout 20 systemctl show -p ActiveState,SubState,Result,NRestarts,MemoryMax,ExecMainCode,ExecMainStatus "${units[@]}") &&
+     [[ $sysout == *ActiveState=* ]]; then
+    while IFS= read -r l; do
+      if [[ -n $l ]]; then U[${un[i]}.${l%%=*}]=${l#*=}; continue; fi
+      i=$((i + 1))
+    done <<< "$sysout"$'\n'
+  else
+    hold_all=1
+    U[_caddy.ActiveState]=hold
+  fi
+
+  # ---- Caddy: every app is reached through it, so one bad sample fires; while it is down the
+  # apps' health probes are held (they would all fail with it). A restart in progress is held.
+  local caddy_up=1 cs=${U[_caddy.ActiveState]:-} csub=${U[_caddy.SubState]:-} det=""
+  if [[ $cs == hold ]]; then caddy_up=0
+  elif [[ $cs != active && $cs != reloading ]]; then
+    caddy_up=0
+    if enabled caddy && ! [[ $cs == activating && $csub == auto-restart ]]; then
+      det="Caddy is not running (${cs:-unknown}${U[_caddy.Result]:+, ${U[_caddy.Result]}}): every app is unreachable"
+      sample _host.caddy _host caddy bad "$det" 1
+    fi
+  elif enabled caddy; then sample _host.caddy _host caddy ok "" 1; fi
+  enabled caddy_config && caddy_config
+
+  # ---- OOM kills: per-app counters are lost when the unit restarts (new cgroup), so a rise
+  # of the slice counters is attributed through the journal (only then: it costs a fork)
+  # (apps run under tando.slice since the per-app slices; older ones under system.slice)
+  local sl s_oom u_oom r_oom oom_units="" old o1 o2 o3
+  s_oom=$(evcount "$CG/system.slice/memory.events" oom_kill)
+  u_oom=$(evcount "$CG/user.slice/memory.events" oom_kill)
+  r_oom=$(evcount "$CG/tando.slice/memory.events" oom_kill)
+  sl="$s_oom:$u_oom:$r_oom"; old=${W[_oomc]:-}
+  IFS=: read -r o1 o2 o3 <<< "$old"
+  if [[ -n $old && $old != "$sl" ]] && (( s_oom > o1 || u_oom > o2 || r_oom > ${o3:-$r_oom} )); then
+    oom_units=$(journalctl --since "@$(( ${VS[last]:-$((NOW - 120))} - 5 ))" -o cat --no-pager \
+      -g 'OOM killer killed' 2> /dev/null | sed -n 's/^\([^ :]*\): The kernel OOM killer.*/\1/p' | sort -u)
+    local hostu=""
+    for u in $oom_units; do [[ $appunits == *" $u "* ]] || hostu+="${hostu:+, }$u"; done
+    [[ -z $oom_units ]] && hostu="a process outside tando apps"
+    [[ -n $hostu ]] && ws _host.oom_t "$NOW" && ws _host.oom_d "OOM killer: $hostu"
+  fi
+  [[ $old != "$sl" ]] && ws _oomc "$sl"
+
+  # ---- apps
+  local q_url=() q_app=() st sub res nr nr0 max ok det
+  for a in "${names[@]}"; do
+    C=() S=()
+    load "$R/apps/$a/app.conf" C
+    load "$R/apps/$a/state" S
+    [[ -n ${S[current]:-} ]] || continue           # nothing deployed: nothing to watch
+    local hold=$hold_all down=hold k=$a det="" unit=1 stopped=0
+    [[ ${C[recipe]:-} == static ]] && unit=0
+    [[ -n ${S[stopped]:-} && ${S[stopped]} != 0 ]] && stopped=1
+    st=${U[$a.ActiveState]:-} sub=${U[$a.SubState]:-} res=${U[$a.Result]:-}
+    nr0=${W[$k.nr]:-} nr=${U[$a.NRestarts]:-${W[$k.nr]:-0}}   # unknown this run: keep the baseline
+
+    # activation running, or just finished: the app is not checked (except "stuck").
+    # An activation or rollback holds the app's lock; a phase other than idle with the lock free
+    # means the activation died (SIGKILL, full disk): then the app is checked again, and two
+    # such samples in a row are "stuck" whatever its age.
+    if [[ ${S[phase]:-idle} != idle ]]; then
+      P=(); load "$R/apps/$a/activation" P
+      local alive=1
+      flock -n "$R/apps/$a/lock" true 2> /dev/null && alive=0
+      ((alive)) && { vs "dg.$a" "$NOW"; hold=1; }
+      cfgv t stuck_min "$a"
+      if enabled stuck "$a"; then
+        if ((!alive)); then
+          det="activation of ${S[target]:-?} died in phase ${S[phase]}"
+          det+=" (result ${P[result]:-?}; nothing holds the app's lock)"
+          sample "$k.stuck" "$a" stuck bad "$det" 2; det=""
+        elif ((NOW - ${P[started]:-$NOW} > t * 60)); then
+          det="activation of ${S[target]:-?} in phase ${S[phase]} for $(dur $((NOW - ${P[started]:-$NOW})))"
+          sample "$k.stuck" "$a" stuck bad "$det" 1; det=""
+        else sample "$k.stuck" "$a" stuck ok "" 1; fi
+      fi
+    else
+      [[ -n ${W[$k.stuck.st]:-} ]] && sample "$k.stuck" "$a" stuck ok "" 1
+      cfgv t deploy_grace "$a"
+      [[ -n ${VS[dg.$a]:-} ]] && ((NOW - ${VS[dg.$a]} < t)) && hold=1
+    fi
+
+    # restarts since the last run (NRestarts drops to 0 on a manual restart or a reboot)
+    local newr=0
+    if [[ -n $nr0 ]] && ((nr > nr0)); then newr=$((nr - nr0)); fi
+    [[ $nr0 != "$nr" ]] && ws "$k.nr" "$nr"
+
+    # how its main process last ended (a crash: exit status or signal, and whether the kernel's
+    # OOM killer did it), for the down and restarts details
+    local xc=${U[$a.ExecMainCode]:-} xs=${U[$a.ExecMainStatus]:-} xi="" xo
+    if ((newr > 0)) || [[ $st != active ]]; then
+      # systemd's own line about the last exit (the unit's ExecMain* already describe the new
+      # process after an automatic restart); only read when the app restarted or is not running
+      local xl
+      xl=$(timeout 10 journalctl -q --no-pager -o cat -u "tando-$a.service" "--since=@$((NOW - 900))" \
+        -g 'process exited, code=' 2> /dev/null | tail -n 1)
+      if [[ $xl =~ code=(exited|killed|dumped),\ status=([0-9]+) ]]; then
+        xc=${BASH_REMATCH[1]} xs=${BASH_REMATCH[2]}
+        case $xc in exited) xc=1;; killed) xc=2;; dumped) xc=3;; esac
+      fi
+    fi
+    case $xc in
+      1) [[ $xs != 0 ]] && xi="exit status $xs";;
+      2) xi="killed by $(signame "$xs")";;
+      3) xi="core dumped ($(signame "$xs"))";;
+    esac
+    xo=$(evcount "$(app_cg "$a")/memory.events" oom_kill)
+    if (( xo > ${VS[oomk.$a]:-$xo} )) || { [[ -n ${W[$k.oom_t]:-} ]] && (( NOW - W[$k.oom_t] < 600 )); }; then
+      xi="${xi:+$xi, }OOM-killed at its memory cap ${C[memory]:-?}"
+    fi
+    # ---- down: not running, failed, or restarting again and again
+    if ((stopped)); then down=stopped
+    elif ((!unit)); then down=nounit
+    elif ((hold)); then down=hold
+    elif [[ $st == active ]]; then
+      if ((newr >= 2)); then down=bad det="crash-looping: $newr restarts in the last minute${xi:+; last: $xi}"
+      else down=ok; fi
+    elif [[ $st == activating && $sub == auto-restart ]]; then
+      down=bad det="crash-looping (restarting; last result: $res${xi:+, $xi})"
+    elif [[ $st == failed ]]; then down=bad det="failed (${res:-unknown}${xi:+, $xi}); systemd gave up restarting it"
+    elif [[ $st == inactive ]]; then down=bad det="not running (inactive${xi:+, $xi}; not stopped with tando stop)"
+    else down=hold; fi                               # activating/deactivating/reloading
+    if [[ $down == stopped ]]; then
+      [[ -n ${W[$k.down.st]:-} ]] && sample "$k.down" "$a" down ok "" 1
+      hold=1
+    elif [[ $down == nounit ]]; then down=ok
+    elif enabled down "$a"; then
+      cfgv t down_after "$a"; sample "$k.down" "$a" down "$down" "${det:-}" "$t"
+    fi
+    [[ $down == ok ]] || hold=1                      # the checks below need a running app
+
+    # ---- restarts: automatic restarts within a window (crash loops are "down" instead)
+    if ((unit)) && enabled restarts "$a"; then
+      local rt=${W[$k.rt]:-} out="" n=0 win rmax x
+      cfgv win restarts_window "$a"; cfgv rmax restarts_max "$a"
+      for x in ${rt//,/ }; do ((NOW - x < win * 60)) && { out+="${out:+,}$x"; n=$((n + 1)); }; done
+      if ((!hold && newr > 0)); then
+        for ((x = 0; x < newr && x < 10; x++)); do out+="${out:+,}$NOW"; n=$((n + 1)); done
+      fi
+      [[ $out != "$rt" ]] && { if [[ -n $out ]]; then ws "$k.rt" "$out"; else wu "$k.rt"; fi; }
+      if ((n >= rmax)); then sample "$k.restarts" "$a" restarts bad "$n automatic restarts within $win min${xi:+; last: $xi}" 1
+      elif ((!hold || n == 0)); then sample "$k.restarts" "$a" restarts ok "" 1; fi
+    fi
+
+    # ---- OOM kills (a kill that systemd recovered from still fires: it lost requests)
+    if ((unit)) && enabled oom "$a"; then
+      local ok_n okn0 q
+      ok_n=$(evcount "$(app_cg "$a")/memory.events" oom_kill)
+      okn0=${VS[oomk.$a]:-$ok_n}
+      if ((ok_n > okn0)) || [[ " ${oom_units//$'\n'/ } " == *" tando-$a.service "* ]]; then
+        ws "$k.oom_t" "$NOW"
+      fi
+      vs "oomk.$a" "$ok_n"
+      cfgv q oom_quiet "$a"
+      if [[ -n ${W[$k.oom_t]:-} ]] && ((NOW - W[$k.oom_t] < q * 60)); then
+        sample "$k.oom" "$a" oom bad "the kernel OOM killer killed the app (memory cap ${C[memory]:-?})" 1
+      else
+        sample "$k.oom" "$a" oom ok "" 1; wu "$k.oom_t"
+      fi
+    fi
+
+    # ---- memory: anon+shmem against MemoryMax, sustained
+    max=${U[$a.MemoryMax]:-}
+    if enabled memory "$a" && [[ $max =~ ^[0-9]+$ ]] && ((max > 0)); then
+      if ((hold)); then sample "$k.memory" "$a" memory hold "" 1
+      else
+        local mp mf sw
+        memstat "$(app_cg "$a")"
+        cfgv mp mem_pct "$a"; cfgv mf mem_for "$a"
+        if ((MEM * 100 >= max * mp)); then
+          read -r sw < "$(app_cg "$a")/memory.swap.current" 2> /dev/null || sw=0
+          det="memory $((MEM >> 20)) MB of $((max >> 20)) MB ($((MEM * 100 / max))%)"
+          ((sw > 1048576)) && det+=", $((sw >> 20)) MB more in swap"
+          sample "$k.memory" "$a" memory bad "$det" "$mf"
+        else sample "$k.memory" "$a" memory ok "" "$mf"; fi
+      fi
+    fi
+
+    # ---- backup age (when the app has daily backups; last_backup may be absent)
+    if enabled backup "$a" && [[ ${C[backup]:-off} == daily ]]; then
+      local bh last=${S[last_backup]:-}
+      cfgv bh backup_hours "$a"
+      if [[ $last =~ ^[0-9]+$ ]]; then
+        if ((NOW - last > bh * 3600)); then
+          sample "$k.backup" "$a" backup bad "last backup $(dur $((NOW - last))) ago" 1
+        else sample "$k.backup" "$a" backup ok "" 1; fi
+      elif [[ ${C[created]:-} =~ ^[0-9]+$ ]] && ((NOW - C[created] > bh * 3600)); then
+        det="no backup recorded since the app was created $(dur $((NOW - C[created]))) ago"
+        sample "$k.backup" "$a" backup bad "$det" 1; det=""
+      fi
+    fi
+
+    # ---- disk: the app's own files (shared/, data_dir, releases, incoming) against app_max_mb,
+    # measured every disk_every minutes (du as root, one file system, no links followed). Over the
+    # cap: an alert. Over it while its file system is disk_stop_pct full: the app is stopped (503
+    # page; tando start brings it back), so one app cannot take every other app's writes and deploys
+    if enabled disk "$a"; then
+      cfgv t disk_every "$a"
+      if ((NOW - ${VS[du.$a]:-0} >= t * 60)); then
+        vs "du.$a" "$NOW"
+        local mb cap=${H[app_max_mb]:-8192} fsp sp dirs=()
+        for f in "$R/apps/$a/shared" "$R/apps/$a/releases" "$R/apps/$a/incoming" "${C[data_dir]:-}"; do
+          [[ -n $f && -d $f && ! -L $f ]] && dirs+=("$f")
+        done
+        mb=$(timeout 50 du -smxc "${dirs[@]}" 2> /dev/null | tail -1 | cut -f1)
+        if [[ $mb =~ ^[0-9]+$ ]]; then
+          vs "dumb.$a" "$mb"
+          if ((mb > cap)); then
+            det="$a uses $mb MB of disk, over the $cap MB allowed per app (host setup app_max_mb=N)"
+            fsp=$(df --output=pcent "$R/apps/$a/shared" 2> /dev/null | tail -1 | tr -dc 0-9)
+            cfgv sp disk_stop_pct "$a"
+            if ((sp > 0 && ${fsp:-0} >= sp && unit && !stopped)) &&
+               "$R/bin/tando-agent" stop "$a" > /dev/null 2>&1; then
+              det+="; its file system is $fsp% full: $a was stopped (free space, then tando start -a $a)"
+            fi
+            sample "$k.disk" "$a" disk bad "$det" 1; det=""
+          else sample "$k.disk" "$a" disk ok "" 1; fi
+        fi
+      fi
+    fi
+
+    HOLDA[$a]=$hold
+    # uptime bookkeeping: what this minute was for the app (a probe below may refine "ok")
+    if ((stopped)); then PL[$a]=stopped
+    elif [[ $down == bad ]]; then PL[$a]=down
+    elif ((hold)); then PL[$a]=hold
+    else PL[$a]=ok; fi
+    HX[$a]=${C[health_expect]:-} HF[$a]=${C[health_fails]:-} HR[$a]=${C[health_recover]:-}
+
+    # ---- queue the health probe and the certificate check
+    local site="$a.${H[apps_domain]:-localhost}" path="${C[path]:-}${C[health]:-/}"
+    if enabled health "$a"; then
+      if ((hold || !caddy_up)); then sample "$k.health" "$a" health hold "" 1
+      elif [[ ${H[tls]:-off} == off ]]; then q_url+=("http://$site$path"); q_app+=("$a")
+      else q_url+=("https://$site$path"); q_app+=("$a"); fi
+    fi
+    if [[ ${H[tls]:-off} != off ]] && enabled tls "$a"; then
+      cfgv t tls_every "$a"
+      if ((NOW - ${VS[tls.$a]:-0} >= t * 60)); then tls_check "$a" "$site"; vs "tls.$a" "$NOW"; fi
+    fi
+  done
+
+  # ---- health: one curl for every app, in parallel, through Caddy (as a visitor would). The
+  # answer is classified so that an alert says what kind of trouble it is:
+  #   unhealthy  it answers, but not what health_expect wants (status, text), or Caddy gets nothing
+  #              from its port (502/504)
+  #   slow       no answer within health_timeout
+  #   saturated  Caddy answered 503 "busy": more requests at once than max_requests/max_conns
+  #   down       Caddy answered 503 "unavailable": no process to send it to
+  if ((${#q_url[@]})); then
+    local args=() to n code ex need j tt exp txt body cls hb=$RUN/hb ms
+    cfgv to health_timeout
+    rm -rf "$hb"; mkdir -m 700 "$hb"
+    for i in "${!q_url[@]}"; do args+=(-o "$hb/$i" "${q_url[i]}"); done
+    declare -A HC=()
+    while read -r n code ex tt; do HC[$n]="$code $ex $tt"; done < <(
+      curl -sk -A tando-probe -H @/opt/tando/probe.header --parallel --parallel-immediate --parallel-max 16 -m "$to" --connect-timeout 5 \
+        --connect-to ::127.0.0.1: -w '%{urlnum} %{http_code} %{exitcode} %{time_total}\n' "${args[@]}" 2> /dev/null)
+    for i in "${!q_url[@]}"; do
+      a=${q_app[i]}; read -r code ex tt <<< "${HC[$i]:-000 99 0}"
+      ms=${tt%.*}${tt#*.}; ms=$((10#${ms:-0} / 1000)); [[ $tt == *.* ]] || ms=0
+      # health_expect = [status|Nxx] [text]; the default: any 2xx or 3xx
+      exp=${HX[$a]%% *} txt=""
+      [[ ${HX[$a]} == *' '* ]] && txt=${HX[$a]#* }
+      [[ $exp =~ ^[1-5]([0-9]{2}|xx)$ ]] || { txt=${HX[$a]}; exp=""; }
+      body=""; [[ -f $hb/$i ]] && IFS= read -r -N 4096 body < "$hb/$i"
+      need=${HF[$a]}; [[ $need =~ ^[1-9][0-9]?$ ]] || cfgv need health_fails "$a"
+      [[ ${HR[$a]} =~ ^[1-9][0-9]?$ ]] && RECOVER[$a.health]=${HR[$a]}
+      cls=ok
+      if [[ -z $exp && $code != [23]?? ]] || [[ $exp == ?xx && $code != "${exp:0:1}"?? ]] ||
+         [[ $exp =~ ^[0-9]{3}$ && $code != "$exp" ]]; then cls=bad; fi
+      [[ $cls == ok && -n $txt && $body != *"$txt"* ]] && cls=notext
+      if [[ $cls == ok ]]; then sample "$a.health" "$a" health ok "" "$need"; wu "$a.live.n"; PL[$a]="ok $ms"; continue; fi
+      case $ex:$code in
+        28:*) cls=slow det="slow: no answer within ${to} s (health_timeout)";;
+        0:503) case $body in
+                 *"is busy:"*) cls=saturated det="saturated: Caddy answered 503 busy (more requests at once than max_requests/max_conns)";;
+                 *"is unavailable"*) cls=down det="down: Caddy answered 503, no process to send it to";;
+                 *) cls=unhealthy det="unhealthy: answered HTTP 503";;
+               esac;;
+        0:502|0:504) cls=unhealthy det="unhealthy: Caddy got no answer from the app's port (HTTP $code)";;
+        0:*) if [[ $cls == notext ]]; then det="unhealthy: answered HTTP $code without \"$(clean "${txt:0:60}")\""
+             else det="unhealthy: answered HTTP $code, expected ${exp:-2xx/3xx}"; fi
+             cls=unhealthy;;
+        7:*) cls=unhealthy det="unhealthy: connection refused";;
+        52:*) cls=unhealthy det="unhealthy: empty reply";;
+        *) cls=unhealthy det="unhealthy: probe failed (curl error $ex)";;
+      esac
+      PL[$a]="$cls $ms"
+      j=$(( ${W[$a.health.n]:-0} + 1 ))
+      sample "$a.health" "$a" health bad "$det; ${q_url[i]#*//} ($j in a row)" "$need"
+      liveness "$a" "$det"
+    done
+    rm -rf "$hb"
+  fi
+
+  # ---- errors and requests from the apps' own logs; the uptime record of this minute
+  ((hold_all)) || logscan
+  uptime_log
+
+  # ---- host
+  host_checks "$hold_all"
+  enabled host_oom || wu _host.oom_t
+  [[ -n ${W[_host.oom_t]:-} ]] && {
+    cfgv t oom_quiet
+    if ((NOW - ${W[_host.oom_t]} < t * 60)); then sample _host.oom _host oom bad "${W[_host.oom_d]:-OOM kill}" 1
+    else sample _host.oom _host oom ok "" 1; wu _host.oom_t; wu _host.oom_d; fi
+  }
+  [[ -n ${W[_host.oom.st]:-} && -z ${W[_host.oom_t]:-} ]] && sample _host.oom _host oom ok "" 1
+
+  # ---- forget apps that were removed, expired silences
+  local key
+  for key in "${!W[@]}"; do
+    a=${key%%.*}
+    case $a in _*) ;;
+      *) [[ -d $R/apps/$a ]] || { unset "W[$key]"; DIRTY=1; };;
+    esac
+    [[ $key == _sil.* ]] && ((W[$key] <= NOW)) && { unset "W[$key]"; DIRTY=1; }
+  done
+  for key in "${!VS[@]}"; do
+    [[ $key == dg.* || $key == tls.* || $key == oomk.* || $key == win.* || $key == top.* || $key == ema.* ||
+       $key == sup.* ]] && ! [[ -d $R/apps/${key#*.} ]] && unset "VS[$key]"
+  done
+
+  reconcile
+  queue_out
+  ((DIRTY)) && save "$V/state" W
+  ((${HIST_N:-0})) && trim_history
+  vs last "$NOW"
+  ((VDIRTY)) && save "$RUN/vstate" VS 600
+  flock -u 8
+  deliver
+  ((VDIRTY)) && save "$RUN/vstate" VS 600
+  return 0
+}
+
+# ---- errors and requests from the app's own logs (tando-logs watch-scan, incremental) ---------
+
+# One call for every app: tando-logs reads each app's journal since its cursor and its request log
+# since its position (both capped per run) and prints per app: scan (lines read, error events,
+# lines journald dropped, requests, 5xx, p95 ms), top failing paths, new error groups, the top
+# error group. The rules below keep 5-minute windows in the volatile state (VS):
+#   http   5xx answers >= http_min and >= http_pct % of requests within 5 minutes
+#   slow   p95 latency of real requests over slow_ms for slow_for minutes (>= slow_min requests/min)
+#   errors error events >= err_spike within 5 minutes and 5x the usual rate (a slow average)
+#   logs   journald dropped lines (rate limit): low severity, resolves after logs_quiet minutes
+# and an event (sent once) for an error type never seen before that appears within err_new_min
+# minutes of a deploy, naming the release. Apps held this run (deploy, down, stopped) are not judged.
+logscan() {
+  local l r a x1 x2 x3 x4 x5 x6 x7
+  declare -A SC=() TOP=() RELT=() RELI=() ETOP=()
+  local NEWE=()
+  [[ -x $R/bin/tando-logs ]] || return 0
+  while IFS=$'\t' read -r r a x1 x2 x3 x4 x5 x6 x7; do
+    valid_app "${a:-}" || continue
+    case $r in
+      scan) SC[$a]="$x1 $x2 $x3 $x4 $x5 $x6 $x7";;
+      top) TOP[$a]+="${TOP[$a]:+, }${x1}x $x2 $(clean "$x3")";;
+      release) RELI[$a]=$x1 RELT[$a]=$x2;;
+      newerr) NEWE+=("$a"$'\t'"$x1"$'\t'"$x2"$'\t'"$x3"$'\t'"$x4"$'\t'"$x5");;
+      errtop) ETOP[$a]="${x1}x $(clean "$x2")";;
+    esac
+  done < <(timeout 60 nice "$R/bin/tando-logs" watch-scan 2> /dev/null)
+  local nev sup tot e5 p95 k out t n m sum5 sumt need pct
+  for a in "${!SC[@]}"; do
+    read -r _ nev sup tot e5 p95 _ <<< "${SC[$a]}"   # (lines read and request bytes skipped: not judged)
+    for x1 in nev sup tot e5 p95; do [[ ${!x1} =~ ^[0-9]+$ ]] || printf -v "$x1" 0; done
+    k=$a
+    # ---- logs: lines journald dropped (judged even while the app is held: they are gone)
+    if enabled logs "$a"; then
+      ((sup > 0)) && { ws "$k.logs_t" "$NOW"; vs "sup.$a" $(( ${VS[sup.$a]:-0} + sup )); }
+      cfgv t logs_quiet "$a"
+      if [[ -n ${W[$k.logs_t]:-} ]] && ((NOW - W[$k.logs_t] < t * 60)); then
+        sample "$k.logs" "$a" logs bad "journald dropped ${VS[sup.$a]:-$sup} log lines: the app logs faster than its log_rate (tando.conf); tando logs -a $a shows a note where" 1
+      else
+        sample "$k.logs" "$a" logs ok "" 1; wu "$k.logs_t"
+        [[ -n ${VS[sup.$a]:-} ]] && { unset "VS[sup.$a]"; VDIRTY=1; }
+      fi
+    fi
+    # rolling 5-minute windows: "time:requests:5xx:errors,..."
+    out=""
+    x2=${VS[win.$a]:-}
+    for x1 in ${x2//,/ }; do
+      t=${x1%%:*}; [[ $t =~ ^[0-9]+$ ]] && ((NOW - t < 290)) && out+="${out:+,}$x1"
+    done
+    out+="${out:+,}$NOW:$tot:$e5:$nev"
+    vs "win.$a" "$out"
+    sum5=0 sumt=0 m=0
+    for x1 in ${out//,/ }; do
+      IFS=: read -r t n x2 x3 <<< "$x1"
+      sumt=$((sumt + n)); sum5=$((sum5 + x2)); m=$((m + x3))
+    done
+    [[ -n ${TOP[$a]:-} ]] && vs "top.$a" "${TOP[$a]}"
+    if ((${HOLDA[$a]:-0})); then
+      sample "$k.http" "$a" http hold "" 1; sample "$k.slow" "$a" slow hold "" 1; sample "$k.errors" "$a" errors hold "" 1
+      continue
+    fi
+    # ---- http: 5xx answers to real requests
+    if enabled http "$a"; then
+      cfgv need http_min "$a"; cfgv pct http_pct "$a"
+      if ((sum5 >= need && sum5 * 100 >= pct * sumt)); then
+        sample "$k.http" "$a" http bad "$sum5 of $sumt requests answered 5xx ($((sum5 * 100 / sumt))%) in 5 min; top: ${VS[top.$a]:-?}" 1
+      else sample "$k.http" "$a" http ok "" 1; fi
+    fi
+    # ---- slow: p95 latency of the minute
+    if enabled slow "$a"; then
+      cfgv need slow_min "$a"; cfgv t slow_ms "$a"; cfgv n slow_for "$a"
+      if ((tot < need)); then sample "$k.slow" "$a" slow hold "" "$n"
+      elif ((p95 > t)); then sample "$k.slow" "$a" slow bad "p95 latency ${p95} ms of $tot requests in the last minute (over slow_ms $t)" "$n"
+      else sample "$k.slow" "$a" slow ok "" "$n"; fi
+    fi
+    # ---- errors: a spike of error events in the app's log against its usual rate (per mille/min)
+    if enabled errors "$a"; then
+      local ema=${VS[ema.$a]:-0} sp
+      [[ $ema =~ ^[0-9]+$ ]] || ema=0
+      cfgv sp err_spike "$a"
+      if ((m >= sp && m * 1000 >= 25 * ema)); then   # 5 minutes x 5 x the per-minute average
+        sample "$k.errors" "$a" errors bad "$m error events in the app log in 5 min (usually about $(( (ema * 5 + 500) / 1000 ))); most: ${ETOP[$a]:-?}; tando errors -a $a" 1
+      else sample "$k.errors" "$a" errors ok "" 1; fi
+      vs "ema.$a" $(( ema + (nev * 1000 - ema) / 60 ))
+    fi
+  done
+  # ---- new error types shortly after a deploy: one event each (at most 3 per app and run)
+  local e id ft cnt kind lab since
+  declare -A NN=()
+  cfgv t err_new_min
+  # oldest first (the scan prints them in hash order)
+  ((${#NEWE[@]} > 1)) && mapfile -t NEWE < <(printf '%s\n' "${NEWE[@]}" | sort -t $'\t' -k3,3n -k2,2)
+  for e in "${NEWE[@]}"; do
+    IFS=$'\t' read -r a id ft cnt kind lab <<< "$e"
+    enabled errors "$a" || continue
+    [[ -n ${RELT[$a]:-} && ${RELT[$a]} =~ ^[0-9]+$ && $ft =~ ^[0-9]+$ ]] || continue
+    since=$((ft - RELT[$a]))
+    ((since >= -60 && since <= t * 60)) || continue
+    NN[$a]=$(( ${NN[$a]:-0} + 1 ))
+    ((NN[$a] <= 3)) || continue
+    [[ $kind == line ]] && lab="an error line"
+    event newerror "$a" errors "new error after release ${RELI[$a]} (live $(dur $((since > 0 ? since : 0))) when it first appeared): $(clean "$lab"), ${cnt}x [$id]; tando errors -a $a; to undo the release: tando rollback -a $a"
+  done
+  for a in "${!NN[@]}"; do
+    ((NN[$a] > 3)) && event newerror "$a" errors "and $((NN[$a] - 3)) more new error types after release ${RELI[$a]}: tando errors -a $a"
+  done
+  return 0
+}
+
+# one line per app and run in $V/probe/<app> ("time class [ms]": ok, down, unhealthy, slow,
+# saturated, hold, stopped), 7 days kept (trimmed once an hour), for tando health
+uptime_log() {
+  local a f
+  [[ -d $V/probe ]] || install -d -m 700 "$V/probe"
+  for a in "${!PL[@]}"; do printf '%s %s\n' "$NOW" "${PL[$a]}" >> "$V/probe/$a"; done
+  if ((NOW - ${VS[ptrim]:-0} >= 3600)); then
+    vs ptrim "$NOW"
+    for f in "$V"/probe/* "$V"/incidents/*.tsv "$V"/tail/*; do
+      [[ -f $f ]] || continue
+      a=${f##*/}; a=${a%.tsv}
+      if [[ ! -d $R/apps/$a ]]; then rm -f "$f"; continue; fi
+      [[ $f == "$V"/probe/* ]] && (( $(wc -l < "$f") > 11000 )) &&
+        { tail -n 10080 "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"; }
+      chmod 600 "$f"
+    done
+  fi
+  return 0
+}
+
+# app_cg app: the cgroup of the app's unit, in its app's slice (or system.slice from before slices)
+app_cg() { local d=$CG/tando.slice/tando-${1//-/\\x2d}.slice/tando-$1.service; [[ -d $d ]] || d=$CG/system.slice/tando-$1.service; echo "$d"; }
+
+# liveness app detail: an app whose unit runs but that failed `liveness` health probes in a row
+# (a process thrashing at its memory cap, a deadlock: systemd sees nothing wrong) is restarted
+# through the agent (its lock, the Caddy site, the health check and the audit line), in a unit of
+# its own so this run does not wait. At most 3 restarts within an hour; after that only the
+# health alert (a release that is broken for good is not restarted every few minutes forever).
+liveness() {
+  local a=$1 lim n r t0 rec
+  cfgv lim liveness "$a"
+  [[ -n ${CF[$a.liveness]+x}${CF[liveness]+x} ]] || lim=3   # (a settings file without the line)
+  ((lim > 0)) || return 0
+  rec=$(sed -n 's/^recipe=//p' "$R/apps/$a/app.conf" 2> /dev/null)
+  [[ -n $rec && $rec != static ]] || return 0
+  [[ $(systemctl show -P ActiveState "tando-$a.service" 2> /dev/null) == active ]] || { wu "$a.live.n"; return 0; }
+  n=$(( ${W[$a.live.n]:-0} + 1 ))
+  if ((n < lim)); then ws "$a.live.n" "$n"; return 0; fi
+  wu "$a.live.n"
+  # a saturated app is not a hung one: Caddy sheds requests over its limits (503 busy) and the
+  # probe through Caddy waits behind them. Asked directly on its port, a working app still answers
+  # (any status) within 20 s; only one that does not is restarted
+  local port hp code
+  port=$(sed -n 's/^port=//p' "$R/apps/$a/app.conf"); hp=$(sed -n 's/^path=//p;' "$R/apps/$a/app.conf")$(sed -n 's/^health=//p' "$R/apps/$a/app.conf")
+  if [[ $port =~ ^[0-9]+$ ]]; then
+    code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' -A tando-probe "http://127.0.0.1:$port${hp:-/}" 2> /dev/null)
+    [[ $code =~ ^[1-5][0-9][0-9]$ ]] && return 0
+  fi
+  t0=${W[$a.live.t0]:-0} r=${W[$a.live.r]:-0}
+  if ((NOW - t0 > 3600)); then t0=$NOW r=0; wu "$a.live.gaveup"; fi
+  if ((r >= 3)); then
+    [[ -n ${W[$a.live.gaveup]:-} ]] && return 0
+    ws "$a.live.gaveup" "$NOW"
+    event restart "$a" health "$2, $n checks in a row while its unit runs; tando-watch restarted it 3 times this hour and stops now: tando logs -a $a, tando restart -a $a"
+    return 0
+  fi
+  ws "$a.live.t0" "$t0"; ws "$a.live.r" $((r + 1))
+  systemd-run --quiet --collect --no-block --unit="tando-$a-liveness-$NOW" \
+    -p Description="tando-watch: restart $a (unresponsive)" "$R/bin/tando-agent" restart "$a" 2> /dev/null
+  event restart "$a" health "$2, $n checks in a row while its unit runs: restarted by tando-watch ($((r + 1)) of at most 3 this hour)"
+}
+
+# Notices from the agent ($V/inbox, root 700, one file each: kind TAB app TAB release TAB text),
+# such as a release rolled back after its deploy had returned. Each becomes one event, sent once:
+# the file is deleted before the event is queued (a crash in between loses it, never repeats it).
+inbox() {
+  local f kind a d t
+  for f in "$V/inbox"/*; do
+    [[ -f $f && ! -L $f && $f != *.tmp ]] || continue
+    # a notice older than an hour is history, not news (alerts set up later, the timer off while
+    # it waited): dropped unsent; tando history keeps the rollback. Name: <epoch>.<app>.<release>
+    t=${f##*/}; t=${t%%.*}
+    if [[ $t =~ ^[0-9]{9,11}$ ]] && (( NOW - 10#$t > 3600 )); then rm -f "$f"; continue; fi
+    kind="" a="" d=""
+    IFS=$'\t' read -r kind a _ d < "$f"   # (the release id is also in the text)
+    rm -f "$f"
+    [[ $kind == rollback ]] && valid_app "$a" || continue
+    event rollback "$a" deploy "$d"
+  done
+  return 0
+}
+
+# The Caddy config on disk, validated only when a file under /etc/caddy is newer than the last
+# validation and at most every caddy_every minutes (caddy validate costs a few hundred ms). tando
+# itself validates before every reload; this catches hand edits that would break the next reload
+# or restart. The verdict is kept in /run, so a reboot validates once more.
+caddy_config() {
+  local ref=$RUN/caddy.checked f changed=0 every out
+  if [[ -f $ref ]]; then
+    for f in /etc/caddy /etc/caddy/* /etc/caddy/*/*; do
+      [[ $f -nt $ref ]] && { changed=1; break; }
+    done
+  else changed=1; fi
+  if ((changed)); then
+    cfgv every caddy_every
+    if ((NOW - ${VS[caddy_t]:-0} >= every * 60 - 5)) && command -v caddy > /dev/null; then
+      : > "$ref"
+      vs caddy_t "$NOW"
+      # caddy may write its local CA while validating: into the tmpfs, as home is read-only here
+      if out=$(cd /etc/caddy && HOME=$RUN XDG_DATA_HOME=$RUN/caddy XDG_CONFIG_HOME=$RUN/caddy \
+          timeout 30 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1); then
+        vs caddy_bad ""
+      else
+        # the first error line; Caddy logs JSON ({"msg":"..."}), older versions plain text
+        out=$(grep -m1 -iE 'error' <<< "$out" | sed 's/.*"msg":"\([^"]*\)".*/\1/; s/.*"error":"\([^"]*\)".*/\1/')
+        vs caddy_bad "$(clean "${out:-caddy validate failed}")"
+      fi
+    fi
+  fi
+  if [[ -n ${VS[caddy_bad]:-} ]]; then
+    sample _host.caddy_config _host caddy_config bad \
+      "the Caddy config on disk is invalid (the next reload or restart fails): ${VS[caddy_bad]}" 1
+  else sample _host.caddy_config _host caddy_config ok "" 1; fi
+}
+
+host_checks() { # hold_all
+  local t pct ip tg f seen=" " worst=0 worstp="" wi=0 wip="" mt=0 ma=0 st=0 sf=0 k v psi="" n la c
+  # disk and inodes: one df for the filesystems tando writes to
+  while read -r tg pct ip; do
+    [[ $seen == *" $tg "* ]] && continue
+    seen+="$tg "
+    pct=${pct%\%} ip=${ip%\%}
+    [[ $pct =~ ^[0-9]+$ ]] && ((pct > worst)) && { worst=$pct worstp=$tg; }
+    [[ $ip =~ ^[0-9]+$ ]] && ((ip > wi)) && { wi=$ip wip=$tg; }
+  done < <(df --output=target,pcent,ipcent / /var /opt/tando 2> /dev/null | tail -n +2)
+  if enabled disk; then
+    cfgv t disk_pct
+    if ((worst >= t)); then sample _host.disk _host disk bad "disk $worstp is $worst% full" 1
+    else sample _host.disk _host disk ok "" 1; fi
+  fi
+  if enabled inodes; then
+    cfgv t inode_pct
+    if ((wi >= t)); then sample _host.inodes _host inodes bad "$wip uses $wi% of its inodes" 1
+    else sample _host.inodes _host inodes ok "" 1; fi
+  fi
+  # nftables: `nft flush ruleset` (the stock /etc/nftables.conf, firewall tools) drops tando's
+  # per-app loopback rules with everything else, silently. Loaded rules differ from the file:
+  # load the file again (under fw_sync's lock), fire an alert and write an audit line
+  if enabled firewall && [[ -s $R/firewall.nft && -f $R/.fw.lock ]] && command -v nft > /dev/null; then
+    local want got fd det=""
+    want=$(grep -c 'meta skuid' "$R/firewall.nft")
+    got=$(nft list table inet tando 2> /dev/null | grep -c 'meta skuid')
+    if [[ $want != "$got" ]]; then
+      exec {fd}< "$R/.fw.lock"
+      if flock -w 30 "$fd"; then
+        want=$(grep -c 'meta skuid' "$R/firewall.nft")
+        got=$(nft list table inet tando 2> /dev/null | grep -c 'meta skuid')
+        if [[ $want != "$got" ]]; then
+          if nft -f "$R/firewall.nft" 2> /dev/null; then
+            det="the per-app loopback rules were gone ($got of $want loaded; nft flush ruleset?): loaded again"
+          else det="the per-app loopback rules are gone ($got of $want loaded) and could not be loaded again"; fi
+        fi
+      fi
+      exec {fd}<&-
+    fi
+    if [[ -n $det ]]; then
+      sample _host.firewall _host firewall bad "$det" 1
+      [[ -x $R/bin/tando-logs ]] && "$R/bin/tando-logs" audit-write fw-restore - 1 "$det" > /dev/null 2>&1
+    else sample _host.firewall _host firewall ok "" 1; fi
+  fi
+  ((${1:-0})) && return 0                            # memory and load settle after a restart
+
+  while read -r k v _; do
+    case $k in MemTotal:) mt=$v;; MemAvailable:) ma=$v;; SwapTotal:) st=$v;; SwapFree:) sf=$v; break;; esac
+  done < /proc/meminfo
+  if [[ -r /proc/pressure/memory ]]; then          # "some avg10=0.00 avg60=0.00 ..."
+    read -r _ _ f _ < /proc/pressure/memory; f=${f#avg60=}; psi=${f%%.*}
+  fi
+  local hf mp pp
+  cfgv hf host_for; cfgv mp mem_avail_pct; cfgv pp psi_pct
+  if enabled host_memory; then
+    if ((mt > 0 && ma * 100 < mt * mp)); then
+      sample _host.memory _host memory bad "only $((ma >> 10)) MB of $((mt >> 10)) MB RAM available" "$hf"
+    elif [[ $psi =~ ^[0-9]+$ ]] && ((psi >= pp)); then
+      sample _host.memory _host memory bad "memory pressure: tasks stalled $psi% of the last minute" "$hf"
+    else sample _host.memory _host memory ok "" "$hf"; fi
+  fi
+  if enabled swap && ((st > 0)); then
+    cfgv t swap_pct
+    if (((st - sf) * 100 >= st * t)); then
+      sample _host.swap _host swap bad "swap $(((st - sf) >> 10)) MB of $((st >> 10)) MB used" "$hf"
+    else sample _host.swap _host swap ok "" "$hf"; fi
+  fi
+  if enabled load; then
+    read -r _ la _ < /proc/loadavg
+    c=$(ncpu); cfgv t load_pct; cfgv n load_for
+    # load average with two decimals as an integer x100
+    v=${la%.*}; f=${la#*.}; v=$((10#$v * 100 + 10#${f:0:2}))
+    if ((v >= c * t)); then sample _host.load _host load bad "load $la (5 min) on $c CPU" "$n"
+    else sample _host.load _host load ok "" "$n"; fi
+  fi
+}
+
+# certificate of the app's link, as Caddy serves it. tls=auto: it must also verify against the
+# system's CAs; tls=internal: Caddy's own CA, only the dates count.
+tls_check() { # app site
+  local a=$1 out s="" e="" ns ne pct t k=() rc
+  [[ ${H[tls]} == internal ]] && k=(-k)
+  out=$(curl -sv "${k[@]}" -o /dev/null -m 10 --connect-to ::127.0.0.1: "https://$2/" 2>&1 > /dev/null); rc=$?
+  if [[ $rc == 60 ]]; then
+    sample "$a.tls" "$a" tls bad "the certificate for $2 does not verify (curl error 60)" 2; return
+  fi
+  s=$(sed -n 's/^\*  *start date: //p' <<< "$out" | head -1)
+  e=$(sed -n 's/^\*  *expire date: //p' <<< "$out" | head -1)
+  if [[ -z $e ]]; then
+    sample "$a.tls" "$a" tls bad "no certificate could be read for $2" 2; return
+  fi
+  ns=$(date -d "$s" +%s 2> /dev/null) || ns=0; ne=$(date -d "$e" +%s 2> /dev/null) || ne=0
+  ((ne > 0)) || return 0
+  cfgv t tls_pct "$a"
+  if ((ne <= NOW)); then sample "$a.tls" "$a" tls bad "certificate for $2 expired $(dur $((NOW - ne))) ago" 1
+  elif ((ns > 0 && ne > ns && (ne - NOW) * 100 < (ne - ns) * t)); then
+    sample "$a.tls" "$a" tls bad "certificate for $2 expires in $(dur $((ne - NOW))) (not renewed)" 1
+  else sample "$a.tls" "$a" tls ok "" 1; fi
+}
+
+trim_history() {
+  local n
+  n=$(wc -l < "$V/history.tsv")
+  ((n > 2000)) || return 0
+  ( umask 077; tail -n 1000 "$V/history.tsv" > "$V/history.tsv.tmp" ) && mv -f "$V/history.tsv.tmp" "$V/history.tsv"
+}
+
+# ---- notifiers -----------------------------------------------------------------------------
+
+notifiers() { local f; for f in "$SEC"/notify-*; do [[ -f $f ]] && echo "${f##*/notify-}"; done; }
+
+# queue this run's notifications (and events such as flapping/reboot) for every notifier
+queue_out() {
+  local e kind a c d out=() name f
+  for e in "${EVENTS[@]}"; do
+    IFS=$'\t' read -r kind a c d <<< "$e"
+    [[ $kind == flap || $kind == reboot ]] && out+=("$kind"$'\t'"$a"$'\t'"$c"$'\t'"$d"$'\t'"$NOW")
+    [[ $kind == rollback || $kind == restart || $kind == newerror ]] && ! silenced "$a" &&
+      out+=("$kind"$'\t'"$a"$'\t'"$c"$'\t'"$d"$'\t'"$NOW")
+  done
+  local o
+  for o in "${OUT[@]}"; do
+    out+=("$o")
+    IFS=$'\t' read -r kind a c d _ <<< "$o"
+    # with include_log_lines=on, a crash carries the app's last lines (they can hold secrets)
+    if [[ $kind == firing && ( $c == down || $c == restarts || $c == oom ) && $(cfg include_log_lines) == on &&
+          -f $V/tail/$a ]]; then
+      local t l
+      while IFS=$'\t' read -r t l; do out+=("log"$'\t'"$a"$'\t'"$c"$'\t'"$(clean "$l")"$'\t'"$t"); done < "$V/tail/$a"
+    fi
+  done
+  ((${#out[@]})) || return 0
+  for name in $(notifiers); do
+    install -d -m 700 "$V/out/$name"
+    f="$V/out/$name/$NOW.$$"
+    printf '%s\n' "${out[@]}" > "$f.tmp" && mv -f "$f.tmp" "$f"
+    # bound the queue of a notifier that keeps failing: drop the oldest
+    local q=("$V/out/$name"/*) i
+    if ((${#q[@]} > 100)); then
+      for ((i = 0; i < ${#q[@]} - 100; i++)); do rm -f "${q[i]}"; done
+      ws "_nf.$name.dropped" $(( ${W[_nf.$name.dropped]:-0} + ${#q[@]} - 100 ))
+    fi
+  done
+}
+
+json() { # string -> JSON string
+  local s=${1//\\/\\\\}
+  s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\t'/ }; s=${s//[[:cntrl:]]/ }
+  printf '"%s"' "$s"
+}
+
+# compose <files...>: TEXT, TITLE and EVENTS_JSON from queued message files
+compose() {
+  local f kind a c d t nf=0 nr=0 nb=0 nrs=0 ne=0 lines="" ev="" low
+  HIPRI=0
+  local host=${CF[name]:-}
+  [[ -n $host ]] || read -r host < /proc/sys/kernel/hostname
+  for f; do
+    while IFS=$'\t' read -r kind a c d t; do
+      [[ -n $kind ]] || continue
+      low=""; [[ $LOW_CHECKS == *" $c "* ]] && low=" (low)"
+      case $kind in firing|"still firing") nf=$((nf + 1)); [[ -z $low ]] && HIPRI=1;; resolved) nr=$((nr + 1));; esac
+      local word=${kind^^}
+      [[ $kind == flap ]] && word=FLAPPING
+      if [[ $kind == reboot ]]; then lines+="RESTARTED host: $d"$'\n'
+      elif [[ $kind == rollback ]]; then nb=$((nb + 1)) HIPRI=1; lines+="ROLLED BACK $a: $d"$'\n'
+      elif [[ $kind == restart ]]; then nrs=$((nrs + 1)) HIPRI=1; lines+="RESTARTED $a: $d"$'\n'
+      elif [[ $kind == newerror ]]; then ne=$((ne + 1)) HIPRI=1; lines+="NEW ERROR $a: $d"$'\n'
+      elif [[ $kind == log ]]; then lines+="    | $d"$'\n'; continue
+      else lines+="$word $a/$c$low: $d"$'\n'; fi
+      ev+="${ev:+,}{\"state\":$(json "$kind"),\"app\":$(json "$a"),\"check\":$(json "$c")"
+      ev+=",\"detail\":$(json "$d"),\"since\":${t:-0}}"
+    done < "$f"
+  done
+  local parts=()
+  ((nf)) && parts+=("$nf firing")
+  ((nr)) && parts+=("$nr resolved")
+  ((nb)) && parts+=("$nb rolled back")
+  ((nrs)) && parts+=("$nrs restarted")
+  ((ne)) && parts+=("$ne new error$( ((ne > 1)) && echo s)")
+  ((${#parts[@]})) || parts=(notice)
+  TITLE="tando $host: $(IFS=,; echo "${parts[*]}" | sed 's/,/, /g')"
+  TEXT="$TITLE"$'\n'"${lines%$'\n'}"
+  EVENTS_JSON="[$ev]"
+  HOSTN=$host
+}
+
+# send <notifier file> : uses TEXT, TITLE, EVENTS_JSON; prints "ok" or an error (no secrets)
+send() {
+  local -A N=()
+  load "$1" N
+  local tmp code rc
+  tmp=$(mktemp -d "$RUN/send.XXXXXX") || { echo "no temp dir"; return 1; }
+  local curlk=(-sS -o "$tmp/body" -w '%{http_code}' -m 15 --connect-timeout 5 --retry 0 -K -)
+  case ${N[type]:-} in
+    webhook)
+      printf '{"host":%s,"title":%s,"text":%s,"events":%s}' "$(json "$HOSTN")" "$(json "$TITLE")" \
+        "$(json "$TEXT")" "$EVENTS_JSON" > "$tmp/data"
+      code=$(printf 'url = "%s"\nheader = "Content-Type: application/json"\n' "${N[url]}" |
+        curl "${curlk[@]}" --data-binary "@$tmp/data" 2> "$tmp/err"); rc=$?;;
+    slack)
+      printf '{"text":%s}' "$(json "$TEXT")" > "$tmp/data"
+      code=$(printf 'url = "%s"\nheader = "Content-Type: application/json"\n' "${N[url]}" |
+        curl "${curlk[@]}" --data-binary "@$tmp/data" 2> "$tmp/err"); rc=$?;;
+    telegram)
+      printf '{"chat_id":%s,"text":%s,"disable_web_page_preview":true}' "$(json "${N[chat]}")" \
+        "$(json "$TEXT")" > "$tmp/data"
+      code=$(printf 'url = "%s/bot%s/sendMessage"\nheader = "Content-Type: application/json"\n' \
+          "${N[api]:-https://api.telegram.org}" "${N[token]}" |
+        curl "${curlk[@]}" --data-binary "@$tmp/data" 2> "$tmp/err"); rc=$?;;
+    ntfy)
+      printf '%s' "${TEXT#*$'\n'}" > "$tmp/data"
+      local k="url = \"${N[url]}\""$'\n'"header = \"Title: ${TITLE//\"/}\""$'\n'
+      ((${HIPRI:-0})) && k+='header = "Priority: high"'$'\n'
+      [[ -n ${N[token]:-} ]] && k+="header = \"Authorization: Bearer ${N[token]}\""$'\n'
+      code=$(printf '%s' "$k" | curl "${curlk[@]}" --data-binary "@$tmp/data" 2> "$tmp/err"); rc=$?;;
+    email)
+      local sm
+      sm=$(command -v sendmail || echo /usr/sbin/sendmail)
+      [[ -x $sm ]] || { rm -rf "$tmp"; echo "sendmail is not installed"; return 1; }
+      printf 'To: %s\nFrom: %s\nSubject: %s\nContent-Type: text/plain; charset=utf-8\n\n%s\n' \
+        "${N[to]}" "${N[from]:-tando@$HOSTN}" "$TITLE" "$TEXT" > "$tmp/data"
+      if timeout 20 "$sm" -t -oi < "$tmp/data" 2> "$tmp/err"; then rm -rf "$tmp"; echo "handed to sendmail"; return 0; fi
+      rm -rf "$tmp"; echo "sendmail failed"; return 1;;
+    *) rm -rf "$tmp"; echo "unknown notifier type"; return 1;;
+  esac
+  if [[ $rc == 0 && $code == 2?? ]]; then rm -rf "$tmp"; echo "HTTP $code"; return 0; fi
+  if [[ $rc != 0 ]]; then
+    case $rc in 6) echo "could not resolve the host";; 7) echo "connection refused";;
+      28) echo "timed out";; 35|60) echo "TLS error (curl $rc)";; *) echo "curl error $rc";; esac
+  else echo "HTTP $code"; fi
+  rm -rf "$tmp"
+  return 1
+}
+
+# deliver queued messages: every notifier in parallel, one attempt per run, with backoff
+deliver() {
+  local name pids=() hb="" f
+  for name in $(notifiers); do
+    local q=("$V/out/$name"/*)
+    [[ -f ${q[0]:-} ]] || continue
+    ((${W[_nf.$name.next]:-0} > NOW)) && continue
+    (
+      compose "${q[@]}"
+      if r=$(send "$SEC/notify-$name"); then rm -f "${q[@]}"; echo "$name ok"
+      else echo "$name fail $r"; fi
+    ) > "$RUN/res.$name" 2> /dev/null &
+    pids+=($!)
+  done
+  # heartbeat: an external "dead man's switch" URL pinged after a completed run, unless every
+  # notifier has been failing for 30 min (then the silence itself is the alarm)
+  if [[ -f $SEC/heartbeat ]]; then
+    local every quiet=1 nn=0
+    cfgv every heartbeat_every
+    for name in $(notifiers); do
+      nn=$((nn + 1))
+      if [[ -z ${W[_nf.$name.since]:-} ]] || ((NOW - ${W[_nf.$name.since]} < 1800)); then quiet=0; fi
+    done
+    ((nn == 0)) && quiet=0
+    if ((!quiet && NOW - ${VS[hb]:-0} >= every * 60 - 5)); then
+      local -A HB=(); load "$SEC/heartbeat" HB
+      (
+        printf 'url = "%s"\n' "${HB[url]}" | curl -sS -o /dev/null -m 10 --connect-timeout 5 -f -K - 2> /dev/null &&
+          echo "~hb ok" || echo "~hb fail"
+      ) > "$RUN/res.~hb" &
+      pids+=($!)
+    fi
+  fi
+  ((${#pids[@]})) || return 0
+  wait "${pids[@]}"
+  # results back into the state (under the lock again)
+  lockfile "$V/lock"; exec 8> "$V/lock"; flock -w 30 8 || return 0
+  load "$V/state" W; DIRTY=0
+  local l n r why fails
+  for f in "$RUN"/res.*; do
+    [[ -f $f ]] || continue
+    read -r n r why < "$f"; rm -f "$f"
+    if [[ $n == '~hb' ]]; then
+      [[ $r == ok ]] && vs hb "$NOW"
+      [[ $r == ok ]] && wu _hb.err || ws _hb.err "$NOW"
+      continue
+    fi
+    if [[ $r == ok ]]; then
+      ws "_nf.$n.ok" "$NOW"; wu "_nf.$n.fails"; wu "_nf.$n.next"; wu "_nf.$n.err"; wu "_nf.$n.since"
+    else
+      fails=$(( ${W[_nf.$n.fails]:-0} + 1 ))
+      ws "_nf.$n.fails" "$fails"; ws "_nf.$n.err" "$(clean "$why")"
+      ws "_nf.$n.since" "${W[_nf.$n.since]:-$NOW}"
+      local b=$(( 60 << (fails > 6 ? 6 : fails - 1) )); ((b > 3600)) && b=3600
+      ws "_nf.$n.next" $((NOW + b - 5))
+    fi
+  done
+  ((DIRTY)) && save "$V/state" W
+  flock -u 8
+}
+
+# ---- verbs for the CLI ---------------------------------------------------------------------
+
+cmd_install() { # write the timer units, directories and default settings; enable the timer
+  need_root
+  install -d -m 755 "$V" /var/lib/tando
+  install -d -m 700 "$SEC" "$V/out" "$V/inbox"
+  [[ -f $V/state ]] || : > "$V/state"
+  [[ -f $V/history.tsv ]] || : > "$V/history.tsv"
+  chmod 600 "$V/state" "$V/history.tsv"   # alert details name apps and paths: root only (tando alerts uses sudo)
+  if [[ ! -f $CONF ]]; then
+    printf '# tando alerts settings: tando alerts set key=value (see docs/MONITORING.md)\n' > "$CONF"
+    chmod 644 "$CONF"
+  fi
+  cat > /etc/systemd/system/tando-watch.service.tmp <<EOF
+[Unit]
+Description=tando: alert checks
+After=network.target caddy.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+# the per-minute metrics sample (tando-metrics) shares this timer and unit activation; the "-"
+# makes its failure harmless: the checks run whatever it does
+ExecStartPre=-$R/bin/tando-metrics sample
+# finish or revert activations that died, and give apps systemd gave up on another start
+ExecStartPre=-+$R/bin/tando-agent recover-all
+ExecStart=$SELF run
+Nice=10
+TimeoutStartSec=150
+RuntimeDirectory=tando-watch
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0022
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes
+MemoryMax=64M
+LogLevelMax=notice
+EOF
+  cat > /etc/systemd/system/tando-watch.timer.tmp <<EOF
+[Unit]
+Description=tando: alert checks once a minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+EOF
+  local f ch=0
+  for f in tando-watch.service tando-watch.timer; do
+    if cmp -s "/etc/systemd/system/$f.tmp" "/etc/systemd/system/$f"; then rm -f "/etc/systemd/system/$f.tmp"
+    else mv -f "/etc/systemd/system/$f.tmp" "/etc/systemd/system/$f"; ch=1; fi
+  done
+  ((ch)) && systemctl daemon-reload
+  systemctl enable -q --now tando-watch.timer || die "could not enable tando-watch.timer"
+  echo ok=1
+}
+
+cmd_uninstall() {
+  need_root
+  systemctl disable -q --now tando-watch.timer 2> /dev/null
+  rm -f /etc/systemd/system/tando-watch.service /etc/systemd/system/tando-watch.timer
+  systemctl daemon-reload
+  echo ok=1
+}
+
+# the dead man's check, as rows for `tando doctor` and `tando alerts` (works without root)
+watch_rows() { # rowtype
+  local -A T=()
+  local l age=-1 last=""
+  if [[ ! -f /etc/systemd/system/tando-watch.timer ]]; then
+    row "$1" warn alerts "not set up: tando alerts enable"; return
+  fi
+  while IFS= read -r l; do [[ -n $l ]] && T[${l%%=*}]=${l#*=}; done < <(
+    systemctl show -p ActiveState tando-watch.timer
+    systemctl show -p Result,ExecMainStatus,ExecMainStartTimestampMonotonic tando-watch.service)
+  NOW=${NOW:-$(now)}; ((NOW)) || NOW=$(now)
+  # monotonic microseconds since boot against /proc/uptime: no local-time string to parse
+  # (date -d fails on zone names such as WIB, with GNU and uutils date alike)
+  last=${T[ExecMainStartTimestampMonotonic]:-0}
+  if [[ $last =~ ^[0-9]+$ ]] && ((last > 0)); then
+    local up; read -r up _ < /proc/uptime; up=${up%.*}
+    age=$((up - last / 1000000)); ((age < 0)) && age=0
+  fi
+  if [[ ${T[ActiveState]:-} != active ]]; then
+    row "$1" fail alerts "tando-watch.timer is ${T[ActiveState]:-missing}: alerts are not running"
+  elif ((age < 0)); then
+    row "$1" warn alerts "timer active, no run yet"
+  elif ((age > 180)); then
+    row "$1" fail alerts "last check run $(dur "$age") ago: alerts are not running"
+  elif [[ ${T[Result]:-success} != success ]]; then
+    row "$1" fail alerts \
+      "last check run failed (${T[Result]}, status ${T[ExecMainStatus]:-?}): journalctl -u tando-watch"
+  else
+    row "$1" ok alerts "checks ran $(dur "$age") ago; $(firing_count) firing"
+  fi
+}
+firing_count() {
+  local k n=0
+  [[ ${#W[@]} -gt 0 ]] || load "$V/state" W
+  for k in "${!W[@]}"; do [[ $k == *.st && ${W[$k]} == firing ]] && n=$((n + 1)); done
+  echo $n
+}
+cmd_doctor() { NOW=$(now); watch_rows check; [[ $EUID -eq 0 ]] && notifier_rows; return 0; }
+# doctor rows for the notifiers (root: their files are root's): a failing one is a warning,
+# none at all is said (alerts are then only visible in tando alerts)
+notifier_rows() {
+  local n nn=0
+  [[ ${#W[@]} -gt 0 ]] || load "$V/state" W
+  for n in $(notifiers); do
+    nn=$((nn + 1))
+    if [[ ${W[_nf.$n.since]:-} =~ ^[0-9]+$ ]]; then
+      local ago t0=${W[_nf.$n.since]}
+      ago=$((NOW - t0))
+      row check warn "notifier $n" "failing for $(dur "$ago"): ${W[_nf.$n.err]:-?}; messages wait in its queue (tando alerts test $n)"
+    fi
+  done
+  if ((nn == 0)); then row check ok notifiers "none: alerts show only in tando alerts"
+  elif ! [[ -f $SEC/heartbeat ]]; then row check ok notifiers "$nn, no heartbeat (tando alerts heartbeat)"
+  else row check ok notifiers "$nn and a heartbeat"; fi
+  return 0
+}
+
+# health [app]: uptime and incidents from the per-minute record (root: the files are root's)
+#   up <app> <uptime 24h x100|-> <uptime 7d x100|-> <minutes judged 24h> <7d> <incidents 7d>
+#      <p50 ms 24h> <p95 ms 24h> <avg probe ms per hour, 24 values oldest first> <last class> <last ms>
+#      <firing checks, comma-separated|->
+#   inc <app> <start> <end|-> <check> <cause>      newest first (15 for one app, 3 for all)
+#   tail <app> <time> <line>                       one app: the last lines before its last crash
+# A minute counts as up when the probe passed (or the app has no probe and runs); hold (deploys,
+# boot) and stopped minutes are not counted at all
+cmd_health() {
+  need_root
+  local a f apps=() k
+  NOW=$(now); load "$V/state" W
+  if [[ -n ${1:-} ]]; then valid_app "$1" && [[ -d $R/apps/$1 ]] || die "no such app: $1"; apps=("$1")
+  else for f in "$R"/apps/*/app.conf; do a=${f%/app.conf}; a=${a##*/}; valid_app "$a" && apps+=("$a"); done; fi
+  for a in "${apps[@]}"; do
+    local fir=""
+    for k in down health oom restarts http slow errors logs memory disk; do
+      [[ ${W[$a.$k.st]:-} == firing ]] && fir+="${fir:+,}$k"
+    done
+    local ninc=0
+    [[ -f $V/incidents/$a.tsv ]] && ninc=$(awk -F'\t' -v f=$((NOW - 604800)) '$1 >= f && $3 != "restart"' "$V/incidents/$a.tsv" | wc -l)
+    if [[ -f $V/probe/$a ]]; then
+      awk -v now="$NOW" -v a="$a" -v fir="${fir:--}" -v ninc="$ninc" '
+        BEGIN { d1 = now - 86400; d7 = now - 604800; LG = log(1.05) }
+        $1 + 0 < d7 { next }
+        { c = $2; ms = $3 + 0; last = c; lastms = $3 }
+        c == "hold" || c == "stopped" { next }
+        { n7++; if (c == "ok") u7++
+          if ($1 + 0 >= d1) { n1++; if (c == "ok") u1++
+            if ($3 != "") { h = int(($1 - d1) / 3600); if (h > 23) h = 23; hs[h] += ms; hn[h]++
+              b = (ms <= 1) ? 0 : int(log(ms) / LG) + 1; hist[b]++; nb++; if (b > mb) mb = b } } }
+        function pct(p,   need, cum, i) { if (nb == 0) return "-"; need = p * nb; cum = 0
+          for (i = 0; i <= mb; i++) { cum += hist[i]; if (cum >= need) return int(exp((i - 0.5) * LG) + 0.5) } return "-" }
+        END { sp = ""; for (h = 0; h < 24; h++) sp = sp (h ? "," : "") (hn[h] ? int(hs[h] / hn[h] + 0.5) : "-")
+          printf "up\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", a, n1 ? int(u1 * 10000 / n1) : "-",
+            n7 ? int(u7 * 10000 / n7) : "-", n1, n7, ninc, pct(0.5), pct(0.95), sp, last == "" ? "-" : last,
+            lastms == "" ? "-" : lastms, fir }' "$V/probe/$a"
+    else
+      row up "$a" - - 0 0 "$ninc" - - - - - "${fir:--}"
+    fi
+    if [[ -f $V/incidents/$a.tsv ]]; then
+      tail -n "$([[ -n ${1:-} ]] && echo 15 || echo 3)" "$V/incidents/$a.tsv" | tac |
+        while IFS=$'\t' read -r f k l c; do row inc "$a" "$f" "$k" "$l" "$c"; done
+    fi
+    if [[ -n ${1:-} && -f $V/tail/$a ]]; then
+      while IFS=$'\t' read -r f l; do row tail "$a" "$f" "$l"; done < "$V/tail/$a"
+    fi
+  done
+  return 0
+}
+
+# brief [app]: firing and pending alerts as rows (no root needed), for `tando status`
+cmd_brief() {
+  NOW=$(now); load "$V/state" W
+  local k a c
+  for k in "${!W[@]}"; do
+    [[ $k == *.st && ${W[$k]} != ok ]] || continue
+    k=${k%.st}; a=${k%%.*}; c=${k#*.}; a=${a/#_host/host}
+    [[ -n ${1:-} && $a != "$1" ]] && continue
+    row alert "$a" "$c" "${W[$k.st]}" "${W[$k.since]:-}" "${W[$k.det]:-}"
+  done
+}
+
+# forget <app>: drop the app's alert state now (tando-agent destroy); a run would only do it a
+# minute later, possibly after notifying about the app it can no longer find
+cmd_forget() {
+  need_root
+  [[ ${1:-} =~ ^[a-z][a-z0-9-]{1,25}$ ]] || die "bad app name"
+  lockfile "$V/lock"; exec 8> "$V/lock"; flock -w 30 8 || die "busy"
+  load "$V/state" W
+  local k n=0
+  rm -f "$V/probe/$1" "$V/incidents/$1.tsv" "$V/tail/$1"
+  for k in "${!W[@]}"; do [[ $k == "$1".* ]] && { unset "W[$k]"; n=$((n + 1)); }; done
+  ((n)) && save "$V/state" W
+  if [[ -r $RUN/vstate ]]; then
+    load "$RUN/vstate" VS
+    n=0
+    for k in "${!VS[@]}"; do [[ ${k#*.} == "$1" ]] && { unset "VS[$k]"; n=$((n + 1)); }; done
+    ((n)) && save "$RUN/vstate" VS 600
+  fi
+  flock -u 8
+  echo ok=1
+}
+
+mask() { # url -> scheme://host/… (paths and queries of webhook URLs are secrets)
+  local u=$1 s h
+  s=${u%%://*}; h=${u#*://}; h=${h%%/*}; h=${h##*@}
+  echo "$s://$h/…"
+}
+
+# show: everything `tando alerts` displays
+cmd_show() {
+  need_root
+  NOW=$(now); conf_load; load "$V/state" W; load "$RUN/vstate" VS
+  local k a c n f t
+  watch_rows run
+  row version "$(cksum < "$SELF" | cut -d' ' -f1)"
+  for k in "${!W[@]}"; do
+    [[ $k == *.st && ${W[$k]} != ok ]] || continue
+    k=${k%.st}; a=${k%%.*}; c=${k#*.}
+    local sil=0; silenced "${a/#_host/host}" && sil=1
+    row alert "${a/#_host/host}" "$c" "${W[$k.st]}" "${W[$k.since]:-}" "${W[$k.det]:-}" \
+      "${W[$k.ns]:-ok}" "$sil" "${W[$k.flap]:-0}" "${W[$k.n]:-}"
+  done
+  for k in "${!W[@]}"; do [[ $k == _sil.* ]] && ((W[$k] > NOW)) && row silence "${k#_sil.}" "${W[$k]}"; done
+  for n in $(notifiers); do
+    local -A N=(); load "$SEC/notify-$n" N
+    local q=("$V/out/$n"/*) qn=0
+    [[ -f ${q[0]:-} ]] && qn=${#q[@]}
+    case ${N[type]:-} in
+      telegram) t="chat …${N[chat]: -3}";;
+      email) t=${N[to]:-};;
+      *) t=$(mask "${N[url]:-}");;
+    esac
+    row notifier "$n" "${N[type]:-?}" "$t" "${W[_nf.$n.ok]:-}" "${W[_nf.$n.fails]:-0}" "$qn" \
+      "${W[_nf.$n.next]:-}" "${W[_nf.$n.err]:-}" "${W[_nf.$n.dropped]:-0}"
+  done
+  if [[ -f $SEC/heartbeat ]]; then
+    local -A HB=(); load "$SEC/heartbeat" HB
+    row heartbeat "$(mask "${HB[url]:-}")" "${VS[hb]:-}" "${W[_hb.err]:-}" "$(cfg heartbeat_every)"
+  fi
+  tail -n "${1:-8}" "$V/history.tsv" 2> /dev/null | while IFS=$'\t' read -r t k a c n; do
+    row hist "$t" "$k" "$a" "$c" "$n"
+  done
+  for k in $(cut -d' ' -f1 <<< "$DEFAULTS"); do row conf "$k" "$(cfg "$k")"; done
+  for k in "${!CF[@]}"; do [[ $k == *.* ]] && row conf "$k" "${CF[$k]}"; done
+  return 0
+}
+
+cmd_history() { # [n]
+  local n=${1:-50} t k a c d
+  need_root   # history.tsv is 600: without root this printed nothing and looked like "no alerts yet"
+  [[ $n =~ ^[0-9]+$ ]] || die "bad count"
+  tail -n "$n" "$V/history.tsv" 2> /dev/null |
+    while IFS=$'\t' read -r t k a c d; do row hist "$t" "$k" "$a" "$c" "$d"; done
+}
+
+# set: key=value lines on stdin; "<app>.<key>" for one app; "<check>=off" disables a check
+cmd_set() {
+  need_root
+  lockfile "$V/lock"; exec 8> "$V/lock"; flock -w 30 8 || die "busy"
+  local -A F=()
+  load "$CONF" F
+  local kv k v base app
+  while IFS= read -r kv; do
+    [[ -n $kv ]] || continue
+    k=${kv%%=*} v=${kv#*=}
+    [[ $kv == *=* ]] || die "expected key=value: $kv"
+    [[ $v != *[[:cntrl:]]* ]] || die "control characters in $k"
+    base=${k##*.} app=""
+    [[ $k == *.* ]] && app=${k%.*}
+    [[ -z $app ]] || valid_app "$app" || die "bad app name in $k"
+    if [[ " $CHECKS_APP $CHECKS_HOST " == *" $base "* ]] && ! grep -q "^$base " <<< "$DEFAULTS"; then
+      [[ $v =~ ^(on|off|)$ ]] || die "$k must be on or off"
+      [[ -n $app && " $CHECKS_HOST " == *" $base "* ]] && die "$base is a host check: set it without an app"
+    elif grep -q "^$base " <<< "$DEFAULTS"; then
+      case $base in
+        name) [[ -z $app && $v =~ ^[A-Za-z0-9._-]{0,40}$ ]] || die "bad name";;
+        notify_reboot) [[ -z $app && $v =~ ^(yes|no|)$ ]] || die "notify_reboot must be yes or no";;
+        include_log_lines) [[ -z $app && $v =~ ^(on|off|)$ ]] || die "include_log_lines must be on or off";;
+        *) [[ $v =~ ^[0-9]{0,6}$ ]] || die "$k must be a whole number"
+           [[ -n $v ]] && v=$((10#$v));;
+      esac
+    else die "unknown setting: $k (see tando alerts set)"; fi
+    if [[ -z $v ]]; then unset "F[$k]"; else F[$k]=$v; fi
+  done
+  {
+    printf '# tando alerts settings: tando alerts set key=value (see docs/MONITORING.md)\n'
+    for k in "${!F[@]}"; do printf '%s=%s\n' "$k" "${F[$k]}"; done | sort
+  } > "$CONF.tmp" && chmod 644 "$CONF.tmp" && mv -f "$CONF.tmp" "$CONF"
+  echo ok=1
+}
+
+# notifier-add <name> <type>: fields as key=value lines on stdin (never in argv)
+cmd_notifier_add() {
+  need_root
+  local name=${1:-} type=${2:-} kv k v
+  valid_name "$name" || die "bad notifier name (a-z, 0-9, -; up to 20)"
+  local -A N=([type]=$type)
+  while IFS= read -r kv; do
+    [[ -n $kv ]] || continue
+    k=${kv%%=*} v=${kv#*=}
+    [[ $v != *[[:cntrl:]]* && $v != *'"'* && $v != *\\* && $v != *' '* ]] || die "bad characters in $k"
+    case $k in
+      url|api) [[ $v =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[^[:space:]]*)?$ ]] || die "$k must be an http(s) URL";;
+      token) [[ $v =~ ^[A-Za-z0-9:_.-]{4,200}$ ]] || die "bad token";;
+      chat) [[ $v =~ ^(-?[0-9]{1,20}|@[A-Za-z0-9_]{4,40})$ ]] || die "bad chat id";;
+      to|from) [[ $v =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || die "bad address in $k";;
+      *) die "unknown field: $k";;
+    esac
+    N[$k]=$v
+  done
+  case $type in
+    webhook|slack) [[ -n ${N[url]:-} ]] || die "$type needs url";;
+    ntfy) [[ -n ${N[url]:-} ]] || die "ntfy needs url (https://ntfy.sh/<topic>)";;
+    telegram) [[ -n ${N[token]:-} && -n ${N[chat]:-} ]] || die "telegram needs token and chat";;
+    email) [[ -n ${N[to]:-} ]] || die "email needs to"
+           command -v sendmail > /dev/null || [[ -x /usr/sbin/sendmail ]] ||
+             die "no sendmail on this host: install and configure an MTA first";;
+    *) die "type must be webhook, slack, telegram, ntfy or email";;
+  esac
+  install -d -m 700 "$SEC" "$V/out" "$V/inbox"
+  lockfile "$V/lock"; exec 8> "$V/lock"; flock -w 30 8 || die "busy"
+  ( umask 077; save "$SEC/notify-$name" N 600 ) || die "could not save"
+  load "$V/state" W
+  for k in "${!W[@]}"; do [[ $k == _nf.$name.* ]] && unset "W[$k]"; done
+  save "$V/state" W
+  install -d -m 700 "$V/out/$name"
+  echo ok=1
+}
+
+cmd_notifier_rm() {
+  need_root
+  valid_name "${1:-}" && [[ -f $SEC/notify-$1 ]] || die "no such notifier: ${1:-}"
+  lockfile "$V/lock"; exec 8> "$V/lock"; flock -w 30 8 || die "busy"
+  rm -f "$SEC/notify-$1"; rm -rf "${V:?}/out/$1"
+  load "$V/state" W
+  local k; for k in "${!W[@]}"; do [[ $k == _nf.$1.* ]] && unset "W[$k]"; done
+  save "$V/state" W
+  echo ok=1
+}
+
+cmd_heartbeat() { # url on stdin ("url=..."), or "off"
+  need_root
+  local kv; IFS= read -r kv || kv=""
+  if [[ $kv == off ]]; then rm -f "$SEC/heartbeat"; echo ok=1; return; fi
+  [[ $kv =~ ^url=https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[^[:space:]\"\\]*)?$ ]] ||
+    die "the heartbeat must be an http(s) URL"
+  install -d -m 700 "$SEC"
+  ( umask 077; printf '%s\n' "$kv" > "$SEC/heartbeat.tmp" && mv -f "$SEC/heartbeat.tmp" "$SEC/heartbeat" )
+  echo ok=1
+}
+
+# silence <app|all> <seconds>: 0 lifts the silence
+cmd_silence() {
+  need_root
+  local a=${1:-} s=${2:-}
+  [[ $a == all ]] || valid_app "$a" || die "bad app"
+  [[ $s =~ ^[0-9]{1,8}$ ]] || die "bad duration"
+  lockfile "$V/lock"; exec 8> "$V/lock"; flock -w 30 8 || die "busy"
+  load "$V/state" W
+  NOW=$(now)
+  if ((s == 0)); then unset "W[_sil.$a]"; else W[_sil.$a]=$((NOW + s)); fi
+  save "$V/state" W
+  echo "until=${W[_sil.$a]:-0}"
+}
+
+# test [name]: send a test message through each notifier now; one row per notifier
+cmd_test() {
+  need_root
+  NOW=$(now); conf_load
+  mkdir -p "$RUN" && chmod 700 "$RUN"
+  local n f r any=0
+  f=$(mktemp "$RUN/msg.XXXXXX")
+  printf 'test\thost\ttest\tthis is a test message from tando alerts; delivery works\t%s\n' "$NOW" > "$f"
+  compose "$f"; rm -f "$f"
+  TITLE="tando $HOSTN: test"; TEXT="$TITLE"$'\n'"This is a test message from tando alerts: delivery works."
+  row sent "$TITLE" "${TEXT#*$'\n'}"
+  for n in $(notifiers); do
+    [[ -n ${1:-} && $n != "$1" ]] && continue
+    any=1
+    ( r=$(send "$SEC/notify-$n") && row test "$n" ok "$r" || row test "$n" fail "$r" ) > "$RUN/test.$n" &
+  done
+  wait
+  # a notifier that works again retries its queue on the next run instead of after its backoff
+  lockfile "$V/lock"; exec 8> "$V/lock"; flock -w 30 8 || die "busy"
+  load "$V/state" W
+  for f in "$RUN"/test.*; do
+    [[ -f $f ]] || continue
+    cat "$f"; n=${f##*/test.}
+    grep -q "	ok	" "$f" && [[ -n ${W[_nf.$n.next]:-} ]] && { unset "W[_nf.$n.next]"; DIRTY=1; }
+    rm -f "$f"
+  done
+  ((DIRTY)) && save "$V/state" W
+  if [[ -n ${1:-} ]] && ((!any)); then die "no such notifier: $1"; fi
+  ((any)) || echo "none=1"
+  return 0
+}
+
+verb=${1:-}
+shift || true
+case $verb in
+  run) cmd_run;;
+  install) cmd_install;;
+  uninstall) cmd_uninstall;;
+  doctor) cmd_doctor;;
+  brief) cmd_brief "$@";;
+  health) cmd_health "$@";;
+  forget) cmd_forget "$@";;
+  show) cmd_show "$@";;
+  history) cmd_history "$@";;
+  set) cmd_set;;
+  notifier-add) cmd_notifier_add "$@";;
+  notifier-rm) cmd_notifier_rm "$@";;
+  heartbeat) cmd_heartbeat;;
+  silence) cmd_silence "$@";;
+  test) cmd_test "$@";;
+  *) die "unknown verb: $verb";;
+esac
+exit 0

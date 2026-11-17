@@ -1,0 +1,3621 @@
+#!/bin/bash
+# tando-agent: the server side of tando. Installed as /opt/tando/bin/tando-agent (root, 755).
+#
+# Mutating verbs run as root through sudo. Read-only verbs (info, status, releases, history,
+# deploy-status, jobs, logs) work as any user that can read the files.
+# Output is key=value lines or tab-separated rows; errors go to stderr. The client never
+# evaluates this output, and this program builds every argv itself.
+set -uo pipefail
+umask 022
+
+R=/opt/tando
+AGENT=$R/bin/tando-agent
+LOGS=$R/bin/tando-logs      # logging helper (server/tando-logs)
+KEEP=5                 # releases kept per app (current and last_good are always kept too)
+SOAK=30                # seconds a new release must stay up after the check through Caddy (soak =)
+UPLOAD_TIMEOUT=900     # seconds after which an unfinished upload lease is considered abandoned
+SHM_SIZE=16M           # each unit's private /dev/shm (counted in its memory)
+HOLD=15s               # how long Caddy holds a request while the app (re)starts
+PROBE_UA=tando-probe   # health checks carry it, and the secret header below
+# X-Tando-Probe: <random>, root-only: Caddy leaves requests with it out of the request logs (a
+# public marker would let any local process hide its requests to an app)
+PROBE_HDR=/opt/tando/probe.header
+
+declare -A C S H P L   # app.conf, state, host.conf, activation progress, upload lease
+
+# ---- small helpers -------------------------------------------------------------------------
+
+die() { AUDIT_NOTE="$*"; echo "tando-agent: $*" >&2; exit 1; }
+# grepq: grep -q for the end of a pipeline. grep -q exits at the first match, the writer can
+# then die of SIGPIPE, and with pipefail a match reads as "no match". This one reads to the end.
+grepq() { grep "$@" > /dev/null; }
+# lockfile <path>: before `exec N>path; flock`: flock(2) works on a read-only descriptor, so a
+# lock file any user can open is one any app can hold forever. Root-owned, 0600, a regular file:
+# another owner's file is replaced; a root-owned one only gets its mode (replacing it would let a
+# second root verb lock a new inode while the first still holds the old one)
+lockfile() {
+  local f=$1
+  [[ -L $f || ( -e $f && ! -f $f ) ]] && die "lock file $f is not a regular file"
+  [[ -e $f && $(stat -c %u "$f") != 0 ]] && rm -f "$f"
+  [[ -e $f ]] || (umask 077; : >> "$f") || die "could not create $f"
+  [[ $(stat -c %a "$f") == 600 ]] || chmod 600 "$f"
+}
+
+# audit trail: `audit <verb> <app>` once at the start of a verb; one line is written to
+# /var/log/tando/audit.log (by tando-logs) when the verb exits, with its result and AUDIT_NOTE.
+audit() { AUDIT_VERB=$1 AUDIT_APP=${2:--}; trap 'audit_done $?' EXIT; }
+audit_done() {
+  [[ -n ${AUDIT_VERB:-} && -x $LOGS ]] || return 0
+  "$LOGS" audit-write "$AUDIT_VERB" "$AUDIT_APP" "${AUDIT_RESULT:-$1}" "${AUDIT_NOTE:-}" < /dev/null &> /dev/null
+  AUDIT_VERB=""
+}
+need_root() { [[ $EUID -eq 0 ]] || die "this needs root (sudo)"; }
+# mono: MONO = whole seconds of the monotonic clock (uptime), for timeouts and the soak: a wall
+# clock set back or forward (NTP after a long stop, a hand fix) neither stretches nor skips them
+mono() { local u; read -r u _ < /proc/uptime; MONO=${u%.*}; }
+valid_app() { [[ $1 =~ ^[a-z][a-z0-9-]{1,25}$ ]]; }
+valid_id() { [[ $1 =~ ^[0-9]{8}-[0-9]{6}(-[0-9]{1,3})?$ ]]; }
+# int_norm v: a number written with leading zeros ("08") as plain decimal; anything else as is
+# (bash arithmetic would read 08 as a bad octal number)
+int_norm() { if [[ $1 =~ ^0+[0-9]+$ ]]; then echo $((10#$1)); else echo "$1"; fi; }
+no_ctrl() { [[ $1 != *[[:cntrl:]]* ]]; }
+now() { printf '%(%s)T' -1; }
+
+# An install of the helpers that was cut off between its renames leaves /opt/tando/bin/.install.pending
+# (see install_helpers_script in the client). One builtin test when there is none. When there is:
+# a read-only verb warns and goes on; any other verb has the install finished or undone first
+# (tando-install-recover takes the install lock, so one still running is waited for) and is
+# refused when that fails, except the recovery verbs, which must run to bring the apps back.
+if [[ -e $R/bin/.install.pending ]]; then
+  case ${1:-} in
+    status|deploy-status|releases|history|busy|info|jobs|domain-ls|domain-check|env-ls|logs|log-stats|\
+    log-doctor|req-summary|req-tail|req-errors|audit-read|errors|doctor|"")
+      [[ ${1:-} == doctor ]] ||
+        echo "tando-agent: warning: an install on <host> was cut off between files, so some programs may be old and some new: tando host setup <host> finishes or undoes it" >&2;;
+    *)
+      if [[ $EUID -eq 0 && -x $R/bin/tando-install-recover ]]; then
+        "$R/bin/tando-install-recover" ||
+          case $1 in recover|recover-all|app-down) ;; *) die "an install on <host> was cut off and could not be repaired: tando host setup <host>";; esac
+      fi;;
+  esac
+fi
+
+# >>> tando-status: the read-only verbs status, deploy-status, releases, history, busy and info are
+# answered by $R/bin/tando-status (Go, srv/status: the same output for far less CPU). Here, before
+# the rest of this file is even parsed: the same argument checks and privilege rule as each verb's
+# shell version, then exec. A server whose tando-status is missing (set up by an older client, or
+# mid-upgrade) falls through to the shell versions further down (cmd_status, cmd_deploy_status,
+# cmd_releases, cmd_history, cmd_busy, cmd_info): they are only that FALLBACK, and go once the
+# agent itself is ported. (test/e2e-status.sh removes this block to compare the two.)
+case ${1:-} in
+  status|deploy-status|releases|history|busy|info)
+    # only while the install's manifest (.versions, written after a complete set was installed) is
+    # newer than this agent and tando-status: a new agent never execs an old tando-status that
+    # lacks a verb (it would exit with a usage error); bash file tests, no fork
+    if [[ -x $R/bin/tando-status && -f $R/bin/.versions && ! $AGENT -nt $R/bin/.versions &&
+          ! $R/bin/tando-status -nt $R/bin/.versions ]]; then
+      case $1 in
+        status) [[ -z ${2:-} ]] || valid_app "$2" || die "invalid app name";;
+        deploy-status|releases) valid_app "${2:-}" || die "invalid app name";;
+        history) [[ ${3:-20} =~ ^[0-9]+$ ]] || die "bad count"
+                 [[ -z ${2:-} ]] || valid_app "$2" || die "invalid app name";;
+        busy) need_root; valid_app "${2:-}" || die "invalid app name";;
+      esac
+      shopt -s execfail   # (a binary that cannot run: the shell version answers instead)
+      exec "$R/bin/tando-status" "$@"
+    fi;;
+esac
+# <<< tando-status
+
+# deciseconds since the epoch, and seconds (one decimal) elapsed since such a mark
+ds() { local t=${EPOCHREALTIME//[!0-9]/}; echo $((10#$t / 100000)); }   # (any locale's separator)
+el() { local d=$(( $(ds) - $1 )); echo "$((d / 10)).$((d % 10))"; }
+
+# Control characters (C0, DEL and UTF-8 C1) never reach a file or the client: an uploaded file
+# name in a message could otherwise forge rows or drive the terminal. No fork (status uses it).
+san_v() { # text -> SAN
+  local LC_ALL=C
+  SAN=${1//[$'\001'-$'\037'$'\177']/?}
+  SAN=${SAN//$'\302'[$'\200'-$'\237']/?}
+}
+
+# one tab-separated row; empty fields become "-" so the client's `read` keeps the columns
+row() {
+  local x out=() SAN
+  for x; do san_v "$x"; out+=("${SAN:--}"); done
+  local IFS=$'\t'
+  echo "${out[*]}"
+}
+
+# key=value files: load into an associative array, save atomically (temp file + mv)
+load() {
+  local -n _m=$2
+  _m=()
+  local k v
+  [[ -r $1 ]] || return 0
+  local line
+  while IFS= read -r line; do   # (IFS='=' read would drop a trailing "=" from the value)
+    k=${line%%=*} v=${line#*=}
+    [[ -n $k && $line == *=* ]] && _m[$k]=$v
+  done < "$1"
+}
+save() {
+  local -n _m=$2
+  local k tmp="$1.tmp.$$" i
+  for i in 1 2; do
+    if ( umask 077; for k in "${!_m[@]}"; do printf '%s=%s\n' "$k" "${_m[$k]}"; done | sort > "$tmp" ); then
+      # unchanged: nothing written (a re-run touches nothing)
+      if cmp -s "$tmp" "$1"; then rm -f "$tmp"; return 0; fi
+      # flushed before the rename, so a power cut leaves the old file or the new one, never an
+      # empty one (the activation's progress file is only a display: not flushed)
+      if meta_mode "$tmp" "${1##*/}" && { [[ ${1##*/} == activation ]] || sync "$tmp"; } && mv -f "$tmp" "$1"; then
+        return 0
+      fi
+    fi
+    rm -f "$tmp"
+    # a full disk: give back the reserve on that file system (1 MB in each app's directory, made
+    # by configure; 8 MB in /opt/tando, made by host setup), then try once more
+    if [[ $i == 1 ]]; then
+      if [[ -f ${1%/*}/.reserve ]]; then rm -f "${1%/*}/.reserve"; continue; fi
+      if [[ -f $R/.reserve ]]; then rm -f "$R/.reserve"; continue; fi
+    fi
+    # the real cause: a directory that is gone (the app was destroyed meanwhile), a full disk, other
+    local av; av=$(df -Pk "${1%/*}" 2> /dev/null | awk 'NR == 2 { print $4 }')
+    if [[ ! -d ${1%/*} ]]; then echo "tando-agent: could not write $1: its directory is gone (destroyed meanwhile?)" >&2
+    elif [[ ${av:-0} =~ ^[0-9]+$ ]] && ((av < 2048)); then echo "tando-agent: could not write $1: the disk is full" >&2
+    else echo "tando-agent: could not write $1" >&2; fi
+    return 1
+  done
+}
+
+# An app's metadata (app.conf, state, activation, history.tsv, the upload lease) is readable by
+# root and the group tando-m-<app> only: the app's user and its deploy user (tando-gate), so the
+# read-only verbs work for both and no other app's user can read it. activation.log (application
+# output of a failed activation) is root's only.
+meta_mode() { # file name
+  case $2 in
+    app.conf|state|activation|upload|history.tsv)
+      if [[ -n ${A:-} ]] && getent group "tando-m-$A" > /dev/null; then
+        chown "root:tando-m-$A" "$1" && chmod 640 "$1"
+      else chmod 600 "$1"; fi;;
+    host.conf) chmod 644 "$1";;
+  esac
+  return 0
+}
+
+app_perms() { # the metadata group, its members, the modes of the app's files
+  local g=tando-m-$A f
+  # its gid from new_uid: never one of a destroyed app (retired), so no leftover file is this group's
+  getent group "$g" > /dev/null || groupadd --system -g "$(new_uid)" "$g" || die "groupadd $g failed"
+  id "${AU:-tando-$A}" &> /dev/null && usermod -aG "$g" "${AU:-tando-$A}"   # adopted apps keep their user
+  id "tando-d-$A" &> /dev/null && usermod -aG "$g" "tando-d-$A"
+  chown "root:$g" "$D"; chmod 751 "$D"      # others may pass through (Caddy, to a static release)
+  for f in app.conf state activation upload history.tsv; do [[ -f $D/$f ]] && meta_mode "$D/$f" "$f"; done
+  touch "$D/activation.log" "$D/lock" "$D/lease.lock"
+  chmod 600 "$D/activation.log" "$D/lock" "$D/lease.lock"
+  # the app's HOME (props): root's, empty, read-only to the app
+  [[ -L $D/home ]] && rm -f "$D/home"
+  install -d -m 755 -o root -g root "$D/home"
+  return 0
+}
+st() { while (($#)); do S[$1]=$2; shift 2; done; save "$D/state" S; }       # update state
+pg() { local SAN; while (($#)); do san_v "$2"; P[$1]=$SAN; shift 2; done; save "$D/activation" P; }  # progress
+
+# select an app: sets A (name), D (directory), loads its config, state and the host config
+app() {
+  valid_app "${1:-}" || die "invalid app name"
+  A=$1 D=$R/apps/$1
+  [[ -f $D/app.conf ]] || {
+    [[ -d $D ]] && die "the directory of $1 is incomplete (no app.conf): tando destroy -a $1 removes it, or tando up recreates it"
+    die "no such app: $1"; }
+  # a half-deleted app directory (an interrupted destroy, a hand cleanup): the skeleton comes back
+  if [[ $EUID == 0 ]]; then
+    [[ -d $D/releases ]] || install -d -m 755 -o root -g root "$D/releases"
+    [[ -d $D/incoming ]] || install -d -m 755 -o "${SUDO_USER:-root}" "$D/incoming"
+  fi
+  load "$D/app.conf" C
+  load "$D/state" S
+  load "$R/host.conf" H
+  app_vars
+}
+# AU: the app's user (tando-<app>; an adopted app keeps its own). ADATA: its data directory.
+app_vars() { AU=${C[user]:-tando-$A} ADATA=${C[data_dir]:-$D/shared/data}; }
+site() { echo "$A.${H[apps_domain]:-localhost}"; }
+link() {
+  if [[ -n ${C[check_url]:-} ]]; then   # adopted app behind a hand-written Caddy site
+    echo "${C[check_url]}${C[path]:-}"
+  elif [[ ${H[tls]:-off} == off ]]; then
+    echo "http://$(site)${H[public_port]:+:${H[public_port]}}${C[path]:-}"
+  else
+    echo "https://$(site)${C[path]:-}"
+  fi
+}
+# journal_dir: the app's journal namespace directory (its sockets are 0666) is 0750 root:<app's
+# group>, from boot on (tmpfiles runs before the journald sockets) and now: no other app can write
+# into this app's journal. The app's own units see it bound at /run/systemd/journal.
+journal_dir() {
+  local g d=/run/systemd/journal.tando-$A f=/etc/tmpfiles.d/tando-journal-$A.conf
+  g=$(id -gn "$AU" 2> /dev/null) || return 0
+  printf 'd %s 0750 root %s -\nz %s 0750 root %s -\n' "$d" "$g" "$d" "$g" | write_if_changed "$f"
+  # it is the RuntimeDirectory of the namespace's journald, set to 0755 whenever that starts:
+  # set it right after
+  mkdir -p "/etc/systemd/system/systemd-journald@tando-$A.service.d"
+  write_if_changed "/etc/systemd/system/systemd-journald@tando-$A.service.d/tando.conf" <<EOF
+[Service]
+ExecStartPost=-/bin/sh -c 'chgrp $g $d && chmod 0750 $d'
+EOF
+  systemctl daemon-reload
+  systemd-tmpfiles --create "$f" 2> /dev/null || true
+}
+
+# app_units: every unit of this app, loaded or on disk: tando-<app>.service and tando-<app>-<kind>...
+# A unit belongs to the app with the longest name it starts with, so destroying hello never
+# touches hello-2's units (tando-hello-2-job-x starts with tando-hello- too)
+app_units() {
+  local u x best apps=()
+  for x in "$R"/apps/*/app.conf; do x=${x%/app.conf}; apps+=("${x##*/}"); done
+  { systemctl list-units --all --plain --no-legend "tando-$A-*" 2> /dev/null | awk '{ print $1 }'
+    ls /etc/systemd/system 2> /dev/null | grep "^tando-$A-" ; } | sort -u |
+  while IFS= read -r u; do
+    best=""
+    for x in "${apps[@]}"; do
+      [[ ( $u == "tando-$x-"* || $u == "tando-$x."* ) && ${#x} -gt ${#best} ]] && best=$x   # (hello-2's own .service too)
+    done
+    [[ -z $best || $best == "$A" ]] && echo "$u"
+  done
+}
+
+# drop_release id: a release that failed takes no disk (its history line stays)
+drop_release() {
+  valid_id "$1" && [[ -d $D/releases/$1 && $(cur_link) != "$1" ]] || return 0
+  rm -rf --one-file-system "${D:?}/releases/$1"; rm -f "$D/jobs/$1"
+  [[ ${C[recipe]:-} == container ]] && podman rmi -f "localhost/tando-$A:$1" > /dev/null 2>&1
+  return 0
+}
+
+# new_uid: a system uid no user or group has, and that no destroyed app had (its files in places
+# tando does not clean must never belong to a later app); the destroyed ones are in $R/retired-uids
+new_uid() {
+  local u
+  for ((u = 999; u >= 200; u--)); do
+    getent passwd "$u" > /dev/null || getent group "$u" > /dev/null && continue
+    grep -qx "$u" "$R/retired-uids" 2> /dev/null && continue
+    echo "$u"; return 0
+  done
+  die "no free system uid left (200-999)"
+}
+
+# domains: C[domains] = "example.com|redirect shop.example.org|off" (domain|www handling)
+domain_tls() { # the TLS of an app's own domains: the host's, but never plain http unless asked
+  if [[ -n ${H[domain_tls]:-} ]]; then echo "${H[domain_tls]}"
+  elif [[ ${H[tls]:-off} == internal ]]; then echo internal
+  else echo auto; fi
+}
+default_www() { # apex-looking (one dot) or www.: redirect the twin; deeper names: no twin
+  if [[ $1 == www.* || $1 =~ ^[^.]+\.[^.]+$ ]]; then echo redirect; else echo off; fi
+}
+www_twin() { if [[ $1 == www.* ]]; then echo "${1#www.}"; else echo "www.$1"; fi; }
+valid_domain() {
+  [[ ${#1} -le 253 && $1 =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$ ]]
+}
+domain_owner() { # domain -> the app that has it (as a domain or a www twin), if any
+  local f l
+  for f in "$R"/apps/*/app.conf; do
+    [[ -f $f ]] || continue
+    l=$(sed -n 's/^domains=//p' "$f")
+    for x in $l; do
+      [[ ${x%|*} == "$1" || ( ${x#*|} != off && $(www_twin "${x%|*}") == "$1" ) ]] && { f=${f%/app.conf}; echo "${f##*/}"; return; }
+    done
+  done
+}
+# domain_set app add|rm domain [www]: change C[domains], re-render the site (validated: a config
+# Caddy rejects is rolled back and nothing changes)
+cmd_domain() {
+  need_root; local op=$1; app "${2:-}"
+  local d=${3:-} w=${4:-} x nd="" owner old
+  [[ $op == ls ]] || { lock 120; domains_lock; }   # (lock reloads app.conf and state)
+  case $op in
+    ls)
+      for x in ${C[domains]:-}; do row domain "${x%|*}" "${x#*|}" "$(cert_expiry "${x%|*}")"; done
+      return;;
+    add)
+      valid_domain "$d" || die "not a domain name: $d"
+      [[ $w =~ ^(redirect|serve|off)$ ]] || die "www must be redirect, serve or off"
+      [[ $d == *.${H[apps_domain]:-localhost} ]] && die "$d is under the server's apps_domain: it is already $A's link pattern"
+      owner=$(domain_owner "$d"); [[ -z $owner || $owner == "$A" ]] || die "$d belongs to $owner on this server: tando domain rm $d -a $owner first"
+      [[ $w == off ]] || { owner=$(domain_owner "$(www_twin "$d")"); [[ -z $owner || $owner == "$A" ]] ||
+        die "$(www_twin "$d") belongs to $owner: use --www off, or remove it there first"; };;
+    rm) valid_domain "$d" || die "not a domain name: $d";;
+    *) die "domain: add, rm or ls";;
+  esac
+  old=${C[domains]:-}
+  for x in $old; do [[ ${x%|*} == "$d" ]] || nd+="${nd:+ }$x"; done
+  [[ $op == rm && " $old " != *" $d|"* ]] && die "$A has no domain $d (tando domain ls)"
+  [[ $op == add ]] && nd+="${nd:+ }$d|$w"
+  C[domains]=$nd
+  [[ -z $nd ]] && unset "C[domains]"
+  write_caddy || die "Caddy rejected the new site config; nothing changed"   # (write_caddy rolls back)
+  save "$D/app.conf" C
+  st applied ""
+  echo "domains=${C[domains]:-}"
+}
+# domain-check app domain: wait (up to 90 s) until the domain answers through this server's
+# Caddy with a valid certificate; on failure, Caddy's own words about it
+cmd_domain_check() {
+  need_root; app "${1:-}"; local d=${2:-} t=0 dt code err ca=/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt opts=()
+  valid_domain "$d" || die "not a domain name: $d"
+  dt=$(domain_tls)
+  local since; since=$(date '+%Y-%m-%d %H:%M:%S' -d '-5 sec')
+  while ((t < 90)); do
+    if [[ $dt == off ]]; then
+      code=$(curl -s -A "$PROBE_UA" -H "@$PROBE_HDR" -o /dev/null -m 5 -w '%{http_code}' -H "Host: $d" "http://127.0.0.1$(health_path)")
+    else
+      opts=(); [[ $dt == internal ]] && opts=(--cacert "$ca")
+      code=$(curl -s -A "$PROBE_UA" -H "@$PROBE_HDR" -o /dev/null -m 5 -w '%{http_code}' "${opts[@]}" \
+        --resolve "$d:443:127.0.0.1" "https://$d$(health_path)" 2> /dev/null)
+    fi
+    [[ $code == [23]?? ]] && { [[ $dt == off ]] && echo "live=http://$d${C[path]:-}" || echo "live=https://$d${C[path]:-}"
+      echo "expires=$(cert_expiry "$d")"; return 0; }
+    sleep 3; t=$((t + 3))
+  done
+  err=$(journalctl -u caddy --since "$since" --no-pager -o cat 2> /dev/null | grep -i "$d" | grep -i 'error\|fail' |
+    sed -n 's/.*"error":"\([^"]*\)".*/\1/p' | tail -1)
+  [[ -n $err ]] || err="no valid answer within 90 s (last HTTP status ${code:-none})"
+  echo "error=$err"
+  return 1
+}
+cert_expiry() { # domain -> epoch when Caddy's certificate for it expires, "-" when there is none
+  local f
+  f=$(find /var/lib/caddy/.local/share/caddy/certificates -name "$1.crt" 2> /dev/null | head -1)
+  [[ -n $f ]] && date -d "$(openssl x509 -enddate -noout -in "$f" 2> /dev/null | cut -d= -f2)" +%s 2> /dev/null || echo -
+}
+
+health_path() { # under path; "/" with a path is the path itself (Next redirects /base/ to /base)
+  local h=${C[health]:-/}
+  [[ -n ${C[path]:-} && $h == / ]] && h=""
+  echo "${C[path]:-}$h"
+}
+# Static sites have no process: Caddy serves their current release. Every other app has a unit.
+has_unit() { [[ ${C[recipe]:-} != static ]]; }
+app_unit() { if has_unit; then echo "tando-$A.service"; fi; }
+
+# (Re)start the app and make Caddy proxy to it again (it may show the stopped or down page).
+# Caddy holds requests while the process restarts, so none fail.
+restart_app() {
+  if [[ -n ${S[stopped]:-}${S[down]:-} ]]; then
+    unset "S[stopped]" "S[down]"
+    write_caddy                     # proxy again (dies, the state unchanged, when Caddy refuses)
+    save "$D/state" S
+    has_unit && systemctl enable -q "tando-$A"
+  fi
+  write_caddy
+  has_unit || return 0
+  systemctl reset-failed "tando-$A" 2> /dev/null
+  systemctl restart "tando-$A"
+}
+# lock [secs]: the app's lock (fd 9). While it waits, $D/lock.wait.<pid> says so; once it holds
+# it, $D/lock.holder names the verb. busy_info reports both, so a client tells "my call is
+# running" from "my call waits for another one" (a call never reports its own lock as another's)
+lock() {
+  [[ -f $D/app.conf ]] || die "$A was destroyed (or is not set up yet) while this command waited for it"
+  lockfile "$D/lock"
+  exec 9>"$D/lock"
+  if ! flock -n 9; then
+    { : > "$D/lock.wait.$BASHPID"; } 2> /dev/null
+    flock -w "${1:-300}" 9; local rc=$?
+    rm -f "$D/lock.wait.$BASHPID"
+    ((rc == 0)) || die "$A is busy: $(lock_holder) holds it (tando status shows it)"
+  fi
+  # what held it may have been a destroy: nothing is written into a directory that is gone
+  [[ -f $D/app.conf ]] || { exec 9>&-; die "$A was destroyed while this command waited for it"; }
+  lock_mark "${verb:-?}"
+}
+lock_mark() {
+  { printf '%s %s\n' "$1" "$BASHPID" > "$D/lock.holder"; } 2> /dev/null
+  # what was read before the lock may be stale: app.conf and state as they are now
+  [[ -f $D/app.conf ]] && load "$D/app.conf" C && app_vars
+  [[ -f $D/state ]] && load "$D/state" S
+  return 0
+}
+# domains_lock: host-wide (fd 6), held to the end of the verb: which app owns a domain is checked
+# and saved by one verb at a time. Taken after the app's lock, never before (one order: no deadlock)
+domains_lock() { lockfile "$R/.domains.lock"; exec 6>"$R/.domains.lock"; flock -w 120 6 || die "another domain change on this server takes too long; try again"; }
+lock_holder() { # the verb that holds the lock, in words
+  local v=""; read -r v _ < "$D/lock.holder" 2> /dev/null
+  case $v in
+    run-activation|activate|configure) echo "a deploy";;
+    rollback) echo "a rollback";;
+    backup-run) echo "a backup";;
+    backup-restore) echo "a restore";;
+    env-set|env-unset) echo "an env change";;
+    start|stop|restart) echo "a $v";;
+    domain-add|domain-rm) echo "a domain change";;
+    destroy) echo "destroy";;
+    recover|recover-all|deploy-status|app-down) echo "a recovery check";;
+    adopt-*) echo "an adopt step";;
+    *) echo "another operation";;
+  esac
+}
+cur_link() { local l; l=$(readlink "$D/current" 2>/dev/null) || return 0; echo "${l##*/}"; }
+
+# ---- unit rendering ------------------------------------------------------------------------
+
+# hardening properties shared by the unit file, the pre-flight unit and job units
+# props <port|-> [kind]: the unit properties of every unit tando runs app code in, one per line.
+# kind: service (the app; binds only its port), preflight (the same on the spare port), job, build,
+# backup (no listening socket at all). The sandbox is the same for all kinds: the app's user, a
+# read-only system, private /tmp, /dev, IPC and a small private /dev/shm (charged to the unit).
+# (The other apps' journal namespaces are closed by journal_dir: their directories are 0750.)
+# ProtectProc=invisible (no other user's processes in /proc: the admin's `tando ssh app -- cmd`,
+# sudo lines, other apps) and ProcSubset=pid (no /proc/meminfo, /proc/sys...): systemd 247+
+SD_PROC=$( (( $(systemctl --version 2> /dev/null | awk 'NR == 1 { print $2 + 0 }') >= 247 )) && echo 1)
+# the rest of the kernel-facing sandbox (all in systemd 247+, as ProtectProc): no kernel tunables,
+# modules, logs, cgroup writes, clock, hostname, namespaces, realtime, setuid files, personality;
+# native syscalls of @system-service only (a refused one answers EPERM: libuv falls back from
+# io_uring); sockets: IP, unix and netlink (os.networkInterfaces). Not MemoryDenyWriteExecute: it
+# breaks every JIT (Node, Python's). Container units (root Podman) take none of these: Podman
+# needs namespaces and more syscalls; they have their own isolation
+SD_HARD=()
+[[ -n $SD_PROC ]] && SD_HARD=(ProtectProc=invisible ProcSubset=pid ProtectKernelTunables=yes
+  ProtectKernelModules=yes ProtectKernelLogs=yes ProtectControlGroups=yes ProtectClock=yes
+  ProtectHostname=yes RestrictNamespaces=yes RestrictRealtime=yes RestrictSUIDSGID=yes
+  LockPersonality=yes SystemCallArchitectures=native "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK"
+  SystemCallFilter=@system-service SystemCallErrorNumber=EPERM)
+# Every unit of an app (the service, its pre-flight, jobs, shell, venv build, backups) runs in the
+# app's slice tando-<app>.slice, under tando.slice: the app's limits hold for all of them together.
+# (The name is escaped: hello-2's slice must not be a child of hello's.) OOMScoreAdjust=500: under
+# memory pressure the kernel kills an app before Caddy, sshd or the agent.
+app_slice() { echo "tando-${A//-/\\x2d}.slice"; }   # (systemd-escape of a name like hello-2)
+write_slice() {
+  local mem=${C[memory]:-256M} mb cpu=${C[cpu]:-}
+  [[ $mem =~ ^([0-9]+)([KMG])$ ]] || mem=256M
+  [[ $mem =~ ^([0-9]+)([KMG])$ ]]; mb=${BASH_REMATCH[1]}
+  case ${BASH_REMATCH[2]} in K) mb=$((mb / 1024));; G) mb=$((mb * 1024));; esac
+  # memory: the live app, its pre-flight beside it during a deploy, and a job or shell (3x memory)
+  [[ $cpu == *% ]] || { [[ -n $cpu ]] && cpu=$(awk -v c="$cpu" 'BEGIN { printf "%d%%", c * 100 }'); }
+  { printf '[Unit]\nDescription=tando app %s: all its units together\n\n[Slice]\n' "$A"
+    printf 'MemoryMax=%sM\nTasksMax=%s\nCPUWeight=100\n' $((mb * 3)) "${C[tasks]:-1024}"
+    [[ -n $cpu ]] && printf 'CPUQuota=%s\n' "$cpu"
+  } | write_if_changed "/etc/systemd/system/$(app_slice)"
+}
+props() { # port [kind]
+  local p=$1 kind=${2:-service} x rw="$D/shared" envs ef=() sock
+  case $kind in
+    service|preflight) sock=("SocketBindAllow=tcp:$p" SocketBindDeny=any);;
+    job|build|backup) sock=(SocketBindDeny=any);;
+    *) die "internal: unit kind $kind";;
+  esac
+  # HOME is root's and read-only to the app (app_perms makes it): dotfiles there (.npmrc with
+  # node-options=--require, ~/.local .pth files, .gitconfig) would run in every later release.
+  # Caches go to shared/.cache (a build's to its private /tmp); user config files are not read
+  # lint: allow RL06 the build unit's own PrivateTmp, no other user can reach it
+  local cache=$D/shared/.cache; [[ $kind == build ]] && cache=/tmp/.cache
+  envs="PORT=$p HOME=$D/home TANDO_DATA_DIR=$ADATA XDG_CACHE_HOME=$cache npm_config_cache=$cache/npm"
+  envs+=" NPM_CONFIG_USERCONFIG=/dev/null PYTHONNOUSERSITE=1 GIT_CONFIG_GLOBAL=/dev/null"
+  [[ -n ${C[data_dir]:-} ]] && rw+=" ${C[data_dir]}"
+  [[ ${C[next_cache]:-} == release && -z ${C[writable]:-} ]] && rw+=" $D/releases"
+  # an adopted app keeps its own env file (read by systemd as root); tando's env file comes after
+  [[ -n ${C[env_file]:-} ]] && ef=("EnvironmentFile=${C[env_file]}")
+  # writable directories live inside releases; ownership limits writes to those directories
+  [[ -n ${C[writable]:-} ]] && rw+=" $D/releases"
+  # glibc malloc arenas: a large share of a small Node app's memory (the env file can override)
+  [[ ${C[recipe]:-} == node || ${C[recipe]:-} == next ]] && envs+=" MALLOC_ARENA_MAX=2"
+  # V8's heap capped at 70% of `memory`: at the cgroup cap Node does not get OOM-killed, it
+  # thrashes in GC and answers nothing while systemd sees it running; with a heap limit it exits
+  # and is restarted. NODE_OPTIONS in the app's env replaces this (the env file wins over
+  # Environment=), so does --max-old-space-size in the start command; adopted apps keep theirs.
+  if [[ ( ${C[recipe]:-} == node || ${C[recipe]:-} == next ) && -z ${C[adopted_from]:-} &&
+        ${C[start]:-} != *max-old-space-size* && ${C[memory]:-256M} =~ ^([0-9]+)([KMG])$ ]]; then
+    local mb=${BASH_REMATCH[1]}
+    case ${BASH_REMATCH[2]} in K) mb=$((mb / 1024));; G) mb=$((mb * 1024));; esac
+    mb=$((mb * 7 / 10)); ((mb >= 64)) && envs+=" NODE_OPTIONS=--max-old-space-size=$mb"
+  fi
+  [[ ${C[database]:-} == sqlite ]] && envs+=" DATABASE_PATH=$D/shared/data/app.sqlite"
+  [[ ${C[recipe]:-} == python ]] && envs+=" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1"
+  if [[ ${C[recipe]:-} == container && ( $kind == service || $kind == preflight ) ]]; then
+    # as quadlet does: podman starts the container and exits, conmon stays as the main process
+    # (Type=notify), the container's cgroup is created inside the unit's (Delegate). No mount
+    # namespace options: podman's network namespaces must stay visible to later podman calls
+    printf '%s\n' Type=notify NotifyAccess=all Delegate=yes KillMode=mixed \
+      "ExecStop=$AGENT container-stop $A" "MemoryMax=${C[memory]:-256M}" SuccessExitStatus=143 \
+      "Environment=PORT=$p" "Slice=$(app_slice)" OOMScoreAdjust=500
+    [[ -x $LOGS ]] && "$LOGS" unit-props "$A"   # conmon passes the container's output to it
+    return
+  fi
+  for x in "User=$AU" "Group=$AU" NoNewPrivileges=yes ProtectSystem=strict \
+      ProtectHome=yes PrivateTmp=yes PrivateDevices=yes PrivateIPC=yes \
+      "TemporaryFileSystem=/dev/shm:size=$SHM_SIZE,mode=1777" "ReadWritePaths=$rw" \
+      "${sock[@]}" "MemoryMax=${C[memory]:-256M}" MemorySwapMax=0 \
+      ${C[memory_high]:+"MemoryHigh=${C[memory_high]}"} \
+      SuccessExitStatus=143 "${ef[@]}" "EnvironmentFile=$D/env" "Environment=$envs" \
+      "Slice=$(app_slice)" OOMScoreAdjust=500 "${SD_HARD[@]}"; do
+    [[ ",${H[unit_drop]:-}," == *",${x%%=*},"* ]] || echo "$x"
+  done
+  [[ -x $LOGS ]] && "$LOGS" unit-props "$A"   # LogNamespace=tando-<app>: its own capped journal
+  return 0
+}
+
+write_unit() {
+  write_slice   # (jobs of a static site run in it too)
+  local f=/etc/systemd/system/tando-$A.service
+  if ! has_unit; then   # a static site (also when an app changed recipe): no process
+    if [[ -f $f ]]; then systemctl disable -q --now "tando-$A"; rm -f "$f"; fi
+    return 0
+  fi
+  {
+    printf '[Unit]\nDescription=tando app %s\nAfter=network.target\n\n[Service]\n' "$A"
+    printf 'ExecStart=%s exec-app %s\n' "$AGENT" "$A"
+    printf 'WorkingDirectory=%s/current\nRestart=on-failure\nRestartSec=2\n' "$D"
+    # stop_timeout (default 10 s): how long a stopping process may finish its requests before it
+    # is killed; Caddy holds new requests meanwhile (an app that waits for every keep-alive
+    # connection to close never ends by itself under load: docs/COMMANDS.md "Limits and load")
+    # (Next's standalone server keeps keep-alive connections open on SIGTERM: 5 s, not 10)
+    local stop=10; [[ ${C[recipe]:-} == next ]] && stop=5
+    printf 'SyslogIdentifier=tando-%s\nTimeoutStopSec=%s\n' "$A" "${C[stop_timeout]:-$stop}"
+    props "${C[port]}"
+    printf '\n[Install]\nWantedBy=multi-user.target\n'
+  } > "$f.tmp"
+  # when the unit gives up (start limit), tando-down@ shows a 503 page instead of holding requests
+  # (gives up = 5 starts within 60 s, so a crash loop ends in "failed" after about 10 s)
+  sed -i "1a OnFailure=tando-down@tando-$A.service\nStartLimitIntervalSec=60\nStartLimitBurst=5" "$f.tmp"
+  if cmp -s "$f.tmp" "$f"; then rm -f "$f.tmp"; else mv -f "$f.tmp" "$f"; fi   # unchanged: untouched
+}
+
+# Caddy site for the app; validated before reload, the previous file restored on failure
+write_caddy() {
+  probe_header
+  local f=/etc/caddy/tando/$A.caddy name
+  [[ ${C[caddy]:-} == external ]] && return 0      # adopted: its hand-written site block serves it
+  name=$(site)
+  [[ ${H[tls]:-off} == off ]] && name="http://$name"
+  # the app's own domains (tando domain add): in the same site block, with HTTPS (Let's Encrypt,
+  # or Caddy's local CA when the host uses tls=internal); their www twins redirect (or serve)
+  local d w dt redirs=""
+  dt=$(domain_tls)
+  for d in ${C[domains]:-}; do
+    w=${d#*|} d=${d%|*}
+    if [[ $dt == off ]]; then name+=", http://$d"; else name+=", $d"; fi
+    case $w in
+      serve) if [[ $dt == off ]]; then name+=", http://$(www_twin "$d")"; else name+=", $(www_twin "$d")"; fi;;
+      redirect) redirs+=" $(www_twin "$d")>$d";;
+    esac
+  done
+  {
+    echo "$name {"
+    [[ ${H[tls]:-off} == internal || ( -n ${C[domains]:-} && $dt == internal ) ]] && echo "	tls internal"
+    # request log for every state of the site; headers and query strings are left out
+    [[ -x $LOGS ]] && "$LOGS" caddy-log "$A"
+    # a Host with a port (site.example:443) reaches the site, but Caddy before 2.7 does not log
+    # it: answer 400, so nothing is served unlogged (public_port, a test setup, stays allowed)
+    echo "	@tandoport {"
+    echo "		header_regexp Host :[0-9]+\$"
+    [[ -n ${H[public_port]:-} ]] && echo "		not header Host *:${H[public_port]}"
+    echo "	}"
+    echo "	respond @tandoport 400"
+    # Caddy before 2.7 serves a Host in other letters (ALPHA.localhost) but does not log it: the
+    # Host must be one of the site's names exactly (the header matcher is case-sensitive)
+    # (one `header Host` line per name: Caddy 2.6 takes one value per line, they are OR'ed)
+    local hn
+    echo "	@tandohost {"
+    echo "		not {"
+    for hn in ${name//,/ }; do
+      hn=${hn#http://}; echo "			header Host $hn"
+      [[ -n ${H[public_port]:-} ]] && echo "			header Host $hn:${H[public_port]}"
+    done
+    echo "		}"
+    echo "	}"
+    echo "	respond @tandohost 400"
+    if [[ -n ${S[stopped]:-} ]]; then
+      echo "	header Retry-After 60"
+      echo "	respond \"$A is stopped\" 503"
+    elif [[ -n ${S[down]:-} ]]; then
+      echo "	header Retry-After 30"
+      echo "	respond \"$A is unavailable\" 503"
+    elif ! has_unit; then
+      # static: Caddy reads the current release (root:caddy, 750/640) itself. Clean URLs (/about
+      # serves about.html) and the project's 404.html as the page of a missing file
+      echo "	root * $D/current"
+      echo "	try_files {path} {path}.html"
+      echo "	file_server"
+      echo "	handle_errors {"
+      echo "		@tando404 expression {err.status_code} == 404"
+      echo "		handle @tando404 {"
+      echo "			rewrite * /404.html"
+      echo "			file_server"
+      echo "		}"
+      echo "	}"
+    else
+      [[ -n ${C[path]:-} ]] && echo "	redir / ${C[path]}"
+      # hold requests while the app restarts (at most HOLD each), so a deploy drops none
+      echo "	reverse_proxy 127.0.0.1:${C[port]} {"
+      local hold=${HOLD%s}; (( ${C[health_timeout]:-15} > hold )) && hold=${C[health_timeout]}
+      # hold = (tando.conf) sets it: an app that starts in a second or two can have a short hold,
+      # which is also how long a request over max_requests waits before its 503 (one loop in Caddy)
+      [[ ${C[hold]:-} =~ ^[1-9][0-9]{0,2}$ ]] && hold=${C[hold]}
+      echo "		lb_try_duration ${hold}s"
+      echo "		lb_try_interval 100ms"
+      # the probe secret (skips the request log) is Caddy's and root's: never handed to an app
+      echo "		header_up -X-Tando-Probe"
+      # the visitor's address, not one the client sent (Caddy replaces X-Forwarded-For itself)
+      echo "		header_up X-Real-IP {remote_host}"
+      # at most this many connections to the app at once; more requests wait in Caddy (within
+      # lb_try_duration) instead of each visitor connection opening one more to a small app
+      local mc=${C[max_conns]:-256}; [[ $mc =~ ^[1-9][0-9]{0,4}$ ]] || mc=256
+      echo "		transport http {"
+      echo "			max_conns_per_host $mc"
+      echo "		}"
+      # load shedding, when max_requests is set: with that many in flight the app counts as full;
+      # a request beyond it waits at most lb_try_duration (the hold) and then gets the 503 "busy"
+      # page below. Caddy 2.6 has one retry loop for "full" and "restarting", so the 503 comes only
+      # after the hold: off by default (a burst then queues for a free connection instead, which
+      # served more under load tests); with a short `hold =` it is a fast shed. (unhealthy_request_
+      # count works only with fail_duration in 2.6; max_fails 1000: a failure never marks it down)
+      local mr=${C[max_requests]:-}
+      if [[ $mr =~ ^[1-9][0-9]{0,5}$ ]]; then
+        echo "		fail_duration 1s"
+        echo "		max_fails 1000"
+        echo "		unhealthy_request_count $mr"
+      fi
+      echo "	}"
+      echo "	handle_errors {"
+      echo "		@tandobusy expression {err.status_code} == 503"
+      echo "		header @tandobusy Retry-After 5"
+      echo "		respond @tandobusy \"$A is busy: too many requests at once, try again in a few seconds\" 503"
+      echo "	}"
+    fi
+    echo "}"
+    for d in $redirs; do
+      if [[ $dt == off ]]; then echo "http://${d%>*} {"; else echo "${d%>*} {"; fi
+      [[ $dt == internal ]] && echo "	tls internal"
+      if [[ $dt == off ]]; then echo "	redir http://${d#*>}{uri} permanent"; else echo "	redir https://${d#*>}{uri} permanent"; fi
+      echo "}"
+    done
+  } > "$f.tmp"
+  # root:caddy 640: the probe header's secret is in it, and apps can read /etc
+  chgrp caddy "$f.tmp" 2> /dev/null; chmod 640 "$f.tmp"
+  if cmp -s "$f.tmp" "$f" && [[ $(stat -c %a "$f") == 640 ]]; then rm -f "$f.tmp"; return 0; fi
+  # one site change at a time on the host (fd 11): Caddy validates and reloads the whole config,
+  # so another app's file in between would be judged (and rolled back) with this one
+  caddy_lock
+  [[ -f $f ]] && cp -p "$f" "$f.old"
+  mv -f "$f.tmp" "$f"
+  local verr=""
+  if ! verr=$(caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1) ||
+     ! verr=$(systemctl reload caddy 2>&1); then
+    if [[ -f $f.old ]]; then mv -f "$f.old" "$f"; else rm -f "$f"; fi
+    exec 11>&-
+    verr=$(printf '%s\n' "$verr" | grep -i 'error\|fail' | tail -1 | cut -c1-300)
+    die "caddy rejected the site config for $A${verr:+: $verr}"
+  fi
+  rm -f "$f.old"
+  exec 11>&-
+}
+caddy_lock() {
+  exec 11>"$R/.caddy.lock"; chmod 600 "$R/.caddy.lock"
+  flock -w 120 11 || die "another change of Caddy's sites takes over 2 minutes; try again"
+}
+
+# ---- health --------------------------------------------------------------------------------
+
+# probe <timeout> <unit> <curl args...>: succeeds on a 2xx/3xx answer.
+# Fails early when the unit stops, fails, or crash-loops (two automatic restarts).
+# A steady HTTP error answer (4xx/5xx for ERR_WINDOW seconds) also fails early.
+# PROBE_WHY describes the failure, including the last answer seen.
+ERR_WINDOW=10
+# the secret probe header (root 600), made once
+probe_header() {
+  [[ -s $PROBE_HDR ]] && return 0
+  (umask 077; printf 'X-Tando-Probe: %s\n' "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')" > "$PROBE_HDR.tmp") &&
+    mv -f "$PROBE_HDR.tmp" "$PROBE_HDR"
+}
+probe() {
+  probe_header
+  local to=$1 end unit=$2 code rc n0=0 n state err_since="" body
+  mono; end=$((MONO + $1))
+  shift 2
+  # straight to a port (the pre-flight, adopt's checks): never the secret, the app would learn it
+  local hdr=(-H "@$PROBE_HDR")
+  [[ " $* " =~ \ https?://(127\.0\.0\.1|localhost|\[::1\]):[0-9] ]] && hdr=()
+  [[ -n $unit ]] && n0=$(systemctl show -P NRestarts "$unit")
+  # the body only says more about an error answer: without room for it in /tmp (a full disk) the
+  # check goes on without it (curl would fail to write it, and a good release be rolled back)
+  body=$(mktemp 2> /dev/null) || body=""
+  while :; do
+    code=$(curl -s -A "$PROBE_UA" "${hdr[@]}" -o "${body:-/dev/null}" -m 5 -w '%{http_code}' "$@" 2> /dev/null); rc=$?
+    if ((rc == 23)) && [[ -n $body ]]; then rm -f "$body"; body=""; continue; fi   # (could not write the body)
+    [[ $code == [23]?? ]] && { rm -f "$body"; return 0; }
+    case $rc in
+      0) LAST_ANSWER="answered HTTP $code"
+         # the start of an error page says more than its status: one line, printable characters
+         local b=""; [[ -n $body ]] && b=$(head -c 200 "$body" | tr -c '[:print:]' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')
+         [[ -n $b ]] && LAST_ANSWER+=" \"${b:0:120}\"";;
+      7) LAST_ANSWER="connection refused";;
+      28) LAST_ANSWER="no answer within 5 s";;
+      52) LAST_ANSWER="empty reply";;
+      *) LAST_ANSWER="curl error $rc";;
+    esac
+    mono
+    if [[ $rc == 0 && $code == [45]?? ]]; then
+      : "${err_since:=$MONO}"
+      if ((MONO - err_since >= ERR_WINDOW)); then
+        PROBE_WHY="health check $LAST_ANSWER for ${ERR_WINDOW} s"; rm -f "$body"; return 1
+      fi
+    else
+      err_since=""
+    fi
+    ((MONO < end)) || { PROBE_WHY="no healthy answer within $to s (last: $LAST_ANSWER)"; rm -f "$body"; return 1; }
+    if [[ -n $unit ]]; then
+      state=$(systemctl show -P ActiveState "$unit")
+      n=$(systemctl show -P NRestarts "$unit")
+      if (( ${n:-0} - ${n0:-0} >= 2 )); then
+        PROBE_WHY="the app is crash-looping ($((n - n0)) restarts; last: $LAST_ANSWER)"; rm -f "$body"; return 1
+      fi
+      case $state in
+        failed|inactive) PROBE_WHY="the app exited ($state; last: $LAST_ANSWER)"; rm -f "$body"; return 1;;
+      esac
+    fi
+    sleep 0.5
+  done
+}
+
+# health check through Caddy, the way a visitor reaches the app
+via_caddy() { # [unit to watch]
+  local name t=${C[health_timeout]:-60} base opts=()
+  name=$(site)
+  if [[ -n ${C[check_url]:-} ]]; then name=${C[check_url]#*://}; name=${name%%/*}; fi
+  if [[ ${C[check_url]:-} == http://* || ( -z ${C[check_url]:-} && ${H[tls]:-off} == off ) ]]; then
+    base=http://127.0.0.1 opts=(-H "Host: $name")
+  else
+    base=https://$name opts=(-k --resolve "$name:443:127.0.0.1")
+  fi
+  probe "$t" "${1:-}" "${opts[@]}" "$base$(health_path)" && static_ok "$base" "${opts[@]}" || return 1
+  # the answer counts only when the process on the app's port is the app's own (a stranger that
+  # grabbed the port during a restart would answer just as well)
+  [[ -n ${1:-} && -n ${C[port]:-} && ${C[caddy]:-} != external ]] || return 0
+  own_listener "${C[port]}" "$1"
+}
+
+# own_listener port unit: everything listening on 127.0.0.1:port runs in that unit's cgroup
+own_listener() {
+  local pids p cg n=0
+  pids=$(ss -Hltnp "sport = :$1" 2> /dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u)
+  for p in $pids; do
+    cg=$(cut -d: -f3- "/proc/$p/cgroup" 2> /dev/null | tail -1)
+    case $cg in */"$2"|*/"$2"/*) n=$((n + 1));;
+      *) PROBE_WHY="port $1 is held by a process outside $2 (pid $p, ${cg:-gone})"; return 1;; esac
+  done
+  ((n)) || { PROBE_WHY="nothing of $2 listens on port $1"; return 1; }
+}
+
+# R1: Node can be healthy while Caddy cannot read the files it serves from disk. Fetch through Caddy
+# the first _next/static file the health page links to, and every check_static path (under path).
+static_ok() { # base curl-options...
+  local base=$1 p code paths=()
+  shift
+  [[ -n ${C[check_static]:-} ]] && read -ra paths <<< "${C[check_static]//,/ }"
+  p=$(curl -s -A "$PROBE_UA" -H "@$PROBE_HDR" -m 10 "$@" "$base$(health_path)" |
+    grep -o "${C[path]:-}/_next/static/[^\"' <>]*" | head -1)
+  [[ -n $p ]] && paths+=("${p#"${C[path]:-}"}")
+  for p in "${paths[@]}"; do
+    for _ in 1 2 3; do
+      code=$(curl -s -A "$PROBE_UA" -H "@$PROBE_HDR" -o /dev/null -m 10 -w '%{http_code}' "$@" "$base${C[path]:-}$p")
+      [[ $code == 200 ]] && break
+      sleep 0.5
+    done
+    [[ $code == 200 ]] || { PROBE_WHY="static file ${C[path]:-}$p answered HTTP $code through Caddy"; return 1; }
+  done
+}
+
+# ---- releases ------------------------------------------------------------------------------
+
+switch_to() { # <id> or "" (no release left: stop the app)
+  if [[ -z $1 ]]; then
+    systemctl stop "tando-$A"; rm -f "$D/current"; st current ""
+    return
+  fi
+  [[ -d $D/releases/$1 ]] || { echo "tando-agent: release $1 is not on disk" >&2; return 1; }
+  ln -sfn "releases/$1" "$D/current.tmp" && mv -Tf "$D/current.tmp" "$D/current" || return 1
+  st current "$1" || return 1
+  restart_app
+}
+
+# fallback_of id: the release to go back to: id itself when its directory exists, else the newest
+# verified release on disk (other than skip); nothing when there is none
+fallback_of() { # id skip
+  local i
+  [[ -n $1 && -d $D/releases/$1 ]] && { echo "$1"; return; }
+  for i in $(releases_by_seq | tac); do
+    [[ $i != "${2:-}" && ${S[status_$i]:-} == verified ]] && { echo "$i"; return; }
+  done
+}
+
+# caddy_up: Caddy runs (started once if it was not): a deploy must not blame the app for it
+caddy_up() {
+  systemctl -q is-active caddy && return 0
+  systemctl start caddy 2> /dev/null; sleep 1
+  systemctl -q is-active caddy
+}
+
+dsec() { local x=$1; [[ $x == *.* ]] || x=$x.0; echo $((10#${x%.*} * 10 + 10#${x#*.})); }
+
+hist() { # id kind result note; phase seconds come from P
+  local d=$(( $(ds) - ${P[started_ds]:-$(ds)} + $(dsec "${P[t_build]:-0}") + $(dsec "${P[t_upload]:-0}") ))
+  local total="$((d / 10)).$((d % 10))"
+  # a line cut off by a crash or a full disk must not swallow this one
+  [[ -s $D/history.tsv && $(tail -c1 "$D/history.tsv" | od -An -c | tr -d ' ') != '\n' ]] && echo >> "$D/history.tsv"
+  row "$(now)" "$1" "$2" "$3" "$total" "${P[t_build]:-0}" "${P[t_upload]:-0}" \
+    "${P[t_copy]:-}" "${P[t_preflight]:-}" "${P[t_switch]:-}" "${P[t_verify]:-}" "$4" >> "$D/history.tsv"
+}
+
+# releases_by_seq: release ids, oldest first, in the order they were deployed (S[seq_<id>], given at
+# activate; the clock does not matter). Releases without a number sort first, by name
+releases_by_seq() {
+  local i
+  for i in "$D"/releases/*; do
+    i=${i##*/}
+    valid_id "$i" && printf '%s %s\n' "${S[seq_$i]:-0}" "$i"
+  done | sort -k1,1n -k2,2 | cut -d' ' -f2
+}
+prune() {
+  local i n=0 keep
+  for i in $(releases_by_seq | tac); do
+    valid_id "$i" || continue
+    n=$((n + 1)) keep=0
+    ((n <= KEEP)) && keep=1
+    [[ $i == "${S[current]:-}" || $i == "${S[last_good]:-}" || $i == "${S[target]:-}" ]] && keep=1
+    [[ -z ${S[status_$i]:-} ]] && keep=1          # reserved by a queued activation
+    if ((!keep)); then
+      rm -rf "${D:?}/releases/$i" "${D:?}/jobs/$i"; unset "S[status_$i]" "S[seq_$i]"
+      [[ ${C[recipe]:-node} == container ]] && podman rmi -f "localhost/tando-$A:$i" > /dev/null 2>&1
+    fi
+  done
+  save "$D/state" S
+}
+
+# soak_why: how the app fell over in the soak, for the history note, the client and the alert:
+# "it exited with status 1", "the kernel killed it (out of memory, memory = 128M)", "it died from
+# signal SEGV"; "it went down (restart, crash or out of memory)" when systemd has started it again
+soak_why() {
+  local -A U=() ; local l
+  while IFS= read -r l; do U[${l%%=*}]=${l#*=}; done < <(systemctl show -p Result,ExecMainCode,ExecMainStatus "tando-$A" 2> /dev/null)
+  case ${U[Result]:-}:${U[ExecMainCode]:-} in
+    oom-kill:*) echo "the kernel killed it (out of memory, memory = ${C[memory]:-256M})";;
+    exit-code:*|*:1) [[ ${U[ExecMainStatus]:-} =~ ^[0-9]+$ ]] && echo "it exited with status ${U[ExecMainStatus]}" && return
+                     echo "it went down (restart, crash or out of memory)";;
+    signal:*|core-dump:*|*:2|*:3) echo "it died from signal ${U[ExecMainStatus]:-?}";;
+    *) echo "it went down (restart, crash or out of memory)";;
+  esac
+}
+
+# Verify the live target of a deploy or rollback through Caddy, or go back to the fallback.
+finish() { # kind [note]
+  local id=${S[target]} fb=${S[fallback]:-} kind=$1 t ok=0 n0 soak soaked=0
+  t=$(ds); pg phase verify
+  caddy_up || { PROBE_WHY="Caddy is not running and did not start (sudo journalctl -u caddy)"; }
+  if via_caddy "$(app_unit)"; then ok=1
+  elif ! systemctl -q is-active caddy && caddy_up && via_caddy "$(app_unit)"; then ok=1; fi
+  # soak: the release must stay up for a while; a crash or an OOM kill in the window rolls back
+  soak=${C[soak]:-${H[soak]:-$SOAK}}
+  if ((ok)) && [[ $kind == deploy ]] && has_unit && ((soak > 0)); then
+    pg t_verify "$(el "$t")" phase soak soak "$soak" soak_end $(($(now) + soak))
+    n0=$(systemctl show -P NRestarts "tando-$A")
+    # (the monotonic clock: a wall clock set back during the soak must not stretch it)
+    local end; mono; end=$((MONO + soak))
+    while mono; ((MONO < end)); do
+      sleep 1
+      if [[ $(systemctl show -P NRestarts "tando-$A") != "$n0" ]] || ! systemctl -q is-active "tando-$A"; then
+        mono; ok=0 soaked=1; PROBE_WHY="$(soak_why), $((soak - end + MONO)) s after going live"; break
+      fi
+    done
+  fi
+  if ((ok)); then
+    S[status_$id]=verified
+    [[ $kind == rollback && -n ${S[prev]:-} ]] && S[status_${S[prev]}]=rolledback   # left, not failed
+    st last_good "$id" phase idle
+    jobs_follow
+    pg t_verify "$(el "$t")" phase done result ok
+    hist "$id" "$kind" ok "${2:-}"
+    return 0
+  fi
+  pg t_verify "$(el "$t")" phase rollback
+  [[ $kind == deploy ]] && S[status_$id]=bad
+  fb=$(fallback_of "$fb" "$id")
+  st phase rollback
+  if [[ -n $fb ]]; then switch_to "$fb" || true
+  elif [[ -z ${S[prev]:-} ]]; then switch_to ""; fi      # a first deploy: nothing to go back to
+  st phase idle
+  jobs_follow
+  pg phase done result rolledback message "after the switch: $PROBE_WHY; back on ${fb:-nothing}"
+  hist "$id" "$kind" rolledback "${2:-$PROBE_WHY}"
+  [[ $kind == deploy && $id != "$fb" ]] && drop_release "$id"
+  # the client has usually returned ("live") before the soak ends: the alert channels are told
+  ((soaked)) && watch_notice rollback "$id" "release $id rolled back to ${fb:-nothing}: $PROBE_WHY"
+  return 1
+}
+
+# watch_notice kind id text: a one-time notice for tando-watch, which sends it through the alert
+# channels on its next run (started now when its timer is on) and deletes it. Root-only spool.
+WATCH_INBOX=/var/lib/tando/watch/inbox
+watch_notice() {
+  local SAN f
+  [[ -d ${WATCH_INBOX%/*} ]] || return 0             # alerts were never installed
+  install -d -m 700 "$WATCH_INBOX" 2> /dev/null || return 0
+  san_v "$3"
+  f="$WATCH_INBOX/$(now).$A.$2"
+  printf '%s\t%s\t%s\t%s\n' "$1" "$A" "$2" "$SAN" > "$f.tmp" 2> /dev/null && mv -f "$f.tmp" "$f"
+  systemctl -q is-active tando-watch.timer 2> /dev/null && systemctl start --no-block tando-watch.service 2> /dev/null
+  return 0
+}
+
+# busy_info: when something holds the app's lock (an activation, its soak, a rollback, a backup,
+# an env change), what and for about how long: busy=<release id or ->, busy_phase=<copy..verify,
+# soak, rollback or other>, busy_left=<seconds of soak left or ->, busy_soak=<the soak>. Nothing
+# when the app is free. The client says it while it waits (lib/deploy.sh: busy_text)
+busy_info() {
+  [[ -f $D/lock ]] && ! flock -n "$D/lock" true 2> /dev/null || return 0
+  local bid=- bph=other bleft=-
+  local -A P=()
+  if [[ ${S[phase]:-idle} != idle ]]; then
+    load "$D/activation" P
+    bid=${S[target]:--} bph=${S[phase]}
+    [[ ${P[id]:-} == "$bid" && -n ${P[phase]:-} ]] && bph=${P[phase]}   # (soak is a part of verify)
+    [[ ${S[kind]:-} == rollback ]] && bph=rollback
+    [[ $bph == soak && ${P[soak_end]:-} =~ ^[0-9]+$ ]] && bleft=$(( P[soak_end] > $(now) ? P[soak_end] - $(now) : 0 ))
+  fi
+  echo "busy=$bid"; echo "busy_phase=$bph"; echo "busy_left=$bleft"
+  echo "busy_soak=${C[soak]:-${H[soak]:-$SOAK}}"
+  # busy_waiting: some call waits for the lock now (its marker's process is alive); busy_by: what
+  # holds it, in words
+  local f w=0
+  for f in "$D"/lock.wait.*; do
+    [[ -e $f ]] || continue
+    if [[ -d /proc/${f##*.} ]]; then w=1; else rm -f "$f"; fi
+  done
+  echo "busy_waiting=$w"
+  echo "busy_by=$(lock_holder)"
+}
+cmd_busy() { need_root; app "$1"; busy_info; }
+
+# ---- upload lease: one upload into incoming/ at a time ----------------------------------
+
+lease_lock() { lockfile "$D/lease.lock"; exec 7>"$D/lease.lock"; flock -w 30 7 || die "lease lock busy"; }
+
+# A lease is stale when its upload outlived UPLOAD_TIMEOUT, or when the activation that took it
+# over has finished copying incoming/ (it removes the lease then) or is gone.
+lease_live() {
+  load "$D/upload" L
+  [[ -n ${L[token]:-} ]] || return 1
+  if [[ -n ${L[id]:-} ]]; then
+    case $(systemctl show -P ActiveState "tando-$A-act-${L[id]}") in
+      active|activating) return 0;;
+      *) return 1;;
+    esac
+  fi
+  (( $(lease_age) < UPLOAD_TIMEOUT ))
+}
+# lease_age: seconds since the lease was taken; a start in the future (the clock was set back
+# since) counts by its distance, so such a lease still expires instead of living until then
+lease_age() {
+  local s=${L[started]:-0} a
+  [[ $s =~ ^[0-9]{1,12}$ ]] || s=0   # (a damaged lease file: very old, so it can be taken over)
+  a=$(( $(now) - 10#$s )); echo $(( a < 0 ? -a : a ))
+}
+
+# upload_writing: an rsync writes into this app's incoming/ (the admin's, or a deploy key's
+# confined receiver: unit tando-rx-<app>@<nonce>, tando-rx-<app> before; list-units matches the
+# patterns against loaded units and loads none)
+upload_writing() {
+  pgrep -f "apps/$A/incoming" > /dev/null && return 0
+  systemctl list-units --plain --no-legend --state=active,activating,deactivating \
+    "tando-rx-$A.service" "tando-rx-$A@*.service" 2> /dev/null | grepq .
+}
+
+cmd_begin() { # app who [upload KB] -> token
+  need_root; app "$1"
+  local who=${2:-unknown} kb=${3:-}
+  [[ $who =~ ^[A-Za-z0-9_.@-]{1,64}$ ]] || die "bad client name"
+  # the client says how big the upload is: over the per-app limit it is refused before it is sent
+  if [[ $kb =~ ^[0-9]{1,12}$ ]] && ((kb / 1024 > ${H[app_max_mb]:-8192})); then
+    die "the upload is $((kb / 1024)) MB, over this server's limit of ${H[app_max_mb]:-8192} MB per app (tando host setup <host> app_max_mb=N); nothing was sent"
+  fi
+  lease_lock
+  # an upload lease whose client went away (laptop killed, network gone) is taken over when
+  # nothing writes into incoming/ (no rsync, no deploy-key receiver) and it is older than 30 s, or
+  # older than 5 s when the same user@machine asks again. Never while an upload runs: two uploads
+  # into one incoming/ would mix their files (a second terminal of the same user is not "the same
+  # client"); the 5 s cover the moment between a client's begin and its rsync starting.
+  # A receiver that has written nothing into incoming/ for 30 s belongs to a connection that died
+  # (the network dropped: the server's rsync waits for a peer that is gone): it is ended first.
+  if lease_live && [[ -z ${L[id]:-} ]]; then
+    local lage; lage=$(lease_age)
+    if { [[ ${L[who]:-} == "$who" && $who != ci-* ]] && ((lage >= 5)); } || ((lage > 30)); then
+      if upload_writing && ((lage > 30)) && [[ -z $(find "$D/incoming" -newermt '30 seconds ago' -print -quit 2> /dev/null) ]]; then
+        pkill -KILL -f "apps/$A/incoming" 2> /dev/null
+        systemctl kill -s KILL "tando-rx-$A.service" "tando-rx-$A@*.service" 2> /dev/null
+        for _ in 1 2 3 4 5 6 7 8 9 10; do upload_writing || break; sleep 0.3; done
+      fi
+      upload_writing || { rm -f "$D/upload"; L=(); }
+    fi
+  fi
+  if lease_live; then
+    local age; age=$(lease_age)
+    if [[ -n ${L[id]:-} ]]; then
+      die "another deploy is activating release ${L[id]} (started ${age}s ago by ${L[who]}); try again shortly (tando status shows it)"
+    fi
+    [[ ${L[who]:-} == "$who" ]] && upload_writing &&
+      die "another deploy of $A from this machine (${L[who]}) is uploading now (started ${age}s ago, another terminal?); nothing of this one was uploaded. Deploy again when it is done"
+    die "another deploy is uploading (started ${age}s ago by ${L[who]}). Wait for it, or if that terminal is gone: tando unlock"
+  fi
+  # without Caddy no app is reachable: a deploy would wait for its check and roll back a good release
+  systemctl is-active -q caddy ||
+    die "Caddy is not running on <host>, so no app is reachable and a deploy cannot be checked. Start it on the server: sudo systemctl start caddy (sudo journalctl -u caddy -n 20 shows why it stopped)"
+  L=([token]=$(< /proc/sys/kernel/random/uuid) [who]=$who [started]=$(now) [started_ds]=$(ds))
+  save "$D/upload" L || die "could not record the upload lease (disk full?): tando doctor"
+  # an admin upload: no rsync of the app's deploy key (tando-gate) may still be writing incoming/
+  [[ $who == ci-* ]] || pkill -KILL -u "tando-d-$A" 2> /dev/null || true
+  echo "token=${L[token]}"
+  # after `tando ci setup`, incoming/ belongs to the app's deploy user: the admin uploads as it
+  local u; u=$(stat -c %U "$D/incoming")
+  if [[ $u == "tando-d-$A" ]]; then echo "upload_as=$u"; fi
+}
+
+cmd_end() { # app, token on stdin (or as argument): give the lease back (upload failed or interrupted)
+  need_root; app "$1"
+  local token=${2:-}
+  [[ -n $token ]] || IFS= read -r token || token=""
+  lease_lock
+  load "$D/upload" L
+  [[ -n $token && ${L[token]:-} == "$token" && -z ${L[id]:-} ]] && rm -f "$D/upload"
+  echo ok=1
+}
+
+# ---- Caddy's admin API and loopback isolation ------------------------------------------------
+#
+# caddy_fallback: Caddy's stock site (":80 { root * /usr/share/caddy; file_server }", the
+# "Caddy works!" page) answers 200 for every host tando does not serve, a destroyed app's name
+# too. When the Caddyfile has exactly that stock block, it becomes a 404 "no app here"; any other
+# :80 site (an adopted server's own catch-all, a hand edit) is left alone. Prints what it did.
+caddy_fallback() {
+  local f=/etc/caddy/Caddyfile
+  [[ -f $f ]] || return 0
+  if grep -q '^# tando: unknown hosts' "$f"; then echo 404; return 0; fi
+  awk '
+    function flush() { for (i = 1; i <= n; i++) print buf[i]; n = 0 }
+    inb == 0 && /^[[:space:]]*:80[[:space:]]*\{[[:space:]]*$/ { inb = 1; n = 0; body = ""; buf[++n] = $0; next }
+    inb == 1 {
+      buf[++n] = $0
+      if ($0 ~ /^[[:space:]]*\}[[:space:]]*$/) {
+        inb = 0
+        if (body == "|root * /usr/share/caddy|file_server" && !done) {
+          print "# tando: unknown hosts (this was Caddy'"'"'s stock \"Caddy works!\" site); apps are in /etc/caddy/tando/"
+          print ":80 {"; print "\trespond \"no app here\" 404"; print "}"
+          n = 0; done = 1
+        } else flush()
+        next
+      }
+      l = $0; sub(/^[[:space:]]+/, "", l); sub(/[[:space:]]+$/, "", l); gsub(/[[:space:]]+/, " ", l)
+      if (l != "" && l !~ /^#/) body = body "|" l
+      next
+    }
+    { print }
+    END { if (inb) flush(); exit !done }' "$f" > "$f.tando-new" || { rm -f "$f.tando-new"; echo "kept (yours)"; return 0; }
+  cp -p "$f" "$f.tando-before-fallback"
+  cat "$f.tando-new" > "$f"; rm -f "$f.tando-new"
+  if ! caddy validate --config "$f" --adapter caddyfile &> /dev/null; then
+    cat "$f.tando-before-fallback" > "$f"; rm -f "$f.tando-before-fallback"
+    echo "kept (404 site invalid)"; return 0
+  fi
+  rm -f "$f.tando-before-fallback"
+  echo 404
+}
+
+# caddy_timeouts: Caddy has no header or idle timeout by default: thousands of slow clients
+# (slowloris) hold their connections for minutes, idle keep-alives cost memory. The global
+# `servers { timeouts }` changes every site of this Caddy, so tando sets it only on a Caddy that
+# host setup installed (caddy_installed=yes) or whose Caddyfile has no site but :80; on a server
+# with other sites `tando doctor` prints the lines instead. Prints what it did.
+CADDY_TIMEOUTS=$'\tservers {\n\t\ttimeouts {\n\t\t\tread_header 10s\n\t\t\tidle 2m\n\t\t}\n\t}'
+# caddy_ours: host setup installed this Caddy, or its Caddyfile serves nothing but :80 (tando's
+# sites are imported): only then tando changes settings that apply to every site of it
+caddy_ours() {
+  [[ ${H[caddy_installed]:-} == yes ]] && return 0
+  ! awk '/^[^[:space:]#]/ && /\{[[:space:]]*$/ && !/^\{/ && !/^:80[[:space:]]*\{/ { o = 1 } END { exit !o }' /etc/caddy/Caddyfile
+}
+# caddy_memory: Go keeps the memory of thousands of keep-alive connections; at 20,000 Caddy took
+# 1.8 GB of a 2 GB server and was OOM-killed (every site down). GOMEMLIMIT at 28% of RAM makes Go
+# collect and give memory back before that (a soft limit: no MemoryMax, which would kill it).
+# Same rule as the timeouts; elsewhere doctor prints the drop-in. Prints what it did.
+CADDY_MEM=/etc/systemd/system/caddy.service.d/tando-memory.conf
+caddy_mem_mb() { awk '/^MemTotal:/ { m = int($2 / 1024 * 0.28); print (m < 64 ? 64 : m) }' /proc/meminfo; }
+caddy_memory() {
+  local before after
+  if ! caddy_ours; then
+    if [[ -f $CADDY_MEM ]]; then echo "memory limit set"; else echo "no memory limit (other sites: tando doctor shows it)"; fi
+    return 0
+  fi
+  before=$(cat "$CADDY_MEM" 2> /dev/null)
+  # OOMScoreAdjust: under memory pressure the kernel kills apps before Caddy, the door to all of them
+  printf '[Service]\nEnvironment=GOMEMLIMIT=%sMiB\nOOMScoreAdjust=-500\n' "$(caddy_mem_mb)" | write_if_changed "$CADDY_MEM"
+  after=$(cat "$CADDY_MEM" 2> /dev/null)
+  if [[ $before == "$after" ]]; then echo "GOMEMLIMIT set"; return 0; fi
+  after=$(sed -n "s/^Environment=GOMEMLIMIT=//p" "$CADDY_MEM")
+  # a running Caddy gets it at its next start: host setup never restarts Caddy (its sites would
+  # refuse connections for a moment); doctor says when the running one started before the drop-in
+  # (a Caddy this very setup installed has no sites yet: it is restarted at once)
+  systemctl daemon-reload || return 0
+  if [[ ${CADDY_FRESH:-} == 1 ]]; then systemctl try-restart caddy; echo "GOMEMLIMIT ${after##*=}"
+  else echo "GOMEMLIMIT ${after##*=} from Caddy's next start"; fi
+}
+caddy_timeouts() {
+  local f=/etc/caddy/Caddyfile
+  [[ -f $f ]] || return 0
+  if grep -q '^[[:space:]]*read_header[[:space:]]' "$f"; then echo "timeouts set"; return 0; fi
+  if grep -q '^[[:space:]]*servers\b' "$f"; then echo "timeouts: yours (servers block)"; return 0; fi
+  caddy_ours || { echo "timeouts not set (other sites: tando doctor shows the lines)"; return 0; }
+  grep -q "^[[:space:]]*admin unix/$CADDY_SOCK\$" "$f" || { echo "timeouts not set (no global block)"; return 0; }
+  cp -p "$f" "$f.tando-before-timeouts"
+  awk -v t="$CADDY_TIMEOUTS" -v s="admin unix/$CADDY_SOCK" '
+    { print } !d { l = $0; sub(/^[[:space:]]+/, "", l); if (l == s) { print "\t# tando: timeouts (slow clients)"; print t; d = 1 } }' \
+    "$f.tando-before-timeouts" > "$f"
+  if ! caddy validate --config "$f" --adapter caddyfile &> /dev/null; then
+    cat "$f.tando-before-timeouts" > "$f"; rm -f "$f.tando-before-timeouts"; echo "timeouts not set (invalid)"; return 0
+  fi
+  rm -f "$f.tando-before-timeouts"
+  echo "timeouts set now"
+}
+
+# On its default 127.0.0.1:2019 Caddy's admin API answers any local process: an app could rewrite
+# the live config and take over another app's domain. It moves to a unix socket in a directory
+# only caddy (and root) can enter. Other loopback services stay reachable by uid only where
+# fw_sync's nftables rules allow it.
+
+CADDY_SOCK=/run/caddy/admin.sock
+
+caddy_admin_private() {
+  local f=/etc/caddy/Caddyfile
+  printf 'd /run/caddy 0750 caddy caddy -\n' | write_if_changed /etc/tmpfiles.d/tando-caddy.conf
+  systemd-tmpfiles --create /etc/tmpfiles.d/tando-caddy.conf || die "could not create /run/caddy"
+  grep -q "^[[:space:]]*admin unix/$CADDY_SOCK\$" "$f" && return 0
+  cp -p "$f" "$f.tando-before-admin"
+  if awk '!/^[[:space:]]*(#|$)/ { exit !($0 ~ /^[[:space:]]*\{[[:space:]]*$/) }' "$f"; then
+    # a global options block: replace its admin line, or add one at its top
+    if grep -q '^[[:space:]]*admin[[:space:]]' "$f"; then
+      sed -i "0,/^[[:space:]]*admin[[:space:]].*/s||\tadmin unix/$CADDY_SOCK|" "$f"
+    else
+      sed -i "0,/^[[:space:]]*{[[:space:]]*\$/s||{\n\tadmin unix/$CADDY_SOCK|" "$f"
+    fi
+  else
+    { printf '{\n\tadmin unix/%s\n}\n\n' "$CADDY_SOCK"; cat "$f.tando-before-admin"; } > "$f"
+  fi
+  if ! caddy validate --config "$f" --adapter caddyfile &> /dev/null; then
+    mv -f "$f.tando-before-admin" "$f"; die "caddy rejected the admin socket setting"
+  fi
+  # the running Caddy still listens on its old admin address, and a plain reload would look for
+  # the new socket. Hand the new config to the old address first: Caddy then moves its admin API
+  # to the socket without dropping a request. Only when that does not work, restart.
+  local old
+  for old in localhost:2019 127.0.0.1:2019; do
+    systemctl is-active -q caddy || break
+    caddy reload --config "$f" --adapter caddyfile --address "$old" &> /dev/null || continue
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -S $CADDY_SOCK ]] && break; sleep 0.3; done
+    if [[ -S $CADDY_SOCK ]] && systemctl is-active -q caddy; then rm -f "$f.tando-before-admin"; return 0; fi
+  done
+  systemctl restart caddy || { mv -f "$f.tando-before-admin" "$f"; systemctl restart caddy
+    die "caddy did not start with its admin API on $CADDY_SOCK"; }
+  rm -f "$f.tando-before-admin"
+}
+
+# Per-uid loopback rules (nftables table inet tando, loaded by tando-firewall.service; ufw's own
+# tables are not touched): an app's user may reach its own port and pre-flight port but no other
+# app's port or pre-flight port (the range, and every app.conf port outside it: an adopted app's
+# 3100), and never 2019. Root, caddy and everything else are unaffected. Apps that share a user
+# (adopted ones can) share their ports. Not "everything but its own port": an app may use a
+# service the admin runs on loopback (redis), resolved's DNS over TCP, or its own public name
+# (a local address, through Caddy on 80/443); a deny-all list would break those silently.
+# rate_limit_rules: per client address (IPv4, or IPv6 /64), on the web ports: at most conn_limit
+# (200) connections at once (more are reset) and conn_rate (100) new ones a second, burst 3x (more
+# are dropped, so clients slow down by retrying). Host-wide, so on by default only on a Caddy that
+# tando owns (caddy_ours); elsewhere `tando host setup <host> rate_limit=on`. Loopback (tando's own
+# probes, an app's requests to itself through Caddy) is never limited; sshd's port is not touched.
+# Counters rl_conn and rl_rate show in doctor.
+rate_limit_rules() {
+  local cl=${H[conn_limit]:-200} cr=${H[conn_rate]:-100}
+  case ${H[rate_limit]:-auto} in
+    off) return 0;;
+    auto) declare -F caddy_ours > /dev/null && caddy_ours 2> /dev/null || return 0;;
+  esac
+  [[ $cl =~ ^[1-9][0-9]{0,5}$ ]] || cl=200; [[ $cr =~ ^[1-9][0-9]{0,5}$ ]] || cr=100
+  local m6='ip6 saddr & ffff:ffff:ffff:ffff::' p='tcp dport { 80, 443 } ct state new'
+  echo "  set rl4c { type ipv4_addr; size 65535; flags dynamic; }"
+  echo "  set rl6c { type ipv6_addr; size 65535; flags dynamic; }"
+  echo "  set rl4r { type ipv4_addr; size 65535; flags dynamic,timeout; timeout 1m; }"
+  echo "  set rl6r { type ipv6_addr; size 65535; flags dynamic,timeout; timeout 1m; }"
+  echo "  counter rl_conn {}"
+  echo "  counter rl_rate {}"
+  echo "  chain input {"
+  echo "    type filter hook input priority -5; policy accept;"
+  echo "    iifname \"lo\" accept"
+  echo "    $p add @rl4c { ip saddr ct count over $cl } counter name rl_conn reject with tcp reset"
+  echo "    $p add @rl6c { $m6 ct count over $cl } counter name rl_conn reject with tcp reset"
+  echo "    $p update @rl4r { ip saddr limit rate over $cr/second burst $((cr * 3)) packets } counter name rl_rate drop"
+  echo "    $p update @rl6r { $m6 limit rate over $cr/second burst $((cr * 3)) packets } counter name rl_rate drop"
+  echo "  }"
+}
+
+# One fw_sync at a time on the host (fd 4, $R/.fw.lock): it reads every app.conf and rewrites one
+# file; two at once (parallel `up` of new apps) wrote the same temp file and loaded half of it.
+# Its own temp file, checked by nft before it replaces the old one; nft -f is one transaction, so
+# a refused load keeps the rules from before. A failure is an error (return 1), not a warning.
+fw_sync() {
+  command -v nft > /dev/null || return 0
+  local f=$R/firewall.nft a u p sp lo hi db x others tmp i
+  local -A own=() pgu=() outside=()
+  lockfile "$R/.fw.lock"; exec 4>"$R/.fw.lock"
+  flock -w 60 4 || { echo "tando-agent: another update of the loopback rules takes over 60 s" >&2; return 1; }
+  tmp=$(mktemp "$R/.firewall.nft.XXXXXX") || { exec 4>&-; return 1; }
+  lo=${H[port_min]:-4100} hi=$(( ${H[port_max]:-4199} + 100 ))
+  for a in "$R"/apps/*/app.conf; do
+    [[ -f $a ]] || continue
+    p=$(sed -n 's/^port=//p' "$a"); sp=$(sed -n 's/^preflight_port=//p' "$a")
+    u=$(sed -n 's/^user=//p' "$a"); db=$(sed -n 's/^database=//p' "$a"); a=${a%/app.conf}; a=${a##*/}
+    u=${u:-tando-$a}; [[ $p =~ ^[0-9]+$ ]] && sp=${sp:-$((p + 100))}
+    [[ $p =~ ^[0-9]+$ && $sp =~ ^[0-9]+$ ]] || continue
+    for x in "$p" "$sp"; do ((x >= lo && x <= hi)) || outside[$x]=1; done
+    u=$(id -u "$u" 2> /dev/null) || continue
+    for x in "$p" "$sp"; do [[ ", ${own[$u]:-}, " == *", $x, "* ]] || own[$u]+="${own[$u]:+, }$x"; done
+    # PostgreSQL only for apps with a database: another app could hold every connection slot
+    # (connections that never answer the password request) and starve them
+    [[ $db == postgres ]] && pgu[$u]=1
+  done
+  unset 'outside[2019]'
+  others=""; for x in "${!outside[@]}"; do others+=", $x"; done
+  {
+    echo "table inet tando {}"
+    echo "flush table inet tando"
+    echo "table inet tando {"
+    echo "  chain output {"
+    echo "    type filter hook output priority 0; policy accept;"
+    for u in "${!own[@]}"; do
+      echo "    oifname \"lo\" meta skuid $u tcp dport { ${own[$u]} } accept"
+      echo "    oifname \"lo\" meta skuid $u tcp dport { $lo-$hi, 2019$others } reject with tcp reset"
+      [[ -n ${pgu[$u]:-} ]] || echo "    oifname \"lo\" meta skuid $u tcp dport 5432 reject with tcp reset"
+      # SocketBindDeny filters bind(), but listen() on an unbound socket autobinds 0.0.0.0:<any>:
+      # the app's packets in a connection opened from outside (not over lo) are dropped
+      echo "    oifname != \"lo\" meta skuid $u ct direction reply drop"
+    done
+    echo "  }"
+    rate_limit_rules
+    echo "}"
+  } > "$tmp"
+  # the same rules as loaded: nothing to do (a host setup again rewrites nothing)
+  if cmp -s "$tmp" "$f" && nft list table inet tando &> /dev/null; then rm -f "$tmp"; exec 4>&-; return 0; fi
+  for i in 1 2 3; do
+    if nft -c -f "$tmp" 2> "$tmp.err" && sync "$tmp" && mv -f "$tmp" "$f" && nft -f "$f" 2> "$tmp.err"; then
+      rm -f "$tmp" "$tmp.err"; exec 4>&-; return 0
+    fi
+    sleep 1
+  done
+  echo "tando-agent: could not load the loopback rules (the rules from before stay): $(head -c 300 "$tmp.err" | tr '\n' ' ')" >&2
+  rm -f "$tmp" "$tmp.err"; exec 4>&-
+  return 1
+}
+
+fw_install() {
+  apt_install nftables
+  write_if_changed /etc/systemd/system/tando-firewall.service <<EOF
+[Unit]
+Description=tando: per-app loopback rules (nftables table inet tando)
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+# nftables.service (re)starting flushes the whole ruleset: load the rules again right after it
+After=nftables.service
+PartOf=nftables.service
+ConditionPathExists=$R/firewall.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f $R/firewall.nft
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload && systemctl enable -q tando-firewall.service
+}
+
+# ---- verbs: host -----------------------------------------------------------------------
+
+cmd_info() {
+  load "$R/host.conf" H
+  local libc=glibc
+  compgen -G '/lib/ld-musl-*' > /dev/null && libc=musl
+  echo "version=$(cat "$R/VERSION" 2> /dev/null || echo unknown)"   # written by host setup
+  echo "arch=$(uname -m)"
+  echo "libc=$libc"
+  echo "apps_domain=${H[apps_domain]:-}"
+  echo "tls=${H[tls]:-}"
+  echo "sum=$(cksum < "$AGENT" | cut -d' ' -f1)"
+  echo "podman=${H[podman]:-no}"
+  echo "python=$(python3 -c 'import venv, sys; print("%d.%d" % sys.version_info[:2])' 2> /dev/null || echo no)"
+  local v; v=$(node --version 2> /dev/null) && echo "node=${v#v}" || echo node=no
+  v=$(caddy version 2> /dev/null) && { v=${v%% *}; echo "caddy=${v#v}"; } || echo caddy=no
+  echo "postgres=${H[postgres]:-no}"
+  echo "public_port=${H[public_port]:-}"
+  echo "ip=$(ip -o route get 1.1.1.1 2> /dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+  echo "addrs=$(ip -o addr show scope global 2> /dev/null | awk '{ sub(/\/.*/, "", $4); printf "%s ", $4 }')"
+  echo "domain_tls=$(domain_tls)"
+}
+
+# host setup, from a fresh Ubuntu server to a ready one. Idempotent: a second run changes nothing
+# (Caddy is reloaded only when its config changed). Progress for the client's box, one line per
+# step as it starts and ends: "step=<name> run" then "step=<name> ok|skip <detail>"; a failing step
+# ends the run with the error on stderr.
+step() { echo "step=$*"; }
+# host_lock: one host setup or runtime install at a time (fd 5, to the end of the verb): both read,
+# change and save host.conf, and run apt (two at once: a lost setting, or apt's own lock refused)
+host_lock() {
+  lockfile "$R/.host.lock"
+  exec 5>"$R/.host.lock"
+  flock -n 5 && return 0
+  echo "tando-agent: waiting for another host setup or runtime install on this server..." >&2
+  flock -w 900 5 || die "another host setup or runtime install has run for over 15 minutes: try again later"
+}
+cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=yes|no] [ufw=no] ...
+  need_root
+  local kv a logkv=() swap=auto ufw=yes feats=() got="" before
+  mkdir -p "$R/apps"
+  host_lock
+  load "$R/host.conf" H
+  : "${H[apps_domain]:=localhost}" "${H[tls]:=off}" "${H[port_min]:=4100}" "${H[port_max]:=4199}"
+  for kv in "$@"; do
+    case $kv in
+      apps_domain=*) [[ ${kv#*=} =~ ^[a-z0-9.-]+$ ]] || die "bad apps_domain"; H[apps_domain]=${kv#*=};;
+      tls=off|tls=internal|tls=auto) H[tls]=${kv#*=};;
+      domain_tls=off|domain_tls=internal|domain_tls=auto) H[domain_tls]=${kv#*=};;
+      public_port=*) [[ ${kv#*=} =~ ^[0-9]{0,5}$ ]] || die "bad public_port"; H[public_port]=${kv#*=};;
+      unit_drop=*) [[ ${kv#*=} =~ ^[A-Za-z,]*$ ]] || die "bad unit_drop"; H[unit_drop]=${kv#*=};;
+      postgres=yes|podman=yes|python=yes|node=yes) feats+=("${kv%=yes}");;
+      node=[0-9]*) [[ ${kv#*=} =~ ^[0-9]{2}$ ]] || die "bad node version (a major, like 24)"; feats+=("$kv");;
+      swap=yes|swap=no) swap=${kv#*=};;
+      ufw=no|ufw=yes) ufw=${kv#*=};;
+      journal_max=*|log_*=*|access_*=*|request_log_max=*) logkv+=("$kv");;
+      app_max_mb=*) [[ ${kv#*=} =~ ^[0-9]{2,9}$ ]] || die "bad app_max_mb"; H[app_max_mb]=${kv#*=};;
+      rate_limit=on|rate_limit=off|rate_limit=auto) H[rate_limit]=${kv#*=};;   # per-client limits (fw_sync)
+      conn_limit=*|conn_rate=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
+      ci_max_mb=*|ci_max_files=*|ci_max_file_mb=*)   # upload limits of deploy keys (tando-gate)
+        [[ ${kv#*=} =~ ^[0-9]{1,9}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
+      *) die "bad setting: $kv";;
+    esac
+  done
+  command -v apt-get > /dev/null || die "this server has no apt: tando sets up Debian and Ubuntu servers (Ubuntu 24.04 or newer)"
+
+  step packages run
+  got=$(apt_missing rsync curl nftables ca-certificates openssl)
+  apt_install rsync curl nftables ca-certificates openssl
+  if [[ -n $got ]]; then step packages ok "installed $got"; else step packages ok "rsync, curl, nftables: already there"; fi
+
+  step caddy run
+  if ! command -v caddy > /dev/null; then
+    apt_install caddy
+    command -v caddy > /dev/null || die "could not install Caddy with apt: install it by hand (https://caddyserver.com/docs/install), then run tando host setup <host> again"
+    got=" (installed now)" H[caddy_installed]=yes CADDY_FRESH=1
+  else got=""; fi
+  # Caddy is every app's front door: the packages leave it dead after a crash, tando does not
+  mkdir -p /etc/systemd/system/caddy.service.d
+  write_if_changed /etc/systemd/system/caddy.service.d/tando.conf <<'EOF'
+[Unit]
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Restart=on-failure
+RestartSec=1
+EOF
+  systemctl daemon-reload
+  systemctl is-enabled -q caddy 2> /dev/null || systemctl enable -q caddy
+  systemctl is-active -q caddy || systemctl start caddy ||
+    die "Caddy is installed but does not start: sudo journalctl -u caddy -n 20 on the server shows why"
+  step caddy ok "$(caddy version 2> /dev/null | cut -d' ' -f1)$got"
+
+  step config run
+  mkdir -p /etc/caddy/tando
+  before=$(cksum < /etc/caddy/Caddyfile 2> /dev/null)
+  grep -q '^import /etc/caddy/tando/\*\.caddy' /etc/caddy/Caddyfile 2>/dev/null ||
+    printf '\nimport /etc/caddy/tando/*.caddy\n' >> /etc/caddy/Caddyfile
+  for kv in "${!H[@]}"; do H[$kv]=$(int_norm "${H[$kv]}"); done
+  save "$R/host.conf" H
+  chmod 644 "$R/host.conf"
+  caddy_admin_private
+  local fallback tmo; fallback=$(caddy_fallback); tmo=$(caddy_timeouts); tmo+="; $(caddy_memory)"
+  if [[ $before != "$(cksum < /etc/caddy/Caddyfile)" ]]; then
+    caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile &> /dev/null ||
+      die "the Caddyfile does not validate: sudo caddy validate --config /etc/caddy/Caddyfile on the server shows why"
+    systemctl reload-or-restart caddy || die "could not reload Caddy: sudo journalctl -u caddy -n 20 shows why"
+    step config ok "unknown hosts: $fallback; $tmo; tando sites imported"
+  else step config ok "unchanged; unknown hosts: $fallback; $tmo"; fi
+
+  step firewall run
+  fw_install
+  got="loopback rules per app"
+  if [[ $ufw == yes ]] && command -v ufw > /dev/null && ufw status 2> /dev/null | grepq '^Status: active'; then
+    if ! ufw status | grepq '^80/tcp.*ALLOW' || ! ufw status | grepq '^443/tcp.*ALLOW'; then
+      { ufw allow 80/tcp && ufw allow 443/tcp; } > /dev/null || die "could not open ports 80 and 443 in ufw"
+    fi
+    got+="; ufw: 80 and 443 open"
+  fi
+  step firewall ok "$got"
+
+  step system run
+  # 8 MB that a full disk gives back, so tando can still write its state (see save)
+  [[ -f $R/.reserve ]] || { head -c 8388608 /dev/zero > "$R/.reserve" 2> /dev/null && chmod 600 "$R/.reserve"; }
+  # lock files only root can open (older tando made them 0644: an app could hold one forever)
+  local lf
+  for lf in "$R"/.*.lock "$R"/apps/*/lock "$R"/apps/*/lease.lock "$R"/adopt/*/lock /var/lib/tando/watch/lock; do
+    [[ -e $lf || -L $lf ]] || continue
+    lockfile "$lf"
+    # one an app opened while it was 0644 may still be open (and held: children inherit the
+    # descriptor): every non-root process with it open goes (only root ever locks it)
+    local lp lu
+    for lp in $(find /proc/[0-9]*/fd -maxdepth 1 -lname "$lf" 2> /dev/null | cut -d/ -f3 | sort -u); do
+      lu=$(stat -c %u "/proc/$lp" 2> /dev/null) || continue
+      ((lu != 0)) && kill -9 "$lp" 2> /dev/null && echo "tando-agent: killed pid $lp (uid $lu), which had $lf open" >&2
+    done
+  done
+  [[ -d $R/adopt ]] && chmod 700 "$R/adopt"
+  [[ -x $LOGS ]] && { "$LOGS" host-setup "${logkv[@]}" > /dev/null || die "log setup failed"; }
+  write_if_changed /etc/systemd/system/tando-recover.service <<EOF
+[Unit]
+Description=tando: finish or revert interrupted activations
+After=network.target caddy.service
+
+[Service]
+Type=oneshot
+ExecStartPre=-$R/bin/tando-install-recover
+ExecStart=$AGENT recover-all
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  # every app's slice is under tando.slice; with half the CPU weight of system.slice, all the apps
+  # together cannot starve Caddy, sshd or the agent when the CPUs are busy
+  write_if_changed /etc/systemd/system/tando.slice <<EOF
+[Unit]
+Description=tando apps
+
+[Slice]
+CPUWeight=50
+IOWeight=50
+EOF
+  write_if_changed /etc/systemd/system/tando-down@.service <<EOF
+[Unit]
+Description=tando: show a 503 page for %i, which has failed
+
+[Service]
+Type=oneshot
+ExecStart=$AGENT app-down %i
+EOF
+  { systemctl daemon-reload && systemctl enable -q tando-recover.service; } || die "could not enable the recover unit"
+  got="units, journals"
+  local mem; mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+  if [[ $swap != no ]] && ! swapon --show=NAME --noheadings 2> /dev/null | grepq . &&
+     { [[ $swap == yes ]] || { ((mem < 2000)) && ! systemd-detect-virt -cq; }; }; then
+    if [[ ! -f /swapfile ]]; then
+      fallocate -l 2G /swapfile 2> /dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+      { chmod 600 /swapfile && mkswap -q /swapfile > /dev/null; } || die "could not make a swap file"
+    fi
+    swapon /swapfile 2> /dev/null || die "could not enable the swap file /swapfile"
+    grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    got+="; 2 GB swap file ($mem MB RAM)"
+  fi
+  step system ok "$got"
+
+  local f
+  for f in ${feats[@]+"${feats[@]}"}; do
+    step "$f" run
+    runtime_install "${f%%=*}" "$(echo "$f" | sed -n 's/^node=//p')"
+    step "$f" ok "$RT_DETAIL"
+  done
+
+  step apps run
+  # settings such as tls change every site: re-render them (each reloads Caddy only if it changed)
+  local n=0
+  for a in "$R"/apps/*/app.conf; do
+    [[ -f $a ]] || continue
+    a=${a%/app.conf}; n=$((n + 1))
+    # (under the app's lock: a deploy or domain change of it writes the same files)
+    ( app "${a##*/}"; lock 300; app_perms; write_unit; jobs_follow; write_caddy; journal_dir ) ||
+      die "could not update the units and Caddy site of ${a##*/}"
+  done
+  ((n)) && systemctl daemon-reload
+  fw_sync || die "the per-app loopback rules could not be loaded (above); run tando host setup again"
+  step apps ok "$n app$( ((n == 1)) || echo s)"
+  echo ok=1
+}
+
+# write_if_changed file: stdin into file, only when it differs (a re-run touches nothing)
+# (a hidden temp file beside it, renamed over it: never half a file, never a file systemd reads)
+write_if_changed() {
+  local t; t=$(mktemp "${1%/*}/.${1##*/}.XXXXXX") || return 1
+  cat > "$t" || { rm -f "$t"; return 1; }
+  if cmp -s "$t" "$1"; then rm -f "$t"; return 0; fi
+  chmod 644 "$t" && mv -f "$t" "$1" || { rm -f "$t"; return 1; }
+}
+
+# runtimes, installed when the first app needs one (tando up), or by host setup node=yes ...
+# RT_DETAIL says what is there afterwards.
+NODE_LTS=24
+runtime_install() { # node [major] | python | podman | postgres
+  case $1 in
+    node) node_install "${2:-}";;
+    python) apt_install python3 python3-venv; H[python]=yes; save "$R/host.conf" H
+      RT_DETAIL="python $(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')";;
+    podman) apt_install podman slirp4netns; H[podman]=yes; save "$R/host.conf" H
+      RT_DETAIL="podman $(podman --version 2> /dev/null | awk '{ print $3 }')";;
+    postgres) pg_setup; H[postgres]=yes; save "$R/host.conf" H
+      RT_DETAIL="postgresql $(find /etc/postgresql -mindepth 1 -maxdepth 1 -printf '%f\n' | sort -V | tail -1)";;
+    *) die "unknown runtime: $1";;
+  esac
+  chmod 644 "$R/host.conf"
+}
+# node_install [major]: Node.js from nodejs.org (the official build, checked against its
+# SHASUMS256.txt) into /usr/local, when node is missing. An existing node is kept; a different
+# major than asked is reported, not replaced (other apps may rely on it).
+node_install() {
+  local want=${1:-$NODE_LTS} have a f base t
+  [[ $want =~ ^[0-9]{2}$ ]] || die "bad node version: $want"
+  if have=$(node --version 2> /dev/null); then
+    have=${have#v}
+    RT_DETAIL="node $have"
+    [[ ${have%%.*} == "$want" ]] || RT_DETAIL+=" (the app asks for $want: one Node per server; set node = ${have%%.*} in tando.conf to silence this)"
+    return 0
+  fi
+  case $(uname -m) in x86_64) a=x64;; aarch64) a=arm64;; *) die "no Node.js build for $(uname -m)";; esac
+  base=https://nodejs.org/dist/latest-v$want.x
+  t=$(mktemp -d) || die "no temp dir"
+  curl -fsS -m 60 "$base/SHASUMS256.txt" > "$t/sums" ||
+    { rm -rf "$t"; die "could not reach nodejs.org to install Node $want (is the server online?)"; }
+  f=$(awk -v n="linux-$a.tar.xz" '$2 ~ n"$" { print $2; exit }' "$t/sums")
+  [[ -n $f ]] || { rm -rf "$t"; die "nodejs.org has no Node $want for linux-$a"; }
+  curl -fsS -m 300 -o "$t/$f" "$base/$f" || { rm -rf "$t"; die "could not download $f from nodejs.org"; }
+  (cd "$t" && grep " $f\$" sums | sha256sum -c --quiet -) || { rm -rf "$t"; die "the checksum of $f does not match nodejs.org's"; }
+  command -v xz > /dev/null || apt_install xz-utils
+  tar -xJf "$t/$f" -C /usr/local --strip-components=1 --no-same-owner \
+    --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md || { rm -rf "$t"; die "could not unpack $f"; }
+  rm -rf "$t"
+  have=$(node --version) || die "node does not run after installing it"
+  RT_DETAIL="node ${have#v} (installed now)"
+}
+cmd_runtime() { # runtime [version]: install a runtime an app needs (tando up asks for it)
+  need_root
+  host_lock
+  load "$R/host.conf" H
+  runtime_install "$1" "${2:-}"
+  echo "detail=$RT_DETAIL"
+}
+
+# doctor <client agent checksum>: rows "check <state> <name> <detail>", state ok|warn|fail
+cmd_doctor() {
+  load "$R/host.conf" H
+  local mine a n=0 bad=() caps=0 mt=0 k v used avail pct
+  # each installed piece against the client's copy (checksums: agent, gate, logs, metrics, watch, status, tandod)
+  local name file want version cver=${6:-}
+  version=$(cat "$R/VERSION" 2> /dev/null || echo unknown)
+  [[ $cver =~ ^[0-9A-Za-z.+_-]{1,40}$ ]] || cver=""   # the client's version (6th argument, optional)
+  # after the client's version: named sums (status=..., tandod=...), which an older agent ignores
+  local -A NS=(); for a in "${@:7}"; do [[ $a =~ ^(status|tandod|offsite|host)=([0-9,]*|none)$ ]] && NS[${a%%=*}]=${a#*=}; done
+  # an install that was cut off between renames leaves its journal (see install_helpers_script in
+  # the client): some programs are old and some new until the next host setup finishes or undoes it
+  if [[ -e $R/bin/.install.pending ]]; then
+    row check fail "install" "an install was cut off between files, so some programs on <host> may be old and some new: tando host setup <host> finishes or undoes it"
+  fi
+  for name in agent gate logs metrics watch status daemon offsite host; do
+    case $name in
+      agent) file=$AGENT want=${1:-};;
+      gate) file=$R/bin/tando-gate want=${2:-};;
+      logs) file=$R/bin/tando-logs want=${3:-};;
+      metrics) file=$R/bin/tando-metrics want=${4:-};;
+      watch) file=$R/bin/tando-watch want=${5:-};;
+      status) file=$R/bin/tando-status want=${NS[status]:-};;
+      daemon) file=$R/bin/tandod want=${NS[tandod]:-};;   # (the row "tandod" is its liveness, from tando-watch)
+      offsite) file=$R/bin/tando-offsite want=${NS[offsite]:-}
+               [[ -n $want || -x $file ]] || continue;;   # (an older client does not install it)
+      host) file=$R/bin/tando-host want=${NS[host]:-}   # host care (srv/hostcare)
+            [[ -n $want || -x $file ]] || continue;;
+    esac
+    if [[ ! -x $file ]]; then row check fail "$name" "not installed: run tando host setup"; continue; fi
+    mine=$(cksum < "$file" | cut -d' ' -f1)
+    # want: the client's checksum, or a list "a,b" (a Go program: one binary per CPU)
+    if [[ -z $want || ,$want, == *,"$mine",* ]]; then row check ok "$name" "$version, same as the client"
+    elif [[ -n $cver && $cver == "$version" ]]; then
+      row check warn "$name" "the $name on <host> differs from this tando (same version $version): tando host setup <host>"
+    elif [[ -n $cver ]]; then
+      row check warn "$name" "$version here, $cver on the laptop: tando host setup <host>"
+    else row check warn "$name" "$version, differs from the client: run tando host setup"; fi
+  done
+  if [[ -x $R/bin/tando-metrics ]]; then   # sampled by tando-watch.timer, before the checks
+    local last
+    last=$(stat -c %Y /var/lib/tando/metrics/host.tsv 2> /dev/null || echo 0)
+    if (( $(now) - last < 180 )); then row check ok "metrics sample" "sampled $(( $(now) - last ))s ago"
+    else row check warn "metrics sample" "no sample in the last 3 minutes (tando-watch.timer)"; fi
+  fi
+  if [[ -n ${H[port_min]:-} && -n ${H[port_max]:-} && -n ${H[apps_domain]:-} ]]; then
+    row check ok "host.conf" "*.${H[apps_domain]} tls=${H[tls]:-off} ports ${H[port_min]}-${H[port_max]}"
+  elif [[ -f $R/host.conf ]]; then row check fail "host.conf" "empty or incomplete: tando host setup <host> rewrites it"
+  else row check fail "host.conf" "missing: tando host setup <host>"; fi
+  : "${H[port_min]:=4100}" "${H[port_max]:=4199}"
+  local cv; cv=$(caddy version 2> /dev/null | cut -d' ' -f1); cv=${cv#v}
+  if [[ -n ${H[public_port]:-} && $cv =~ ^2\.[0-6]\. ]]; then
+    row check warn "caddy log" "Caddy $cv does not log requests whose Host has a port, and public_port=${H[public_port]} gives every one a port: their requests are not in tando requests"
+  fi
+  if systemctl -q is-active caddy; then row check ok caddy "$cv running"
+  elif command -v caddy > /dev/null; then row check fail caddy "not running: sudo systemctl start caddy (sudo journalctl -u caddy -n 20 says why)"
+  else row check fail caddy "not installed: tando host setup installs it"; fi
+  # DNS: apps are <app>.<apps_domain>, so a name under it must point at this server
+  local dom=${H[apps_domain]:-localhost} ip
+  if [[ $dom != localhost && $dom != *.localhost ]]; then
+    ip=$(getent ahostsv4 "tando-dns-check.$dom" 2> /dev/null | awk '{ print $1; exit }')
+    if [[ -z $ip ]]; then
+      row check warn dns "*.$dom does not resolve: add a DNS record  *.$dom A <this server's address>"
+    elif ip -o addr show 2> /dev/null | grepq "inet $ip/"; then row check ok dns "*.$dom -> $ip (this server)"
+    else row check ok dns "*.$dom -> $ip (not this server: fine behind NAT)"; fi
+  fi
+  if ss -Hltn 'sport = :2019' | grepq .; then
+    row check fail "caddy admin" "Caddy's admin API listens on TCP 2019, open to every app: run tando host setup"
+  elif grep -q "^[[:space:]]*admin unix/$CADDY_SOCK\$" /etc/caddy/Caddyfile 2> /dev/null &&
+       curl -s -m 3 -o /dev/null --unix-socket "$CADDY_SOCK" -H "Host: " http://localhost/config/; then
+    row check ok "caddy admin" "$CADDY_SOCK, caddy and root only"
+  elif grep -q "^[[:space:]]*admin unix/$CADDY_SOCK\$" /etc/caddy/Caddyfile 2> /dev/null; then
+    row check fail "caddy admin" "$CADDY_SOCK does not answer: sudo systemctl restart caddy (reloads fail until then)"
+  else row check warn "caddy admin" "not on tando's unix socket: run tando host setup"; fi
+  # slow clients: tando sets these only on a Caddy of its own (caddy_timeouts); here, say what to add
+  if grep -qs '^[[:space:]]*read_header[[:space:]]' /etc/caddy/Caddyfile; then
+    row check ok "caddy timeouts" "read_header and idle set"
+  else
+    row check warn "caddy timeouts" "none: slow clients can hold thousands of connections. Add to the global block ({ ... }) of /etc/caddy/Caddyfile: servers { timeouts { read_header 10s idle 2m } } then sudo systemctl reload caddy"
+  fi
+  local cst cstart=0   # when the running Caddy started (epoch), from its monotonic start time
+  cst=$(systemctl show -P ExecMainStartTimestampMonotonic caddy 2> /dev/null)
+  [[ $cst =~ ^[0-9]+$ ]] && cstart=$(( $(now) - $(awk '{ print int($1) }' /proc/uptime) + cst / 1000000 ))
+  if [[ -f $CADDY_MEM ]] && systemctl -q is-active caddy && (( $(stat -c %Y "$CADDY_MEM") > cstart + 1 )); then
+    row check ok "caddy memory" "GOMEMLIMIT from Caddy's next restart"
+  elif systemctl show -P Environment caddy 2> /dev/null | grepq GOMEMLIMIT=; then
+    row check ok "caddy memory" "GOMEMLIMIT set"
+  else
+    row check warn "caddy memory" "no GOMEMLIMIT: 20,000 keep-alive connections took 1.8 GB and got Caddy OOM-killed on a 2 GB server. Add /etc/systemd/system/caddy.service.d/memory.conf with [Service] Environment=GOMEMLIMIT=$(caddy_mem_mb)MiB, then sudo systemctl daemon-reload && sudo systemctl restart caddy"
+  fi
+  if command -v nft > /dev/null && nft list table inet tando &> /dev/null; then
+    row check ok "loopback rules" "apps reach only their own ports (nftables)"
+  else row check warn "loopback rules" "not loaded: apps can reach each other's ports on 127.0.0.1"; fi
+  # per-client limits on the web ports (rate_limit_rules): how often they tripped since the rules loaded
+  local rlc rlr
+  if nft list counter inet tando rl_conn &> /dev/null; then
+    rlc=$(nft list counter inet tando rl_conn 2> /dev/null | sed -n 's/.*packets \([0-9]*\).*/\1/p')
+    rlr=$(nft list counter inet tando rl_rate 2> /dev/null | sed -n 's/.*packets \([0-9]*\).*/\1/p')
+    row check ok "client limits" "${H[conn_limit]:-200} conns, ${H[conn_rate]:-100}/s per address; refused ${rlc:-0}, slowed ${rlr:-0}"
+  elif [[ ${H[rate_limit]:-auto} != off ]]; then
+    row check warn "client limits" "no per-client connection limits (other sites on this Caddy): tando host setup <host> rate_limit=on"
+  fi
+  if grep -q '^import /etc/caddy/tando/\*\.caddy' /etc/caddy/Caddyfile 2>/dev/null; then
+    row check ok "caddy import" "/etc/caddy/tando/*.caddy"
+  else row check fail "caddy import" "missing from /etc/caddy/Caddyfile"; fi
+  if [[ ${H[postgres]:-} == yes ]]; then
+    if pg_isready -q -h 127.0.0.1; then row check ok postgresql "accepting connections"
+    else row check fail postgresql "not running"; fi
+  fi
+  if [[ -x $R/bin/tando-gate ]]; then   # CI: sshd reads deploy keys as tando-keys (docs/CI.md)
+    if getent passwd tando-keys > /dev/null && [[ -f /etc/ssh/sshd_config.d/50-tando-ci.conf ]]; then
+      row check ok "ci keys" "sshd reads them as tando-keys; $(ls -d "$R"/ci/*/ 2> /dev/null | wc -l) apps with keys"
+    else row check fail "ci keys" "tando-keys or the sshd drop-in is missing: run tando host setup"; fi
+  fi
+  if systemctl -q is-enabled tando-recover.service 2>/dev/null; then row check ok "recover unit" enabled
+  else row check fail "recover unit" "not enabled"; fi
+  for k in curl rsync systemd-run flock nft openssl; do
+    command -v "$k" > /dev/null || bad+=("$k")
+  done
+  if ((${#bad[@]})); then row check fail tools "missing: ${bad[*]}: tando host setup <host> installs them"
+  else row check ok tools "curl rsync nft openssl"; fi
+  # runtimes: only what the apps here use (tando up installs them)
+  local need_node=0 have
+  grep -qs '^recipe=\(node\|next\)$' "$R"/apps/*/app.conf && need_node=1
+  if have=$(node --version 2> /dev/null); then row check ok node "${have#v}"
+  elif ((need_node)); then row check fail node "missing, and node/next apps are here: tando host setup <host> node=yes"; fi
+  if swapon --show=NAME --noheadings 2> /dev/null | grepq .; then row check ok swap "$(swapon --show=SIZE --noheadings | head -1 | tr -d ' ')"
+  elif (( $(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo) < 2000 )) && ! systemd-detect-virt -cq; then
+    row check warn swap "none, with under 2 GB of RAM: tando host setup <host> swap=yes"; fi
+  if command -v ufw > /dev/null && ufw status 2> /dev/null | grepq '^Status: active' &&
+     ! ufw status | grepq '^443/tcp.*ALLOW'; then
+    row check fail ufw "active, and ports 80/443 are closed: tando host setup <host> opens them"
+  fi
+  read -r _ _ used avail pct _ < <(df -Pk / | tail -1)
+  pct=${pct%\%}
+  if ((pct >= 97)); then row check fail disk "$pct% used"
+  elif ((pct >= 90)); then row check warn disk "$pct% used"
+  else row check ok disk "$pct% used, $((avail / 1048576)) GB free"; fi
+  # inodes: many small files (node_modules in every kept release) run out before the bytes do
+  local ipct; ipct=$(df -Pi "$R" 2> /dev/null | awk 'NR == 2 && $2 > 0 { sub(/%/, "", $5); print $5 }')
+  if [[ $ipct =~ ^[0-9]+$ ]] && ((ipct >= 90)); then
+    row check warn inodes "$ipct% of the inodes of $R used: fewer releases kept, or a bigger file system"
+  fi
+  # apps share the file system of /opt/tando (no quotas): name it, its root reserve (what root's
+  # deploys and backups still get when an app has filled it) and the largest app (tando-watch)
+  local fsrc fst lapp="" lmb=0 rb="" dv
+  read -r fsrc fst < <(df --output=source,fstype "$R" 2> /dev/null | tail -1)
+  while IFS='=' read -r k dv; do
+    [[ $k == dumb.* && $dv =~ ^[0-9]+$ ]] && ((dv > lmb)) && { lmb=$dv lapp=${k#dumb.}; }
+  done 2> /dev/null < /run/tando-watch/vstate   # (2> first: a missing file says nothing)
+  [[ $fst == ext[234] ]] && rb=$(tune2fs -l "$fsrc" 2> /dev/null | sed -n 's/^Reserved block count: *//p')
+  v="${lapp:+largest $lapp $lmb MB of }${H[app_max_mb]:-8192} MB per app; $fst"
+  if [[ $rb == 0 ]]; then row check warn "app disk" "$v $fsrc for $R; no blocks reserved for root: an app filling it stops every deploy (sudo tune2fs -m 2 $fsrc)"
+  else row check ok "app disk" "$v"; fi
+  # backups and restores run pg_dump/tar as the app's user outside its sandbox: with
+  # kernel.yama.ptrace_scope=0 the app could attach to them
+  if [[ $(cat /proc/sys/kernel/yama/ptrace_scope 2> /dev/null) == 0 ]]; then
+    row check warn ptrace "kernel.yama.ptrace_scope=0: an app can attach to its own backup and restore processes; set it to 1 (sysctl)"
+  fi
+  while read -r k v _; do [[ $k == MemTotal: ]] && mt=$((v * 1024)); done < /proc/meminfo
+  bad=()
+  for a in "$R"/apps/*/app.conf; do
+    [[ -f $a ]] || continue
+    a=${a%/app.conf}; a=${a##*/}; n=$((n + 1))
+    if ! ( app "$a" ) > /dev/null 2>&1; then
+      row check fail "app $a" "incomplete app directory: tando destroy -a $a removes it"; continue
+    fi
+    (
+      app "$a"
+      local cur=${S[current]:-} msg="" l
+      l=$(cur_link)
+      [[ -s $D/state ]] || msg="state file missing or empty"
+      [[ -z $cur && -z $l ]] && msg="${msg:+$msg, }nothing deployed"
+      [[ -n $cur && $l != "$cur" ]] && msg="${msg:+$msg, }current link points at ${l:-nothing}, the state says $cur (tando restart repairs it)"
+      [[ -n $cur && ! -d $D/releases/$cur ]] && msg="${msg:+$msg, }the current release $cur is missing on disk: deploy again"
+      [[ -d $D/releases ]] && [[ -z $(ls -A "$D/releases") && -n $cur ]] && msg="${msg:+$msg, }no releases on disk"
+      [[ -n $cur && ${S[status_$cur]:-} != verified ]] && msg="current release $cur is ${S[status_$cur]:-unverified}"
+      [[ ${S[phase]:-idle} != idle ]] && msg="activation in phase ${S[phase]}"
+      [[ -n $cur ]] && has_unit && ! systemctl -q is-active "tando-$a" && msg="${msg:+$msg, }unit not running"
+      if [[ ${C[backup]:-off} == daily ]] && [[ ${S[last_backup]:-0} =~ ^[0-9]{1,12}$ ]] && (( $(now) - 10#${S[last_backup]:-0} > 2 * 86400 )); then
+        msg="${msg:+$msg, }last backup older than 2 days"
+      fi
+      [[ -n $msg ]] && row check warn "app $a" "$msg"
+      exit 0
+    )
+    v=$(sed -n 's/^memory=//p' "$R/apps/$a/app.conf")
+    case $v in *G) caps=$((caps + ${v%G} * 1073741824));; *M) caps=$((caps + ${v%M} * 1048576));;
+      *K) caps=$((caps + ${v%K} * 1024));; esac
+  done
+  [[ -x $R/bin/tando-offsite ]] && "$R/bin/tando-offsite" doctor   # offsite backups (docs/BACKUP.md)
+  if [[ -x $R/bin/tando-watch ]]; then "$R/bin/tando-watch" doctor
+  else row check warn alerts "not set up: tando host setup"; fi
+  # host care: one row from its last summary (tando host status is the machine's own view)
+  [[ -x $R/bin/tando-host ]] && "$R/bin/tando-host" doctor 2> /dev/null
+  row check ok apps "$n apps, ports used $n of $((H[port_max] - H[port_min] + 1))"
+  if ((mt > 0 && caps > mt)); then
+    row check warn "memory caps" "$((caps / 1048576)) MB of caps over $((mt / 1048576)) MB RAM"
+  else row check ok "memory caps" "$((caps / 1048576)) MB of caps, $((mt / 1048576)) MB RAM"; fi
+  [[ -x $LOGS ]] && "$LOGS" log-doctor
+  return 0
+}
+
+# ---- verbs: app lifecycle --------------------------------------------------------------
+
+# configure <app>: create the app if missing, apply settings read from stdin as key=value
+cmd_configure() {
+  need_root
+  valid_app "${1:-}" || die "invalid app name"
+  A=$1 D=$R/apps/$1
+  load "$R/host.conf" H
+  [[ -n ${H[port_min]:-} ]] || die "host not set up (tando host setup)"
+  local k v new=0 jobs=() owner="${SUDO_USER:-root}" f p used=" " parts check=0 origin="" force=0 confdom="" confwww="" x
+  # the settings first; then, for an existing app, its lock before app.conf is read: a domain add
+  # or another configure in between would otherwise be overwritten by this one's stale copy
+  local input; input=$(cat)
+  if [[ -f $D/app.conf ]]; then
+    [[ $'\n'$input$'\n' == *$'\n'check=1$'\n'* ]] || lock
+    load "$D/app.conf" C
+    load "$D/state" S
+    # the live release's jobs are those it was deployed with: keep them before app.conf changes
+    [[ -n ${S[current]:-} && ! -f $D/jobs/${S[current]} ]] && valid_id "${S[current]}" && jobs_snap "${S[current]}"
+  else
+    # a user of that name is only taken over when an earlier configure of this app made it and was
+    # interrupted before app.conf existed (its marker .creating is in the app's directory)
+    id "tando-$A" &> /dev/null && [[ ! -f $D/.creating ]] && die "user tando-$A exists but was not created by tando"
+    new=1
+  fi
+  app_vars
+  # optional settings are cleared unless given again
+  unset "C[path]" "C[data]" "C[start_shell]" "C[writable]" "C[backup]" "C[database]" "C[image]" "C[soak]" \
+    "C[container_port]" "C[build_memory]" "C[log_max]" "C[log_keep]" "C[log_rate]" "C[access_log]" \
+    "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
+    "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]"
+  local line
+  while IFS= read -r line; do
+    k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
+    no_ctrl "$v" || die "control characters in $k"
+    case $k in
+      recipe) [[ $v =~ ^(node|static|next|python|container)$ ]] || die "bad recipe: $v";;
+      image) [[ $v =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]] || die "bad image: $v";;
+      container_port) [[ $v =~ ^[0-9]{1,5}$ ]] || die "bad container_port: $v";;
+      build_memory) [[ $v =~ ^[0-9]+[KMG]$ ]] || die "bad build_memory: $v";;
+      start) [[ -n $v ]] || die "empty start command";;
+      start_shell) [[ $v =~ ^(true|false)$ ]] || die "start_shell must be true or false";;
+      health) [[ $v =~ ^/[A-Za-z0-9._~/?=\&%-]*$ ]] || die "bad health path: $v";;
+      path) [[ $v =~ ^(/[A-Za-z0-9._~-]+)+$ ]] || die "bad path: $v (like /shop)";;
+      data) if [[ ${C[recipe]:-} == container ]]; then   # the volume's path inside the container
+              [[ $v =~ ^(/[A-Za-z0-9_.-]+)+$ && $v != */../* ]] || die "bad data path: $v (like /data)"
+            else
+              [[ $v =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$ ]] ||
+                die "bad data directory: $v (a relative path inside the release)"
+            fi;;
+      writable) read -ra parts <<< "${v//,/ }"
+                for f in "${parts[@]}"; do
+                  [[ $f =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ && /$f/ != */../* && /$f/ != */./* ]] ||
+                    die "bad writable directory: $f (a relative path inside the release)"
+                done;;
+      backup) [[ $v =~ ^(daily|off)$ ]] || die "backup must be daily or off";;
+      database) [[ $v =~ ^(postgres|sqlite)$ ]] || die "database must be postgres or sqlite";;
+      memory) [[ $v =~ ^[0-9]+[KMG]$ ]] || die "bad memory: $v";;
+      health_timeout) [[ $v =~ ^[0-9]{1,3}$ ]] || die "bad health_timeout: $v";;
+      soak) [[ $v =~ ^[0-9]{1,3}$ ]] || die "bad soak: $v (seconds)";;
+      # limits of the app (docs/COMMANDS.md "Limits and load"): its CPU (a % of one core, or
+      # cores), its processes and threads, and its connections and requests in flight through Caddy
+      cpu) [[ $v =~ ^[1-9][0-9]{0,3}%$ || $v =~ ^[0-9]{1,2}(\.[0-9]{1,2})?$ && $v != 0 && $v != 0.0 ]] || die "bad cpu: $v (like 50% or 1.5 cores)";;
+      tasks) [[ $v =~ ^[1-9][0-9]{1,5}$ ]] || die "bad tasks: $v (processes and threads, like 512)";;
+      max_conns|max_requests) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] || die "bad $k: $v";;
+      stop_timeout) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || die "bad stop_timeout: $v (seconds)";;
+      hold) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || die "bad hold: $v (seconds)";;
+      log_max|log_keep|log_rate|access_log|request_log_max) "$LOGS" valid "$k" "$v" 2> /dev/null || die "bad $k: $v";;
+      # health check of tando-watch: expected status and/or text, failures to fire, successes to resolve
+      health_expect) [[ $v =~ ^([1-5]([0-9]{2}|xx))?( ?[\ -~]{1,100})?$ && -n $v && $v != *[\"\\]* ]] ||
+                       die "bad health_expect: $v (like 200, 2xx or 200 ok)";;
+      health_fails|health_recover) [[ $v =~ ^[1-9][0-9]?$ ]] || die "bad $k: $v (1 to 99)";;
+      job.*) [[ ${k#job.} =~ ^[a-z][a-z0-9-]{0,20}$ && $v == *'|'* ]] || die "bad job: $k"
+             systemd-analyze calendar "$(trim "${v%%|*}")" &> /dev/null || die "bad schedule for job ${k#job.}: $(trim "${v%%|*}")"
+             jobs+=("${k#job.}");;
+      # check=1: only validate and say whether the app exists (before a build); origin: where the
+      # client deploys from (user@machine:directory), force=1: deploy although it differs
+      check) check=1; continue;;
+      domain) for x in $v; do valid_domain "$x" || die "not a domain name: $x"; confdom+=" $x"; done; continue;;
+      www) [[ $v =~ ^(redirect|serve|off)$ ]] || die "www must be redirect, serve or off"; confwww=$v; continue;;
+      origin) [[ ${#v} -le 300 ]] || die "origin too long"; origin=$v; continue;;
+      force) [[ $v == 1 ]] && force=1; continue;;
+      "") continue;;
+      *) die "unknown setting: $k";;
+    esac
+    v=$(int_norm "$v")
+    C[$k]=$v
+  done <<< "$input"
+  if [[ -n $origin && -n ${C[origin]:-} && ${C[origin]} != "$origin" ]] && ((!force)); then
+    die "$A on <host> was last deployed from ${C[origin]}, not from here ($origin). Deploy from here anyway: tando deploy --force (or tando up --force)"
+  fi
+  # runtimes this app needs and the server lacks: the client installs them (tando-agent runtime)
+  local needs=""
+  case ${C[recipe]:-node} in
+    node|next) command -v node > /dev/null || needs+=" node";;
+    python) python3 -c 'import venv, ensurepip' 2> /dev/null || needs+=" python";;
+    container) [[ ${H[podman]:-} == yes ]] && command -v podman > /dev/null || needs+=" podman";;
+  esac
+  [[ ${C[database]:-} == postgres && ${H[postgres]:-} != yes ]] && needs+=" postgres"
+  if ((check)); then
+    AUDIT_VERB=""   # only a look: nothing to record
+    echo "exists=$((1 - new))"; echo "current=${S[current]:-}"; echo "needs=${needs# }"
+    echo "node=$(node --version 2> /dev/null | tr -d v)"
+    echo "domains=$(app_domains)"
+    # another activation (or a rollback, backup, env change) holds the app: the deploy will wait
+    # for it in configure; the client says what for and about how long (busy_left: seconds of
+    # soak left, "-" when unknown)
+    ((new)) || busy_info
+    return 0
+  fi
+  [[ -z $needs ]] || die "$A needs${needs} on <host>, which is not installed: tando up installs it (or tando host setup <host>${needs// / }=yes)"
+  [[ -n $origin ]] && C[origin]=$origin
+  # domains in tando.conf are added to the app's domains (tando domain rm removes one); who owns
+  # a domain is checked and written under the host-wide domain lock (two apps, one domain)
+  [[ -n $confdom ]] && domains_lock
+  for x in $confdom; do
+    [[ " ${C[domains]:-} " == *" $x|"* ]] && continue
+    k=$(domain_owner "$x"); [[ -z $k || $k == "$A" ]] || die "$x belongs to $k on this server"
+    C[domains]="${C[domains]:+${C[domains]} }$x|${confwww:-$(default_www "$x")}"
+  done
+  if ((new)); then
+    lockfile "$R/.ports.lock"; exec 8>"$R/.ports.lock"
+    flock -w 120 8 || die "another app is being created on this server and takes too long ($R/.ports.lock); try again"
+    # another `tando up` of this same app created it while this one waited
+    [[ -f $D/app.conf ]] && die "another tando up created $A a moment ago; run this one again (it then deploys to it)"
+    for f in "$R"/apps/*/app.conf; do
+      [[ -f $f ]] && used+="$(sed -n 's/^port=//p;s/^preflight_port=//p' "$f" | tr '\n' ' ') "
+    done
+    # the app port and its pre-flight port (+100) must both be free
+    for ((p = H[port_min]; p <= H[port_max]; p++)); do
+      [[ $used == *" $p "* ]] && continue
+      ss -Hltn "sport = :$p or sport = :$((p + 100))" | grepq . || break
+    done
+    ((p <= H[port_max])) || die "no free port in ${H[port_min]}-${H[port_max]}"
+    C[port]=$p C[created]=$(now)
+    # what an earlier app of this name left (an interrupted destroy: no app.conf, no user, not a
+    # creation in progress) is removed first, so the new app starts with no old state or history
+    if [[ -d $D && ! -f $D/.creating ]] && ! id "tando-$A" &> /dev/null; then rm -rf "${D:?}"; fi
+    install -d -m 755 -o root -g root "$D" && : > "$D/.creating" || die "could not create $D (disk full?)"
+    if ! id "tando-$A" &> /dev/null; then
+      useradd --system --user-group --no-create-home --home-dir /nonexistent -u "$(new_uid)" \
+        --shell /usr/sbin/nologin "tando-$A" || die "useradd failed"
+    fi
+    install -d -m 755 -o root -g root "$D" "$D/releases"
+    install -d -m 755 -o "$owner" "$D/incoming"
+    install -d -m 750 -o "tando-$A" -g "tando-$A" "$D/shared"
+    install -m 640 -o root -g "tando-$A" /dev/null "$D/env"
+    # values set with tando env set before the app existed (env_staged) become its env
+    staged_lock
+    if [[ -f $R/staged/$A/env && ! -L $R/staged/$A/env ]]; then
+      cat "$R/staged/$A/env" > "$D/env" && rm -rf "${R:?}/staged/$A"
+    fi
+    : > "$D/history.tsv"
+    save "$D/state" S && save "$D/app.conf" C || die "could not write the app's files (disk full?)"
+    rm -f "$D/.creating"
+    flock -u 8
+  fi
+  for k in "${!C[@]}"; do   # drop jobs no longer configured
+    [[ $k == job.* && " ${jobs[*]} " != *" ${k#job.} "* ]] && unset "C[$k]"
+  done
+  [[ ${C[database]:-} == sqlite && -z ${C[data]:-} ]] && C[data]=data   # the file lives in data/
+  if [[ -z ${C[backup]:-} && ( -n ${C[data]:-} || -n ${C[database]:-} ) ]]; then C[backup]=daily; fi
+  save "$D/app.conf" C
+  # nothing changed since the last configure by this agent (every deploy calls it): done
+  local applied; applied=$(cat "$D/app.conf" "$AGENT" | cksum | cut -d' ' -f1)
+  if ((!new)) && [[ ${S[applied]:-} == "$applied" ]] && [[ -f /etc/caddy/tando/$A.caddy || ${C[caddy]:-} == external ]]; then
+    echo "port=${C[port]}"; echo "link=$(link)"; echo "created=0"; echo "changed=0"
+    AUDIT_VERB=""   # nothing changed (every deploy asks): nothing to record
+    return 0
+  fi
+  [[ ${C[database]:-} == postgres ]] && db_ensure
+  [[ -x $LOGS ]] && { "$LOGS" app-setup "$A" > /dev/null || die "log setup failed"; }
+  app_perms
+  # the shared/ directories the app uses, created once now by its own user (see ensure_shared)
+  fail() { die "$1"; }
+  [[ -n ${C[data]:-} ]] && ensure_shared data
+  [[ ${C[recipe]:-} == next && ${C[next_cache]:-} != release ]] && ensure_shared next-cache
+  [[ ${C[recipe]:-} == python ]] && ensure_shared .cache
+  write_unit; write_caddy; jobs_follow; sync_backup_timer
+  journal_dir
+  [[ -f $D/.reserve ]] || { head -c 1048576 /dev/zero > "$D/.reserve" 2> /dev/null && chmod 600 "$D/.reserve"; }
+  # (not marked applied on failure: the next deploy tries again)
+  fw_sync || die "the per-app loopback rules could not be loaded (above), so $A was not deployed: tando doctor"
+  systemctl daemon-reload
+  has_unit && [[ -z ${S[stopped]:-} ]] && systemctl enable -q "tando-$A"
+  st applied "$applied"
+  echo "port=${C[port]}"; echo "link=$(link)"; echo "created=$new"; echo "changed=1"
+}
+
+# activate <app> <token> <build s> <upload s>: start a detached activation, print its id
+# activate <app> <build s> <upload s>, the lease token on stdin (kept out of process lists);
+# the older form activate <app> <token> <build s> <upload s> is still accepted
+cmd_activate() {
+  need_root; app "$1"; shift
+  local token b u id base n=1
+  if (($# == 3)); then token=$1; shift; else IFS= read -r token || token=""; fi
+  b=${1:-0} u=${2:-0}
+  recover
+  [[ $b =~ ^[0-9]+(\.[0-9])?$ && $u =~ ^[0-9]+(\.[0-9])?$ ]] || die "bad timings"
+  lease_lock
+  load "$D/upload" L
+  if ! [[ -n $token && ${L[token]:-} == "$token" && -z ${L[id]:-} ]]; then
+    # another client's lease now (it took over this one): say so; no lease at all: it expired
+    [[ -n ${L[token]:-} && ${L[token]} != "$token" ]] &&
+      die "another deploy of $A started while this one was uploading; run the deploy again"
+    [[ -n $token && ${L[token]:-} == "$token" ]] && die "this upload was already activated as release ${L[id]}"
+    die "this upload's lease expired; run the deploy again"
+  fi
+  [[ -n $(ls -A "$D/incoming") ]] || die "nothing uploaded"
+  # this client's rsync has ended; another one still writing would mix its files into the release
+  upload_writing && die "another upload into $A's incoming/ is still running, so this upload may be mixed with it; nothing was activated: run the deploy again"
+  # the same upload as the live, verified release, with the same settings: nothing to do (no new
+  # release, no restart). Exact: incoming/ is compared by its entries' change times and inodes,
+  # which any write by rsync changes. Not for containers (image = may name a newer image)
+  local cur=${S[current]:-}
+  if [[ -n $cur && ${S[inc_id]:-} == "$cur" && ${S[status_$cur]:-} == verified && ${S[phase]:-idle} == idle &&
+        -z ${S[stopped]:-}${S[down]:-} && ${C[recipe]:-node} != container && -n ${S[applied]:-} &&
+        ${S[inc_applied]:-} == "${S[applied]}" && $(cur_link) == "$cur" && $(inc_sum) == "${S[inc_sum]:-}" ]] &&
+     { ! has_unit || systemctl -q is-active "tando-$A"; }; then
+    rm -f "$D/upload"
+    AUDIT_NOTE="unchanged: release $cur stays live"
+    echo "id=$cur"; echo "same=1"
+    return 0
+  fi
+  # the copy needs room: the upload's size plus a margin, or nothing starts
+  local need free
+  need=$(du -sk "$D/incoming" 2> /dev/null | cut -f1); need=$(( ${need:-0} + 8192 ))
+  free=$(df -Pk "$D/releases" | awk 'NR == 2 { print $4 }')
+  ((free >= need)) || die "not enough disk space on <host> for this release: it needs $((need / 1024)) MB, $((free / 1024)) MB are free (tando doctor)"
+  # and as many free inodes as the upload has entries (a release of many small files)
+  local nf ifree
+  # (a file system without a fixed inode count, btrfs, reports 0 of 0: no limit)
+  nf=$(find "$D/incoming" -xdev 2> /dev/null | wc -l); ifree=$(df -Pi "$D/releases" | awk 'NR == 2 { print ($2 > 0 ? $4 : "") }')
+  [[ $ifree =~ ^[0-9]+$ ]] && ((ifree < nf + 1000)) &&
+    die "not enough free inodes on <host> for this release: it has $nf files, $ifree inodes are free (tando doctor; old releases: tando releases)"
+  base=$(date -u +%Y%m%d-%H%M%S); id=$base
+  until mkdir "$D/releases/$id" 2> /dev/null; do
+    n=$((n + 1)); id="$base-$n"; ((n < 100)) || die "could not reserve a release id"
+  done
+  L[id]=$id; save "$D/upload" L || { rmdir "$D/releases/$id"; die "could not record the release (disk full?)"; }
+  # (its number in deploy order is given by the activation once it holds the app's lock: activate
+  # itself never waits for another activation's soak; the client sees "queued" and says for what)
+  local who=() w f
+  [[ -x $LOGS ]] && read -r w f < <("$LOGS" audit-origin) && who=(-E "TANDO_AUDIT_WHO=$w" -E "TANDO_AUDIT_FROM=$f")
+  # ExecStopPost: whatever ends the activation (an OOM kill, SIGKILL, a full disk), recover runs
+  # at once and finishes or reverts it, so no release stays half-activated
+  if ! systemd-run --quiet --collect --unit="tando-$A-act-$id" "${who[@]}" \
+      -p Description="tando activation $A $id" -p "ExecStopPost=$AGENT recover $A" \
+      "$AGENT" run-activation "$A" "$id" "$b" "$u"; then
+    rmdir "$D/releases/$id"; rm -f "$D/upload"
+    die "systemd-run failed"
+  fi
+  AUDIT_VERB=""   # the activation writes the deploy's audit line when it ends
+  echo "id=$id"
+}
+
+# map the data directory and the Next cache into shared/ (never over shipped files)
+# Directories in shared/ (app-owned) are created by the app user itself, so the kernel applies the
+# app's rights: root never creates, chowns or chmods anything there (a planted symlink would make
+# root act on its target). At activation root only verifies them.
+shared_ok() { local p=$D/shared/$1; [[ -d $p && ! -L $p && $(stat -c %U "$p") == "$AU" ]]; }
+ensure_shared() { # name: create if missing (as the app user), then verify
+  [[ -e $D/shared/$1 || -L $D/shared/$1 ]] || as_app mkdir -m 750 "$D/shared/$1" ||
+    fail "could not create shared/$1"
+  shared_ok "$1" || fail "shared/$1 is not a directory of $AU (a symbolic link?): refusing to use it"
+}
+
+link_shared() { # release dir
+  local rel=$1 d
+  # TANDO_DATA_DIR is in every unit's environment and HOME is read-only: the directory must exist
+  [[ -n ${C[data_dir]:-} ]] || ensure_shared data
+  if [[ -n ${C[data]:-} ]]; then
+    d=${C[data]}
+    [[ -e $rel/$d || -L $rel/$d ]] && fail "data directory '$d' ships in the release; remove it from the upload"
+    ensure_shared data
+    mkdir -p "$(dirname "$rel/$d")"
+    ln -s "$D/shared/data" "$rel/$d"
+  fi
+  if [[ ${C[recipe]:-node} == next && -d $rel/.next ]]; then
+    [[ -e $rel/.next/cache ]] && fail ".next/cache ships in the release; it must not be uploaded"
+    if [[ ${C[next_cache]:-} == release ]]; then   # adopted: the image cache lives and dies with the release
+      install -d -m 750 -o "$AU" -g "$AU" "$rel/.next/cache"
+    else
+      ensure_shared next-cache
+      ln -s "$D/shared/next-cache" "$rel/.next/cache"
+    fi
+  fi
+}
+
+# metadata of every entry in incoming/ (ctime catches any change); compared around the copy
+upload_sum() { find "$D/incoming" -printf '%P\t%y\t%s\t%C@\t%i\t%n\n' | sort | cksum; }
+# the same without incoming/ itself (its mode is changed after each copy): what was activated last
+inc_sum() { find "$D/incoming" -mindepth 1 -printf '%P\t%y\t%s\t%C@\t%i\t%n\t%m\n' | sort | cksum; }
+
+# run-activation <app> <id> <build> <upload>: runs inside its own transient unit
+cmd_run_activation() {
+  need_root; app "$1"
+  local id=$2 rel=$D/releases/$2 t l bad
+  valid_id "$id" || die "bad id"
+  lock 3600
+  AUDIT_NOTE="release $id"
+  load "$D/state" S
+  # its number in deploy order (rollback and prune go by it, not by the clock); a damaged value
+  # starts again after the highest number a release still has
+  if ! [[ ${S[seq]:-0} =~ ^[0-9]{1,9}$ ]]; then
+    local k m=0; for k in "${!S[@]}"; do [[ $k == seq_* && ${S[$k]} =~ ^[0-9]{1,9}$ ]] && ((10#${S[$k]} > m)) && m=$((10#${S[$k]})); done
+    S[seq]=$m
+  fi
+  S[seq]=$(( 10#${S[seq]:-0} + 1 )); S[seq_$id]=${S[seq]}
+  P=([id]=$id [phase]=copy [result]=running [started]=$(now) [started_ds]=$(ds) [t_build]=$3 [t_upload]=$4); pg
+  # what to go back to: the last good release; with a lost or emptied state, whatever current points
+  # at now (a failed deploy must never stop an app that was serving)
+  local l0; l0=$(cur_link)
+  if [[ -z ${S[current]:-} && -n $l0 && -d $D/releases/$l0 ]]; then   # it was serving: say so again
+    S[current]=$l0 S[status_$l0]=verified; [[ -n ${S[last_good]:-} ]] || S[last_good]=$l0
+  fi
+  local prev=${S[current]:-$l0} fb=${S[last_good]:-}
+  [[ -n $fb && -d $D/releases/$fb ]] || fb=$prev
+  st phase copy target "$id" kind deploy prev "$prev" fallback "$fb"
+  fail() {
+    AUDIT_NOTE="release $id: $1"
+    S[status_$id]=bad; st phase idle
+    pg phase done result failed message "$1"
+    hist "$id" deploy failed "$1"
+    drop_release "$id"
+    free_lease 2> /dev/null   # (a failure before the copy ended: the upload's lease goes with it)
+    exit 1
+  }
+  jobs_snap "$id" || fail "could not record the release's jobs (disk full?)"
+
+  # one limit for the upload and the releases kept, in real bytes (du counts a hardlink once)
+  local used max=$(( ${H[app_max_mb]:-8192} * 1048576 ))
+  used=$(du -sbc "$D/incoming" "$D/releases" 2> /dev/null | awk 'END { print $1 }')
+  # (refused for its size: the upload is cleared, so incoming/ does not keep holding it)
+  ((used <= max)) || { find "$D/incoming" -mindepth 1 -delete 2> /dev/null; fail "the upload and the releases kept use $((used / 1048576)) MB, over this server's limit of $((max / 1048576)) MB per app (host setup app_max_mb=N); the upload was cleared"; }
+
+  t=$(ds)
+  import_release
+  pg t_copy "$(el "$t")" phase preflight
+
+  # pre-flight: run the new release on a spare port beside the live app
+  t=$(ds); st phase preflight
+  preflight_static
+  local spare=${C[preflight_port]:-$((C[port] + 100))} unit="tando-$A-pre-$id" args=() x
+  # another process answering on the spare port could pass the pre-flight in the new release's place
+  has_unit && ss -Hltn "sport = :$spare" | grepq . && fail "pre-flight port $spare is in use by another process"
+  while IFS= read -r x; do args+=(-p "$x"); done < <(props "$spare" preflight)
+  has_unit && { systemd-run --quiet --collect --unit="$unit" "${args[@]}" -p "WorkingDirectory=$rel" \
+    "$AGENT" exec-app "$A" "$rel" || fail "could not start the pre-flight unit"; }
+  if has_unit && ! { probe "${C[health_timeout]:-60}" "$unit" "http://127.0.0.1:$spare$(health_path)" &&
+                     own_listener "$spare" "$unit.service"; }; then
+    app_journal -u "$unit" -n 60 --no-pager -o cat > "$D/activation.log" 2>&1
+    systemctl stop "$unit" 2> /dev/null
+    P[t_preflight]=$(el "$t")     # written with the failure itself, in one pg (no ✓ in between)
+    fail "pre-flight: $PROBE_WHY"
+  fi
+  has_unit && systemctl stop "$unit"
+  : > "$D/activation.log"
+  pg t_preflight "$(el "$t")" phase switch
+
+  # back up the app's data, switch, then verify through Caddy (finish goes back to last_good)
+  t=$(ds); st phase switch
+  caddy_up || fail "Caddy is not running on <host> and did not start, so nothing was switched (sudo journalctl -u caddy -n 20)"
+  if has_unit && ! own_listener "${C[port]}" "tando-$A.service" && [[ $PROBE_WHY == *"outside"* ]]; then
+    fail "port ${C[port]} is held by another process, not by tando-$A: nothing was switched ($PROBE_WHY)"
+  fi
+  if has_backup_data; then
+    backup_take predeploy > /dev/null 2> "$D/backup.err" ||
+      fail "the pre-deploy backup failed, so the release was not switched in: $(tail -c 300 "$D/backup.err" | tr '\n' ' ')"
+  fi
+  switch_to "$id" || fail "could not switch to the new release (disk full?)"
+  st phase verify; pg t_switch "$(el "$t")"
+  local rc=0
+  finish deploy || rc=1
+  if ((rc)); then
+    AUDIT_RESULT=rolledback AUDIT_NOTE="release $id: ${P[message]:-rolled back}"
+    app_journal -u "tando-$A" -n 60 --no-pager -o cat > "$D/activation.log" 2>&1
+  fi
+  prune
+  exit $rc
+}
+
+# ---- importing a release: incoming/ -> releases/<id> -----------------------------------------
+# (runs inside run-activation: uses id, rel and fail from there)
+
+free_lease() {
+  lease_lock; load "$D/upload" L
+  [[ ${L[id]:-} == "$id" ]] && rm -f "$D/upload"     # incoming/ is free for the next upload
+  flock -u 7
+}
+
+import_release() {
+  if [[ ${C[recipe]:-node} == container ]]; then import_image; return; fi
+  # copy without following symlinks, make it root-owned and read-only to the app (static: to
+  # Caddy, which serves it), then inspect the copy (not the upload, which can still change)
+  local group=$AU l bad
+  has_unit || group=caddy
+  rm -rf "$rel"
+  local before after
+  before=$(upload_sum)
+  local after_inc; after_inc=$(inc_sum)
+  if ! cp -a --no-dereference "$D/incoming" "$rel" 2> "$D/copy.err"; then
+    # the cause in words: cp's own error, and what is left on the file system
+    local why fb ifree
+    why=$(grep -v '^$' "$D/copy.err" | tail -1 | cut -c1-200)
+    fb=$(df -Pk "$D/releases" 2> /dev/null | awk 'NR == 2 { print int($4 / 1024) }')
+    ifree=$(df -Pi "$D/releases" 2> /dev/null | awk 'NR == 2 { print ($2 > 0 ? $4 : "") }')
+    rm -rf "$rel"
+    if [[ $ifree =~ ^[0-9]+$ ]] && ((ifree < 1000)); then
+      fail "copy failed: no free inodes ($ifree left; the upload and the releases kept hold $(find "$D/incoming" "$D/releases" -xdev 2> /dev/null | wc -l) files): ${why:-cp failed}"
+    fi
+    fail "copy failed: ${why:-cp failed} (${fb:-?} MB and ${ifree:-?} inodes free)"
+  fi
+  rm -f "$D/copy.err"
+  after=$(upload_sum)
+  [[ $before == "$after" ]] || { rm -rf "$rel"; fail "the upload changed during the copy"; }
+  chmod go-rwx "$D/incoming"   # rsync -p copies the client's mode; other users never read it
+  st inc_id "$id" inc_sum "$after_inc" inc_applied "${S[applied]:-}"   # (for an unchanged next deploy)
+  free_lease
+  chown -RhP "root:$group" "$rel" && chmod -R a-st,u=rwX,g=rX,o= "$rel" || fail "chown failed"
+  open_public "$rel"
+  while IFS= read -r -d '' l; do
+    bad=$(readlink -f "$l") || bad=/
+    [[ $bad == "$rel"/* ]] || fail "symlink leaves the release: ${l#"$rel"/}"
+  done < <(find "$rel" -type l -print0)
+  bad=$(find "$rel" -name '.env*' -print -quit)
+  [[ -z $bad ]] || fail "secret file in release: ${bad#"$rel"/}"
+  bad=$(find "$rel" \( ! -type f ! -type d ! -type l \) -print -quit)
+  [[ -z $bad ]] || fail "special file in release: ${bad#"$rel"/}"
+  bad=$(find "$rel" -type f -links +1 -print -quit)
+  [[ -z $bad ]] || fail "hardlink in release: ${bad#"$rel"/}"
+  link_shared "$rel"
+  make_writable "$rel"
+  [[ ${C[recipe]:-node} == python ]] && build_venv
+  return 0
+}
+
+# container: load the uploaded image (or pull the named one) into root Podman's storage and tag
+# it localhost/tando-<app>:<id>; the release directory only holds that name
+import_image() {
+  local ref img
+  rm -rf "$rel"; install -d -m 750 -o root -g "tando-$A" "$rel"
+  # an image upload holds plain files only: a symbolic link could make root read another file
+  if [[ -n $(find "$D/incoming" -type l -print -quit) ]]; then
+    free_lease; fail "the image upload holds a symbolic link"
+  fi
+  if [[ -e $D/incoming/image-ref || -L $D/incoming/image-ref ]]; then
+    [[ -f $D/incoming/image-ref && ! -L $D/incoming/image-ref ]] || { free_lease; fail "image-ref is not a plain file"; }
+    ref=$(head -c 256 "$D/incoming/image-ref" | head -1)
+    free_lease
+    [[ $ref =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]] || fail "bad image reference in image-ref"
+    # the reference came from the upload: it is never echoed back in a message
+    podman pull -q "$ref" > /dev/null 2> "$D/activation.log" || fail "podman pull of the image in image-ref failed"
+    img=$ref
+  else
+    local before
+    before=$(upload_sum)
+    img=$(tar -C "$D/incoming" -cf - . | podman load 2> "$D/activation.log" | sed -n 's/^Loaded image: //p' | tail -1)
+    [[ $before == "$(upload_sum)" ]] || fail "the upload changed while it was loaded"
+    chmod go-rwx "$D/incoming"
+    free_lease
+    [[ -n $img ]] || fail "podman load failed"
+  fi
+  podman tag "$img" "localhost/tando-$A:$id" || fail "podman tag failed"
+  [[ -z ${ref:-} ]] && podman untag "$img" "$img" 2> /dev/null   # drop the laptop's build name
+  [[ -n ${C[data]:-} ]] && ensure_shared data
+  echo "localhost/tando-$A:$id" > "$rel/IMAGE"
+  chown root:"tando-$A" "$rel/IMAGE"; chmod 640 "$rel/IMAGE"
+}
+
+# python: a virtualenv per release, built on the server (wheels are platform-specific) as the app
+# user in a transient unit with bounded memory and CPU; then made read-only like the release.
+# pip's cache is the unit's private /tmp: a wheel the app planted in shared/.cache would be
+# installed into every later release
+build_venv() {
+  local req=$rel/requirements.txt unit="tando-$A-venv-$id" cmd out runtime cpu mem
+  [[ -f $req ]] || return 0
+  install -d -o "tando-$A" -g "tando-$A" "$rel/.venv"     # in the fresh root-owned release
+  ensure_shared .cache
+  if command -v uv > /dev/null; then
+    cmd="uv venv --quiet $rel/.venv && uv pip install --quiet --python $rel/.venv/bin/python -r $req"
+  else
+    cmd="python3 -m venv $rel/.venv && $rel/.venv/bin/pip install --quiet --disable-pip-version-check -r $req"
+  fi
+  local args=() x tc=/tmp/.cache   # lint: allow RL06 the unit's own PrivateTmp, no other user can reach it
+  while IFS= read -r x; do
+    case $x in MemoryMax=*|ReadWritePaths=*|EnvironmentFile=*|Environment=*) continue;; esac
+    args+=(-p "$x")
+  done < <(props - build)
+  out=$(systemd-run --wait --collect --unit="$unit" "${args[@]}" -p "MemoryMax=${C[build_memory]:-512M}" \
+    -p CPUQuota=100% -p "ReadWritePaths=$rel/.venv $D/shared" \
+    -p "WorkingDirectory=$rel" -E "HOME=$D/home" -E "XDG_CACHE_HOME=$tc" -E PYTHONNOUSERSITE=1 \
+    -E NPM_CONFIG_USERCONFIG=/dev/null -E GIT_CONFIG_GLOBAL=/dev/null \
+    /bin/sh -c "$cmd" 2>&1)
+  if [[ $out != *"Finished with result: success"* ]]; then
+    app_journal -u "$unit" -n 60 --no-pager -o cat > "$D/activation.log" 2>&1
+    fail "building the virtualenv failed"
+  fi
+  runtime=$(sed -n 's/.*Service runtime: \(.*\)/\1/p' <<< "$out")
+  cpu=$(sed -n 's/.*CPU time consumed: \(.*\)/\1/p' <<< "$out")
+  mem=$(sed -n 's/.*Memory peak: \([^ ,]*\).*/\1/p' <<< "$out")
+  pg venv "${runtime:-?} wall, ${cpu:-?} CPU, ${mem:-?} peak memory"
+  chown -RhP "root:tando-$A" "$rel/.venv" && chmod -R u=rwX,g=rX,o= "$rel/.venv" || fail "chown failed"
+}
+
+# static: no process to pre-flight; the health path must exist as a file in the release
+preflight_static() {
+  has_unit && return 0
+  local f=$rel/${C[health]#/}
+  [[ -d $f ]] && f=$f/index.html
+  [[ -f $f ]] || fail "pre-flight: ${C[health]:-/} is not a file in the release"
+}
+
+# Finish or revert an interrupted activation. Skipped while an activation holds the lock.
+recover() {
+  lockfile "$D/lock"; exec 9>"$D/lock"; flock -n 9 || return 0
+  lock_mark recover
+  load "$D/state" S; load "$D/activation" P
+  local ph=${S[phase]:-idle} id=${S[target]:-} fb=${S[fallback]:-}
+  case $ph in
+    idle)
+      # current link and state agree; a lost one is rebuilt from the other
+      local l; l=$(cur_link)
+      if [[ -n ${S[current]:-} && -d $D/releases/${S[current]} && $l != "${S[current]}" ]]; then
+        switch_to "${S[current]}"
+      elif [[ -z ${S[current]:-} && -n $l && -d $D/releases/$l ]]; then
+        st current "$l" "status_$l" verified      # it was serving: the state says so again
+        [[ -n ${S[last_good]:-} ]] || st last_good "$l"
+      fi
+      # an app systemd gave up on (down) gets another start once its port is free (tando-watch
+      # runs recover-all every minute): a stray process that held it may be gone
+      if [[ -n ${S[down]:-} && -z ${S[stopped]:-} && -n ${S[current]:-} ]] && has_unit &&
+         ! ss -Hltn "sport = :${C[port]}" | grepq .; then
+        restart_app || true
+      fi;;
+    copy|preflight)
+      systemctl stop "tando-$A-pre-$id" 2> /dev/null
+      S[status_$id]=bad; st phase idle
+      pg phase done result failed message "interrupted during $ph"
+      hist "$id" deploy failed "interrupted during $ph"
+      drop_release "$id"
+      if ! systemctl -q is-active "tando-$A" && [[ -n ${S[current]:-} ]]; then
+        restart_app
+      fi
+      ;;
+    switch|verify|soak|rollback)
+      if [[ $(cur_link) == "$id" ]]; then
+        restart_app
+        finish "${S[kind]:-deploy}" "recovered after interruption"
+      else
+        [[ ${S[kind]:-deploy} == deploy ]] && S[status_$id]=bad
+        fb=$(fallback_of "$fb" "$id")
+        if [[ -n $fb && $(cur_link) != "$fb" ]]; then switch_to "$fb"
+        elif [[ -n $fb ]]; then restart_app; fi
+        st phase idle
+        jobs_follow
+        pg phase done result rolledback message "interrupted before the switch"
+        hist "$id" "${S[kind]:-deploy}" rolledback "interrupted"
+      fi
+      ;;
+  esac
+  flock -u 9
+}
+# journalctl option for the app's namespace (plus the main journal), once it has one
+jns() { [[ -f /etc/systemd/journald@tando-$A.conf ]] && echo "--namespace=+tando-$A"; }
+app_journal() { local j; j=$(jns); journalctl ${j:+"$j"} "$@"; }
+
+cmd_recover() {
+  need_root
+  # run by an activation's ExecStopPost: not while the machine shuts down (that is the boot's
+  # recover-all's job, with Caddy and the app up again)
+  [[ $(systemctl is-system-running 2> /dev/null) == stopping ]] && { echo "phase=shutdown"; return 0; }
+  app "$1"; recover; echo "phase=${S[phase]:-idle}"
+}
+cmd_recover_all() {
+  need_root
+  local f
+  for f in "$R"/apps/*/app.conf; do
+    [[ -f $f ]] || continue
+    f=${f%/app.conf}
+    ( app "${f##*/}"; recover ) || true
+  done
+}
+
+# rollback <app> [id]: to the given release, or the newest verified one older than current.
+# Not affected by the upload lease.
+cmd_rollback() {
+  need_root; app "$1"; recover; lock 120
+  load "$D/state" S
+  local cur=${S[current]:-} to=${2:-} i t
+  if [[ -n $to ]]; then
+    valid_id "$to" && [[ -d $D/releases/$to ]] || die "no such release: $to"
+  else
+    local seen=0
+    for i in $(releases_by_seq | tac); do
+      [[ $i == "$cur" ]] && { seen=1; continue; }
+      if ((seen)) && [[ ${S[status_$i]:-} == verified ]]; then to=$i; break; fi
+    done
+    [[ -n $to ]] || die "no earlier verified release to roll back to"
+  fi
+  [[ $to != "$cur" ]] || die "$to is already current"
+  P=([id]=$to [phase]=switch [result]=running [started]=$(now) [started_ds]=$(ds)); pg
+  st phase rollback target "$to" kind rollback prev "$cur" fallback "$cur"
+  AUDIT_NOTE="from ${cur:--} to $to"
+  t=$(ds); switch_to "$to" || { st phase idle; die "could not switch to $to"; }
+  pg t_switch "$(el "$t")"
+  st phase verify
+  finish rollback "from $cur" || die "rollback health check failed ($PROBE_WHY); back on $cur"
+  echo "current=$to"; echo "from=$cur"; echo "link=$(link)"
+}
+
+cmd_deploy_status() { # app id
+  app "$1"; valid_id "${2:-}" || die "bad id"
+  local k l
+  load "$D/activation" P
+  # the activation unit died without finishing (killed, out of memory): recover it now
+  if [[ ${P[id]:-} == "$2" && ${P[result]:-} == running && $EUID == 0 ]] &&
+     [[ ! $(systemctl show -P ActiveState "tando-$A-act-$2") =~ ^(active|activating|deactivating)$ ]]; then
+    recover; load "$D/state" S; load "$D/activation" P
+  fi
+  if [[ ${P[id]:-} != "$2" ]]; then   # a later rollback or deploy overwrote it: history has the end
+    local h; h=$(awk -F '\t' -v id="$2" '$2 == id { r = $4 } END { print r }' "$D/history.tsv" 2> /dev/null)
+    if [[ -n $h ]]; then echo "phase=done"; echo "result=${h/ok/verified}"; echo "link=$(link)"; return; fi
+  fi
+  if [[ ${P[id]:-} == "$2" ]]; then
+    for k in "${!P[@]}"; do printf '%s=%s\n' "$k" "${P[$k]}"; done
+    echo "link=$(link)"
+    if [[ ${P[result]} == failed || ${P[result]} == rolledback ]] &&
+       [[ -s $D/activation.log && -r $D/activation.log ]]; then
+      local SAN
+      while IFS= read -r l; do san_v "$l"; echo "log=$SAN"; done < "$D/activation.log"
+    fi
+  elif [[ -d $D/releases/$2 && -z ${S[status_$2]:-} ]]; then
+    echo "phase=queued"; echo "result=running"
+    # what it waits for (read from state and progress, no lock: a deploy key reads this too)
+    if [[ ${S[phase]:-idle} != idle && ${S[target]:-} != "$2" ]]; then
+      local wph=${S[phase]}
+      [[ ${P[id]:-} == "${S[target]:-}" && -n ${P[phase]:-} ]] && wph=${P[phase]}
+      [[ ${S[kind]:-} == rollback ]] && wph=rollback
+      echo "waiting_for=${S[target]:-}"; echo "waiting_phase=$wph"
+      [[ $wph == soak && ${P[soak_end]:-} =~ ^[0-9]+$ ]] && echo "waiting_left=$(( P[soak_end] > $(now) ? P[soak_end] - $(now) : 0 ))"
+    fi
+  else
+    echo "phase=done"; echo "result=${S[status_$2]:-unknown}"
+  fi
+}
+
+# ---- writable directories: per release, seeded from the shipped content -------------------
+
+# Files a hand-written Caddy site serves from disk (public_dirs, set by adopt) are world-readable,
+# like any web root; the directories above them only traversable (R1).
+open_public() { # release dir
+  local rel=$1 d p seg parts=()
+  [[ -n ${C[public_dirs]:-} ]] || return 0
+  chmod o+x "$rel"
+  read -ra parts <<< "${C[public_dirs]//,/ }"
+  for d in "${parts[@]}"; do
+    [[ $d =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ && /$d/ != */../* && -d $rel/$d && ! -L $rel/$d ]] || continue
+    p=$rel
+    for seg in ${d//\// }; do p+=/$seg; chmod o+x "$p"; done
+    chmod -R o+rX "$rel/$d"
+  done
+}
+
+# Make the listed directories of a release (root-owned copy) writable by the app user. Nothing
+# is mounted: each release has its own copy, so writes never outlive the release.
+make_writable() { # release dir
+  local rel=$1 d parts=()
+  [[ -n ${C[writable]:-} ]] || return 0
+  read -ra parts <<< "${C[writable]//,/ }"
+  for d in "${parts[@]}"; do
+    [[ -L $rel/$d ]] && fail "writable directory $d is a symlink in the release"
+    [[ -e $rel/$d && ! -d $rel/$d ]] && fail "writable path $d is not a directory"
+    mkdir -p "$rel/$d"
+    [[ $(readlink -f "$rel/$d") == "$rel/$d" ]] || fail "writable directory $d goes through a symlink"
+    chown -RhP "$AU:$AU" "$rel/$d"
+    chmod -R u+w "$rel/$d"
+  done
+}
+
+# ---- backups: /var/backups/tando/<app>/<YYYYMMDD-HHMMSS>-<kind>/ ---------------------------
+#
+# Root never reads the app's files: tar and pg_dump run as the app user (runuser) and root only
+# writes their output stream into its own 700 directory.
+
+BK=/var/backups/tando
+
+has_backup_data() { [[ -n ${C[data]:-} || -n ${C[data_dir]:-} || ${C[database]:-} == postgres ]]; }
+valid_backup() { [[ $1 =~ ^[0-9]{8}-[0-9]{6}-(daily|predeploy|manual|safety|final)$ ]]; }
+as_app() { (cd / && exec runuser -u "$AU" -- "$@"); }   # cwd / : root's cwd may be private
+# as_app_unit cmd...: the same, inside the app's sandbox (props backup): it sees only what the app
+# sees, so a symlink the app planted cannot make it read anything the app could not
+as_app_unit() {
+  local args=() x
+  while IFS= read -r x; do
+    case $x in EnvironmentFile=*|Environment=*|MemoryMax=*|LogNamespace=*) continue;; esac
+    args+=(-p "$x")
+  done < <(props - backup)
+  systemd-run --quiet --pipe --wait --collect --unit="tando-$A-backup-$$-$RANDOM" "${args[@]}" \
+    -p WorkingDirectory=/ -p MemoryMax=512M "$@"
+}
+
+backup_take() { # kind -> prints the backup id
+  local kind=$1 id dir tmp n=0 snap=() live=$ADATA/app.sqlite
+  BK_WARN=""
+  install -d -m 700 -o root -g root "$BK" "$BK/$A"
+  id="$(date -u +%Y%m%d-%H%M%S)-$kind"
+  while [[ -e $BK/$A/$id ]]; do sleep 1; id="$(date -u +%Y%m%d-%H%M%S)-$kind"; n=$((n + 1)); ((n < 5)) || return 1; done
+  dir=$BK/$A/$id tmp=$BK/$A/.$id.tmp
+  rm -rf "$tmp"; mkdir -m 700 "$tmp"
+  if [[ -n ${C[data]:-} && -z ${C[data_dir]:-} ]] && ! shared_ok data; then
+    rm -rf "$tmp"; echo "shared/data is not a directory of $AU (a symbolic link?): no backup taken" >&2; return 1
+  fi
+  if [[ ( -n ${C[data]:-} || -n ${C[data_dir]:-} ) && -d $ADATA ]]; then
+    # sqlite: a consistent snapshot through sqlite3 when the binary exists; otherwise the live
+    # file is archived as is (a write during the archive can leave it inconsistent)
+    if [[ ${C[database]:-} == sqlite && -f $live ]] && command -v sqlite3 > /dev/null &&
+       as_app_unit sqlite3 "$live" ".backup '$live.snapshot'" < /dev/null; then
+      snap=(--exclude=./app.sqlite --transform 's,^\./app\.sqlite\.snapshot$,./app.sqlite,')
+    fi
+    # A file the app made unreadable (or deleted mid-way) is a warning in the backup's meta, not a
+    # failure: else a compromised app blocks every deploy (the pre-deploy backup must succeed).
+    # tar 1 = some files changed or vanished; 2 = a real error. The archive is written by root
+    # (cat), so the file system's root reserve still takes it when an app has filled the disk
+    local trc wrc
+    as_app_unit tar -C "$ADATA" --ignore-failed-read --warning=no-file-changed "${snap[@]}" -czf - . \
+      < /dev/null 2> "$tmp/tar.err" | cat > "$tmp/data.tar.gz"
+    trc=${PIPESTATUS[0]} wrc=${PIPESTATUS[1]}
+    if ((trc > 1 || wrc != 0)); then
+      echo "data archive failed: $(head -c 300 "$tmp/tar.err" | tr -c '[:print:]' ' ')" >&2; rm -rf "$tmp"; return 1
+    fi
+    if [[ -s $tmp/tar.err ]]; then
+      BK_WARN="$(grep -c . "$tmp/tar.err") files not readable or changed while read, first: $(head -1 "$tmp/tar.err" | head -c 200 | tr -c '[:print:]' ' ')"
+      echo "tando-agent: backup of $A: $BK_WARN" >&2
+    fi
+    rm -f "$tmp/tar.err"
+    ((${#snap[@]})) && as_app_unit rm -f "$live.snapshot" < /dev/null
+  fi
+  if [[ ${C[database]:-} == postgres ]]; then
+    db_creds
+    if ! PGPASSWORD=$DB_PW as_app pg_dump -Fc -h 127.0.0.1 -U "$DB_ROLE" -d "$DB_ROLE" > "$tmp/db.dump"; then
+      rm -rf "$tmp"; echo "pg_dump failed" >&2; return 1
+    fi
+  fi
+  printf 'kind=%s\ncreated=%s\n' "$kind" "$(now)" > "$tmp/meta"
+  [[ -n ${BK_WARN:-} ]] && printf 'warning=%s\n' "$BK_WARN" >> "$tmp/meta"
+  mv "$tmp" "$dir"
+  st last_backup "$(now)"
+  backup_prune
+  offsite_kick "$id"
+  echo "$id"
+}
+
+# offsite copy (docs/BACKUP.md): tando-offsite uploads the new backup in a unit of its own, so a
+# slow upload never holds a deploy (the pre-deploy backup included); tando-offsite.timer retries
+# what did not get there. Nothing when offsite is off.
+offsite_kick() {
+  [[ -f $R/offsite.conf && -x $R/bin/tando-offsite ]] || return 0
+  systemd-run --quiet --no-block --collect --unit="tando-offsite-$A-$1" -p Nice=10 -p IOSchedulingClass=idle \
+    "$R/bin/tando-offsite" push "$A" "$1" > /dev/null 2>&1 || true
+}
+# offsite_fetch id: a backup that is only in the bucket comes back to $BK/$A/<id> first (verified)
+offsite_fetch() {
+  [[ -d $BK/$A/$1 || ! -f $R/offsite.conf || ! -x $R/bin/tando-offsite ]] && return 0
+  echo "tando-agent: $1 is not on this server: fetching it from offsite storage" >&2
+  "$R/bin/tando-offsite" fetch "$A" "$1" > /dev/null || die "could not fetch backup $1 from offsite storage"
+}
+
+# keep the newest 7 daily backups plus the newest of each of the 4 weeks before them,
+# the newest 5 of each other kind, and every final backup
+backup_prune() {
+  local i kind week weeks=" " nweeks=0 ndaily=0 keep
+  declare -A count
+  for i in $(ls -1 "$BK/$A" | sort -r); do
+    valid_backup "$i" || continue
+    # (a backup fetched from offsite storage stays a day: it is fetched to be restored)
+    [[ -f $BK/$A/$i/fetched && -n $(find "$BK/$A/$i/fetched" -mmin -1440 2> /dev/null) ]] && continue
+    kind=${i#*-*-} keep=0
+    case $kind in
+      final) keep=1;;
+      daily)
+        ndaily=$((ndaily + 1))
+        if ((ndaily <= 7)); then keep=1
+        else
+          week=$(date -d "${i:0:8}" +%G-%V)
+          if [[ $weeks != *" $week "* ]] && ((nweeks < 4)); then weeks+="$week "; nweeks=$((nweeks + 1)); keep=1; fi
+        fi;;
+      *) count[$kind]=$(( ${count[$kind]:-0} + 1 )); (( count[$kind] <= 5 )) && keep=1;;
+    esac
+    ((keep)) || rm -rf "${BK:?}/$A/$i"
+  done
+}
+
+cmd_backup_run() { # app kind: the timer (daily), `tando backup now` (manual)
+  need_root; app "$1"
+  local kind=${2:-manual} id
+  [[ $kind == daily || $kind == manual ]] || die "bad backup kind"
+  has_backup_data || die "$A has no data or database to back up"
+  lock 3600
+  load "$D/state" S
+  id=$(backup_take "$kind") || die "backup failed"
+  echo "id=$id"
+}
+
+# backup ls/cat also work for an app that was destroyed (its final backup stays in $BK/<app>)
+app_or_gone() {
+  if [[ -f $R/apps/${1:-}/app.conf ]]; then app "$1"; return; fi
+  valid_app "${1:-}" && [[ -d $BK/$1 ]] || die "no such app: ${1:-}"
+  A=$1
+}
+cmd_backup_ls() {
+  need_root; app_or_gone "$1"
+  local i size created where
+  [[ -d $BK/$A ]] || return 0
+  for i in $(ls -1 "$BK/$A" | sort -r); do
+    valid_backup "$i" || continue
+    # (a backup pruned while this lists them is left out, not shown half)
+    size=$(du -sb "$BK/$A/$i" 2> /dev/null | cut -f1)
+    created=$(sed -n 's/^created=//p' "$BK/$A/$i/meta" 2> /dev/null)
+    [[ -n $size && -n $created ]] || continue
+    # 7th field, where it is: local, both (uploaded), or local+pending / local+failed / local+uploading
+    where=local
+    if [[ -f $R/offsite.conf ]]; then
+      where=$(sed -n 's/^state=//p' "$BK/$A/$i/offsite" 2> /dev/null)
+      case $where in uploaded) where=both;; "") where=local;; *) where=local+$where;; esac
+    fi
+    row backup "$i" "${i#*-*-}" "$created" "$size" \
+      "$([[ -f $BK/$A/$i/data.tar.gz ]] && echo data)$([[ -f $BK/$A/$i/db.dump ]] && echo ' db')" "$where"
+  done
+  # the ones only in the bucket (rows "offsite <id> <kind> <created> <size> <local 1|0>")
+  if [[ -f $R/offsite.conf && -x $R/bin/tando-offsite ]]; then
+    local r k c z l err
+    while IFS=$'\t' read -r r i k c z l; do
+      [[ $r == offsite && $l == 0 ]] && valid_backup "$i" && row backup "$i" "$k" "$c" "$z" - offsite
+    done < <("$R/bin/tando-offsite" ls "$A" 2> "$BK/.offsite-ls.err")
+    err=$(head -c 300 "$BK/.offsite-ls.err" 2> /dev/null); rm -f "$BK/.offsite-ls.err"
+    [[ -n $err ]] && row offsite-error "${err#tando-offsite: }"
+  fi
+  return 0
+}
+
+cmd_backup_cat() { # app id: the backup as an uncompressed tar on stdout (for `backup pull`)
+  need_root; app_or_gone "$1"; valid_backup "${2:-}" && offsite_fetch "$2"
+  valid_backup "${2:-}" && [[ -d $BK/$A/$2 ]] || die "no such backup: ${2:-}"
+  audit_done 0
+  exec tar -C "$BK/$A/$2" -cf - .
+}
+
+# restore: stop the app, keep a safety copy of the current data, restore, start, health-check
+cmd_backup_restore() {
+  need_root; app "$1"
+  local id=${2:-} dir safety
+  valid_backup "$id" && offsite_fetch "$id"
+  valid_backup "$id" && [[ -d $BK/$A/$id ]] || die "no such backup: $id"
+  dir=$BK/$A/$id
+  recover; lock 300
+  load "$D/state" S
+  # on failure: start the app again and say where the data before the restore is
+  rfail() { [[ -n ${S[current]:-} ]] && restart_app; die "$1 (the previous data is in backup $safety)"; }
+  systemctl stop "tando-$A"
+  safety=$(backup_take safety) || { restart_app; die "could not take the safety backup; nothing restored"; }
+  echo "safety=$safety"
+  if [[ -f $dir/data.tar.gz ]] && [[ -n ${C[data_dir]:-} ]]; then
+    # an adopted app's own data directory: emptied and refilled as its user (its rights only)
+    [[ -d $ADATA && ! -L $ADATA ]] || rfail "$ADATA is not a directory"
+    as_app find "$ADATA" -mindepth 1 -delete || rfail "could not clear the data directory"
+    as_app tar -C "$ADATA" --no-same-owner -xzf - < "$dir/data.tar.gz" || rfail "data restore failed"
+  elif [[ -f $dir/data.tar.gz ]]; then
+    # into a fresh directory the app user creates and fills, then swapped in by rename (which
+    # moves a link rather than following it); root never writes into shared/ itself
+    local new=$D/shared/.restore-$$ old=$D/shared/.replaced-$$
+    [[ -e $D/shared/data || -L $D/shared/data ]] || as_app mkdir -m 750 "$D/shared/data"
+    shared_ok data || rfail "shared/data is not a directory of $AU (a symbolic link?): nothing restored"
+    as_app mkdir -m 750 "$new" || rfail "could not create a directory for the restore"
+    if ! as_app tar -C "$new" --no-same-owner -xzf - < "$dir/data.tar.gz"; then
+      as_app rm -rf "$new"; rfail "data restore failed"
+    fi
+    [[ -d $new && ! -L $new ]] || rfail "the restore directory was replaced"
+    mv -T "$D/shared/data" "$old" && mv -T "$new" "$D/shared/data" || rfail "could not swap the data in"
+    as_app rm -rf "$old"
+  fi
+  if [[ -f $dir/db.dump ]]; then
+    db_creds
+    PGPASSWORD=$DB_PW as_app pg_restore --clean --if-exists --no-owner -h 127.0.0.1 -U "$DB_ROLE" \
+      -d "$DB_ROLE" < "$dir/db.dump" || rfail "database restore failed"
+  fi
+  [[ -n ${S[current]:-} ]] || { echo healthy=1; return; }
+  restart_app
+  if via_caddy "$(app_unit)"; then echo healthy=1; else echo healthy=0; fi
+}
+
+sync_backup_timer() {
+  local f=/etc/systemd/system/tando-$A-backup
+  if [[ ${C[backup]:-off} == daily ]]; then
+    printf '[Unit]\nDescription=tando backup %s\n\n[Service]\nType=oneshot\nExecStart=%s backup-run %s daily\n' \
+      "$A" "$AGENT" "$A" > "$f.service"
+    printf '[Unit]\nDescription=tando daily backup %s\n\n[Timer]\nOnCalendar=daily\n' "$A" > "$f.timer"
+    printf 'RandomizedDelaySec=30min\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' >> "$f.timer"
+    systemctl daemon-reload
+    systemctl enable -q --now "tando-$A-backup.timer"
+  elif [[ -f $f.timer ]]; then
+    systemctl disable -q --now "tando-$A-backup.timer"
+    rm -f "$f.timer" "$f.service"
+  fi
+}
+
+# ---- PostgreSQL: one role and one database per app, named tando_<app> ---------------------
+
+pgsql() { (cd / && exec runuser -u postgres -- psql -X -q -At -v ON_ERROR_STOP=1 "$@"); }
+
+apt_missing() { local p m=""; for p; do dpkg -s "$p" > /dev/null 2>&1 || m+="${m:+ }$p"; done; echo "$m"; }
+apt_install() { # packages...
+  local p missing=()
+  for p; do dpkg -s "$p" > /dev/null 2>&1 || missing+=("$p"); done
+  ((${#missing[@]})) || return 0
+  # apt's own output goes to a log, so a failure can point at it and a success prints nothing
+  # NEEDRESTART_SUSPEND: Ubuntu's needrestart would otherwise restart every service that uses an
+  # outdated library after a noninteractive install, including sites tando does not manage
+  { apt-get update -qq &&
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq "${missing[@]}"; } \
+    >> /var/log/tando-apt.log 2>&1 || die "could not install ${missing[*]} with apt: sudo tail -20 /var/log/tando-apt.log on the server shows why"
+}
+
+pg_setup() {
+  local ver conf
+  if ! command -v pg_ctlcluster > /dev/null; then
+    apt_install postgresql
+  fi
+  ver=$(ls /etc/postgresql | sort -V | tail -1)
+  conf=/etc/postgresql/$ver/main/conf.d/tando.conf
+  # sized for a 1-2 GB machine shared with the apps
+  cat > "$conf.tmp" <<EOF
+listen_addresses = 'localhost'
+max_connections = 20
+shared_buffers = 32MB
+work_mem = 2MB
+maintenance_work_mem = 16MB
+effective_cache_size = 256MB
+wal_buffers = 1MB
+max_wal_size = 256MB
+# a client that never answers the password request holds a slot only this long (default 60 s)
+authentication_timeout = 5s
+superuser_reserved_connections = 3
+EOF
+  if ! cmp -s "$conf.tmp" "$conf"; then mv "$conf.tmp" "$conf"; else rm -f "$conf.tmp"; fi
+  # the install can restart dbus or systemd libraries: retry until systemctl answers and
+  # the server accepts connections
+  local i
+  for i in $(seq 30); do
+    systemctl restart postgresql 2> /dev/null && break
+    sleep 1
+  done
+  for i in $(seq 30); do pg_isready -q -h 127.0.0.1 && break; sleep 1; done
+  systemctl enable -q postgresql
+  # apps reach only their own database: no default CONNECT on the shared databases
+  pgsql -c "REVOKE CONNECT ON DATABASE postgres FROM PUBLIC" -c "REVOKE CONNECT ON DATABASE template1 FROM PUBLIC" ||
+    die "could not configure postgresql"
+}
+
+db_role() { echo "tando_${A//-/_}"; }
+
+# DB_ROLE and DB_PW from the app's env file (root-owned; never sent to the client unasked)
+db_creds() {
+  declare -A E
+  env_load E
+  DB_ROLE=$(db_role)
+  DB_URL=${E[DATABASE_URL]:-}
+  DB_PW=${DB_URL#postgres://*:}; DB_PW=${DB_PW%%@*}
+  [[ -n $DB_URL ]] || die "no DATABASE_URL in the env of $A"
+}
+
+# create the role and database if missing; (re)write DATABASE_URL with a new password if absent
+db_ensure() {
+  [[ ${H[postgres]:-} == yes ]] || die "no PostgreSQL on this host: tando host setup <host> postgres=yes"
+  local r pw
+  r=$(db_role)
+  declare -A E
+  env_load E
+  if [[ -n ${E[DATABASE_URL]:-} ]] && [[ $(pgsql -c "SELECT 1 FROM pg_roles WHERE rolname = '$r'") == 1 ]]; then
+    db_limit "$r"; return 0
+  fi
+  pw=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  # statements on stdin, so the password never appears in a process list
+  if [[ $(pgsql -c "SELECT 1 FROM pg_roles WHERE rolname = '$r'") == 1 ]]; then
+    pgsql <<< "ALTER ROLE $r WITH LOGIN PASSWORD '$pw';" || die "could not set the database password"
+  else
+    pgsql <<< "CREATE ROLE $r WITH LOGIN PASSWORD '$pw';" || die "could not create role $r"
+    echo database_created=1
+  fi
+  if [[ $(pgsql -c "SELECT 1 FROM pg_database WHERE datname = '$r'") != 1 ]]; then
+    pgsql -c "CREATE DATABASE $r OWNER $r" || die "could not create database $r"
+  fi
+  pgsql -c "REVOKE ALL ON DATABASE $r FROM PUBLIC" -c "GRANT CONNECT, TEMPORARY ON DATABASE $r TO $r" ||
+    die "could not restrict database $r"
+  E[DATABASE_URL]="postgres://$r:$pw@127.0.0.1:5432/$r"
+  env_save E || die "could not write the env file of $A (disk full?)"
+  db_limit "$r"
+}
+# db_limit role: one app holds at most DB_CONN_LIMIT of the server's connections (max_connections
+# 20, 3 kept for the superuser): a leaking pool cannot take every slot from the other apps
+DB_CONN_LIMIT=10
+db_limit() { pgsql -c "ALTER ROLE $1 CONNECTION LIMIT $DB_CONN_LIMIT" || die "could not limit the connections of role $1"; }
+
+db_drop() {
+  local r
+  r=$(db_role)
+  pgsql -c "DROP DATABASE IF EXISTS $r WITH (FORCE)" -c "DROP ROLE IF EXISTS $r"
+}
+
+cmd_db_url() { need_root; app "$1"; [[ ${C[database]:-} == postgres ]] || die "$A has no database"
+  db_creds; echo "url=$DB_URL"; }
+
+cmd_db_psql() { # interactive, over ssh -t; runs as the app user with the app's role
+  need_root; app "$1"; [[ ${C[database]:-} == postgres ]] || die "$A has no database"
+  db_creds
+  export PGPASSWORD=$DB_PW PSQL_HISTORY=/dev/null
+  audit_done 0
+  cd /tmp && exec runuser -u "$AU" -- psql -h 127.0.0.1 -U "$DB_ROLE" -d "$DB_ROLE"
+}
+
+# shell <app> [hex]: a shell as the app's user, in the app's own sandbox (props, kind job: the same
+# user, read-only system, private /tmp, /dev and IPC, shared/ writable, no listening socket), with
+# the app's env, in its current release: `tando ssh <app>` (interactive, over ssh -t) and
+# `tando ssh <app> -- <command>` (the command hex-encoded, so no shell between the client and here
+# parses it; a terminal when ssh has one, else its stdin and stdout are piped). Root only: a CI
+# deploy key never gets here (tando-gate allows no such verb, and its sudo rules name none).
+# shell-put <app>: the command of `tando ssh <app> -- cmd` arrives hex-encoded on stdin (never in
+# an argv: sudo's and systemd-run's command lines are readable in /proc) and waits in a root-only
+# file under /run/tando/shell; `shell <app> @<token>` hands it to the unit as a credential
+SHELL_Q=/run/tando/shell
+cmd_shell_put() {
+  need_root; app "$1"
+  local hex="" t f
+  IFS= read -r -n 8200 hex || [[ -n $hex ]] || die "no command on stdin"
+  shell_decode "$hex"
+  install -d -m 700 -o root -g root /run/tando "$SHELL_Q"
+  find "$SHELL_Q" -type f -mmin +60 -delete 2> /dev/null   # left by a client that went away
+  t=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') f=$SHELL_Q/$A.$t
+  (umask 077; printf '%s\n' "$SHELL_CMD" > "$f") || die "could not store the command"
+  echo "token=$t"
+}
+shell_decode() { # hex -> SHELL_CMD, or die
+  local hex=$1 s
+  # (not one regex with {1,4096}: compiling that took 4 s of CPU on a small server)
+  [[ -n $hex && ${#hex} -le 8192 && $((${#hex} % 2)) = 0 && $hex != *[!0-9a-f]* ]] || die "bad command (hex)"
+  # \x before every pair (one sed: a loop of ${hex:i:2} under UTF-8 cost 0.5 s of CPU for 8192)
+  s=$(sed 's/../\\x&/g' <<< "$hex")
+  [[ $s != *'\x00'* ]] || die "bad command (NUL)"
+  printf -v SHELL_CMD '%b' "$s"
+  no_ctrl "${SHELL_CMD//$'\t'/ }" || die "the command has control characters"
+}
+cmd_shell() {
+  need_root; app "$1"
+  local hex=${2:-} cmd="" s="" p=() x mode=--pty qf=""
+  if [[ $hex == @* ]]; then   # a command stored by shell-put
+    [[ $hex =~ ^@[0-9a-f]{32}$ ]] || die "bad command token"
+    qf=$SHELL_Q/$A.${hex#@}
+    [[ -f $qf && ! -L $qf ]] || die "the command expired or was already run; run tando ssh again"
+  fi
+  [[ ${C[recipe]:-node} != container ]] || die "$A runs in a container; a shell inside it is not supported (tando logs -a $A)"
+  has_unit || die "$A is a static site: it has no process, so there is no sandbox to open a shell in"
+  [[ -d $D/current/ ]] || die "$A has no current release yet (tando up first)"
+  id "$AU" &> /dev/null || die "the user $AU does not exist"
+  if [[ -n $qf ]]; then
+    cmd=$(< "$qf"); [[ -n $cmd ]] || die "empty command"
+    AUDIT_NOTE="command: ${cmd:0:120}"
+    [[ -t 0 ]] || mode=--pipe
+  elif [[ -n $hex ]]; then   # older clients: the command as an argument
+    shell_decode "$hex"; cmd=$SHELL_CMD
+    AUDIT_NOTE="command: ${cmd:0:120}"
+    [[ -t 0 ]] || mode=--pipe
+  else
+    # lint: allow RL04 a message, not a command: "(ssh -t)" is text
+    [[ -t 0 ]] || die "an interactive shell needs a terminal (ssh -t); tando ssh $A -- <command> runs one command"
+  fi
+  # (ProcSubset=pid stays off here: ps, free and top read /proc/meminfo and /proc/stat)
+  while IFS= read -r x; do [[ $x == ProcSubset=* ]] || p+=(-p "$x"); done < <(props - job)
+  [[ ${C[recipe]:-} == python && -d $D/current/.venv ]] && p+=(-E "VIRTUAL_ENV=$D/current/.venv" -E "PATH=$D/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+  audit_done 0
+  # the app's own port for curl (binding it stays denied); no history file in shared/
+  p+=(-E "PORT=${C[port]}" -E HISTFILE=/dev/null -E "TERM=${TERM:-xterm}" -p "WorkingDirectory=$D/current")
+  if [[ -n $qf ]]; then
+    # the command as a credential (/run/credentials/<unit>/cmd, the unit's user only): no argv of
+    # sudo, systemd-run or bash carries it; the file goes when the unit stops
+    # shellcheck disable=SC2016 # expanded by the shell inside the unit
+    exec systemd-run --quiet "$mode" --wait --collect --unit="tando-$A-shell-$$" \
+      -p Description="tando shell $A" "${p[@]}" -p "LoadCredential=cmd:$qf" -p "ExecStopPost=+/bin/rm -f $qf" \
+      /bin/bash --norc --noprofile -c '. "$CREDENTIALS_DIRECTORY/cmd"'
+  fi
+  if [[ -n $cmd ]]; then
+    exec systemd-run --quiet "$mode" --wait --collect --unit="tando-$A-shell-$$" \
+      -p Description="tando shell $A" "${p[@]}" /bin/bash --norc --noprofile -c "$cmd"
+  fi
+  exec systemd-run --quiet --pty --wait --collect --unit="tando-$A-shell-$$" -p Description="tando shell $A" \
+    "${p[@]}" -E "PS1=$A:\\w\\$ " /bin/bash --norc --noprofile -i
+}
+
+# ---- destroy, unlock -----------------------------------------------------------------------
+
+cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data unless purge
+  need_root
+  valid_app "${1:-}" || die "invalid app name"
+  # an app directory without app.conf (a first tando up interrupted early): nothing was deployed,
+  # there is no data; it goes, with the user only when that interrupted configure made it
+  if [[ -d $R/apps/$1 && ! -f $R/apps/$1/app.conf ]]; then
+    A=$1 D=$R/apps/$1
+    if [[ ${2:-} == plan ]]; then printf '%s\n' releases=0 env=0 data= database= backups=0 jobs=0 final=0; return 0; fi
+    if [[ -f $D/.creating ]] && getent passwd "tando-$A" > /dev/null; then
+      pkill -KILL -u "tando-$A" 2> /dev/null; sleep 0.2
+      userdel "tando-$A" || die "could not remove the user tando-$A (userdel failed); run tando destroy again"
+      groupdel "tando-$A" 2> /dev/null; groupdel "tando-m-$A" 2> /dev/null
+    fi
+    rm -rf "${D:?}"; rm -f "/etc/systemd/system/$(app_slice)"
+    echo "destroyed=$A"; return 0
+  fi
+  app "$1"
+  [[ -n ${C[adopted_from]:-} ]] && die "$A was adopted from ${C[adopted_from]}.service: use tando adopt undo"
+  local purge=${2:-} id f
+  if [[ $purge == plan ]]; then   # what there is to remove, for the question the client asks
+    echo "releases=$(find "$D/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+    echo "env=$(grep -c . "$D/env")"
+    echo "data=$([[ -n ${C[data]:-}${C[data_dir]:-} ]] && du -sb "$ADATA" 2> /dev/null | cut -f1)"
+    echo "database=${C[database]:-}"
+    echo "backups=$(find "$BK/$A" -mindepth 1 -maxdepth 1 2> /dev/null | grep -c .)"
+    echo "jobs=$(printf '%s\n' "${!C[@]}" | grep -c '^job\.')"
+    echo "final=$(has_backup_data && echo 1 || echo 0)"
+    return 0
+  fi
+  lock 300
+  load "$D/state" S
+  # (no user any more: an earlier destroy got that far, after its final backup)
+  if [[ $purge != purge ]] && has_backup_data && id "$AU" &> /dev/null; then
+    systemctl stop "tando-$A"
+    id=$(backup_take final) || die "final backup failed; nothing removed (use --purge to skip it)"
+    echo "backup=$BK/$A/$id"
+  fi
+  # this app's units only: app names may contain "-", so tando-<app>-* would also match hello-2's
+  local units=() u
+  while IFS= read -r u; do units+=("$u"); done < <(app_units)
+  for u in "${units[@]}"; do [[ $u == *.timer ]] && systemctl disable -q --now "$u" 2> /dev/null; done
+  systemctl disable -q --now "tando-$A.service" 2> /dev/null
+  # every unit of the app, running jobs and transients included, then every process of its user
+  ((${#units[@]})) && { systemctl stop "${units[@]}" 2> /dev/null; systemctl kill -s KILL "${units[@]}" 2> /dev/null; }
+  local uid i; uid=$(id -u "$AU" 2> /dev/null)
+  for ((i = 0; i < 50; i++)); do
+    pgrep -u "$AU" > /dev/null 2>&1 || break
+    pkill -KILL -u "$AU" 2> /dev/null; sleep 0.2
+  done
+  pgrep -u "$AU" > /dev/null 2>&1 &&
+    die "processes of $AU survive a kill: $(pgrep -u "$AU" | tr '\n' ' ')- nothing removed; run tando destroy again"
+  for u in "${units[@]}"; do rm -f "/etc/systemd/system/$u"; done
+  rm -f "/etc/systemd/system/tando-$A.service" "/etc/systemd/system/$(app_slice)"
+  systemctl daemon-reload
+  rm -f "/etc/caddy/tando/$A.caddy" "/etc/tmpfiles.d/tando-journal-$A.conf"
+  rm -rf "/etc/systemd/system/systemd-journald@tando-$A.service.d"
+  caddy_lock; systemctl reload caddy || echo "warning=caddy reload failed" >&2; exec 11>&-
+  [[ ${C[database]:-} == postgres ]] && { db_drop || echo "warning=could not drop the database" >&2; }
+  if [[ ${C[recipe]:-node} == container ]]; then
+    podman images --format '{{.Repository}}:{{.Tag}}' | grep "^localhost/tando-$A:" |
+      xargs -r podman rmi -f > /dev/null 2>&1
+    rm -f "$R/run/$A-"*.env
+  fi
+  [[ -x $LOGS ]] && "$LOGS" app-remove "$A" > /dev/null
+  [[ -x $R/bin/tando-gate ]] && { $R/bin/tando-gate admin remove "$A" > /dev/null ||
+    echo "warning=could not remove the deploy user" >&2; }
+  rm -f "/var/lib/tando/metrics/$A.tsv" "/var/lib/tando/metrics/$A.tsv.1"
+  [[ -x $R/bin/tando-watch ]] && "$R/bin/tando-watch" forget "$A" > /dev/null   # its alert state
+  # leftovers of the uid outside the app's directory, then the user; its uid is never handed out
+  # again. The app's directory goes last: a destroy interrupted before it finds the app again and
+  # finishes (an earlier order left a user tando-<app> that blocked a new app of that name)
+  if [[ -n $uid ]]; then
+    find /dev/shm /tmp /var/tmp -xdev -user "$uid" -delete 2> /dev/null
+    grep -qx "$uid" "$R/retired-uids" 2> /dev/null || echo "$uid" >> "$R/retired-uids"
+  fi
+  if getent passwd "tando-$A" > /dev/null && ! userdel "tando-$A"; then
+    die "could not remove the user tando-$A (userdel failed); run tando destroy again to finish"
+  fi
+  # the gids are retired like the uid (the same list: new_uid hands out neither again)
+  local g gid
+  for g in "tando-$A" "tando-m-$A"; do
+    gid=$(getent group "$g" | cut -d: -f3)
+    [[ $gid =~ ^[0-9]+$ ]] && { grep -qx "$gid" "$R/retired-uids" 2> /dev/null || echo "$gid" >> "$R/retired-uids"; }
+    groupdel "$g" 2> /dev/null
+  done
+  rm -rf "${D:?}"
+  systemctl reset-failed "tando-$A.service" ${units[@]+"${units[@]}"} "tando-down@tando-$A.service" 2> /dev/null
+  # its slice last: stopped once nothing of the app runs in it, so systemd unloads it (no file left)
+  systemctl stop "$(app_slice)" 2> /dev/null; systemctl reset-failed "$(app_slice)" 2> /dev/null
+  [[ $purge == purge ]] && rm -rf "${BK:?}/$A"
+  fw_sync || echo "warning=could not reload the loopback rules (tando doctor)" >&2
+  echo "destroyed=$A"
+}
+
+cmd_unlock() { # app: clear an upload lease left by a client that went away
+  need_root; app "$1"; lease_lock
+  load "$D/upload" L
+  if [[ -z ${L[token]:-} ]]; then echo "held=0"; return; fi
+  if [[ -n ${L[id]:-} ]] && lease_live; then
+    die "release ${L[id]} is activating; that lease is freed when it has copied the upload"
+  fi
+  echo "held=1"; echo "who=${L[who]}"; echo "age=$(lease_age)"
+  rm -f "$D/upload"
+  pkill -KILL -u "tando-d-$A" 2> /dev/null || true   # end the deploy key's uploads with their lease
+}
+
+# ---- verbs: views ----------------------------------------------------------------------
+
+app_row() { # name of the array with this unit's systemctl fields
+  local -n _u=$1
+  local mem=0 max=${_u[MemoryMax]:-} up=0 k v
+  local mono=${_u[ActiveEnterTimestampMonotonic]:-0} cpu=${_u[CPUUsageNSec]:-0}
+  # (the unit's cgroup: in its app's slice; one deployed before the slices existed: system.slice)
+  local cgd=/sys/fs/cgroup/tando.slice/tando-${A//-/\\x2d}.slice/tando-$A.service
+  [[ -d $cgd ]] || cgd=$CG/tando-$A.service
+  local state=${_u[ActiveState]:-inactive} stat=$cgd/memory.stat
+  # memory shown is anon + shmem; MemoryCurrent also counts reclaimable page cache
+  if [[ -r $stat ]]; then
+    while read -r k v; do [[ $k == anon || $k == shmem ]] && mem=$((mem + v)); done < "$stat"
+  fi
+  [[ $max =~ ^[0-9]+$ ]] || max=0
+  [[ $cpu =~ ^[0-9]+$ ]] || cpu=0
+  [[ $state == active && $mono != 0 ]] && up=$((UPT - mono / 1000000))
+  has_unit || { [[ -n ${S[current]:-} ]] && state=active; }   # static: served by Caddy
+  [[ -n ${S[down]:-} ]] && state=failed
+  [[ -n ${S[stopped]:-} ]] && state=stopped   # stopped by the user (tando stop); inactive = it died
+  [[ ${S[phase]:-idle} != idle ]] && state=deploying
+  row app "$A" "$state" "${C[port]}" "${S[current]:-}" "${S[status_${S[current]:-x}]:-}" \
+    "$mem" "$max" "$cpu" "${_u[NRestarts]:-0}" "$up" "$(link)" "${C[recipe]:-}" \
+    "${C[backup]:-off}" "${S[last_backup]:-}" "${C[database]:-}" ${LG[$A]:-- - - -} "$(app_domains)" \
+    "${C[cpu]:--}" "${C[tasks]:-1024}" "${C[max_conns]:-256}" "${C[max_requests]:--}"
+  # (LG: 4 words, split on purpose; the last four: the app's limits, cpu "-" = none)
+}
+app_domains() { local x o=""; for x in ${C[domains]:-}; do o+="${o:+,}${x%|*}"; done; echo "${o:--}"; }
+
+# status [app]: a host row and one row per app; with an app also its releases and history
+cmd_status() {
+  local l k v a names=() units=() la mt=0 ma=0 cpus dt du
+  load "$R/host.conf" H
+  if [[ -n ${1:-} ]]; then
+    app "$1"; names=("$1")
+  else
+    for a in "$R"/apps/*/app.conf; do   # apps whose metadata this caller may read
+      [[ -r $a ]] && { a=${a%/app.conf}; names+=("${a##*/}"); }
+    done
+  fi
+  read -r UPT _ < /proc/uptime; UPT=${UPT%.*}
+  CG=/sys/fs/cgroup/system.slice
+  read -r la _ < /proc/loadavg
+  while read -r k v _; do
+    case $k in MemTotal:) mt=$v;; MemAvailable:) ma=$v;; esac
+  done < /proc/meminfo
+  # no forks for the host name and CPU count; df is the one left (statfs has no /proc file)
+  local hn x part lo hi; cpus=0
+  read -r hn < /proc/sys/kernel/hostname
+  IFS=, read -ra part < /sys/devices/system/cpu/online
+  for x in "${part[@]}"; do
+    lo=${x%-*} hi=${x#*-}; cpus=$((cpus + hi - lo + 1))
+  done
+  { read -r _; read -r _ dt du _; } < <(df -Pk /)
+  row host "$hn" "$cpus" "$la" $((mt * 1024)) $(((mt - ma) * 1024)) $((dt * 1024)) \
+    $((du * 1024)) "$UPT"
+  # host care's counts (tando-host's summary, root 600), as tando-status prints them
+  local hk hv hat _h1 htodo hfail hwarn
+  if [[ -r /var/lib/tando/hostcare/summary ]]; then
+    while IFS=$'\t' read -r hk hv hat _h1 htodo hfail hwarn _; do
+      [[ $hk == summary && $hv == 1 ]] && { row hostcare "$htodo" "$hfail" "$hwarn" "$hat"; break; }
+    done < /var/lib/tando/hostcare/summary
+  fi
+  ((${#names[@]})) || return 0
+  # log sizes (tando-logs caches its journal counts for a minute): appended to the app rows as
+  # bytes on disk (journal + request log), the journal cap, lines in 24 h, lines per hour
+  declare -gA LG=()
+  local r jb cap ab lines hl
+  if [[ $EUID -eq 0 && -x $LOGS ]]; then
+    local lk lr lsrc
+    while IFS=$'\t' read -r r a jb cap ab lines _ _ hl _ _ lk lr lsrc _; do
+      [[ $r == logs ]] || continue
+      [[ $jb =~ ^[0-9]+$ ]] || jb=0
+      [[ $ab =~ ^[0-9]+$ ]] || ab=0
+      LG[$a]="$((jb + ab)) ${cap:--} ${lines:--} ${hl:--}"
+      [[ $a == "${1:-}" ]] && LC="${lk:--} ${lr:--} ${lsrc:--}"   # retention, request log budget, cap source
+    done < <("$LOGS" log-stats ${1:+"$1"} 2> /dev/null)
+  fi
+  for a in "${names[@]}"; do units+=("tando-$a.service"); done
+  declare -A U
+  local i=0
+  # one systemctl call for all apps; blocks are separated by empty lines
+  while IFS= read -r l; do
+    if [[ -n $l ]]; then U[${l%%=*}]=${l#*=}; continue; fi
+    ( A=${names[i]} D=$R/apps/${names[i]}; load "$D/app.conf" C; load "$D/state" S; app_row U )
+    U=(); i=$((i + 1))
+  done < <(systemctl show -p ActiveState,MemoryMax,CPUUsageNSec,NRestarts \
+             -p ActiveEnterTimestampMonotonic "${units[@]}"; echo)
+  if [[ -n ${1:-} ]]; then
+    [[ -n ${LC:-} ]] && row logcfg "$1" ${LC}   # (3 words, split on purpose)
+    cmd_releases "$1"; cmd_history "$1" 5
+    local x; for x in ${C[domains]:-}; do row domain "${x%|*}" "${x#*|}" "$(cert_expiry "${x%|*}")"; done
+    # the last 16 minutes from tando-metrics (m rows: bucket, memory, cpu per mille, restarts, state)
+    [[ -x $R/bin/tando-metrics ]] && "$R/bin/tando-metrics" read "$1" 16 60 2> /dev/null
+  fi
+  # with an app, its offsite state (the file tando-offsite keeps; srv/status prints the same row)
+  if [[ -n ${1:-} && -r /var/lib/tando/offsite/state/$1 ]]; then
+    local -A OB=(); load "/var/lib/tando/offsite/state/$1" OB
+    [[ ${OB[enabled]:-} == 1 ]] && row offsite "${OB[last_upload]:-0}" "${OB[pending]:-0}" "${OB[oldest_pending]:-0}" \
+      "${OB[alert_hours]:-6}" "${OB[creds]:-}" "${OB[error]:-}"
+  fi
+  [[ -x $R/bin/tando-watch ]] && "$R/bin/tando-watch" brief ${1:+"$1"}   # active alerts
+  return 0
+}
+
+cmd_releases() {
+  app "$1"
+  local i cur last
+  for i in $(releases_by_seq | tac); do
+    cur=0 last=0
+    [[ $i == "${S[current]:-}" ]] && cur=1
+    [[ $i == "${S[last_good]:-}" ]] && last=1
+    row rel "$i" "${S[status_$i]:-pending}" "$cur" "$last"
+  done
+}
+
+cmd_history() { # [app] [n]
+  local n=${2:-20} f
+  [[ $n =~ ^[0-9]+$ ]] || die "bad count"
+  if [[ -n ${1:-} ]]; then
+    valid_app "$1" || die "invalid app name"
+    set -- "$R/apps/$1/history.tsv"
+  else
+    set -- "$R"/apps/*/history.tsv
+  fi
+  for f; do
+    [[ -r $f ]] || continue
+    f=${f%/history.tsv}
+    tail -n "$n" "$f/history.tsv" | awk -F '\t' 'NF == 12' | sed "s/^/hist\t${f##*/}\t/"
+  done
+}
+
+# ---- env: stored double-quoted with \ " ` $ escaped; systemd reads that back verbatim ----
+
+env_load() {
+  local -n _e=$1
+  local line k v out i c
+  _e=()
+  while IFS= read -r line; do
+    k=${line%%=*} v=${line#*=}
+    v=${v#\"}; v=${v%\"}; out=""
+    for ((i = 0; i < ${#v}; i++)); do
+      c=${v:i:1}
+      if [[ $c == '\' ]]; then i=$((i + 1)); c=${v:i:1}; fi
+      out+=$c
+    done
+    _e[$k]=$out
+  done < "$D/env"
+}
+env_save() { # array [file, default $D/env]
+  local -n _e=$1
+  local k v tmp dest=${2:-$D/env}
+  tmp=$(mktemp "$D/.env.XXXXXX") || return 1   # (its own name: never shared with another writer)
+  chown "root:$AU" "$tmp" && chmod 640 "$tmp" || { rm -f "$tmp"; return 1; }
+  # written whole to a temp file, flushed to disk, then renamed: a full disk or a power cut leaves
+  # the old env or the new one, never half of it
+  if for k in "${!_e[@]}"; do
+       v=${_e[$k]//\\/\\\\}; v=${v//\"/\\\"}; v=${v//\`/\\\`}; v=${v//\$/\\\$}
+       printf '%s="%s"\n' "$k" "$v"
+     done | sort > "$tmp" && sync "$tmp" && mv -f "$tmp" "$dest"; then return 0; fi
+  rm -f "$tmp"; return 1
+}
+
+protected_key() {
+  case $1 in
+    PORT|HOME|TANDO_DATA_DIR|DATABASE_PATH) return 0;;
+    DATABASE_URL) [[ ${C[database]:-} == postgres ]];;
+    *) return 1;;
+  esac
+}
+mask_url() { # postgres://role:secret@host/db -> postgres://role:****@host/db
+  local u=$1 pre post
+  [[ $u == *://*:*@* ]] || { echo "$u"; return; }
+  pre=${u%%@*} post=${u#*@}
+  echo "${pre%:*}:****@$post"
+}
+
+# env set|unset|ls <app>: set reads KEY=VALUE lines, unset reads KEY lines, from stdin.
+# Output: changed=0|1, restarted=0|1 and, when not restarted, why=<nothing-deployed|stopped|static>.
+# For an app that does not exist yet the values are staged ($R/staged/<app>/env, root 600; staged=1)
+# and the first configure (tando up) makes them the app's env: a required secret can be set first.
+cmd_env() {
+  need_root
+  local op=$1 line k
+  declare -A E
+  if valid_app "${2:-}" && [[ ! -e $R/apps/$2 ]] && [[ $op != ls || -f $R/staged/$2/env ]]; then
+    staged_lock
+    # (looked at again under the lock: a first configure may have created the app meanwhile)
+    [[ ! -e $R/apps/$2 ]] && { env_staged "$op" "$2"; return; }
+    exec 3>&-
+  fi
+  app "${2:-}"
+  [[ $op == ls ]] || { recover; lock 120; }
+  env_load E
+  declare -A OLD=(); for k in "${!E[@]}"; do OLD[$k]=${E[$k]}; done
+  env_edit "$op" || return 0
+  # the same values again: nothing to save, nothing to restart
+  if [[ ${#E[@]} == "${#OLD[@]}" ]]; then
+    local same=1
+    for k in "${!E[@]}"; do [[ -n ${OLD[$k]+x} && ${OLD[$k]} == "${E[$k]}" ]] || { same=0; break; }; done
+    ((same)) && { echo changed=0; echo healthy=1; return 0; }
+  fi
+  # a running app is first started with the new env beside the live one (on the pre-flight port,
+  # like a deploy): an env it does not start with is refused before anything restarts
+  if has_unit && [[ -n ${S[current]:-} && -z ${S[stopped]:-} && ${C[recipe]:-node} != container ]] &&
+     systemctl -q is-active "tando-$A"; then
+    env_save E "$D/.env.check" || die "could not write the env file (disk full?); nothing changed"
+    if ! env_preflight "$D/.env.check"; then
+      rm -f "$D/.env.check"
+      local out SAN; out=$(grep -v 'systemd\[\|tando-.*\.service: ' "$D/activation.log" 2> /dev/null | grep . | tail -2 | tr '\n' ' ' | cut -c1-300)
+      san_v "$out"
+      die "$A does not start with the new env (pre-flight: $PROBE_WHY${SAN:+; it said: $SAN}), so nothing was changed and it was not restarted"
+    fi
+    rm -f "$D/.env.check"
+  fi
+  env_save E || die "could not write the env file (disk full?); nothing changed"
+  echo changed=1
+  if ! has_unit; then echo restarted=0; echo why=static; echo healthy=1; return; fi
+  if [[ -z ${S[current]:-} ]]; then echo restarted=0; echo why=nothing-deployed; echo healthy=1; return; fi
+  if [[ -n ${S[stopped]:-} ]]; then echo restarted=0; echo why=stopped; echo healthy=1; return; fi
+  # was it serving before? Then a change that breaks it is undone, as a failed deploy is
+  local was_up=0
+  [[ -z ${S[down]:-} ]] && systemctl -q is-active "tando-$A" && was_up=1
+  restart_app
+  echo restarted=1
+  if via_caddy "$(app_unit)"; then echo healthy=1; return 0; fi
+  local why=$PROBE_WHY
+  if ((was_up)); then
+    E=(); for k in "${!OLD[@]}"; do E[$k]=${OLD[$k]}; done
+    env_save E || die "the app fails its health check with the new env ($why), and the previous env could not be written back (disk full?): fix the value with tando env set, or tando env unset it"
+    restart_app
+    if via_caddy "$(app_unit)"; then
+      AUDIT_RESULT=reverted
+      die "the app failed its health check with the new env ($why), so the previous env was put back and $A runs on it again: nothing changed (tando logs shows the app's output)"
+    fi
+    die "the app fails its health check with the new env ($why); the previous env was put back, but $A does not answer with it either: tando logs, tando doctor"
+  fi
+  echo healthy=0
+  echo "tando-agent: $A was not healthy before this change either, so the new env was kept; undo it with tando env set or tando env unset (tando env ls shows the values)" >&2
+}
+
+# env_preflight file: the current release with this env file on the pre-flight port, health-checked
+# (PROBE_WHY on failure; the app's output in activation.log)
+env_preflight() {
+  local cand=$1 spare=${C[preflight_port]:-$((C[port] + 100))} unit="tando-$A-envcheck-$$" args=() x rc=0
+  local rel=$D/releases/${S[current]}
+  [[ -d $rel ]] || return 0   # (nothing to try it with: the restart's own check decides)
+  ss -Hltn "sport = :$spare" | grepq . && { PROBE_WHY="pre-flight port $spare is in use"; return 1; }
+  while IFS= read -r x; do [[ $x == "EnvironmentFile=$D/env" ]] && x="EnvironmentFile=$cand"; args+=(-p "$x"); done < <(props "$spare" preflight)
+  systemd-run --quiet --collect --unit="$unit" "${args[@]}" -p "WorkingDirectory=$rel" "$AGENT" exec-app "$A" "$rel" ||
+    { PROBE_WHY="could not start the pre-flight unit"; return 1; }
+  if ! { probe "${C[health_timeout]:-60}" "$unit" "http://127.0.0.1:$spare$(health_path)" && own_listener "$spare" "$unit.service"; }; then
+    app_journal -u "$unit" -n 60 --no-pager -o cat > "$D/activation.log" 2>&1; rc=1
+  fi
+  systemctl stop "$unit" 2> /dev/null
+  return $rc
+}
+
+# env_staged op app: env set/unset/ls of an app that is not on this server yet
+# staged_lock: env set of apps not created yet, and the first configure that takes their values,
+# one at a time (fd 3, $R/staged/.lock, root only; held to the end of the verb)
+staged_lock() {
+  install -d -m 700 -o root -g root "$R/staged" || die "could not create $R/staged"
+  exec 3>"$R/staged/.lock"; chmod 600 "$R/staged/.lock"
+  flock -w 60 3 || die "another env change of an app not created yet takes over 60 s; try again"
+}
+env_staged() {
+  [[ -f $R/host.conf ]] || die "host not set up (tando host setup)"
+  A=$2 D=$R/staged/$2 AU=root
+  local -A C=()   # (no database yet: DATABASE_URL may be staged; tando's own value wins later)
+  declare -A E=()
+  [[ -f $D/env ]] && env_load E
+  [[ $1 == ls ]] || install -d -m 700 -o root -g root "$R/staged" "$D"
+  env_edit "$1" || return 0
+  if ((${#E[@]})); then env_save E; chmod 600 "$D/env"; else rm -rf "${D:?}"; fi
+  echo changed=1; echo staged=1; echo restarted=0; echo why=not-created; echo healthy=1
+}
+
+# env_edit op: apply stdin to E (set/unset), or list E (ls); returns 1 when there is nothing to save
+env_edit() {
+  local line k
+  case $1 in
+    ls)
+      for k in "${!E[@]}"; do
+        if [[ $k == DATABASE_URL ]]; then row env "$k" "$(mask_url "${E[$k]}")"; else row env "$k" "${E[$k]}"; fi
+      done | sort
+      return 1;;
+    set)
+      while IFS= read -r line; do
+        k=${line%%=*}
+        [[ $k =~ ^[A-Za-z_][A-Za-z0-9_]*$ && $line == *=* ]] || die "bad key: $k"
+        protected_key "$k" && die "$k is set by tando"
+        no_ctrl "${line#*=}" || die "control characters in the value of $k"
+        E[$k]=${line#*=}
+      done;;
+    unset)
+      local nokey="" n=0
+      while IFS= read -r k; do
+        [[ $k =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "bad key: $k"
+        protected_key "$k" && die "$k is set by tando"
+        if [[ -n ${E[$k]+x} ]]; then unset "E[$k]"; n=$((n + 1)); else nokey+=" $k"; fi
+      done
+      [[ -n $nokey ]] && echo "missing=${nokey# }"
+      ((n)) || { echo changed=0; echo healthy=1; return 1; };;
+    *) die "env: set, unset or ls";;
+  esac
+  return 0
+}
+
+# stop: Caddy answers 503 "stopped" at once (switched before the process stops, so requests in
+# flight finish), and the unit is disabled so a reboot keeps it stopped.
+# start/restart: proxy again first (Caddy holds new requests), then start; none fail.
+cmd_svc() { # start|stop|restart app
+  need_root; app "$2"; recover
+  [[ -n ${S[current]:-} ]] || die "nothing deployed yet"
+  lock 120; load "$D/state" S
+  if [[ $1 == stop ]]; then
+    [[ -n ${S[stopped]:-} ]] && { echo already=1; echo healthy=1; return; }
+    # the state says stopped only once Caddy answers 503 (write_caddy dies before the save)
+    S[stopped]=1; unset "S[down]"
+    write_caddy
+    save "$D/state" S || die "could not save the state"
+    has_unit && { systemctl disable -q --now "tando-$A" || die "systemctl stop failed"; }
+    echo healthy=1
+    return
+  fi
+  if has_unit && ! own_listener "${C[port]}" "tando-$A.service" && [[ $PROBE_WHY == *outside* ]]; then
+    die "port ${C[port]} of $A is held by another process ($PROBE_WHY); stop it, then tando $1"
+  fi
+  if [[ $1 == start && -z ${S[stopped]:-}${S[down]:-} ]] && { ! has_unit || systemctl is-active -q "tando-$A"; }; then
+    echo already=1; echo healthy=1; return
+  fi
+  restart_app || die "systemctl $1 failed"
+  if via_caddy "$(app_unit)"; then echo healthy=1; else echo healthy=0; fi
+}
+
+# app-down <unit>: run by tando-down@ when an app's unit has failed for good (start limit):
+# Caddy answers 503 at once instead of holding requests for a process that is not coming back
+cmd_app_down() {
+  need_root; app "${1#tando-}"
+  # wait for a command that holds the app (it may be what failed), then look again
+  lockfile "$D/lock"; exec 9>"$D/lock"; flock -w 300 9 || return 0
+  lock_mark app-down
+  load "$D/state" S
+  [[ $(systemctl show -P ActiveState "tando-$A") == failed ]] || return 0
+  S[down]=1
+  write_caddy
+  save "$D/state" S
+}
+
+cmd_logs() { # app [n] [follow]
+  app "$1"
+  local n=${2:-100} follow=()
+  [[ $n =~ ^[0-9]+$ ]] || die "bad count"
+  [[ ${3:-} == follow ]] && follow=(-f)
+  local j; j=$(jns)
+  exec journalctl ${j:+"$j"} -u "tando-$A.service" -n "$n" --no-pager -o short-iso "${follow[@]}"
+}
+
+# exec-app <app> [dir]: runs as the app user inside its unit. The start command comes from
+# app.conf. Without start_shell it is split on spaces and run with no shell.
+cmd_exec_app() {
+  app "$1"
+  local dir=${2:-$D/current} argv
+  [[ $dir == "$D/current" || $dir == "$D"/releases/* ]] || die "bad dir"
+  cd "$dir" || die "no release"
+  case ${C[recipe]:-node} in
+    container) exec_container "$dir";;
+    next) export HOSTNAME=127.0.0.1;;      # Next standalone binds to $HOSTNAME
+    python) [[ -d $dir/.venv ]] && export VIRTUAL_ENV=$dir/.venv PATH="$dir/.venv/bin:$PATH";;
+  esac
+  if [[ ${C[start_shell]:-} == true ]]; then exec /bin/sh -c "${C[start]}"; fi
+  read -ra argv <<< "${C[start]}"
+  exec "${argv[@]}"
+}
+
+# container: root Podman (podman itself needs root here, see docs/ARCHITECTURE.md), but the container
+# runs as the app's own uid (one-uid user namespace: container root = tando-<app>), with no
+# capabilities, no new privileges, a read-only root filesystem, published on 127.0.0.1 only
+exec_container() {
+  local dir=$1 img uid gid envf cport=${C[container_port]:-8080} k args
+  [[ $EUID -eq 0 ]] || die "container apps start as root"
+  img=$(< "$dir/IMAGE") || die "no image in $dir"
+  uid=$(id -u "tando-$A") gid=$(id -g "tando-$A")
+  declare -A E
+  env_load E
+  envf=$R/run/$A-$PORT.env
+  install -d -m 700 "$R/run"
+  for k in "${!E[@]}"; do printf '%s=%s
+' "$k" "${E[$k]}"; done > "$envf"
+  chmod 600 "$envf"
+  # slirp4netns (a user-space network per container, port forwarded by its own process) rather
+  # than the netavark bridge: with the bridge's NAT, a request in flight across a container switch
+  # could hang instead of failing fast and being retried by Caddy
+  args=(-d --sdnotify=conmon --rm --replace --init --name "tando-$A-$PORT" --cgroups=split --log-driver=passthrough
+    --network=slirp4netns:port_handler=slirp4netns
+    --pull=never --uidmap "0:$uid:1" --gidmap "0:$gid:1" --user 0:0 --read-only --cap-drop=all
+    --security-opt=no-new-privileges -p "127.0.0.1:$PORT:$cport" -e "PORT=$cport" --env-file "$envf")
+  if [[ -n ${C[data]:-} ]]; then   # podman (root) would mount a planted symlink's target
+    shared_ok data || die "shared/data is not a directory of $AU (a symbolic link?): refusing to mount it"
+    args+=(-v "$D/shared/data:${C[data]}")
+  fi
+  exec podman run "${args[@]}" "$img"
+}
+
+cmd_container_stop() { # app (ExecStop of a container unit): stop gracefully, then remove
+  valid_app "${1:-}" || die "invalid app name"
+  [[ ${PORT:-} =~ ^[0-9]+$ ]] || die "no PORT"
+  podman stop -i -t 10 "tando-$1-$PORT" > /dev/null
+  podman rm -f -i "tando-$1-$PORT" > /dev/null
+}
+
+# ---- scheduled jobs: ExecStart is always this runner; the command lives only in app.conf ----
+
+trim() { local s=$1; s=${s%"${s##*[![:space:]]}"}; echo "${s#"${s%%[![:space:]]*}"}"; }
+
+# Jobs take effect with a verified release and go back with it: each release keeps the jobs of
+# the tando.conf it was deployed with ($D/jobs/<id>, root 600), and the job units are always
+# those of the current release (jobs_follow, after a verify, a rollback or a recovery). A deploy
+# whose release fails never changes the schedule. A release from before this rule has no such
+# file: its jobs are those of app.conf.
+jobs_snap() { # id: record the jobs of app.conf (C) as release id's
+  local k
+  # (mkdir, never install -d: that would recreate an app directory a destroy has just removed)
+  [[ -d $D/jobs ]] || { mkdir -m 700 "$D/jobs" && chown root:root "$D/jobs"; } || return 1
+  for k in "${!C[@]}"; do [[ $k != job.* ]] || printf '%s=%s\n' "$k" "${C[$k]}"; done | sort > "$D/jobs/$1.tmp" &&
+    mv -f "$D/jobs/$1.tmp" "$D/jobs/$1" || { rm -f "$D/jobs/$1.tmp"; return 1; }
+}
+# shellcheck disable=SC2034  # J is read by sync_jobs through its nameref
+jobs_follow() { # the job units become those of the current release (none without one)
+  local id=${S[current]:-} k
+  local -A J=()
+  if [[ -n $id && -f $D/jobs/$id ]]; then load "$D/jobs/$id" J
+  elif [[ -n $id ]]; then for k in "${!C[@]}"; do [[ $k == job.* ]] && J[$k]=${C[$k]}; done; fi
+  sync_jobs J
+}
+# sync_jobs [array]: the units of exactly these jobs (default: app.conf's); only what differs is
+# written, systemd is reloaded once and only then, a timer is enabled only when it is not yet
+sync_jobs() {
+  local -n _jobs=${1:-C}
+  local k n f x cal want=" " changed=0 new=()
+  for k in "${!_jobs[@]}"; do
+    [[ $k == job.* ]] || continue
+    n=${k#job.}
+    cal=$(trim "${_jobs[$k]%%|*}")
+    if ! systemd-analyze calendar "$cal" &> /dev/null; then
+      echo "tando-agent: bad schedule for job $n: $cal (left out)" >&2; continue
+    fi
+    want+="$n "
+    f=/etc/systemd/system/tando-$A-job-$n
+    [[ -f $f.service && -f $f.timer ]] || changed=1
+    { printf '[Unit]\nDescription=tando job %s %s\n\n[Service]\nType=oneshot\n' "$A" "$n"
+      printf 'ExecStart=%s run-job %s %s\nWorkingDirectory=%s\n' "$AGENT" "$A" "$n" "$(job_dir)"
+      props - job
+    } > "$f.service.new"
+    printf '[Unit]\nDescription=tando job timer %s %s\n\n[Timer]\nOnCalendar=%s\nAccuracySec=1s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' \
+      "$A" "$n" "$cal" > "$f.timer.new"
+    for x in service timer; do
+      if cmp -s "$f.$x.new" "$f.$x"; then rm -f "$f.$x.new"; else mv -f "$f.$x.new" "$f.$x"; changed=1; fi
+    done
+    new+=("tando-$A-job-$n.timer")
+  done
+  for f in /etc/systemd/system/tando-"$A"-job-*.timer; do
+    [[ -f $f ]] || continue
+    n=${f##*/tando-"$A"-job-}; n=${n%.timer}
+    [[ $want == *" $n "* ]] && continue
+    systemctl disable -q --now "tando-$A-job-$n.timer"
+    rm -f "$f" "${f%.timer}.service"; changed=1
+  done
+  ((changed)) && systemctl daemon-reload
+  # the timers not yet enabled and running, in one call (200 jobs: one systemctl, not 200)
+  local todo=()
+  for k in ${new[@]+"${new[@]}"}; do
+    systemctl -q is-enabled "$k" 2> /dev/null && systemctl -q is-active "$k" && continue
+    todo+=("$k")
+  done
+  ((${#todo[@]})) && systemctl enable -q --now "${todo[@]}"
+  return 0
+}
+
+# where jobs run: the current release, or shared/ when the app user cannot read the release
+job_dir() { if has_unit && [[ ${C[recipe]:-node} != container ]]; then echo "$D/current"; else echo "$D/shared"; fi; }
+
+cmd_run_job() { # app name (as the app user)
+  app "$1"
+  local cmd=${C[job.$2]:-}
+  [[ -n $cmd ]] || die "no such job"
+  cd "$(job_dir)" || die "no release"
+  exec /bin/bash -c "${cmd#*|}"
+}
+
+# job-run <app> <name>: run a scheduled job now, in its own unit (tando-<app>-job-<name>.service:
+# the fixed runner run-job and the job sandbox, props - job), wait for it, then print its output
+# (log=<line>, the last 200 lines of this run) and result=, status= (its exit status), secs=.
+# A run the timer started already is waited for, not doubled.
+cmd_job_run() {
+  need_root; app "$1"
+  local n=${2:-} u inv t0 l SAN
+  [[ $n =~ ^[A-Za-z0-9_-]{1,40}$ && -n ${C[job.$n]:-} ]] || die "$A has no job ${n//[^A-Za-z0-9_-]/?} (tando jobs lists them)"
+  u=tando-$A-job-$n.service
+  [[ -f /etc/systemd/system/$u ]] ||
+    die "job $n is not scheduled yet: jobs take effect with the first verified release that has them (tando up; tando status)"
+  AUDIT_NOTE="job $n"
+  t0=$(ds)
+  systemctl start "$u" < /dev/null 2> /dev/null   # (a oneshot: returns when the job has ended)
+  inv=$(systemctl show -P InvocationID "$u")
+  if [[ $inv =~ ^[0-9a-f]{32}$ ]]; then
+    # the job's stdout/stderr of this run, in its app's journal namespace (or the system journal
+    # when it has none): journald may still be writing the last lines, so wait up to 3 s for them
+    local i out
+    for i in 1 2 3 4 5 6; do
+      journalctl --sync 2> /dev/null; [[ -n $(jns) ]] && journalctl "$(jns)" --sync 2> /dev/null
+      out=$(journalctl --namespace='*' "_SYSTEMD_INVOCATION_ID=$inv" _TRANSPORT=stdout -o cat --no-pager -n 200 2> /dev/null)
+      [[ -n $out ]] && break
+      sleep 0.5
+    done
+    [[ -n $out ]] && while IFS= read -r l; do san_v "$l"; echo "log=$SAN"; done <<< "$out"
+  fi
+  echo "result=$(systemctl show -P Result "$u")"
+  echo "status=$(systemctl show -P ExecMainStatus "$u")"
+  echo "secs=$(el "$t0")"
+  [[ $(systemctl show -P Result "$u") == success ]] || AUDIT_RESULT=1
+  return 0
+}
+
+cmd_jobs() {
+  app "$1"
+  local k n line
+  declare -A U
+  for k in $(printf '%s\n' "${!C[@]}" | grep '^job\.' | sort); do
+    n=${k#job.}; U=()
+    while IFS= read -r line; do U[${line%%=*}]=${line#*=}; done < <(
+      systemctl show --timestamp=unix -p NextElapseUSecRealtime,LastTriggerUSec "tando-$A-job-$n.timer"
+      systemctl show -p Result,ExecMainStatus "tando-$A-job-$n.service")
+    row job "$n" "$(trim "${C[$k]%%|*}")" "${U[NextElapseUSecRealtime]#@}" "${U[LastTriggerUSec]#@}" \
+      "${U[Result]:-}" "${U[ExecMainStatus]:-}" "$(trim "${C[$k]#*|}")"
+  done
+}
+
+# ---- dispatch ------------------------------------------------------------------------------
+
+verb=${1:-}
+shift || true
+# one audit line per mutating verb and per read of a secret; deploys are written by the activation
+case $verb in
+  setup) audit setup -;;
+  runtime) audit runtime -;;
+  domain-add|domain-rm) audit "$verb" "${1:-}";;
+  activate|run-activation) audit deploy "${1:-}";;
+  configure|rollback|env-set|env-unset|env-ls|start|stop|restart|unlock|destroy|backup-run|\
+  backup-restore|backup-cat|db-url|db-psql|shell|job-run) audit "$verb" "${1:-}";;
+esac
+case $verb in
+  info) cmd_info;;
+  setup) cmd_setup "$@";;
+  runtime) cmd_runtime "$@";;
+  domain-add) cmd_domain add "$@";;
+  domain-rm) cmd_domain rm "$@";;
+  domain-ls) cmd_domain ls "$@";;
+  domain-check) cmd_domain_check "$@";;
+  doctor) cmd_doctor "$@";;
+  configure) cmd_configure "$@";;
+  begin) cmd_begin "$@";;
+  end) cmd_end "$@";;
+  activate) cmd_activate "$@";;
+  run-activation) cmd_run_activation "$@";;
+  recover) cmd_recover "$@";;
+  recover-all) cmd_recover_all;;
+  rollback) cmd_rollback "$@";;
+  deploy-status) cmd_deploy_status "$@";;
+  status) cmd_status "$@";;
+  releases) cmd_releases "$@";;
+  history) cmd_history "$@";;
+  env-set) cmd_env set "$@";;
+  env-unset) cmd_env unset "$@";;
+  env-ls) cmd_env ls "$@";;
+  start|stop|restart) cmd_svc "$verb" "$@";;
+  logs|log-stats|log-doctor|req-summary|req-tail|req-errors|audit-read|errors)
+    if [[ $verb == logs ]] && valid_app "${1:-}" &&
+       [[ $(sed -n 's/^recipe=//p' "$R/apps/$1/app.conf" 2> /dev/null) == static ]]; then
+      die "$1 is a static site: it has no process and no app log; tando requests shows its requests"
+    fi
+    if [[ ! -x $LOGS ]]; then
+      [[ $verb == logs ]] && cmd_logs "$@" && exit 0
+      die "tando-logs is not installed: run tando host setup"
+    fi
+    exec "$LOGS" "$verb" "$@";;
+  exec-app) cmd_exec_app "$@";;
+  run-job) cmd_run_job "$@";;
+  jobs) cmd_jobs "$@";;
+  unlock) cmd_unlock "$@";;
+  app-down) cmd_app_down "$@";;
+  container-stop) cmd_container_stop "$@";;
+  destroy) cmd_destroy "$@";;
+  backup-run) cmd_backup_run "$@";;
+  backup-ls) cmd_backup_ls "$@";;
+  backup-cat) cmd_backup_cat "$@";;
+  backup-restore) cmd_backup_restore "$@";;
+  db-url) cmd_db_url "$@";;
+  db-psql) cmd_db_psql "$@";;
+  shell) cmd_shell "$@";;
+  shell-put) cmd_shell_put "$@";;
+  busy) cmd_busy "$@";;
+  job-run) cmd_job_run "$@";;
+  host)   # host care (docs/HOSTCARE.md): the server itself, answered by tando-host (Go, srv/hostcare)
+    need_root
+    [[ -x $R/bin/tando-host ]] || die "host care is not installed on <host>: tando host setup <host> installs it"
+    exec "$R/bin/tando-host" "$@";;
+  adopt-scan|adopt-apply|adopt-run|adopt-status|adopt-undo|adopt-undo-run)
+    # `tando adopt` (docs/MIGRATION.md): the client installs $R/bin/tando-adopt before calling these
+    [[ -f $R/bin/tando-adopt && $(stat -c %U:%a "$R/bin/tando-adopt") == root:[67][04][04] ]] ||
+      die "the adopt helper is not installed: run tando adopt from the laptop"
+    # lint: allow RL03 R is /opt/tando; the helper is checked above: root's, writable by root only
+    . "$R/bin/tando-adopt"
+    "cmd_${verb//-/_}" "$@";;
+  *) die "unknown verb: $verb";;
+esac
+exit 0

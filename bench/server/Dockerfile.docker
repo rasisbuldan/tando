@@ -1,0 +1,7 @@
+# Approach B server: the bench base plus Docker Engine (Ubuntu's docker.io). Caddy is disabled:
+# kamal-proxy owns port 80. Node stays installed but unused (the app runs from its image).
+FROM tando-bench-base:latest
+RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
+ && rm -rf /var/lib/apt/lists/* \
+ && systemctl disable caddy.service && systemctl enable docker.service containerd.service \
+ && usermod -aG docker vmadmin

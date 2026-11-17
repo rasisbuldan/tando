@@ -1,0 +1,40 @@
+# ShellCheck configuration for tando (read by test/lint.sh and by editors).
+# Strict by default: every check is on, including optional ones that fit this codebase. Each
+# disabled code below says why. test/lint.sh adds tando-specific checks shellcheck cannot do.
+
+# lib/*.sh and test/lib.sh are sourced fragments without a shebang; they are bash, not sh.
+shell=bash
+# Follow `. file` / `source file` where the path can be resolved, relative to the script.
+external-sources=true
+source-path=SCRIPTDIR
+source-path=SCRIPTDIR/..
+
+# Optional checks worth having here.
+enable=avoid-nullary-conditions    # [ "$x" ] -> [ -n "$x" ]: intent is explicit
+enable=check-unassigned-uppercase  # typo in an UPPER_CASE global is otherwise silent
+enable=deprecate-which             # command -v is the portable lookup
+
+# SC1090/SC1091: "can't follow non-constant source" / "not following". bin/tando sources
+# "$TANDO_HOME/lib/*.sh" and plugin commands lib/cmd-<name>.sh by design; every one of those
+# files is linted on its own, so following them adds nothing but noise.
+disable=SC1090,SC1091
+
+# SC2016: "expressions don't expand in single quotes". Single-quoted text is how this code
+# passes programs to awk, perl, sed and to the remote shell over ssh (expansion on the server
+# is the point). Expansions that must happen locally are caught by SC2086/SC2029 and by the
+# lint.sh ssh-quoting check instead.
+disable=SC2016
+
+# Not enabled: quote-safe-variables (SC2248). It flags every `[ $rc -ne 0 ]` and `$i`; about 50
+# hits, none a real risk. Unquoted expansions that matter (SC2086, ssh strings) are still checked.
+
+# SC2154: "var is referenced but not assigned". The client reads agent output with
+# kv_read, which assigns K_<key> through `printf -v`; shellcheck cannot see dynamic assignment,
+# so every K_* use would be flagged. Unassigned typos are caught at run time by `set -u`
+# (test/lint.sh requires it) and by the e2e suites.
+disable=SC2154
+
+# SC2031/SC2030: "modification is local to a subshell" (info). Tests run checks in ( ... )
+# on purpose to keep state from leaking between them; the rare real mistake is visible
+# in tests because the value is then asserted.
+disable=SC2030,SC2031

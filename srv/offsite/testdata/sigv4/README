@@ -1,0 +1,8 @@
+SigV4 test vectors, one file each: "key: value" lines, then the expected Authorization header
+after "authz:" (and, where given, the canonical request after a line "--- creq").
+
+get-vanilla, get-vanilla-query-order-key-case, post-vanilla: AWS's aws-sig-v4-test-suite
+(service "service", region us-east-1, credentials AKIDEXAMPLE).
+s3-get-object, s3-put-object, s3-get-lifecycle, s3-list-objects: the worked examples of
+"Signature Calculations for the Authorization Header: Transferring Payload in a Single Chunk"
+in the Amazon S3 API reference (sig-v4-header-based-auth.html).

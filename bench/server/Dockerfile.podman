@@ -1,0 +1,8 @@
+# Approach D server: the bench base plus Podman (quadlet). Caddy stays as the proxy.
+FROM tando-bench-base:latest
+RUN apt-get update && apt-get install -y --no-install-recommends podman crun conmon netavark aardvark-dns \
+      fuse-overlayfs nftables \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /etc/containers/registries.conf.d \
+ && printf '[[registry]]\nlocation = "tando-bench-registry:5000"\ninsecure = true\n' \
+      > /etc/containers/registries.conf.d/50-bench.conf

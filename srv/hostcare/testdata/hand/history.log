@@ -1,0 +1,15 @@
+
+Start-Date: 2026-11-15  06:10:02
+Commandline: /usr/bin/unattended-upgrade
+Upgrade: libc6:arm64 (2.39-0ubuntu8.9, 2.39-0ubuntu8.12), libc-bin:arm64 (2.39-0ubuntu8.9, 2.39-0ubuntu8.12)
+End-Date: 2026-11-15  06:10:09
+
+Start-Date: 2026-11-16  10:00:00
+Commandline: apt-get install -y -q curl
+Requested-By: vmadmin (1000)
+Install: curl:arm64 (8.5.0-2ubuntu10.6), libcurl4t64:arm64 (8.5.0-2ubuntu10.6, automatic)
+End-Date: 2026-11-16  10:00:05
+
+Start-Date: 2026-11-16  11:00:00
+Commandline: apt-get update
+End-Date: 2026-11-16  11:00:05

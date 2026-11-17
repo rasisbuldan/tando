@@ -1,0 +1,48 @@
+// Package metrics keeps per-minute samples of every tando app and of the host, for the graphs of
+// `tando top` and the trend in `tando status` (docs/TOP.md). Nothing keeps running: `sample` is
+// run once a minute by tando-watch.service (ExecStartPre, see tando-watch's install) and costs
+// one systemctl call and a few /sys and /proc reads; `read` needs no root.
+//
+// Files, in Dir (/var/lib/tando/metrics, 755), all root 644 so `tando top` reads them as the
+// admin's own user:
+//
+//	<app>.tsv, <app>.tsv.1   time  anon_bytes  cpu_usec_since_last_sample  restarts  state(r|s|f|a)
+//	host.tsv, host.tsv.1     time  load1x100  mem_used_bytes  mem_total_bytes
+//	.state                   "<app> <cpu usage_usec> <file start time> <lines>" per app, and
+//	                         ".host 0 <start> <lines>"
+//
+// Each file covers at most 3.5 days or 5100 lines, then becomes .1 (the old .1 is dropped), so an
+// app keeps at most 7 days, about 2 x 160 KB. The format is the shell version's: files it wrote
+// are read as they are.
+//
+// Layer: domain. It imports internal/* only; no other domain package, not daemon.
+package metrics
+
+import (
+	"path/filepath"
+
+	"tando/srv/internal/env"
+)
+
+const (
+	span     = 302400 // seconds one file covers (3.5 days)
+	maxLines = 5100   // lines one file holds
+	fileMode = 0o644  // readable without root: tando top reads as the admin's user
+	dirMode  = 0o755
+)
+
+// Metrics samples into and reads from Dir.
+type Metrics struct {
+	Env env.Env
+	Dir string
+}
+
+// New uses dir, or Env.Lib/metrics when dir is "" (the shell's TANDO_METRICS_DIR override).
+func New(e env.Env, dir string) Metrics {
+	if dir == "" {
+		dir = filepath.Join(e.Lib, "metrics")
+	}
+	return Metrics{Env: e, Dir: dir}
+}
+
+func (m Metrics) file(who string) string { return filepath.Join(m.Dir, who+".tsv") }

@@ -1,0 +1,45 @@
+[38;5;242m╭─[0m [1mtando go · Step 7 of 8 · Run[0m [38;5;242m─────────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m
+[38;5;242m│[0m [32m✓ [0mServer  [32m✓ [0mSetup  [32m✓ [0mApp  [32m✓ [0mLink  [32m✓ [0mExtras  [32m✓ [0mReview  [1;36m● Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m
+[38;5;242m│[0m [2m◌ 1/4[0m  tando host add prod vmadmin@127.0.0.1 --port 2275 --key /tmp/tando-shot.gbePtA/id --inse…[0m[0m [38;5;242m│[0m
+[38;5;242m│[0m [2m◌ 2/4[0m  tando host setup prod public_port=8375[0m                                                    [38;5;242m│[0m
+[38;5;242m│[0m [2m◌ 3/4[0m  tando init -H prod[0m                                                                        [38;5;242m│[0m
+[38;5;242m│[0m [2m◌ 4/4[0m  tando up[0m                                                                                  [38;5;242m│[0m
+[38;5;242m╰─[0m [1m[0m[2meach command is shown before it runs[0m [38;5;242m──────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m
+
+[2m[1/4][0m [1m$ tando host add prod vmadmin@127.0.0.1 --port 2275 --key /tmp/tando-shot.gbePtA/id \[0m
+[1m      --insecure-test --yes[0m
+[32m● connected[0m sudo ok, not set up yet: tando host setup prod
+added host prod (vmadmin@127.0.0.1, port 2275, host key NOT checked)
+
+[2m[2/4][0m [1m$ tando host setup prod public_port=8375[0m
+[38;5;242m╭─[0m [1mhost setup prod[0m [38;5;242m────────────────────────────────────────────────────────────[0m [2mvmadmin@127.0.0.1[0m [38;5;242m─╮[0m
+[38;5;242m│[0m [32m✓[0m [2m1/8[0m  agent     [0m  [2m        0.1.0 in /opt/tando/bin[0m[0m                                               [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m2/8[0m  packages  [0m  [2m        installed rsync curl nftables[0m[0m                                         [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m3/8[0m  caddy     [0m  [2m        2.6.2 (installed now)[0m[0m                                                 [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m4/8[0m  config    [0m  [2m        tando sites imported; admin API on a unix socket[0m[0m                      [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m5/8[0m  firewall  [0m  [2m        loopback rules per app[0m[0m                                                [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m6/8[0m  system    [0m  [2m        units, journals[0m[0m                                                       [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m7/8[0m  apps      [0m  [2m        0 apps[0m[0m                                                                [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m8/8[0m  checks    [0m  [2m        alert checks and metrics, every minute[0m[0m                                [38;5;242m│[0m
+[38;5;242m│[0m [2mlinks     [0m  http://<app>.localhost:8375  (tls off)[0m                                               [38;5;242m│[0m
+[38;5;242m│[0m [2mruntimes  [0m  none yet: tando up installs what an app needs[0m                                        [38;5;242m│[0m
+[38;5;242m│[0m [2mtook      [0m  57s  [2maarch64, caddy 2.6.2[0m[0m                                                            [38;5;242m│[0m
+[38;5;242m╰─[0m [1m[0m[2mnext: cd your-app && tando up[0m [38;5;242m─────────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m
+
+[2m[3/4][0m [1m$ tando init -H prod[0m
+wrote tando.conf (static, host prod)
+
+[2m[4/4][0m [1m$ tando up[0m
+[38;5;242m╭─[0m [1mdeploy landing[0m [38;5;242m──────────────────────────────────────────────────────────────────────────[0m [2mprod[0m [38;5;242m─╮[0m
+[38;5;242m│[0m [2m–[0m [2m1/7[0m  [2mbuild     [0m  [2m          nothing to build (no build in tando.conf)[0m[0m                           [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m2/7[0m  stage     [0m  [2m  0.1s  1 file[0m[0m                                                                [38;5;242m│[0m
+[38;5;242m│[0m         created landing on prod: user tando-landing, port 4100[0m                                   [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m3/7[0m  upload    [0m  [2m  0.1s  1 file changed, 276 B sent[0m[0m                                            [38;5;242m│[0m
+[38;5;242m│[0m         release 20261114-113023[0m                                                                  [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m4/7[0m  copy      [0m  [2m  0.0s[0m[0m                                                                        [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m5/7[0m  preflight [0m  [2m  0.0s[0m[0m                                                                        [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m6/7[0m  switch    [0m  [2m  0.1s[0m[0m                                                                        [38;5;242m│[0m
+[38;5;242m│[0m [32m✓[0m [2m7/7[0m  verify    [0m  [2m  0.1s[0m[0m                                                                        [38;5;242m│[0m
+[38;5;242m╰─[0m [1m[0m[2mlive in 1.9s  http://landing.localhost:8375[0m [38;5;242m───────────────────────────────────────────────────[0m[38;5;242m─╯[0m
+

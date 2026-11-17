@@ -1,0 +1,12 @@
+{
+  "name": "tando-cli",
+  "version": "0.0.0",
+  "description": "Deploy apps from your laptop to your own Linux server over ssh",
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://github.com/OWNER/tando",
+  "repository": { "type": "git", "url": "git+https://github.com/OWNER/tando.git" },
+  "bin": { "tando": "bin/tando" },
+  "os": ["darwin", "linux"],
+  "files": [],
+  "scripts": {}
+}

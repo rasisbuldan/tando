@@ -1,0 +1,37 @@
+[?1049h[?25l[H[2J[?25l[H[38;5;242m╭─[0m [1mtando go · Step 6 of 8 · Review[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [32m✓ [0mServer  [32m✓ [0mSetup  [32m✓ [0mApp  [32m✓ [0mLink  [32m✓ [0mExtras  [1;36m● Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mReview[0m[0m                                                                                           [38;5;242m│[0m[K
+[38;5;242m│[0m server   prod  vmadmin@127.0.0.1[0m                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m app      landing (static), memory 256M, health /[0m                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m link     http://landing.localhost:8375[0m                                                           [38;5;242m│[0m[K
+[38;5;242m│[0m extras   alerts off, CI off[0m                                                                      [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m These run, in this order:[0m                                                                        [38;5;242m│[0m[K
+[38;5;242m│[0m   [1;36mtando host add prod vmadmin@127.0.0.1 --port 2275 --key /tmp/tando-shot.gbePtA/id --insecure-…[0m[0m [38;5;242m│[0m[K
+[38;5;242m│[0m   [1;36mtando host setup prod public_port=8375[0m[0m                                                         [38;5;242m│[0m[K
+[38;5;242m│[0m   [1;36mtando init -H prod[0m[0m                                                                             [38;5;242m│[0m[K
+[38;5;242m│[0m   [1;36mtando up[0m[0m                                                                                       [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m [1m1  Run now [2m(recommended)[0m[0m[0m                                                                       [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mnothing has changed anywhere until now[0m[0m                                                     [38;5;242m│[0m[K
+[38;5;242m│[0m   2  Go back and change something[0m                                                                [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1m↑↓/1-9[0m[2m move[0m [2m·[0m [0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mb[0m[2m back[0m [2m·[0m [0m[1ms[0m[2m skip[0m [2m·[0m [0m[1mq[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 6 of 8 · Review[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [32m✓ [0mServer  [32m✓ [0mSetup  [32m✓ [0mApp  [32m✓ [0mLink  [32m✓ [0mExtras  [1;36m● Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mReview[0m[0m                                                                                           [38;5;242m│[0m[K
+[38;5;242m│[0m server   prod  vmadmin@127.0.0.1[0m                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m app      landing (static), memory 256M, health /[0m                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m link     http://landing.localhost:8375[0m                                                           [38;5;242m│[0m[K
+[38;5;242m│[0m extras   alerts off, CI off[0m                                                                      [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m These run, in this order:[0m                                                                        [38;5;242m│[0m[K
+[38;5;242m│[0m   [1;36mtando host add prod vmadmin@127.0.0.1 --port 2275 --key /tmp/tando-shot.gbePtA/id --insecure-…[0m[0m [38;5;242m│[0m[K
+[38;5;242m│[0m   [1;36mtando host setup prod public_port=8375[0m[0m                                                         [38;5;242m│[0m[K
+[38;5;242m│[0m   [1;36mtando init -H prod[0m[0m                                                                             [38;5;242m│[0m[K
+[38;5;242m│[0m   [1;36mtando up[0m[0m                                                                                       [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m [1m1  Run now [2m(recommended)[0m[0m[0m                                                                       [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mnothing has changed anywhere until now[0m[0m                                                     [38;5;242m│[0m[K
+[38;5;242m│[0m   2  Go back and change something[0m                                                                [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1m↑↓/1-9[0m[2m move[0m [2m·[0m [0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mb[0m[2m back[0m [2m·[0m [0m[1ms[0m[2m skip[0m [2m·[0m [0m[1mq[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[0m[?25h

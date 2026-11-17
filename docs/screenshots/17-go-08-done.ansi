@@ -1,0 +1,13 @@
+[38;5;242m╭─[0m [1mtando go · Step 8 of 8 · Done[0m [38;5;242m───────────────────────────────────────────────────────────[0m [2mprod[0m [38;5;242m─╮[0m
+[38;5;242m│[0m [32m✓ [0mServer  [32m✓ [0mSetup  [32m✓ [0mApp  [32m✓ [0mLink  [32m✓ [0mExtras  [32m✓ [0mReview  [32m✓ [0mRun  [32m✓ [0mDone[0m                              [38;5;242m│[0m
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m
+[38;5;242m│[0m [32m✓[0m [1mlanding is live[0m  http://landing.localhost:8375[0m                                                 [38;5;242m│[0m
+[38;5;242m│[0m [2mtook      [0m  1m 5s[0m                                                                                [38;5;242m│[0m
+[38;5;242m├─[0m [1mnext[0m [38;5;242m──────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m
+[38;5;242m│[0m [33m●[0m landing has no domain of its own[0m                                                               [38;5;242m│[0m
+[38;5;242m│[0m   [1;36mtando domain add example.com[0m[0m                                                                   [38;5;242m│[0m
+[38;5;242m│[0m [33m●[0m no one is told when an app goes down[0m                                                           [38;5;242m│[0m
+[38;5;242m│[0m   [1;36mtando alerts notifier add phone ntfy[0m[0m                                                           [38;5;242m│[0m
+[38;5;242m│[0m [33m●[0m deploys of landing only run from this laptop[0m                                                   [38;5;242m│[0m
+[38;5;242m│[0m   [1;36mtando ci setup && tando ci github[0m[0m                                                              [38;5;242m│[0m
+[38;5;242m╰─[0m [1m[0m[2mtando next: every suggestion · tando cheat: the commands that matter[0m [38;5;242m──────────────────────────[0m[38;5;242m─╯[0m

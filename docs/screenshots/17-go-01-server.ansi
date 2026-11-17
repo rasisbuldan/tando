@@ -1,0 +1,181 @@
+[?1049h[?25l[H[2J[?25l[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m [1;36m_[0m[0m                                                                                              [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m [1;36m_[0m[0m                                                                                              [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m v[1;36m_[0m[0m                                                                                             [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vm[1;36m_[0m[0m                                                                                            [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vma[1;36m_[0m[0m                                                                                           [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmad[1;36m_[0m[0m                                                                                          [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadm[1;36m_[0m[0m                                                                                         [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmi[1;36m_[0m[0m                                                                                        [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmin[1;36m_[0m[0m                                                                                       [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmin@[1;36m_[0m[0m                                                                                      [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmin@1[1;36m_[0m[0m                                                                                     [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmin@12[1;36m_[0m[0m                                                                                    [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmin@127[1;36m_[0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmin@127.[1;36m_[0m[0m                                                                                  [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmin@127.0[1;36m_[0m[0m                                                                                 [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmin@127.0.[1;36m_[0m[0m                                                                                [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmin@127.0.0[1;36m_[0m[0m                                                                               [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmin@127.0.0.[1;36m_[0m[0m                                                                              [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmin@127.0.0.1[1;36m_[0m[0m                                                                             [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 1 of 8 · Server[0m [38;5;242m──────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [1;36m● Server[0m  [2m○ Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour server's address[0m[0m                                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m The IP address or name of a server with Ubuntu 24.04 or newer and ssh.[0m                           [38;5;242m│[0m[K
+[38;5;242m│[0m tando installs what it needs there. You can paste user@address.[0m                                  [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m Address [2m[none][0m[0m                                                                                   [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m vmadmin@127.0.0.1[1;36m_[0m[0m                                                                             [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mesc[0m[2m back[0m [2m·[0m [0m[1mctrl-c[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[0m[?25h[?1049l

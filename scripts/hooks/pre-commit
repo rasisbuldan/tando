@@ -1,0 +1,8 @@
+#!/bin/bash
+# pre-commit: refuse a commit whose staged files hold credentials or private details
+# (scripts/secret-scan.sh --staged: it scans what will be committed, not the working tree).
+# Enable once per clone with `make hooks` (git config core.hooksPath scripts/hooks).
+# A deliberate test fixture goes in scripts/secret-scan.allow with a reason.
+set -u
+root=$(git rev-parse --show-toplevel) || exit 1
+exec "$root/scripts/secret-scan.sh" --staged

@@ -1,0 +1,110 @@
+# Tests for the tando repository itself. Written without being able to run it (no GitHub access
+# while it was made): see docs/TESTING.md "CI" for the assumptions and what to check first.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SHELLCHECK_VERSION: v0.11.0
+  TANDO_COLOR: never
+
+jobs:
+  secrets:
+    # credentials and private details (keys, tokens, real addresses, home paths, e-mail): no
+    # baseline, any finding fails; deliberate fixtures are in scripts/secret-scan.allow
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: the scanner catches every kind it claims (fixtures made at test time)
+        run: test/secret-scan-test.sh
+      - name: scan every file in the repository
+        run: scripts/secret-scan.sh
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: "shellcheck ${{ env.SHELLCHECK_VERSION }} (pinned: the baseline depends on its version)"
+        run: |
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            | tar -xJ -C "$RUNNER_TEMP"
+          echo "SHELLCHECK=$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}/shellcheck" >> "$GITHUB_ENV"
+      - run: sudo apt-get install -y --no-install-recommends zsh
+      - uses: actions/setup-go@v5   # the Go server programs (srv/go.mod); same Go, same binary bytes
+        with:
+          go-version-file: srv/go.mod
+          cache: false
+      - name: lint (new findings fail; the baseline is test/lint-baseline.txt)
+        run: test/lint.sh
+      - name: Go server programs (gofmt, vet, tests, no-shell lint, layering, both CPUs)
+        run: test/go.sh
+      - name: release archive is reproducible (binaries included)
+        run: scripts/release.sh --check
+
+  ui:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5   # the Go server programs (srv/go.mod); same Go, same binary bytes
+        with:
+          go-version-file: srv/go.mod
+          cache: false
+      - name: ui tests (macOS /bin/bash is 3.2.57)
+        run: BASH_BIN=/bin/bash /bin/bash test/ui-test.sh
+      - name: laptop side under macOS /bin/bash (bash -n, ui-test, local commands)
+        if: runner.os == 'macOS'
+        run: test/portability.sh mac
+      - name: install and uninstall from the checkout
+        run: |
+          ./install.sh --prefix "$RUNNER_TEMP/p"
+          "$RUNNER_TEMP/p/bin/tando" help > /dev/null
+          ./uninstall.sh --prefix "$RUNNER_TEMP/p"
+
+  e2e:
+    # The test server is Ubuntu with systemd as PID 1 in Docker (test/server). Assumptions:
+    # - ubuntu-24.04 runners use cgroup v2 and allow `docker run --privileged --cgroupns=private`
+    #   (test/server/up.sh does this); systemd then boots in the container.
+    # - Building the image downloads Caddy (apt) and Node 24 (nodejs.org): network is available.
+    # - curl resolves *.localhost to 127.0.0.1 (curl >= 7.78 does it itself).
+    # - The runner is x86_64; the Dockerfile maps amd64 -> x64 for Node.
+    # e2e-next needs npm (setup-node); e2e-data installs PostgreSQL inside the container.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-go@v5   # the Go server programs (srv/go.mod); same Go, same binary bytes
+        with:
+          go-version-file: srv/go.mod
+          cache: false
+      - name: build the test server image
+        run: docker build -q -t tando-testvm:latest test/server
+      - name: all server suites, in parallel, each on its own test server
+        run: test/all.sh --skip ui-test,lint
+      - name: Linux and BusyBox clients
+        run: test/portability.sh linux busybox debian
+      - name: logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: |
+            .tando/all/
+            test/.portability/
+          retention-days: 7

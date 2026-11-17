@@ -1,0 +1,27 @@
+[?1049h[?25l[H[2J[?25l[H[38;5;242m╭─[0m [1mtando go · Step 2 of 8 · Setup[0m [38;5;242m───────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [32m✓ [0mServer  [1;36m● Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mSet up the server[0m[0m                                                                                [38;5;242m│[0m[K
+[38;5;242m│[0m Installs Caddy (HTTPS), rsync, curl and nftables from apt, the tando programs,[0m                   [38;5;242m│[0m[K
+[38;5;242m│[0m a firewall unit and alert checks every minute. Takes 1-2 minutes. RAM: 16 GB.[0m                    [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m [1m1  Install everything [2m(recommended)[0m[0m[0m                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mand a swap file if the server has less than 2 GB of RAM[0m[0m                                    [38;5;242m│[0m[K
+[38;5;242m│[0m   2  Install everything but the swap file[0m                                                        [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mfor servers that must not swap[0m[0m                                                             [38;5;242m│[0m[K
+[38;5;242m│[0m   3  Skip: I will run tando host setup myself[0m                                                    [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mdeploying fails until it has run[0m[0m                                                           [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1m↑↓/1-9[0m[2m move[0m [2m·[0m [0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mb[0m[2m back[0m [2m·[0m [0m[1ms[0m[2m skip[0m [2m·[0m [0m[1mq[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 2 of 8 · Setup[0m [38;5;242m───────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [32m✓ [0mServer  [1;36m● Setup[0m  [2m○ App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mSet up the server[0m[0m                                                                                [38;5;242m│[0m[K
+[38;5;242m│[0m Installs Caddy (HTTPS), rsync, curl and nftables from apt, the tando programs,[0m                   [38;5;242m│[0m[K
+[38;5;242m│[0m a firewall unit and alert checks every minute. Takes 1-2 minutes. RAM: 16 GB.[0m                    [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m [1m1  Install everything [2m(recommended)[0m[0m[0m                                                            [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mand a swap file if the server has less than 2 GB of RAM[0m[0m                                    [38;5;242m│[0m[K
+[38;5;242m│[0m   2  Install everything but the swap file[0m                                                        [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mfor servers that must not swap[0m[0m                                                             [38;5;242m│[0m[K
+[38;5;242m│[0m   3  Skip: I will run tando host setup myself[0m                                                    [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mdeploying fails until it has run[0m[0m                                                           [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1m↑↓/1-9[0m[2m move[0m [2m·[0m [0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mb[0m[2m back[0m [2m·[0m [0m[1ms[0m[2m skip[0m [2m·[0m [0m[1mq[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[0m[?25h[?1049l

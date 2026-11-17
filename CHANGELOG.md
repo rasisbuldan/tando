@@ -1,0 +1,482 @@
+# Changelog
+
+All notable changes to tando. The version is in `VERSION`; releases are tagged `v<version>` and
+built by `scripts/release.sh` (see docs/RELEASING.md). Format: one section per release, newest
+first, grouped by area.
+
+## Unreleased
+
+- The project was renamed to tando. It is licensed under the PolyForm Noncommercial License 1.0.0; commercial use needs approval (COMMERCIAL.md).
+
+Summary of this round (16-17 Nov 2026). The server programs under `/opt/tando/bin` were rewritten
+from bash to Go (`tando-metrics`, `tando-logs`, `tando-watch`, `tando-gate`, `tando-status`, and the
+new monitoring daemon `tandod`), with the same verbs, output and files; two features were added,
+offsite backup and host care; the alerts cover both. Details by area below. Performance figures are
+from a 1-CPU arm64 test container (bench/RESULTS.md); the Go binaries have not yet run on the real
+x86-64 server (docs/STATUS.md).
+
+### Monitoring (alerts for the new features)
+- Offsite: a per-app check `offsite` (srv/watch) reads `/var/lib/tando/offsite/state/<app>` and
+  fires when a backup made on the server has not reached the bucket after `alert_hours` (6 h), or
+  when the bucket credentials stop working; it resolves when no backup waits that long and the credentials
+  work. It is judged only for apps with offsite copies on.
+- Host care: the host checks `updates`, `reboot`, `exposed`, `ssh`, `units`, `readonly`, `ioerr`,
+  `clock`, `eol` and `boot` are judged hourly by `tando-host` and read by tando-watch from its
+  summary file (stale after 3 hours). `exposed`, `readonly` and `ioerr` are high severity, `ssh` low.
+  Thresholds and on/off through `tando alerts set`; see docs/MONITORING.md and docs/HOSTCARE.md.
+- Server programs: no shell anywhere in `srv/` (enforced by `srv/tools/srvlint`, see "Server" below),
+  and a cut-off `tando host setup` repairs itself (see "Server" below).
+
+### Offsite backups
+- `tando backup offsite set` copies every backup (daily, manual, pre-deploy, safety, final) to
+  Cloudflare R2 or any S3-compatible store right after it is made, in a unit of its own (a deploy
+  never waits for an upload); `tando-offsite.timer` retries failed uploads every 30 minutes and
+  applies the offsite retention (by default the local one; `keep_*` to keep more; only this server's
+  objects; the newest always). New Go program `tando-offsite` (srv/offsite: the S3 API with SigV4 by
+  hand, standard library only), installed by `tando host setup`.
+- Encrypted on the server by default (AES-256-GCM streaming, a recovery key shown once;
+  `key --show|--saved|--import|--rotate`); `tando doctor` warns until the key is confirmed saved.
+- `tando backup ls` shows where each backup is (local, offsite, both) and lists offsite-only ones;
+  `tando restore <id>` (new, = `backup restore`) and `backup pull` fetch from offsite when needed.
+- Disaster recovery: `tando backup offsite hosts` and `tando restore --from-host <host id> --all`
+  recreate a lost server's apps (settings, env, domains, data, database) on a new one
+  (runbook in docs/BACKUP.md). Releases are not backed up: deploy again with `tando up`.
+- Monitoring: an offsite state file per app for the `backup` alert, doctor rows (offsite, queue,
+  timer, recovery key), an offsite line in `tando status <app>`.
+- Tests: srv/offsite unit tests against an in-process S3 that checks every signature (AWS's SigV4
+  vectors, multipart, retries, faults, resume, 1.5 GB streams in bounded memory, fuzzed parsers and
+  decryption), `test/e2e-offsite.sh`, `test/offsite-r2-check.sh` for a real bucket.
+
+### Server
+- Host care (docs/HOSTCARE.md): `tando host status` shows the server itself (OS and its end of
+  support, pending and security updates, unattended-upgrades, a needed reboot and the kernel,
+  ports open to the world cross-checked with ufw, sshd's effective settings, failed services,
+  read-only file systems, disk I/O errors, disks and /boot, the clock, backups) with a to-do list
+  of exact fixes; `tando host care on --updates` lets Ubuntu's unattended-upgrades install
+  security updates (security origins only, no service restarts), `--reboot` reboots in a
+  maintenance window under fixed safety rules (never during a deploy, backups first, a notice
+  before, every app verified after, never beside sites tando does not manage unless allowed);
+  `tando host update` and `tando host reboot` do the same by hand. New program `tando-host`
+  (srv/hostcare) with an hourly timer and a summary file for the alerts (`updates`, `reboot`,
+  `exposed`, `ssh`, `units`, `readonly`, `ioerr`, `clock`, `eol`, `boot`; settings through
+  `tando alerts set`); `tando ls` and `tando host ls` show the server's to-do count, `tando doctor`
+  one row. `tando host setup` turns security updates on where it installed Caddy (`care=off`).
+- Logs: the per-minute scan counts each request once after a crash or an index rebuild (its
+  position is the log file and a byte offset; where it cannot tell it learns, never a burst);
+  `tando errors` no longer takes new errors from the monitor; the journal cursor is sealed and kept
+  with the group counts, a refused cursor is reported instead of stopping detection; a first scan
+  reports 0 error events; request log file names are checked and their number bounded (log-doctor
+  warns); gzip'd rolls are matched by size, reads are bounded per tick; `app-remove` removes the
+  scan state; known error groups are not pushed out by a spray of new ones (docs/LOGGING.md).
+- Internal: `srv/` architecture cleanup, no change in behaviour (srv/README.md: package map, output rule).
+- Tests: the no-shell rule of `srv/` is enforced on the syntax trees (`srv/tools/srvlint`, run by
+  `test/go.sh`: aliased imports, raw syscalls, folded literals, a closed and reviewed list of
+  programs, the layering), `run.Exec` starts only an allowlist of programs (not only "not a shell"),
+  and `test/go.sh` runs `go test -race`; `du` gets `--` before its directories.
+- Server programs run in `/` with a scrubbed environment, `systemd-run`, `sudo` and `nice` only
+  with the options and unit properties in a fixed list (no `Exec*`), `python3` for the tool
+  versions in isolated mode (`-I`: a `venv.py` in the caller's directory is not imported), and
+  srvlint lists every program's arguments (`srv/tools/srvlint/args.txt`) and fails on an unvalidated one.
+- Fix: `tando host setup` switched its programs into `/opt/tando/bin` one rename at a time, so a
+  failure or kill between renames left a mixed set (a new `tando-agent` beside an old
+  `tando-status`). Now every file is verified and staged first, a journal and a hard link to each
+  replaced file are written, then the renames follow; a failed rename is undone at once, and a
+  switch cut off by a kill or a lost connection is finished or undone by the next `tando host
+  setup` (or any on-demand install). The client says the install may be cut off and how to repair
+  it; `tando doctor` shows a `fail` row "install" while a switch is pending.
+- A cut-off install now repairs itself: `tando-install-recover` (a helper; the same code the install
+  script runs) finishes or undoes it at boot (`tando-recover.service`) and before any mutating
+  `tando-agent` verb (a read-only verb only warns); the check is one bash file test. After a full
+  install the agent also records `/opt/tando/bin/.versions`, and hands `status` and the other read
+  verbs to `tando-status` only while neither it nor `tando-status` is newer than that file, so a
+  new agent no longer execs an old `tando-status` that lacks a verb.
+- New: `tandod`, a small monitoring daemon (`srv/daemon`, about 10 MB of memory). Each minute it
+  runs the metrics sample, the alert checks and the scan of the apps' logs in one process,
+  instead of a timer starting `tando-metrics`, `tando-agent recover-all` (a bash program, every
+  minute) and `tando-watch` (which started `tando-logs`, `systemctl` and `nft`): it keeps a
+  connection to systemd's private bus and a cache of the files it reads, runs recover-all only
+  when an activation died or an app is down, and lists the firewall rules only after the ruleset
+  changed. Alert semantics are unchanged (one sample a minute; the same state files, written the
+  same crash-safe way). `tando-watch.timer` stays the switch and becomes the fallback: it starts
+  `tando-watch-fallback.service`, skipped while tandod runs. The read verbs of `tando-watch` ask
+  tandod over a root-only socket first. `tando host setup` installs and starts it; `tando doctor`
+  shows it. Email notifications are handed to sendmail in a unit of its own (sendmail could not
+  write its spool from the sandbox of the checks). A run of the checks that panics, fails 3 times
+  or kills the process twice in a row makes tandod hand the checks to the timer (it removes
+  `/run/tandod/active`, the fallback's condition), raise the new host alert `monitor` (also for a
+  tandod that keeps restarting) and warn in `tando doctor`; retries back off from 1 h to 24 h.
+  "N in a row" counts minutes, not runs (two runs in a minute no longer fire early). A lock of
+  the checks held for good is reported straight to the notifiers and by doctor. Host setup
+  restarts tandod only when its binary or unit changed, and checks it runs the new binary. Fixed on the way: two runs of one process in the same
+  second could overwrite each other's queued message; a lone C1 byte (8-bit CSI) or invalid UTF-8
+  in an app's text reached notifications (Telegram rejects them); a static app made every run ask
+  the journal how its (non-existent) process ended.
+- The agent's read-only, frequently called verbs (`status`, `deploy-status`, `releases`,
+  `history`, `busy`, `info`) are answered by a new Go program, `tando-status` (`srv/status`),
+  which `host setup` installs and doctor checks (row `status`). `tando-agent` keeps the verbs: it
+  checks their arguments and the privilege rule in its first lines and execs tando-status; where
+  the binary is missing its shell versions answer as before. The output is the shell's, byte for
+  byte (test/e2e-status.sh compares the two on one server: 121 checks). No process is started per
+  app, cgroup and /proc files are read directly, df is statfs, a certificate's expiry is read
+  without openssl and date, `info` keeps the python3/node/caddy versions until the program
+  changes, and systemd is asked over its private socket: the loaded units' properties in one
+  pipelined write, a stopped app's MemoryMax from its unit file (asking systemd about a unit it
+  has not loaded makes it parse and collect that unit each time). Measured on a 1 CPU / 2 GB
+  arm64 test server (CPU of the process tree, medians; test/load/status-bench.sh and
+  status-scale.sh): `status` with 100 apps 364 -> 16 ms (wall 426 -> 22 ms; systemd's own share
+  60 -> 5.5 ms), with 20 apps 95 -> 9 ms, with 3 apps 30 -> 7 ms (what is left is mostly the other
+  programs status includes: tando-logs log-stats and tando-watch brief); `history` of every app
+  280 -> 2 ms at 100 apps; `info` 34 -> 2-3 ms; `releases`, `busy`, `deploy-status` 11-19 -> 2 ms
+  (the cost of starting bash and a Go program). tando-status's peak RSS is 6.5 MB (11 MB for
+  `status` of 100 apps). As root, `status` is answered by tandod when it runs: tando-status asks
+  its socket first (100 ms to connect; anything but an `ok` answer and it collects itself), and
+  the daemon runs the same code with the rows of tando-logs, tando-watch and tando-metrics
+  in-process, collected when asked (a stop, a start or a deploy shows in the very next `tando ls`).
+  Everything included (the processes, systemd and tandod's share), `status` at 3 apps costs
+  2.2 ms of CPU against the shell's 35 ms, `status <app>` 2.2 ms against 38, at 20 apps 3.0 ms
+  against 113, at 100 apps 5.7 ms against 418. `tando doctor` compares the installed tandod too (row `daemon`); the sums of
+  tando-status and tandod are sent as named arguments, which an older agent ignores. Fixed on the way: `status` dropped the row of an app whose
+  app.conf has no port (or that the caller may not read) with `C[port]: unbound variable`;
+  `releases`, `busy` and `deploy-status` without an app said `$1: unbound variable` (now
+  `invalid app name`); a certificate file that does not parse showed today's midnight as its
+  expiry (now `-`); a `deploy-status` activation file without `result` aborted the verb; a symlink
+  in Caddy's certificate store (the caddy user's) was followed by root.
+- `tando-metrics` is now a Go program (`srv/`, standard library only), the first of the server
+  programs to move from bash; its verbs, output, files (`/var/lib/tando/metrics`, 644) and the
+  files the shell version wrote are unchanged. New verb `tando-metrics version`. The shell
+  original is kept in `server/legacy/` (not shipped). Fixed on the way: when `systemctl` failed,
+  a sample wrote a line for the first app only and forgot every file's line count (the next
+  sample started the files over); `read` with a zero-padded number (`010`) read it as octal.
+- `tando-logs` (journal namespaces, `tando logs`, the request log, `watch-scan` and `errors`,
+  log stats, the audit trail) is now a Go program (`srv/logs`); its verbs, stdin spec, rows,
+  `key=value` lines, exit codes, messages, the journald and Caddy config it writes and its files
+  (`logs.conf`, the stats and request-log caches, `/var/lib/tando/logscan`: cursors, request
+  positions, `groups.tsv`, samples, `audit.log` and its rotation) are unchanged; error group ids
+  are the same, so groups on a server keep their ids and counts. New verb `tando-logs version`.
+  Caddy's JSON lines and journalctl's are parsed with `encoding/json/jsontext` instead of awk:
+  `req-summary` and `req-errors` cost about a third of the CPU (600,000 lines: 2.2 s -> 0.7 s and
+  0.9 s -> 0.26 s), the error scan's parser a fifth. `--regex` is RE2 (POSIX ERE plus `\d`, `\w`;
+  linear time) and `-i` matches case-insensitively. Fixed on the way: the address column of
+  `tando requests tail` and `errors` was empty on Caddy 2.6 (`remote_ip` is the first key of
+  Caddy's request object and was never found); every text `tando logs` left a temp file in `/tmp`
+  and printed `of: unbound variable`; `-n 00` printed the whole journal; a message over 4096 bytes
+  showed as `ul`; a job name in app.conf was word-split into unit names; a fragment of a request
+  line (the 8 MB scan cap starting inside a line) counted as a request; an audit result such as
+  `1;x` was written as `fail(1;x)`, a note could be cut inside a UTF-8 character, and an audit
+  write waiting for the lock during a rotation appended to the rotated file; an invalid hand-set
+  `journal_max` reached journald's config. The shell original is kept in
+  `server/legacy/tando-logs` (not shipped).
+- Requests: tando-logs keeps an index of the request log beside it
+  (`/var/lib/tando/logscan/<app>/reqindex/`, root only: a 32-byte record per line and the path
+  keys, one segment per log file, deleted with it), brought up to date every minute by `watch-scan`
+  and by the new verb `tando-logs req-roll [app]`. `tando requests` (the summary of any window),
+  `requests errors` and `requests tail` read it instead of the whole log and print the same bytes
+  as a full scan: on 600,000 lines, 2.2 s -> 0.04 s, 0.84 s -> 0.025 s and 0.07 s -> 0.005 s of CPU
+  against the shell version, memory under 12 MB. Lines are parsed by a scanner written for
+  Caddy's layout (2.4 million lines a second, no allocation per line). `watch-scan` no longer
+  starts journalctl for an app whose journal did not change (5 ms an idle app), takes its request
+  numbers from the index (all of a rolled file, no 8 MB cap: `bytes skipped` is now always 0), and
+  builds the index from the existing log the first time it runs after an upgrade (about 0.3 s per
+  600,000 lines, once).
+- tandod's log scan: an app with nothing new in its journal or request log costs three stat calls
+  (100 idle apps: about 0.25 ms a tick), an app that never logged a line no longer runs
+  `journalctl --since=-24h` every minute, and a busy app's tick no longer reloads its path
+  dictionary or replaces files by rename (20 apps at 240 requests a minute: about 2.5 ms a tick
+  besides journalctl). What the daemon keeps between ticks is bounded: a client requesting unique
+  URLs no longer grows it (2 million of them over 5 apps: peak RSS 14 MB, was 45 MB); the path
+  dictionary of a segment is capped at 1 MB (was 4 MB). Files in the request log's directory are
+  opened without following links or blocking, so a FIFO put there cannot hang a tick.
+- `tando-watch` (the alert checks and notifiers) is now a Go program (`srv/watch`); its verbs,
+  rows, exit codes, messages, notification bodies, settings and files (state, history,
+  incidents, silences, notifiers, queued messages under `/var/lib/tando/watch`, the units) are
+  unchanged, and a host upgraded by `tando host setup` keeps all of them. New verb `tando-watch
+  version`. Health probes, certificate checks, notifier deliveries and the heartbeat use Go's
+  HTTP client with curl's limits instead of curl (no curl process; secrets stay inside the
+  process), and the host disk check reads statfs instead of running df. A run killed at any
+  point no longer repeats or loses a notification (`/var/lib/tando/watch/commit`; the shell sent
+  a run's messages again when killed between queueing and saving its state, and lost an inbox
+  rollback notice when killed after reading it). Two runs no longer deliver the same queue at
+  once. Fixed on the way: `hog.disk=off` was refused ("disk is a host check") although `disk` is
+  also an app check; `silence <app> 08` failed as octal; an app whose directories were all
+  missing had `du` measure `/` for up to 50 s; a queued line with an empty detail (a resolve
+  owed after a silence) showed its timestamp as the detail; the volatile disk counters of a
+  removed app stayed in `/run/tando-watch/vstate`. The shell original is kept in
+  `server/legacy/`. `tando alerts` compares the server's tando-watch with either CPU's binary.
+- `tando-gate` (CI deploy keys) is now a Go program (`srv/gate`); verbs, the request grammar,
+  messages, exit codes, files, modes, the sshd drop-in and the sudo rule are unchanged, so servers
+  with keys keep working after `tando host setup`. New verb `tando-gate version`; the shell
+  original is in `server/legacy/`. The request is parsed into a typed one by a fixed grammar
+  before anything runs; the gate keeps 4 variables of its environment and clears the rest, sets
+  umask and working directory, and as root refuses to start with a Go runtime variable set; root
+  reads the upload only through directory descriptors (no link followed, no file opened). Fixed
+  or hardened on the way: an upload faster than the watchdog's first check (a second) passed
+  the app's byte and file limits (now checked from 250 ms and once more when the receiver ends);
+  the watchdog stops an upload whose tree it cannot walk (the shell's `find` errors were ignored); authorized_keys gets only well-formed key lines from the key list;
+  rx mode checks the rsync options again; a short rsync option ending in a bare `e` is refused;
+  the deploy user is looked up in /etc/passwd only (not other NSS sources) and key mode checks the
+  real uid too; the sudo rule's candidate file is created afresh (a symlink there was followed);
+  an append to cron.deny/at.deny/retired-uids ends an unterminated last line first; the read-only
+  verbs' lines are cleaned of control characters once more. An upload right after the previous one (back to
+  back, or right after `end`) could fail with "Unit tando-rx-<app>.service was already loaded"
+  on a busy host: systemd had not yet collected the ended receiver, and it collects only when it
+  is otherwise idle (the shell version had the same race). Each receiver now has a unit of its own,
+  `tando-rx-<app>@<nonce>`; one receiver per app is kept by the lease lock, and the gate and
+  tando-agent find and stop them by pattern (with `list-units`, which loads no unit). The
+  deploy user's own walks of its upload (rx mode) no longer stop at a directory the upload left at
+  mode 000: it is made u+rwx first, so links and setuid bits under it are still dealt with.
+  When systemd was slow to start the receiver's unit (more than 5 s), the gate gave the lease lock
+  back before the unit existed: an `end` or an activation then found nothing to stop, and the
+  receiver of the ended upload started afterwards (shown on a test server; with stock clients the
+  connection was closed by then). Now the lock is kept until the unit runs, `end`/`activate` close
+  the upload under the lock first, and the receiver refuses to start unless its ticket is current. A session opened before the update
+  (its login process is the old bash script) is refused by root mode once: deploy again.
+- `tando host setup` installs a Go program as the static binary for the server's CPU (x86_64 or
+  aarch64), checked by running `<binary> version` (scripts still by `bash -n`), and no longer
+  sends a server program whose SHA-256 matches the installed one. `tando doctor` accepts either
+  CPU's checksum for a Go program.
+
+### Build and release
+- `scripts/build-server.sh` builds the Go programs for linux/amd64 and linux/arm64, statically and
+  reproducibly, into `dist/server/`; host setup and `install.sh` run it from a checkout when Go is
+  installed. Release archives carry the binaries as `server/linux-<cpu>/<name>` (2.3 MB each;
+  the archive is about 2.3 MB instead of 0.3 MB), and making a release needs Go.
+- Tests: `test/go.sh` (gofmt, go vet, go test, no-shell lint, layering, both CPUs) runs in
+  `test/all.sh`; lint rules RL15/RL16 (no `os/exec` outside `srv/internal/run`, no shell).
+
+## 0.1.0 - not released yet
+
+First tagged release; the date is set when the tag is made. Tested on arm64 Ubuntu 26.04
+test containers and, on 14 Nov 2026, on one real x86-64 Ubuntu 26.04 server; see docs/STATUS.md for
+what is verified and what is still open.
+
+### Deploy
+- `init` detects the recipe (next, node, python, container, static), start command and health
+  path, and writes `tando.conf`; `recipes` lists what each recipe needs.
+- `up` creates the app (only after a successful build) and deploys; `deploy` builds on the laptop,
+  rsyncs changed files, and the server copies them into a root-owned release.
+- Activation on the server, detached from ssh: pre-flight on port+100, atomic switch, verify through
+  Caddy, 30 s soak (`soak =`), automatic rollback; recovery at boot, from every mutating verb and
+  from the activation unit's `ExecStopPost`; client deadline while polling.
+- `rollback [id]`, `releases`, `history` with phase times; release order by deploy sequence,
+  5 verified releases kept, failed releases deleted at once; per-app disk cap (`app_max_mb`).
+- Upload lease with stale-lease takeover and `unlock`; a deploy from another directory or to
+  another target asks first (`--force`, `--yes`).
+- Next.js: standalone output (`init` offers to set it), static and public copied, darwin native
+  packages swapped for the server's architecture.
+- `--json` on `ls`, `status`, `releases`, `history`; `--wait` / `TANDO_WAIT=1` for CI.
+- A failed deploy explains itself: missing env var, missing local file or missing Python package,
+  with the command to fix it; a rollback during the soak records its reason (`why <id>: ...` in
+  `history`) and raises an alert. `init` picks a real health route instead of `/` when it can.
+- Static sites get clean URLs and a custom `404.html`; Python uploads get gunicorn or uvicorn
+  added to `requirements.txt` when the start command needs it.
+- A command that has to wait for another deploy says what it is waiting for.
+
+### Run and configure
+- `start`, `stop` (503 page), `restart`, with Caddy holding requests during a restart
+  (15 s, or `health_timeout` when longer).
+- `env set/unset/ls/import`, values on stdin, stored root:app 640.
+- `env set` before the first `up` is kept on the server and applied when the app is created;
+  `env ls` masks values unless `--show`.
+- `ssh <app>` opens a shell (or runs one command) inside the app's sandbox as the app's user;
+  `jobs run <name>` runs a scheduled job now.
+- Scheduled jobs (`job.<name> = <schedule> | <command>`, `jobs`); `data =` directory,
+  `writable =`, `memory =`, `node =`; `MALLOC_ARENA_MAX=2` for Node apps.
+- `database = postgres` (one role per app, `db psql`, `db url --show`) or `sqlite`.
+- `backup now/ls/restore/pull`, daily and pre-deploy backups, final backup on `destroy`.
+- Runtimes installed when the first app needs one: Node (checksummed, per major), Python venv
+  built on the server, Podman (container recipe, root Podman), PostgreSQL.
+
+### Servers and domains
+- `host add/ls/setup/rm`: setup installs the agent and helpers, rsync, curl, nftables, Caddy
+  (the distribution's package) and units; it is idempotent. It moves Caddy's admin API to a unix
+  socket without a restart (the new config is handed to the old admin address; a restart
+  is the fallback), and adds a `Restart=on-failure` drop-in for Caddy.
+- Links `<app>.<ip-with-dashes>.sslip.io` (public IPv4) or `<app>.<apps_domain>`.
+- `domain add/rm/ls`: DNS check from the laptop with the records to create, `--wait`, `--www`,
+  validated Caddy config with rollback, waits for the certificate.
+- `doctor` checks the server end to end, including a server that is not set up yet; `version`.
+- `destroy` (`--purge`) removes every trace of the app and retires its uid.
+- Unknown host names get a plain 404 over HTTP instead of another app's page (only when the stock
+  `:80` block is still in the Caddyfile).
+- Package installs on the server run with `NEEDRESTART_SUSPEND=1`, so Ubuntu's needrestart does
+  not restart services tando does not manage.
+
+### Security
+- Per-app user and sandbox for the app, its pre-flight, jobs, venv build and backups (ProtectSystem
+  strict, private /tmp, /dev, IPC, 16 MB private /dev/shm, socket-bind limits); health counts only
+  when the listener is in the app's own unit.
+- nftables per-uid loopback rules (`inet tando`); journal namespaces closed per app; a secret probe
+  header keeps tando's probes out of request logs; requests with a port in Host get 400.
+- Server output is checked before any arithmetic on the laptop (numbers with leading zeros or
+  more than 18 digits show as `-`); control characters and bidi controls (U+200E/F, U+202A-E,
+  U+2066-9, U+061C) are stripped, so a log line cannot reorder what the terminal shows.
+- `backup pull` creates its file mode 600 (it holds a database dump); `install.sh` refuses a plain
+  `http://` `--from` unless `--insecure`, and redirects stay on https.
+- A refused CI deploy key says so (revoked, or for another app or server) and names
+  `tando ci setup`, instead of advising to edit authorized_keys.
+- CI deploy keys (`ci setup/ls/revoke/rotate/github/hook`) through `tando-gate`: one app only,
+  confined rsync receiver, upload limits, revocation that evicts sessions.
+- Third review (the architecture notes): the loopback rules also refuse adopted apps' ports and drop app
+  replies to outside connections; adopt runs fw_sync; tando-watch puts flushed rules back (alert
+  `firewall`). The probe secret never reaches an app; X-Real-IP is the peer's; Host in other
+  letters gets 400 on Caddy 2.6; half-closed requests show as `aborted` in `tando requests`.
+- **Changed:** an app's HOME is `/opt/tando/apps/<app>/home`, read-only (it was shared/): write
+  data under `$TANDO_DATA_DIR`; caches go to `shared/.cache`. User npm/git/pip config is not read.
+- App units get ProtectProc, ProcSubset and the kernel-facing systemd protections with a syscall
+  filter (exposure 7.7 → 3.3); `tando ssh -- cmd` no longer shows the command in any argv.
+- Lock files root 0600 with timeouts (an app could hold `.ports.lock` and freeze `tando up`).
+- Disk: an app over `app_max_mb` alerts (`disk`) and is stopped when the disk is 95% full; an
+  unreadable file in the data no longer fails the pre-deploy backup (a warning in its meta).
+- Caddy header/idle timeouts on a server tando set up; doctor shows the lines elsewhere.
+- Destroyed apps' gids are retired; alert state is root-only.
+
+### Observe
+- `ls` (`--all`, `--watch`), `status` (`--watch`), `top` full-screen dashboard (`--read-only`).
+- `logs` from a journald namespace per app, with filters, `--release`, `--deploy`, `pull`;
+  `requests` summary, tail and errors from Caddy's log; `audit` of every mutating verb.
+- `alerts`: per-minute checks (down, health, memory, OOM, restarts, TLS, disk...), notifiers
+  (webhook, Slack, Telegram, ntfy, email), silences, heartbeat; per-minute metrics for graphs.
+- Time columns are headed `TIME (GMT)` and show the UTC time (`11-14 17:01`, with seconds in
+  `audit` and `requests`) in `history`, `status`, `backup ls`, `alerts`, `audit`, `requests` and the
+  `top` history view, the same clock as release ids; they were a relative age or the laptop's local
+  time under `WHEN`; the requests tables' answer time is now `LATENCY`. `--json` is unchanged.
+- `status` shows the app's limits in one row (cpu cap, tasks, connections, the in-flight count over
+  which Caddy answers 503 busy); `--json` adds `cpu_limit, tasks_max, max_conns, max_requests`.
+- Every other absolute time is GMT too: `logs` lines and `--since`/`--until` dates (a first line
+  `# times in GMT (UTC)` on a terminal; `--json` times carry `+00:00`), `requests tail -f`, the
+  `requests` "log starts" note, `ci ls` (`CREATED (GMT)`, `LAST DEPLOY (GMT)`).
+- Log retention and size: `log_keep` (`Nh`/`Nd`, default 30d) and `log_max` (default min(2G, 5% of
+  the disk); circular: the oldest entries go when it is full) per app or as host defaults; journal
+  files close after a quarter of `log_keep` so retention trims. A change restarts only the app's
+  journald (the app and its output stream stay) and vacuums at once. `status` shows `logs 6.4 MB of
+  2.0 GB, keeps 30 d`; doctor compares the caps with the free space.
+- Request log: sized by `request_log_max` (default min(log_max/4, 256M)), kept for `log_keep`,
+  rolled files gzip'd (about 20x); `requests` reads the rolled and gzip'd files; a changed rotation
+  applies at the next Caddy reload (no restart). Before: 4 MiB x 4, seconds of history under load.
+- `logs` notes the lines journald dropped in the window shown (rate limit `log_rate`); tando-watch
+  raises a low-severity `logs` alert.
+- `errors [app]`: the app's error lines and stack traces (Node, Python, Go) grouped by type and
+  first app frame, with counts, first/last seen (GMT), the release they appeared in and a sample;
+  `--since`, `--json`. Read incrementally once a minute; no agent in the app.
+- `health [app]`: uptime over 24 h and 7 d, incidents (start, duration, cause), probe latency, the
+  last lines before the last crash; `--json`.
+- Alerts: `http` (5xx share of real requests, top failing paths), `slow` (p95), `errors` (spike),
+  `logs` (low), and one "NEW ERROR ... after release <id> ... tando rollback" notice per new error
+  type after a deploy; health failures say unhealthy / slow / saturated / down; tando.conf
+  `health_expect`, `health_fails`, `health_recover`; crash alerts name the exit status or signal and
+  an OOM kill; log lines are never sent unless `include_log_lines=on`. `alerts` without a notifier
+  shows one copy-paste line per kind (ntfy first); `alerts test` shows the message and each
+  receiver's HTTP answer; `doctor` reports a failing notifier; the first `up` of an app says alerts
+  watch it.
+
+### Migration and onboarding
+- `adopt plan/apply/undo/status`: take over a hand-deployed Next.js systemd app in place, with
+  backup and verified undo (docs/MIGRATION.md; rehearsed on a replica only).
+- Plugins: `go` (setup wizard), `next`, `link`, `open`, `ssh`, `cheat`; plugin loading from
+  `lib/cmd-<name>.sh`.
+- Help and argument checking driven by `lib/help.txt`; exit codes 0/1/2. The app name can be
+  given as a plain word (`tando logs shop`); a mistyped command, flag or app name gets a
+  suggestion.
+- `tando help <command> <subcommand>` (`tando help alerts notifier`) shows the command's help.
+- `host setup` installs its helpers in one call under a host-wide lock (`/opt/tando/.install.lock`):
+  each file goes to a unique temporary name, is checked against the size and SHA-256 computed on
+  the laptop and with `bash -n`, then moved into place; two setups at once queue instead of failing
+  ("mv: cannot stat ...new") or mixing versions. A long step detail is wrapped under the step.
+- Wording: `doctor` "1 warning", `env ls` "(1 character)", an empty history in `status` says
+  "no deploy has finished yet", a rollback's reason reads "rolled back to it from <id>"; with
+  `TANDO_ASCII=1` no "·" is left (help, footers, setup). ssh's "ControlSocket ... already exists"
+  notice is no longer shown.
+- `host setup` shows the running step at once with a ticking time (a PostgreSQL install takes a
+  minute or more), on a terminal.
+- Many commands at once to one server: a session sshd turns away (MaxSessions 10 per shared
+  connection, MaxStartups) is retried up to 3 times with a short random pause (nothing ran on the
+  server), then explained as "too many tando commands at once". A `$TMPDIR` with a space no longer
+  breaks rsync's ssh wrapper (the work directory goes to /tmp instead).
+
+### Tooling and docs
+- `install.sh`/`uninstall.sh` (manifest, checksum check), `scripts/release.sh` (reproducible
+  archive, SHA-256), bash and zsh completions (`completions/gen.sh`), Makefile.
+- Tests: `test/all.sh` (parallel slots, `--repeat`), e2e suites (core, bootstrap, cli, data, next,
+  recipes, ci, logs, alerts, top, adopt, sec2, faults, ease), `ui-test`, `install-test`,
+  `trial` (regressions found on the real server), `portability` (macOS bash 3.2, Debian, BusyBox
+  clients), `lint.sh` with a baseline and tando's own rules (RL01-RL14);
+  GitHub Actions workflow (never run on GitHub).
+- Examples: hello, next, python, container, site, notes, logflood. Benchmarks in `bench/`.
+- Docs: README, docs/ (STATUS, COMMANDS, CI, LOGGING, MONITORING, MIGRATION,
+  TOP, TESTING, RELEASING, EASE) and the review reports.
+
+### Reliability (idempotency, concurrency, faults)
+- Re-runs change nothing: a deploy of an unchanged tree with unchanged settings onto its live,
+  verified release says "already live" and restarts nothing (no new release); `env set` of values
+  the app already has does not restart it; app.conf, state and unit/job files are rewritten only
+  when they differ; host setup twice touches no file and reloads nothing.
+- Jobs take effect with a verified release and go back with it: each release keeps the jobs it was
+  deployed with (`/opt/tando/apps/<app>/jobs/<id>`); a failed release never changes the schedule.
+- `env set`/`unset` on a running app first starts it with the new values on the pre-flight port:
+  values it does not start with are refused before anything restarts (no outage); one that fails
+  only after the restart is undone (previous env put back, restarted); exit 1 says which. Next
+  apps get a 5 s stop timeout (its server keeps keep-alive connections on SIGTERM).
+- Upload lease: never taken over while an rsync (or a deploy key's receiver) still writes into
+  `incoming/` — two terminals of one user could put a mix of two uploads live; activate refuses
+  while another upload writes. A receiver left by a dropped connection (nothing written for 30 s)
+  is ended before its lease is taken over.
+- Lost updates fixed: verbs re-read app.conf and state once they hold the app's lock (two
+  `domain add` at once, a domain add during a deploy's configure); domain ownership under a
+  host-wide lock; one host setup or runtime install at a time; firewall rules written under a
+  host-wide lock to a temp file of their own, checked by nft, and a failed load is an error;
+  `env set` of apps not created yet under a lock; no shared fixed-name temp files.
+- `activate` no longer waits for another activation's soak; a queued deploy (also with a CI key)
+  says what it waits for. The client says "waiting for ..." only when its call really waits for
+  another one, naming it (it used to report its own restart as "another operation").
+- Interrupted operations finish when run again: a first `up` cut off after the app's user was
+  made, a `destroy` cut off before the end, an app directory without app.conf (destroy removes it).
+- Faults: probe timeouts and the soak use the monotonic clock (a wall clock set back no longer
+  stretches them); a lease or state field damaged or "from the future" no longer blocks deploys;
+  health checks do not fail a good release when /tmp is full; state, env and the firewall file are
+  flushed to disk before they replace the old one; old alert notices are not sent when alerts are
+  set up later.
+- PostgreSQL: apps without `database = postgres` cannot connect to 5432; authentication_timeout
+  5 s; each app's role holds at most 10 connections (one app cannot take every slot).
+- Under load: tando-watch restarts an app whose unit runs but that failed `liveness` (3) health
+  checks in a row (at most 3 times an hour, then it only alerts; `liveness = 0` turns it off);
+  node/next apps get `NODE_OPTIONS=--max-old-space-size` at 70% of `memory` (unless set), so V8
+  exits instead of thrashing at the cgroup cap; Caddy opens at most 256 connections to an app
+  (`max_conns` in app.conf) and queues the rest.
+- Limits and load (docs/COMMANDS.md): `max_requests` (off by default) sheds requests over the
+  limit with a 503 "busy" page (Retry-After) after the hold (`hold =`, default 15 s); per-client connection limits on 80/443
+  (`conn_limit`, `conn_rate`, `rate_limit` in host setup; on by default only where tando owns
+  Caddy); every unit of an app in its own slice with `cpu =`, `tasks =` and 3x `memory` for all its
+  units together; apps get OOMScoreAdjust 500 and all of them half the CPU weight of Caddy and
+  sshd; `stop_timeout` (10 s, was 20); examples close keep-alive connections on SIGTERM; one
+  change of Caddy's sites at a time host-wide.
+- Disk: a failed copy says why (cp's error, free MB and inodes; "no free inodes"); activate checks
+  free inodes as well as bytes; doctor warns at 90% of the inodes; an upload over `app_max_mb` is
+  refused before it is sent, and one refused later is cleared from incoming/. 200 jobs are
+  enabled in one systemctl call. Two deploys from one checkout: the second says so (lock in .tando).
+- A command that waited for an app's lock while the app was destroyed stops cleanly (no half app
+  directory recreated); `up` of a name whose earlier app left a directory without app.conf starts
+  clean.
+- Smaller: a second `up` of an app being created says so; a command that waited for an app that
+  was destroyed meanwhile says that instead of "(disk full?)"; write errors name the real cause;
+  `backup ls` skips a backup pruned while it lists.
+- Tests: test/faults n1-n7 (in e2e-faults), e2e-data D16, e2e 16e.
+- Found on the real server (15 Nov): `tando ci setup` works under sudo-rs (it rejects
+  `!requiretty`; the rule is written without it there); `tando alerts history` printed "no alerts
+  yet" for every server (it read a root-only file without sudo; e2e-alerts 4e); every activation
+  creates `shared/data` (`$TANDO_DATA_DIR` was set but the directory existed only with `data =`);
+  `tando errors` sees an exception name after a logger's prefix (`12:00:01 [api] TypeError: x`).
+
+- Release check (16 Nov): `install.sh`, `uninstall.sh` and three server programs had lost their
+  executable bit (`./install.sh` failed with "permission denied"); `install.sh --from` takes a
+  relative path. install-test I3r, I3x.
+
+### Known issues
+- An app's shell and jobs can reach loopback ports of services tando does not manage, and can
+  list world-readable directories of other software on the server (the architecture notes).
+- Unknown host names under HTTPS fail the TLS handshake instead of getting a 404.
+- No real disk quota per app (`app_max_mb` caps uploads and releases; the disk guard stops an app
+  at `disk_stop_pct`); no requests-per-second limit per app (Caddy has none without a plugin).
+- A reload of Caddy closes the idle keep-alive connections of every site it serves.
+- On the real server: the container recipe (the image must be built for the server's
+  architecture), `adopt apply` and a reboot were not exercised; the default link depends on
+  sslip.io.

@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="876" height="538" viewBox="0 0 876 538">
+<style>text{font-family:'SF Mono','Menlo','DejaVu Sans Mono','Consolas','Liberation Mono',monospace;font-size:14px;white-space:pre;fill:#d4d7dd}.b{font-weight:700}.i{font-style:italic}</style>
+<rect width="876" height="538" rx="10" fill="#16181d"/>
+<rect width="876" height="34" rx="10" fill="#24272e"/><rect y="24" width="876" height="10" fill="#24272e"/>
+<circle cx="20" cy="17.0" r="6" fill="#ff5f57"/>
+<circle cx="40" cy="17.0" r="6" fill="#febc2e"/>
+<circle cx="60" cy="17.0" r="6" fill="#28c840"/>
+<text x="438.0" y="22.0" text-anchor="middle" style="font-size:12px;fill:#8b919c">tando doctor</text>
+<text x="18.0" y="60.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">╭─</text>
+<text x="43.2" y="60.6" textLength="50.4" lengthAdjust="spacingAndGlyphs" class="b">doctor</text>
+<text x="102.0" y="60.6" textLength="688.8" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">──────────────────────────────────────────────────────────────────────────────────</text>
+<text x="799.2" y="60.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">prod</text>
+<text x="841.2" y="60.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">─╮</text>
+<text x="18.0" y="77.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="77.6" textLength="42.0" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">CHECK</text>
+<text x="169.2" y="77.6" textLength="42.0" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">STATE</text>
+<text x="236.4" y="77.6" textLength="50.4" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">DETAIL</text>
+<text x="849.6" y="77.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="94.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="94.6" textLength="42.0" lengthAdjust="spacingAndGlyphs">agent</text>
+<text x="169.2" y="94.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="94.6" textLength="210.0" lengthAdjust="spacingAndGlyphs">0.1.0, same as the client</text>
+<text x="849.6" y="94.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="111.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="111.6" textLength="33.6" lengthAdjust="spacingAndGlyphs">gate</text>
+<text x="169.2" y="111.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="111.6" textLength="210.0" lengthAdjust="spacingAndGlyphs">0.1.0, same as the client</text>
+<text x="849.6" y="111.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="128.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="128.6" textLength="33.6" lengthAdjust="spacingAndGlyphs">logs</text>
+<text x="169.2" y="128.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="128.6" textLength="210.0" lengthAdjust="spacingAndGlyphs">0.1.0, same as the client</text>
+<text x="849.6" y="128.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="145.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="145.6" textLength="58.8" lengthAdjust="spacingAndGlyphs">metrics</text>
+<text x="169.2" y="145.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="145.6" textLength="210.0" lengthAdjust="spacingAndGlyphs">0.1.0, same as the client</text>
+<text x="849.6" y="145.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="162.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="162.6" textLength="42.0" lengthAdjust="spacingAndGlyphs">watch</text>
+<text x="169.2" y="162.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="162.6" textLength="210.0" lengthAdjust="spacingAndGlyphs">0.1.0, same as the client</text>
+<text x="849.6" y="162.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="179.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="179.6" textLength="58.8" lengthAdjust="spacingAndGlyphs">metrics</text>
+<text x="169.2" y="179.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="179.6" textLength="126.0" lengthAdjust="spacingAndGlyphs">sampled 23s ago</text>
+<text x="849.6" y="179.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="196.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="196.6" textLength="75.6" lengthAdjust="spacingAndGlyphs">host.conf</text>
+<text x="169.2" y="196.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="196.6" textLength="294.0" lengthAdjust="spacingAndGlyphs">*.localhost tls=off ports 4100-4199</text>
+<text x="849.6" y="196.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="213.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="213.6" textLength="75.6" lengthAdjust="spacingAndGlyphs">caddy log</text>
+<text x="169.2" y="213.6" textLength="50.4" lengthAdjust="spacingAndGlyphs" style="fill:#e5c07b">● warn</text>
+<text x="236.4" y="213.6" textLength="604.8" lengthAdjust="spacingAndGlyphs">Caddy 2.6.2 does not log requests whose Host has a port, and public_por…</text>
+<text x="849.6" y="213.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="230.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="230.6" textLength="42.0" lengthAdjust="spacingAndGlyphs">caddy</text>
+<text x="169.2" y="230.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="230.6" textLength="109.2" lengthAdjust="spacingAndGlyphs">2.6.2 running</text>
+<text x="849.6" y="230.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="247.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="247.6" textLength="92.4" lengthAdjust="spacingAndGlyphs">caddy admin</text>
+<text x="169.2" y="247.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="247.6" textLength="462.0" lengthAdjust="spacingAndGlyphs">unix socket /run/caddy/admin.sock (caddy and root only)</text>
+<text x="849.6" y="247.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="264.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="264.6" textLength="117.6" lengthAdjust="spacingAndGlyphs">loopback rules</text>
+<text x="169.2" y="264.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="264.6" textLength="495.6" lengthAdjust="spacingAndGlyphs">apps reach only their own ports (nftables table inet tando)</text>
+<text x="849.6" y="264.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="281.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="281.6" textLength="100.8" lengthAdjust="spacingAndGlyphs">caddy import</text>
+<text x="169.2" y="281.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="281.6" textLength="201.6" lengthAdjust="spacingAndGlyphs">/etc/caddy/tando/*.caddy</text>
+<text x="849.6" y="281.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="298.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="298.6" textLength="84.0" lengthAdjust="spacingAndGlyphs">postgresql</text>
+<text x="169.2" y="298.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="298.6" textLength="176.4" lengthAdjust="spacingAndGlyphs">accepting connections</text>
+<text x="849.6" y="298.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="315.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="315.6" textLength="58.8" lengthAdjust="spacingAndGlyphs">ci keys</text>
+<text x="169.2" y="315.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="315.6" textLength="453.6" lengthAdjust="spacingAndGlyphs">sshd reads deploy keys as tando-keys; 0 apps with keys</text>
+<text x="849.6" y="315.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="332.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="332.6" textLength="100.8" lengthAdjust="spacingAndGlyphs">recover unit</text>
+<text x="169.2" y="332.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="332.6" textLength="58.8" lengthAdjust="spacingAndGlyphs">enabled</text>
+<text x="849.6" y="332.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="349.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="349.6" textLength="42.0" lengthAdjust="spacingAndGlyphs">tools</text>
+<text x="169.2" y="349.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="349.6" textLength="184.8" lengthAdjust="spacingAndGlyphs">curl rsync nft openssl</text>
+<text x="849.6" y="349.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="366.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="366.6" textLength="33.6" lengthAdjust="spacingAndGlyphs">node</text>
+<text x="169.2" y="366.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="366.6" textLength="58.8" lengthAdjust="spacingAndGlyphs">24.22.3</text>
+<text x="849.6" y="366.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="383.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="383.6" textLength="33.6" lengthAdjust="spacingAndGlyphs">swap</text>
+<text x="169.2" y="383.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="383.6" textLength="42.0" lengthAdjust="spacingAndGlyphs">15.7G</text>
+<text x="849.6" y="383.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="400.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="400.6" textLength="33.6" lengthAdjust="spacingAndGlyphs">disk</text>
+<text x="169.2" y="400.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="400.6" textLength="168.0" lengthAdjust="spacingAndGlyphs">28% used, 89 GB free</text>
+<text x="849.6" y="400.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="417.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="417.6" textLength="50.4" lengthAdjust="spacingAndGlyphs">alerts</text>
+<text x="169.2" y="417.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="417.6" textLength="235.2" lengthAdjust="spacingAndGlyphs">checks ran 23s ago; 0 firing</text>
+<text x="849.6" y="417.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="434.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="434.6" textLength="33.6" lengthAdjust="spacingAndGlyphs">apps</text>
+<text x="169.2" y="434.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="434.6" textLength="226.8" lengthAdjust="spacingAndGlyphs">5 apps, ports used 5 of 100</text>
+<text x="849.6" y="434.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="451.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="451.6" textLength="92.4" lengthAdjust="spacingAndGlyphs">memory caps</text>
+<text x="169.2" y="451.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="451.6" textLength="235.2" lengthAdjust="spacingAndGlyphs">800 MB of caps, 16040 MB RAM</text>
+<text x="849.6" y="451.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="468.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="468.6" textLength="100.8" lengthAdjust="spacingAndGlyphs">main journal</text>
+<text x="169.2" y="468.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="468.6" textLength="210.0" lengthAdjust="spacingAndGlyphs">capped at 200M (16M used)</text>
+<text x="849.6" y="468.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="485.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="485.6" textLength="67.2" lengthAdjust="spacingAndGlyphs">app logs</text>
+<text x="169.2" y="485.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="485.6" textLength="294.0" lengthAdjust="spacingAndGlyphs">5 apps in their own capped journals</text>
+<text x="849.6" y="485.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="502.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="34.8" y="502.6" textLength="67.2" lengthAdjust="spacingAndGlyphs">log caps</text>
+<text x="169.2" y="502.6" textLength="33.6" lengthAdjust="spacingAndGlyphs" style="fill:#98c379">● ok</text>
+<text x="236.4" y="502.6" textLength="310.8" lengthAdjust="spacingAndGlyphs">330 MB of app log caps, 91595 MB free</text>
+<text x="849.6" y="502.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">│</text>
+<text x="18.0" y="519.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">╰─</text>
+<text x="43.2" y="519.6" textLength="168.0" lengthAdjust="spacingAndGlyphs" style="fill-opacity:.6">0 failed, 1 warnings</text>
+<text x="219.6" y="519.6" textLength="638.4" lengthAdjust="spacingAndGlyphs" style="fill:#6c6c6c">───────────────────────────────────────────────────────────────────────────╯</text>
+</svg>

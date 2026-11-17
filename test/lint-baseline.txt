@@ -1,0 +1,74 @@
+# test/lint-baseline.txt: known findings, written by `test/lint.sh --update-baseline`.
+# One line per finding: file TAB code TAB source line (whitespace collapsed). Line numbers are
+# not stored, so edits elsewhere in a file do not invalidate entries. Remove lines as fixed.
+# Info findings (RL08 line length, shellcheck style notes) are never recorded here.
+lib/cmd-alerts.sh	RL04	ssh "${SSHO[@]}" "$TARGET" "if [ ! -x $WATCH_BIN ]; then echo 'alerts are not set up on this host: tando alerts enable' >&2; exit 3; fi; $s$WATCH_BIN $*" \
+lib/common.sh	RL04	ssh "${SSHO[@]}" "$TARGET" "$s$AGENT_BIN $*" 2> "${ERRF:-$TMPD/err}" | strip
+server/tando-agent	SC2010	ls /etc/systemd/system 2> /dev/null | grep "^tando-$A-" ; } | sort -u |
+test/e2e-bootstrap.sh	SC2034	sum0=$(srv 'sudo cksum < /etc/caddy/tando/hello.caddy')
+test/e2e-bootstrap.sh	SC2034	sum1=$(srv 'sudo cksum < /etc/caddy/tando/hello.caddy')
+test/e2e-data.sh	SC2034	listing=$(srv "sudo tar -tvzf $BK/notes/$id2/data.tar.gz")
+test/e2e-data.sh	SC2164	cd "$W/notes"
+test/e2e-next.sh	SC2164	cd "$W"
+test/e2e-sec2.sh	RL03	. "$E/env.sh"
+test/e2e.sh	SC2034	pid=$(srv "systemctl show -P MainPID tando-hello")
+test/e2e.sh	SC2164	cd "$W/hello"
+test/e2e.sh	SC2164	cd "$W/hello"
+test/e2e.sh	SC2164	cd "$W/site"
+test/faults/i2-restore-while-writing.sh	RL06	same=$(srv "sudo bash -c 'tar -xzOf /var/backups/tando/$A/$id/data.tar.gz ./log.txt > /tmp/i2.b; head -$n0 /opt/tando/apps/$A/shared/data/log.txt | cmp -s - /tmp/i2.b && echo same'")
+test/load/big-meta.sh	RL03	. "$LROOT/test/lib.sh"
+test/load/big-meta.sh	RL06	for i in \$(seq 1 $n); do printf '%s\t20250101-%06d\tdeploy\tok\t3.5\t0.1\t0.4\t0.1\t0.6\t0.1\t2.1\t-\n' \$((t - $n * 60 + i * 60)) \$i; done > /tmp/h; cat \$f >> /tmp/h; cat /tmp/h > \$f; wc -l < \$f"
+test/load/caddy-variants.sh	RL02	sx "sed -i '/loadtest-variants/d' /etc/caddy/Caddyfile; rm -f /etc/caddy/loadtest-variants.caddy /var/log/loadtest-variant.log*; systemctl reload caddy"
+test/load/client-watch.sh	RL03	. "$LROOT/test/lib.sh" # t_pty
+test/load/cpu-neighbour.sh	RL02	sed -i '' '/^cpu =/d' tando.conf; TANDO_SOAK=2 "$R" up > /dev/null 2>&1
+test/load/logflood.sh	RL02	"$(sx "du -sb /var/log/journal/*.tando-logflood | cut -f1")" "$(load1)" | tee -a "$out/during.tsv"
+test/load/logflood.sh	RL02	sx "du -sb /var/log/journal/*.tando-logflood 2>/dev/null"
+test/load/logflood.sh	RL02	sx "du -sb /var/log/journal/*.tando-logflood; cat /etc/systemd/journald@tando-logflood.conf; journalctl -u systemd-journald@tando-logflood --no-pager -o cat | grep -i -E 'suppress|rotat|vacuum' | tail -5;
+test/load/many-apps.sh	RL03	. "$LROOT/test/lib.sh" # t_pty
+test/load/sampler.sh	RL02	t=$(date +%s.%N | cut -c1-14)
+test/load/shim/ssh	RL09	#!/bin/bash
+test/load/stress.sh	RL02	disk) sx "df -k /opt/tando | tail -1; avail=\$(df -k --output=avail /opt/tando | tail -1); fallocate -l \$(( (avail - ${DISK_LEFT_KB:-20000}) * 1024 )) /opt/tando/loadtest-fill; df -h /opt/tando | tail -1";;
+test/race/inv-server.sh	SC2010	ls /etc/caddy/tando/ 2> /dev/null | grep -E '\.(tmp|old)$' | while read -r x; do echo "VIOL host caddy temp file left: $x"; done
+test/race/inv-server.sh	SC2034	declare -A PORTS UIDS SITES
+test/race/lib.sh	RL02	sed -i '' "s/^app = .*/app = $2/" "$p/tando.conf" 2> /dev/null || sed -i "s/^app = .*/app = $2/" "$p/tando.conf"
+test/race/lib.sh	SC2034	RACE_IT=0
+test/race/lib.sh	SC2034	for i in $(seq 1 120); do
+test/race/repro/same-who-lease.sh	SC2046	set -- $(srv "sudo cat /opt/tando/apps/$APP/current/VERSION /opt/tando/apps/$APP/current/marker" | tr '\n' ' ')
+test/race/s1-pair.sh	SC2034	fails=0
+test/race/s1-pair.sh	SC2034	recover) ( for j in 1 2 3 4 5; do jitter 1500; sroot /opt/tando/bin/tando-agent recover "$APP"; done > "$LOG/$i.op.out" 2>&1
+test/race/s2-setup.sh	RL02	sed -i '' "s/^app = .*/app = py$k/" "$p/tando.conf"; echo "host = test" >> "$p/tando.conf"
+test/race/s3-ci.sh	SC2046	set -- $(srv "sudo cat /opt/tando/apps/$APP/current/VERSION /opt/tando/apps/$APP/current/marker" | tr '\n' ' ')
+test/race/s3-ci.sh	SC2155	export TANDO_DEPLOY_KEY=$E/ci.key TANDO_HOST=$(secret "$E/ci.setup" TANDO_HOST)
+test/race/s3-ci.sh	SC2155	export TANDO_PORT=$(secret "$E/ci.setup" TANDO_PORT) TANDO_KNOWN_HOSTS=$(secret "$E/ci.setup" TANDO_KNOWN_HOSTS)
+test/race/s3-ci.sh	SC2155	export TANDO_PORT=$(secret "$E/ci.setup" TANDO_PORT) TANDO_KNOWN_HOSTS=$(secret "$E/ci.setup" TANDO_KNOWN_HOSTS)
+test/race/s5-client.sh	SC2046	set -- $(srv "sudo cat /opt/tando/apps/$APP/current/VERSION /opt/tando/apps/$APP/current/marker" | tr '\n' ' ')
+test/race/s6-timing.sh	SC2034	( for t in $(seq 1 50); do srv "sudo test -f /opt/tando/apps/$APP/upload" && break; sleep 0.1; done
+test/race/s6-timing.sh	SC2046	set -- $(srv "sudo cat /opt/tando/apps/$APP/current/VERSION /opt/tando/apps/$APP/current/marker /opt/tando/apps/$APP/current/crash-after 2> /dev/null" | tr '\n' ' ')
+test/sec2/attacks/a01-job-port-hijack.sh	RL09	#!/bin/bash
+test/sec2/attacks/a02-job-preflight-port.sh	RL09	#!/bin/bash
+test/sec2/attacks/a03-destroy-survivor.sh	RL09	#!/bin/bash
+test/sec2/attacks/a03-destroy-survivor.sh	SC2034	for i in $(seq 1 40); do rootsh 'journalctl --namespace=tando-gamma -u tando-gamma-job-tick -o cat --no-pager | grep -q "job up"' && break; sleep 1; done
+test/sec2/attacks/a04-loopback-matrix.sh	RL09	#!/bin/bash
+test/sec2/attacks/a05-writable-chown-race.sh	RL09	#!/bin/bash
+test/sec2/attacks/a06-probe-ua-unlogged.sh	RL09	#!/bin/bash
+test/sec2/attacks/a07-host-port-unlogged.sh	RL09	#!/bin/bash
+test/sec2/attacks/a15-journal-namespace-flood.sh	RL09	#!/bin/bash
+test/sec2/attacks/a16-devshm-shared.sh	RL09	#!/bin/bash
+test/sec2/attacks/a16-devshm-shared.sh	SC2034	for j in $(seq 1 20); do [ "$(get alpha /health)" = ok ] && break; sleep 1; done
+test/sec2/env.sh	SC2034	AG=/opt/tando/bin/tando-agent INC=/opt/tando/apps/alpha/incoming/
+test/sec2/env.sh	SC2034	KA=$W/key.alpha$([ "$SEC2_B" = 1 ] && echo b) KB=$W/key.bravo$([ "$SEC2_B" = 1 ] && echo b)
+test/sec2/env.sh	SC2034	ROOT=$W/tree T=$W/tree R=$W/tree/bin/tando
+test/sec2/setup.sh	RL05	rm -rf "$TANDO_CONFIG_DIR" "$W/cfg-ci$sfx"; mkdir -p "$TANDO_CONFIG_DIR"
+test/sec3/app/disk-fill.sh	RL09	#!/bin/bash
+test/sec3/net/adopt-fw.sh	RL09	#!/bin/bash
+test/sec3/net/lock-dos.sh	RL09	#!/bin/bash
+test/sec3/net/log-evasion.sh	RL09	#!/bin/bash
+test/sec3/net/nft-flush.sh	RL09	#!/bin/bash
+test/sec3/net/probe-secret-leak.sh	RL09	#!/bin/bash
+test/sec3/proto/hostile-run.sh	RL06	. /tmp/tando-secb.ZyNr20/env.sh
+test/sec3/proto/hostile-run.sh	RL10	printf '%s\n' "${vs[@]}" | rootsh 'cat > /opt/tando/hostile/verbs'
+test/sec3/proto/hostile-wrap.sh	RL01	mapfile -t P < <(payloads "$self.$v")
+test/sec3/proto/hostile-wrap.sh	RL06	"x$(head -c 3000 /dev/zero | tr '\0' A)" "../../../../tmp/evil" "-oProxyCommand=touch\${IFS}$M-o$1"
+test/sec3/proto/hostile-wrap.sh	RL09	#!/bin/bash
+test/server/down.sh	RL09	#!/bin/bash
+test/server/ssh.sh	RL09	#!/bin/bash

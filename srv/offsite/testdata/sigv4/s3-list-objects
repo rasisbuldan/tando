@@ -1,0 +1,12 @@
+service: s3
+region: us-east-1
+access: AKIAIOSFODNN7EXAMPLE
+secret: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+method: GET
+host: examplebucket.s3.amazonaws.com
+path: /
+query: max-keys=2&prefix=J
+header: x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+date: 20130524T000000Z
+payload: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+authz: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7

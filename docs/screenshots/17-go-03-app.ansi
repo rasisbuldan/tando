@@ -1,0 +1,25 @@
+[?1049h[?25l[H[2J[?25l[H[38;5;242m╭─[0m [1mtando go · Step 3 of 8 · App[0m [38;5;242m─────────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [32m✓ [0mServer  [32m✓ [0mSetup  [1;36m● App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour app[0m[0m                                                                                         [38;5;242m│[0m[K
+[38;5;242m│[0m Detected: a static app in landing/[0m                                                               [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m [1m1  Continue with these settings [2m(recommended)[0m[0m[0m                                                  [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mtando init writes them to tando.conf[0m[0m                                                       [38;5;242m│[0m[K
+[38;5;242m│[0m   2  Name          landing[0m                                                                       [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mthe app's name on the server and in its link[0m[0m                                               [38;5;242m│[0m[K
+[38;5;242m│[0m   3  Health check  /[0m                                                                             [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mmust answer before a new release goes live[0m[0m                                                 [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1m↑↓/1-9[0m[2m move[0m [2m·[0m [0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mb[0m[2m back[0m [2m·[0m [0m[1ms[0m[2m skip[0m [2m·[0m [0m[1mq[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[H[38;5;242m╭─[0m [1mtando go · Step 3 of 8 · App[0m [38;5;242m─────────────────────────────────────────────────────────[0m [2mlanding[0m [38;5;242m─╮[0m[K
+[38;5;242m│[0m [32m✓ [0mServer  [32m✓ [0mSetup  [1;36m● App[0m  [2m○ Link[0m  [2m○ Extras[0m  [2m○ Review[0m  [2m○ Run[0m  [2m○ Done[0m[0m                              [38;5;242m│[0m[K
+[38;5;242m├─[0m[38;5;242m────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;5;242m─┤[0m[K
+[38;5;242m│[0m [1mYour app[0m[0m                                                                                         [38;5;242m│[0m[K
+[38;5;242m│[0m Detected: a static app in landing/[0m                                                               [38;5;242m│[0m[K
+[38;5;242m│[0m [0m                                                                                                 [38;5;242m│[0m[K
+[38;5;242m│[0m [1;36m❯[0m [1m1  Continue with these settings [2m(recommended)[0m[0m[0m                                                  [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mtando init writes them to tando.conf[0m[0m                                                       [38;5;242m│[0m[K
+[38;5;242m│[0m   2  Name          landing[0m                                                                       [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mthe app's name on the server and in its link[0m[0m                                               [38;5;242m│[0m[K
+[38;5;242m│[0m   3  Health check  /[0m                                                                             [38;5;242m│[0m[K
+[38;5;242m│[0m       [2mmust answer before a new release goes live[0m[0m                                                 [38;5;242m│[0m[K
+[38;5;242m╰─[0m [1m[0m[2m[0m[1m↑↓/1-9[0m[2m move[0m [2m·[0m [0m[1menter[0m[2m ok[0m [2m·[0m [0m[1mb[0m[2m back[0m [2m·[0m [0m[1ms[0m[2m skip[0m [2m·[0m [0m[1mq[0m[2m quit[0m[0m [38;5;242m─────────────────────────────────────────────[0m[38;5;242m─╯[0m[K[J[0m[?25h[?1049l

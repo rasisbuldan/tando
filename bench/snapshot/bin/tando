@@ -1,0 +1,108 @@
+#!/bin/bash
+# tando: build on the laptop, upload by rsync, run under systemd behind Caddy.
+# Runs on macOS /bin/bash 3.2. See README.md.
+set -o pipefail
+self=$0; while [ -L "$self" ]; do l=$(readlink "$self"); case $l in /*) self=$l;; *) self=$(dirname "$self")/$l;; esac; done
+TANDO_HOME=$(cd "$(dirname "$self")/.." && pwd -P)
+. "$TANDO_HOME/lib/ui.sh"
+. "$TANDO_HOME/lib/common.sh"
+. "$TANDO_HOME/lib/deploy.sh"
+. "$TANDO_HOME/lib/views.sh"
+TMPD=$(mktemp -d "${TMPDIR:-/tmp}/tando.XXXXXX") || exit 1
+trap 'ui_frame_cleanup; rm -rf "$TMPD"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+ui_init
+
+usage() { cat <<'EOF'
+usage: tando <command> [-a app] [-H host]
+  host add <name> <user@host> [--port N] [--key path]   register a server
+  host ls | host setup <name> [apps_domain=D] [tls=off|internal|auto] [public_port=N]
+  init                      write tando.conf for this directory
+  up                        create the app if missing, apply tando.conf, deploy
+  deploy                    build, upload, activate (pre-flight, switch, verify)
+  rollback [id] | releases  go back to the previous verified release
+  env set K=V ... | env unset K ... | env ls
+  logs [-f] [-n N] | start | stop | restart
+  ls [--watch N] | status [app] [--watch N] | history [app] | jobs
+EOF
+}
+
+# common flags, anywhere after the command
+WATCH="" FOLLOW="" LINES=100 ARGS=()
+parse() {
+  while [ $# -gt 0 ]; do case $1 in
+    -a) APP=$2; shift 2;; -H) HOST=$2; shift 2;;
+    --watch) is_num "${2:-}" || die "--watch needs seconds"; WATCH=$2; shift 2;;
+    -f) FOLLOW=follow; shift;; -n) is_num "${2:-}" || die "-n needs a number"; LINES=$2; shift 2;;
+    *) ARGS+=("$1"); shift;; esac; done
+}
+
+cmd_host() {
+  case ${1:-} in
+    add) shift; host_add "$@";;
+    ls) host_ls;;
+    setup) [ -n "${2:-}" ] || die "usage: tando host setup <name>"; host_use "$2"; shift 2
+      local kv; for kv in "$@"; do case $kv in apps_domain=*|tls=*|unit_drop=*|public_port=*) ;; *) die "bad setting: $kv";; esac; done
+      ui_box_open "host setup $HOST" "$TARGET"
+      ssh "${SSHO[@]}" "$TARGET" 'sudo -n install -d -m 755 /opt/tando/bin && sudo -n tee /opt/tando/bin/tando-agent.new >/dev/null &&
+        sudo -n chmod 755 /opt/tando/bin/tando-agent.new && sudo -n mv -f /opt/tando/bin/tando-agent.new /opt/tando/bin/tando-agent' \
+        < "$TANDO_HOME/server/tando-agent" || die "could not install the agent (needs ssh + passwordless sudo)"
+      ui_step 1 2 agent ok "/opt/tando/bin/tando-agent"
+      agent sudo setup "$@" > "$TMPD/o"; agent info > "$TMPD/o"; kv_read "$TMPD/o" arch apps_domain tls
+      ui_step 2 2 setup ok "recover unit, caddy import"
+      ui_kv arch "$K_arch"; ui_kv apps "*.$K_apps_domain (tls $K_tls)"
+      ui_box_close "ready: tando up";;
+    *) usage; exit 1;;
+  esac
+}
+
+cmd_up() {
+  [ -f tando.conf ] || cmd_init
+  conf_load || die "no tando.conf"; resolve 1
+  configure
+  [ "$K_created" = 1 ] && note "created $APP on $HOST: user tando-$APP, port $K_port"
+  do_deploy
+}
+cmd_deploy() { conf_load; resolve 1; do_deploy; }
+
+cmd_rollback() { resolve 1; local id=${ARGS[1]:-}
+  [ -z "$id" ] || valid_id "$id" || die "bad release id: $id"
+  agent sudo rollback "$APP" $id > "$TMPD/o"; kv_read "$TMPD/o" current
+  ui_box_open "rollback $APP" "$HOST"; ui_kv current "$K_current $(ui_badge verified)"; ui_box_close
+}
+
+cmd_env() { resolve 1; local op=${ARGS[1]:-ls} a
+  case $op in
+    ls) cmd_env_ls;;
+    set|unset) [ ${#ARGS[@]} -ge 3 ] || die "usage: tando env $op K=V ..."
+      for a in "${ARGS[@]:2}"; do
+        case $a in *'
+'*) die "values cannot contain newlines";; esac
+        case $op:$a in set:[A-Za-z_]*=*|unset:[A-Za-z_]*) ;; *) die "bad argument: $a";; esac
+        printf '%s\n' "$a"; done > "$TMPD/env"
+      agent sudo "env-$op" "$APP" < "$TMPD/env" > "$TMPD/o"; health_note "env updated, $APP restarted";;
+    *) die "env: set, unset or ls";;
+  esac
+}
+cmd_logs() { resolve 1
+  ssh "${SSHO[@]}" "$TARGET" "sudo -n $AGENT_BIN logs $APP $LINES $FOLLOW" | strip; }
+cmd_svc() { resolve 1; agent sudo "$1" "$APP" > "$TMPD/o"; health_note "$1: $APP"; }
+health_note() { kv_read "$TMPD/o" healthy
+  [ "$K_healthy" = 1 ] && note "$1" || { note "$1, but the health check through Caddy fails: tando logs"; exit 1; }; }
+
+main() {
+  local cmd=${1:-}; [ $# -gt 0 ] && shift
+  parse "$cmd" "$@"
+  case $cmd in
+    host) cmd_host "${ARGS[@]:1}";;
+    init) cmd_init;; up) cmd_up;; deploy) cmd_deploy;;
+    rollback) cmd_rollback;; releases) cmd_releases;;
+    env) cmd_env;; logs) cmd_logs;;
+    start|stop|restart) cmd_svc "$cmd";;
+    ls) cmd_ls;; jobs) cmd_jobs;;
+    status) [ -n "${ARGS[1]:-}" ] && APP=${ARGS[1]}; cmd_status;;
+    history) [ -n "${ARGS[1]:-}" ] && APP=${ARGS[1]}; cmd_history;;
+    ""|-h|--help|help) usage;;
+    *) usage; exit 1;;
+  esac
+}
+main "$@"
