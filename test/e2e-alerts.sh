@@ -843,6 +843,9 @@ sleep 2; until_ 60 idle   # (a run that is starting has no ExecMainStartTimestam
 # (the timer's: tando-watch.service, referenced by nothing now, is unloaded after a run)
 check "27h systemd prints its timestamps in a local zone here (TZ=WIB-7)" \
   srv 'TZ=WIB-7 systemctl show -P ActiveEnterTimestamp tando-watch.timer | grep -q WIB'
+# (the daemon tests above leave tandod just restarted and degraded, with no run on record yet:
+# the timer's fallback runs within two minutes)
+until_ 150 srv '/opt/tando/bin/tando-watch doctor | grep -q "checks ran"'
 srv 'TZ=WIB-7 /opt/tando/bin/tando-watch doctor; systemctl show -p StatusText,ActiveState tandod; systemctl show -p ActiveState,Result,ExecMainStartTimestampMonotonic tando-watch.service tando-watch-fallback.service; cat /proc/uptime' >&2
 check "27i the dead man's check still reads the last run's age under that zone" \
   srv 'TZ=WIB-7 /opt/tando/bin/tando-watch doctor | grep -q "checks ran"'

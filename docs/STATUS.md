@@ -56,12 +56,20 @@ Full suite on this tree, 17 Nov 2026 (`test/all.sh`, 21 suites, test containers 
 | Failing check | What it was | State |
 |---|---|---|
 | e2e-trial T3b | a doctor row wider than 80 columns | fixed, suite passes again |
-| e2e-faults m3 | the test expected 8 setup steps, there are 9 | test fixed, suite not rerun yet |
+| e2e-faults m3 | the test expected 8 setup steps, there are 9 | test fixed; rerun pending |
 | e2e 19j | stopped journal units that systemd had not unloaded yet were counted as leftovers of `destroy` | test fixed, check passes again |
-| e2e-alerts 27i | the "last run" row of `tando-watch doctor` after the daemon tests | open |
+| e2e-alerts 27i | the check asked for the last run before the first run after the daemon tests | test fixed, suite passes (154 passed, 1 skipped) |
 
-Open: in two of three later runs of e2e-alerts beside another suite, the test container did not
-accept ssh after the suite's `docker restart`; alone it passes. Not yet explained.
+Test environment: with other test containers starting and stopping beside it (Docker on OrbStack),
+a container sometimes comes back from `docker restart` with systemd up and sshd listening but its
+published ports reaching nothing. The alerts and fault suites restart it once more when that
+happens. This cost several runs; it is not a tando fault (no connection arrives in the container,
+and tando's firewall does not touch port 22).
+
+On GitHub's runners (x86-64, the first place the amd64 server programs ran): lint, Go, the secret
+scan and the laptop-side jobs pass. In the server job 12 suites pass; the open failures there are
+in checks that depend on the runner (a pseudo-terminal, a forwarded ssh agent, a fake ssh for
+`host setup`, a half-closed request in the Caddy log) and are being worked through.
 
 Release check, 16 Nov (before the Go binaries were part of the archive; not repeated since): `test/portability.sh` 53 passed, 0 incompatibilities;
 `scripts/release.sh --check` reproducible (40 files, 292 KB); installed from the archive into an

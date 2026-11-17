@@ -13,7 +13,13 @@ SSHP=${TANDO_TEST_SSH_PORT:-2222} HTTPP=${TANDO_TEST_HTTP_PORT:-8080}
 READY=$D/.ready; [ "$NAME" = tando-testvm ] || READY=$D/.ready-$NAME
 rm -f "$READY"
 [ "${1:-}" = "--reset" ] && docker rm -f "$NAME" >/dev/null 2>&1 || true
-[ -f "$D/id_test" ] || ssh-keygen -q -t ed25519 -N '' -C tando-test -f "$D/id_test"
+# (several servers may start at once on a fresh checkout: make the key aside, the first link wins)
+if [ ! -f "$D/id_test" ]; then
+  ssh-keygen -q -t ed25519 -N '' -C tando-test -f "$D/.id_test.$$" &&
+    { ln "$D/.id_test.$$.pub" "$D/id_test.pub" 2> /dev/null && ln "$D/.id_test.$$" "$D/id_test" 2> /dev/null; }
+  rm -f "$D/.id_test.$$" "$D/.id_test.$$.pub"
+  until [ -f "$D/id_test" ] && [ -f "$D/id_test.pub" ]; do sleep 0.2; done
+fi
 
 docker build -q --build-arg "CADDY=$CADDY" --build-arg "BARE=$BARE" -t "$IMAGE" "$D" >/dev/null
 if ! docker container inspect "$NAME" >/dev/null 2>&1; then

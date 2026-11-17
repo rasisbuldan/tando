@@ -215,7 +215,7 @@ echo 2 > VERSION
 check "2b2 plain output into a reader that stops early prints no broken-pipe error" hasnt "$E/pipe.err" "cmd-ci.sh.*Broken pipe"
 check "2c the build ran (BUILT shipped)" test "$(srv 'sudo cat /opt/tando/apps/alpha/current/BUILT')" = "built 2"
 echo 3 > VERSION
-as_key "$E/setup.alpha" script -q "$E/d3.tty" "$R" deploy < /dev/null > /dev/null 2>&1
+as_key "$E/setup.alpha" "$ROOT/test/pty-run.sh" "$E/d3.tty" "$R" deploy < /dev/null > /dev/null 2>&1
 check "2d on a terminal the key shows the same boxed progress" sh -c "grep -q '╭─ deploy alpha' '$E/d3.tty' && grep -q 'upload' '$E/d3.tty'"
 check "2e alpha answers v3" test "$(ver alpha)" = 3
 echo 4 > VERSION

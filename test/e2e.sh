@@ -433,7 +433,7 @@ check "11d the link serves one of them (v$(ver))" eval 'case "$(ver)" in 21|22) 
 # 15. --watch repaints on a pseudo-terminal: a second frame comes without any input. Each frame
 # is one ssh round trip, which takes seconds on a loaded machine, so this waits for the second
 # frame (up to 30 s) instead of counting frames in a fixed window.
-( COLUMNS=80 script -q "$E/watch.out" "$R" status --watch 1 < /dev/null > /dev/null 2>&1 & )
+( COLUMNS=80 "$ROOT/test/pty-run.sh" "$E/watch.out" "$R" status --watch 1 < /dev/null > /dev/null 2>&1 & )
 frames=0 t0=$SECONDS
 while [ $((SECONDS - t0)) -lt 30 ]; do
   sleep 0.5

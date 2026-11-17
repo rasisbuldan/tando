@@ -175,7 +175,15 @@ docker_powerloss() { docker kill "$TANDO_TEST_NAME" > /dev/null; docker start "$
 # wait_server: ssh answers and systemd finished booting (running or degraded); fails after the timeout
 booted() { case $(srv 'systemctl is-system-running' 2> /dev/null) in running|degraded) return 0;; esac; return 1; }
 wait_server() {
-  until_ 90 srv -o ConnectTimeout=2 true 2> /dev/null || { echo "wait_server: no ssh after 90 s" >&2; return 1; }
+  if ! until_ 90 srv -o ConnectTimeout=2 true 2> /dev/null; then
+    # Seen with Docker on OrbStack while other test containers start and stop: the container is
+    # up and sshd listens, but its published ports reach nothing. One more restart brings them back.
+    if [ "$(docker exec "$TANDO_TEST_NAME" systemctl is-active ssh.socket 2> /dev/null)" = active ]; then
+      echo "wait_server: the published ports do not answer: restarting the container once more" >&2
+      docker restart -t 5 "$TANDO_TEST_NAME" > /dev/null
+    fi
+    until_ 90 srv -o ConnectTimeout=2 true 2> /dev/null || { echo "wait_server: no ssh after 90 s" >&2; return 1; }
+  fi
   until_ 60 booted || { echo "wait_server: systemd still $(srv 'systemctl is-system-running') after 60 s" >&2; return 1; }
   rm -f "$TANDO_CONFIG_DIR"/cm-* 2> /dev/null; pkill -f "ControlPath=$TANDO_CONFIG_DIR" 2> /dev/null
   return 0
