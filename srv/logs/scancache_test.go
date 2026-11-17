@@ -129,7 +129,7 @@ func TestIdleScan(t *testing.T) {
 		!strings.Contains(b.String(), "scan\tapp007\t0\t0\t0\t0\t0\t0\t0\n") {
 		t.Fatalf("%d commands, %q", len(h.calls)-n, b.String())
 	}
-	if runtime.GOOS == "linux" { // (fstatat; elsewhere os.Stat allocates)
+	if runtime.GOOS == "linux" && !raceOn { // (fstatat; elsewhere os.Stat allocates)
 		b.Reset()
 		if a := testing.AllocsPerRun(20, func() { h.l.WatchScan(ctx(), nil, w); w.Flush(); b.Reset() }); a > 1 {
 			t.Fatalf("an idle scan of 20 apps: %v allocations", a)

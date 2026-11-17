@@ -88,7 +88,9 @@ if want mac; then
     BASH_BIN=/bin/bash /bin/bash test/ui-test.sh > "$E/ui-mac.out" 2>&1
     check "M2 test/ui-test.sh under /bin/bash 3.2 ($(tail -1 "$E/ui-mac.out"))" test $? = 0
     # local commands: help, init on every example; host add (logs in to the test server)
-    server_up
+    # (no Docker, as on GitHub's macOS runners: no test server, so host add is skipped)
+    have_srv=0
+    if docker info > /dev/null 2>&1; then server_up; have_srv=1; else echo "SKIP M3 host add: no Docker here"; fi
     (
       export TANDO_CONFIG_DIR=$E/mac-cfg TANDO_COLOR=never
       /bin/bash bin/tando help > "$E/help.out" 2>&1 || exit 1
@@ -101,6 +103,7 @@ if want mac; then
         (cd "$E/mac/$ex" && /bin/bash "$ROOT/bin/tando" init) > "$E/init-$ex.out" 2>&1
         { echo "rc=$?"; cat "$E/mac/$ex/tando.conf" 2> /dev/null; } > "$E/init-$ex.mac"
       done
+      [ "$have_srv" = 1 ] || exit 0
       /bin/bash bin/tando host add t vmadmin@127.0.0.1 --port "$SSHP" --key "$ROOT/test/server/id_test" \
         --yes > /dev/null 2>&1 || exit 1   # the real path: host key shown and trusted
       [ -f "$E/mac-cfg/hosts/t" ] && [ -s "$E/mac-cfg/known_hosts" ]

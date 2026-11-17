@@ -451,6 +451,13 @@ until_ 60 srv true || { # (why the server does not answer after its restart, for
   docker exec "$TANDO_TEST_NAME" sh -c 'systemctl is-system-running; systemctl list-jobs --no-pager | head -20; ls -la /run/nologin;
     systemctl --failed --no-pager --no-legend; systemctl status ssh ssh.socket --no-pager | head -30; journalctl -b -p warning --no-pager | tail -40' >&2
   "$ROOT/test/server/ssh.sh" -v true 2>&1 | tail -15 >&2
+  docker exec "$TANDO_TEST_NAME" sh -c 'ip -4 addr show scope global; ss -ltn | head -12' >&2
+  # Seen with other test containers starting and stopping beside this one (Docker on OrbStack):
+  # the container is up, systemd runs and ssh.socket listens, but the published ports reach
+  # nothing (ssh and http alike, no connection arrives inside). A second restart brings them back.
+  log "the server's published ports do not answer after the restart: restarting it once more"
+  docker restart "$TANDO_TEST_NAME" > /dev/null
+  until_ 60 srv true
 }
 until_ 30 test "$(curl -s -o /dev/null -w '%{http_code}' "http://hog.localhost:$HP/health")" = 200
 check "22a the timer is active again after the restart" test "$(srv 'systemctl is-active tando-watch.timer')" = active

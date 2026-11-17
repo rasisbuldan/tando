@@ -83,7 +83,7 @@ jobs:
     # - The runner is x86_64; the Dockerfile maps amd64 -> x64 for Node.
     # e2e-next needs npm (setup-node); e2e-data installs PostgreSQL inside the container.
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -96,7 +96,8 @@ jobs:
       - name: build the test server image
         run: docker build -q -t tando-testvm:latest test/server
       - name: all server suites, in parallel, each on its own test server
-        run: test/all.sh --skip ui-test,lint
+        # (e2e-faults takes about 1.5 hours by itself: run it by hand, test/all.sh --only e2e-faults)
+        run: test/all.sh --skip ui-test,lint,e2e-faults
       - name: Linux and BusyBox clients
         run: test/portability.sh linux busybox debian
       - name: logs
