@@ -259,6 +259,9 @@ case $base in ""|*[!0-9]*) base=14;; esac
 get hog "/grow?mb=$((89 - base))" > /dev/null
 wruns 2
 check "8a memory: 2 samples above the threshold are pending" eq "$(st hog.memory.st)/$(nmsg)" pending/0
+[ "$(st hog.memory.st)" = pending ] || {   # what the server saw, for a failure on another machine
+  echo "  8a: base=$base MB"; srv "systemctl show tando-hog -p MemoryMax -p MemoryCurrent -p MemorySwapMax -p ControlGroup | tr '\n' ' '; echo
+    cg=/sys/fs/cgroup\$(systemctl show tando-hog -p ControlGroup --value); sudo grep -E '^(anon|shmem|file) ' \$cg/memory.stat | tr '\n' ' '; cat \$cg/memory.swap.current 2>&1; sudo grep hog /var/lib/tando/watch/state | tr '\n' ' '" 2>&1 | sed 's/^/  8a: /'; }
 wrun
 check "8b memory: the 3rd sample fires once" eq "$(nev firing hog memory)" 1
 get hog /free > /dev/null; until_ 30 wrun_and seen resolved hog memory

@@ -39,6 +39,7 @@ rt=$(srv 'sudo /opt/tando/bin/tando-logs req-tail bravo 50')
 check "S3-4a a Host in other letters is refused (got $cu), not served unlogged" t_eq "$cu" 400
 check "S3-4b a request whose client half-closed is in the log, as aborted" \
   eval 'echo "$rt" | grep -q "aborted.*/s3-halfclose"'
+echo "$rt" | grep -q "aborted.*/s3-halfclose" || { echo "  S3-4b: nc flag [$NCN]; log lines:"; echo "$rt" | grep -i 's3-\|abort' | tail -5 | sed 's/^/  S3-4b: /'; }
 
 # 5: nft flush ruleset -> tando-watch puts the table back, fires an alert, writes an audit line
 fwo=$(srv 'sudo nft flush ruleset; sudo /opt/tando/bin/tando-watch run > /dev/null 2>&1; sudo nft list table inet tando | grep -c skuid; sudo tail -3 /var/log/tando/audit.log | grep -c fw-restore; sudo grep -c "^_host.firewall.st=firing" /var/lib/tando/watch/state')

@@ -27,10 +27,13 @@ Medians of 3 to 9 runs. Full method, raw tables and the places where tando loses
 On a real 1 CPU, 2 GB server: 8,599 requests at 50 connections while a deploy, a rollback and
 another deploy ran. None failed.
 
+On that server, with 3 apps: monitoring (checks, metrics and the log scan every minute) takes 8 MB
+of memory and 0.1% of the CPU, and a status call costs 24 ms of server CPU.
+
 What that means in practice:
 
 - **A 5 dollar server is enough.** tando adds almost nothing on top of your app. There is no
-  Docker daemon and no proxy container, and monitoring runs in about 10 MB in our tests.
+  Docker daemon and no proxy container, and monitoring runs in 8 MB on the real server.
 - **Deploys are small and fast.** Only changed files travel (rsync), so a deploy sends kilobytes,
   not an image.
 - **The server never builds.** The build runs on your laptop or in CI, so a deploy cannot run a
