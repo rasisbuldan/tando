@@ -6,14 +6,19 @@ first, grouped by area.
 
 ## Unreleased
 
+## 0.1.0 - 2026-11-18
+
+First public release.
+
 - The project was renamed to tando. It is licensed under the PolyForm Noncommercial License 1.0.0; commercial use needs approval (COMMERCIAL.md).
 
 Summary of this round (16-17 Nov 2026). The server programs under `/opt/tando/bin` were rewritten
 from bash to Go (`tando-metrics`, `tando-logs`, `tando-watch`, `tando-gate`, `tando-status`, and the
 new monitoring daemon `tandod`), with the same verbs, output and files; two features were added,
 offsite backup and host care; the alerts cover both. Details by area below. Performance figures are
-from a 1-CPU arm64 test container (bench/RESULTS.md); the Go binaries have not yet run on the real
-x86-64 server (docs/STATUS.md).
+from a 1-CPU arm64 test container and, since 17 Nov, from the real x86-64 server (bench/RESULTS.md).
+- A deploy refused for lack of disk space or inodes gives its upload lease back at once (the next
+  deploy was refused for up to 5 seconds).
 
 ### Monitoring (alerts for the new features)
 - Offsite: a per-app check `offsite` (srv/watch) reads `/var/lib/tando/offsite/state/<app>` and

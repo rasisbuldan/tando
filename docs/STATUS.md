@@ -72,12 +72,12 @@ tando's: a deploy refused for lack of disk space kept its upload lease, so a sec
 an activation; h2 passes alone. The whole fault suite has not been rerun since.
 
 On GitHub's runners (x86-64, the first place the amd64 server programs ran): lint, Go, the secret
-scan and the laptop-side jobs pass. In the third run of the server job 14 suites passed and 4 had
-failing checks, 8 in all. All 8 were tests written for the laptop: an ssh client option OpenSSH 9.6
-on Linux ignores, a fake ssh that did not read its input, `nc` not half-closing on Linux, a memory
-figure calibrated for arm64, and one alert text that depends on timing. They are changed and pass
-on the laptop; two were reproduced and checked in a Linux container. The job has not yet passed
-as a whole on GitHub.
+scan and the laptop-side jobs pass. The server job (18 suites; the fault suite
+is not run there) took six runs to pass: its failing checks were tests written for the laptop (an
+ssh client option OpenSSH 9.6 on Linux ignores, a fake ssh that did not read its input, `nc` not
+half-closing on Linux, a newer Caddy logging an aborted request as 499, runners without swap, a
+pseudo-terminal). It passed as a whole on 17 Nov. GitHub's macOS runners were not always
+available: a job cancelled after 15 minutes in the queue is that, not a test.
 
 Release check, 16 Nov (before the Go binaries were part of the archive; not repeated since): `test/portability.sh` 53 passed, 0 incompatibilities;
 `scripts/release.sh --check` reproducible (40 files, 292 KB); installed from the archive into an
