@@ -31,6 +31,15 @@ first, grouped by area.
 - Added: tando's own drop-in keeps the PostgreSQL postmaster out of the OOM killer's reach
   (-900, as the Ubuntu packages already set); `tando doctor` reads the live values.
 
+- Added: alerts for scheduled jobs. A job that fails (exit status, signal, its timeout, the memory
+  limit) fires `job.<name>` for its app, one message per failed run, resolved by its next success
+  (`tando jobs run <name>` counts); a job removed from tando.conf takes its alert with it.
+  `job=off` turns it off.
+- Added: alerts for PostgreSQL, on hosts where an app has `database = postgres`: `db_conns` when
+  an app's role holds 80% of its connection limit for 5 minutes (`db_conn_pct`, `db_conn_for`; the
+  limit is read from the server), host `postgres` when the server does not answer or its slots
+  are 80% taken. The database's size counts as the app's disk use (`disk`, `app_max_mb`) and is
+  shown with the connections by `tando status <app>` and `tando health <app>`.
 - Tests: tiers (`test/all.sh --tier check|quick|full|nightly|weekly`), `test/check.sh`, suite selection
   by changed files (`test/suites.map`), fault scenarios in shards; the full tier takes about 16 minutes
   on the reference laptop (was about 2 hours). AGENTS.md says what to run when.

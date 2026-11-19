@@ -43,6 +43,7 @@ cmd/tando-offsite/      main: dispatches the verbs of tando-offsite and version
 offsite/                domain: S3 client, encryption, push/fetch/sync/retention, disaster recovery (below)
 internal/               platform: everything at least two programs need; never imports a domain package
   run/        start a program: argv, timeout, explicit env; never a shell. The only os/exec user
+              (Cmd.User: as another user, privileges dropped: psql as postgres)
   env/        Env: paths (/opt/tando, /var/lib/tando, /sys/fs/cgroup, /proc), clock, euid, Runner
   out/        Writer: Row (empty -> "-"), Fields (empty kept), KV, Relay, Stream; Clean (controls -> "?"),
               Cleaner (the rule as values: watch's and gate's shell rules are other values of it)
@@ -88,7 +89,9 @@ awk), `metrics`' five-field `fields` (an array: `read` runs over 2000 lines per 
 unit, /proc, statfs, cgroups), runs the checks, decides, commits, unlocks and delivers. Checks are
 `hostCheck`/`appCheck` values (`check.go` lists them in the order they run, because earlier ones
 hold later ones: Caddy down holds the health probes, a deploying, stopped or dead app holds
-memory, restarts and health); one file per check or family (`check_*.go`). Each check calls
+memory, restarts and health); one file per check or family (`check_*.go`; `check_jobs.go`: the
+job units are asked in that same one call; `check_postgres.go`: one `psql` a run as the postgres
+user, `run.Cmd.User`, only when an app has a database). Each check calls
 `tick.sample(key, app, check, ok|bad|hold, detail, need)`, the state machine of `machine.go`
 (ok -> pending -> firing -> ok, flapping); `reconcile.go` decides what to send (silences,
 flapping, reminders); `commit.go` records it so that a killed run neither loses nor repeats a
@@ -107,7 +110,9 @@ Tests: `harness_test.go` is a fake host (temp dirs, a clock moved a minute per t
 `run.Func` answering systemctl/journalctl/tando-logs/du, fake probes and receivers);
 `scenario_test.go` drives it (fire after N, recover after M, flapping, silences, backoff and the
 queue, the liveness cap, the disk guard, http/slow/errors/logs thresholds, new errors after a
-release, crash recovery of a commit, notifier payloads); `verbs_test.go` the other verbs;
+release, crash recovery of a commit, notifier payloads); `jobs_pg_test.go` the scheduled jobs
+(once per failed run, resolve, removed, never ran) and PostgreSQL (thresholds, windows, no
+answer, the database in the disk check); `verbs_test.go` the other verbs;
 `output_test.go` hostile bytes in the state, history and settings through the read verbs.
 
 ## gate: how the package is laid out

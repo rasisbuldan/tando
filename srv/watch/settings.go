@@ -31,6 +31,8 @@ var defaults = []struct{ key, def, desc string }{
 	{"disk_stop_pct", "95", "an app over app_max_mb is stopped when its file system is this % full (0 = never)"},
 	{"liveness", "3", "failed health probes in a row, with the unit of the app running, after which tando-watch restarts the app (at most 3 times an hour, then only alerts); 0 = never"},
 	{"stuck_min", "20", "minutes an activation may run before it counts as stuck"},
+	{"db_conn_pct", "80", "connections of an app's database role as % of the role's connection limit (PostgreSQL's whole server: % of its usable slots)"},
+	{"db_conn_for", "5", "samples at or above db_conn_pct before db_conns (or host postgres) fires"},
 	{"http_min", "5", "answers with HTTP 5xx within 5 minutes (real requests, from the request log) before http fires, if also http_pct"},
 	{"http_pct", "10", "% of the requests within 5 minutes answered 5xx before http fires"},
 	{"slow_ms", "3000", "p95 latency in ms of real requests within a minute above which the minute counts as slow"},
@@ -56,8 +58,8 @@ var defaults = []struct{ key, def, desc string }{
 // The checks that can be turned off ("<check>=off", "<app>.<check>=off"). "logs" is of low
 // severity: no high priority in ntfy, "(low)" in the text.
 var (
-	appChecks  = []string{"down", "health", "memory", "oom", "restarts", "tls", "backup", "stuck", "disk", "http", "slow", "errors", "logs"}
-	hostChecks = []string{"disk", "inodes", "host_memory", "swap", "load", "host_oom", "caddy", "caddy_config", "firewall", "monitor"}
+	appChecks  = []string{"down", "health", "memory", "oom", "restarts", "tls", "backup", "stuck", "disk", "http", "slow", "errors", "logs", "job", "db_conns"}
+	hostChecks = []string{"disk", "inodes", "host_memory", "swap", "load", "host_oom", "caddy", "caddy_config", "firewall", "monitor", "postgres"}
 )
 
 func lowSeverity(check string) bool { return check == "logs" || check == "ssh" }

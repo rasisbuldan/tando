@@ -30,7 +30,11 @@ type tick struct {
 	appUnits map[string]bool              // tando-<app>.service of every app with a unit
 	holdAll  bool                         // booting, or systemd did not answer: apps not judged
 	caddyUp  bool
-	oomUnits map[string]bool // units the journal names for this run's OOM kills
+	names    []string            // every app (with or without a release)
+	jobs     map[string][]string // app -> the scheduled jobs of its live release (check_jobs.go)
+	again    map[string]bool     // firing checks that failed anew this run: told again (a job's next failed run)
+	pg       *pgFacts            // what PostgreSQL answered this run (nil: not asked, or no answer)
+	oomUnits map[string]bool     // units the journal names for this run's OOM kills
 	apps     []*appTick
 
 	events   []event
@@ -57,7 +61,9 @@ type appTick struct {
 func (a *appTick) key(c string) string { return a.name + "." + c }
 
 // unitProps are what one systemctl call reads for every app and Caddy.
-var unitProps = []string{"ActiveState", "SubState", "Result", "NRestarts", "MemoryMax", "ExecMainCode", "ExecMainStatus"}
+// (InactiveEnterTimestampMonotonic is for the job units: when a run ended, check_jobs.go)
+var unitProps = []string{"ActiveState", "SubState", "Result", "NRestarts", "MemoryMax", "ExecMainCode", "ExecMainStatus",
+	"InactiveEnterTimestampMonotonic"}
 
 // Run is the verb `run`: one check run under the lock, then delivery outside it.
 func (w Watch) Run(ctx context.Context) error {
@@ -111,6 +117,8 @@ func (w *Watch) newTick(ctx context.Context) *tick {
 		units:    map[string]map[string]string{},
 		appUnits: map[string]bool{},
 		oomUnits: map[string]bool{},
+		jobs:     map[string][]string{},
+		again:    map[string]bool{},
 		resolved: map[string]string{},
 		recover:  map[string]int64{},
 	}
@@ -121,6 +129,7 @@ func (t *tick) check() {
 	t.readInbox()
 	t.checkBoot()
 	names := t.findApps()
+	t.names = names
 	for _, c := range firstChecks() {
 		c.check(t)
 	}
@@ -160,7 +169,7 @@ func (t *tick) checkBoot() {
 	}
 }
 
-// findApps lists the apps and asks systemd about every app unit and Caddy in one call. Static
+// findApps lists the apps and asks systemd about every app unit, every job unit and Caddy in one call. Static
 // apps have no unit (Caddy serves them): only their health, tls and backups are checked. If the
 // call fails or times out, nothing that depends on it is judged this run (an empty answer is not
 // "everything is down").
@@ -173,6 +182,12 @@ func (t *tick) findApps() []string {
 			withUnit = append(withUnit, a)
 			units = append(units, "tando-"+a+".service")
 			t.appUnits["tando-"+a+".service"] = true
+		}
+		// its scheduled jobs: their units, in the same call (keyed by the unit's name)
+		t.jobs[a] = t.w.jobsOf(a)
+		for _, j := range t.jobs[a] {
+			withUnit = append(withUnit, jobUnit(a, j))
+			units = append(units, jobUnit(a, j))
 		}
 	}
 	withUnit = append(withUnit, "_caddy")
@@ -239,7 +254,7 @@ func (t *tick) forgetRemoved() {
 			continue
 		}
 		switch p {
-		case "dg", "tls", "oomk", "win", "top", "ema", "sup", "du", "dumb":
+		case "dg", "tls", "oomk", "win", "top", "ema", "sup", "du", "dumb", "pgsz", "pgc", "pgl":
 			if !fsinfo.DirFollow(t.w.appDir(a)) {
 				t.vs.del(k)
 			}

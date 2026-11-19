@@ -1,7 +1,8 @@
 #!/bin/bash
 # End-to-end test of tando alerts (server/tando-watch, lib/cmd-alerts.sh) against a clean test
-# container. One PASS/FAIL line per check; exits non-zero on any failure. Takes about 8 minutes
-# (three of them the two quiet periods it waits out, sections 9 and 10).
+# container. One PASS/FAIL line per check; exits non-zero on any failure. Takes about 10 minutes
+# (three of them the two quiet periods it waits out, sections 9 and 10; section 31 installs
+# PostgreSQL from the network).
 #
 # This is the bulk: every check, notifier, setting and verb, with the check runs started by hand
 # (one run stands for a minute). Two parts that need a server of their own run beside it:
@@ -558,6 +559,106 @@ cpu=0; for i in 1 2 3 4 5; do d0=$(dcpu); wrun; c=$(srv 'systemctl show -P CPUUs
   cpu=$((cpu + (c + $(dcpu) - d0) / 1000000)); done
 echo "watch run CPU (5 runs, average): $((cpu / 5)) ms" >> "$E/numbers"
 check "28zc a check run costs under 0.5 s of CPU on average ($((cpu / 5)) ms)" test $((cpu / 5)) -lt 500
+
+# ---- 30. scheduled jobs that fail (srv/watch check_jobs.go): one message per failed run ----
+# ops: hello with two jobs whose exit status the test sets (a file in shared/); "yearly" so that no
+# timer starts one meanwhile: runs are started as the timer does (systemctl start) or by hand
+cp -R "$TREE/examples/hello" "$W/ops"
+printf '#!/bin/sh\n# exits with the status the suite wrote (0 without one)\nexit "$(cat /opt/tando/apps/ops/shared/code 2> /dev/null || echo 0)"\n' > "$W/ops/job.sh"
+printf 'app = ops\nrecipe = node\nstart = node server.js\nhealth = /health\nmemory = 128M\njob.flaky = yearly | sh job.sh\njob.gone = yearly | sh job.sh\n' > "$W/ops/tando.conf"
+(cd "$W/ops" && "$R" up > "$E/up-ops.out" 2>&1) || { tail -5 "$E/up-ops.out" >&2; fail "30 up ops (an app with two jobs)"; }
+jcode() { srv "echo $1 | sudo tee /opt/tando/apps/ops/shared/code > /dev/null"; }
+jtimer() { srv "sudo systemctl start tando-ops-job-$1.service" > /dev/null 2>&1; true; }   # what its timer does
+jdet() { since_mark | grep -q "$1"; }
+mark; wruns 2
+check "30a jobs scheduled that never ran: no alert, no state" \
+  eq "$(srv 'systemctl is-active tando-ops-job-flaky.timer tando-ops-job-gone.timer' | tr '\n' ' ')$(nev firing ops job.flaky)/$(st ops.job.flaky.st)" "active active 0/"
+jcode 3; (cd "$W/ops" && "$R" jobs run flaky > "$E/jobrun1.out" 2>&1); rc=$?
+check "30b tando jobs run of a failing job exits with its status (rc=$rc)" eq "$rc" 3
+wrun
+check "30c a job that exits 3 (run by hand): one notification naming the job" eq "$(nev firing ops job.flaky)/$(st ops.job.flaky.st)" 1/firing
+check "30d its detail: the job, when, the exit status, what to run" jdet 'job flaky failed at [0-9-]* [0-9:]* UTC: exit status 3; tando jobs run flaky -a ops'
+wruns 3
+check "30e the same failed run is not told again" eq "$(nev firing ops job.flaky)" 1
+"$R" alerts > "$E/alerts-job.out" 2>&1
+check "30f tando alerts lists it as ops job.flaky" grep -q 'ops.*job\.flaky.*exit status 3' "$E/alerts-job.out"
+jcode 4; jtimer flaky; wrun
+check "30g the next run fails too (started as its timer does): a second notification, with its status" \
+  eval '[ "$(nev firing ops job.flaky)" = 2 ] && jdet "job flaky failed at .* UTC: exit status 4"'
+wruns 2
+check "30h and only that one" eq "$(nev firing ops job.flaky)/$(nev resolved ops job.flaky)" 2/0
+jcode 0; (cd "$W/ops" && "$R" jobs run flaky > "$E/jobrun2.out" 2>&1); rc=$?
+wrun
+check "30i a successful run by hand (rc=$rc) resolves it at once, one notification" \
+  eq "$rc/$(nev resolved ops job.flaky)/$(st ops.job.flaky.st)" 0/1/ok
+# a job that fails and is then removed from tando.conf: its alert goes with it
+jcode 7; jtimer gone; jcode 0; wrun
+check "30j the second job fails: its own alert" eq "$(nev firing ops job.gone)/$(st ops.job.gone.st)" 1/firing
+grep -v '^job.gone' "$W/ops/tando.conf" > "$W/ops/tando.conf.new" && mv "$W/ops/tando.conf.new" "$W/ops/tando.conf"
+(cd "$W/ops" && "$R" up > "$E/up-ops2.out" 2>&1) || tail -5 "$E/up-ops2.out" >&2
+wrun
+check "30k the job is removed from tando.conf and deployed: its alert resolves (no longer scheduled) and is dropped" \
+  eval '[ "$(nev resolved ops job.gone)" = 1 ] && jdet "the job is no longer scheduled" && [ "$(st ops.job.gone.st)" != firing ] &&
+        [ -z "$(st ops.job.gone.det)$(st ops.job.gone.run)" ] && srv "! test -e /etc/systemd/system/tando-ops-job-gone.service"'
+wruns 2
+check "30l nothing more about either job" eq "$(nev firing ops job.flaky)/$(nev firing ops job.gone)/$(nev resolved ops job.gone)" 2/1/1
+
+# ---- 31. PostgreSQL (srv/watch check_postgres.go): connections of an app's role, the server down ----
+printf 'database = postgres\n' >> "$W/ops/tando.conf"
+(cd "$W/ops" && "$R" up > "$E/up-ops-db.out" 2>&1) || tail -5 "$E/up-ops-db.out" >&2
+check "31a up with database = postgres: PostgreSQL accepts connections (it is installed from the network when missing)" \
+  srv 'pg_isready -q -h 127.0.0.1'
+# sessions of ops's role, held open by real psql clients in a unit of their own until pgfree
+srv 'sudo tee /root/pghold.sh > /dev/null' <<'PGHOLD'
+#!/bin/sh
+# pghold.sh N: N idle sessions of the role of app ops, open until this unit is stopped
+url=$(/opt/tando/bin/tando-agent db-url ops | sed -n 's/^url=//p')
+i=0
+while [ "$i" -lt "$1" ]; do sleep 900 | psql -q "$url" & i=$((i + 1)); done
+wait
+PGHOLD
+pgconns() { srv "sudo -u postgres psql -At -c \"SELECT count(*) FROM pg_stat_activity WHERE usename = 'tando_ops'\"" 2> /dev/null; }
+pghas() { [ "$(pgconns)" = "$1" ]; }
+pghold() { srv "sudo systemd-run -q --collect --unit=pghold /bin/sh /root/pghold.sh $1"; until_ 30 pghas "$1"; }
+pgfree() { srv 'sudo systemctl stop pghold.service' 2> /dev/null; until_ 30 pghas 0; }
+aset db_conn_for=2
+mark; wruns 2
+"$R" status -a ops > "$E/status-ops.out" 2>&1; "$R" health ops > "$E/health-ops.out" 2>&1
+"$R" status -a ops --json > "$E/status-ops.json" 2>&1
+check "31b tando status and tando health show the database's size and its role's connections against the server's limit" \
+  eval 'grep -Eq "database +postgres +[0-9.]+ MB, 0 of 10 connections" "$E/status-ops.out" &&
+        grep -Eq "database +[0-9.]+ MB, 0 of 10 connections" "$E/health-ops.out" &&
+        grep -Eq "\"database\":\{\"bytes\":[0-9]+,\"connections\":0,\"connection_limit\":10\}" "$E/status-ops.json"'
+pghold 7; wruns 3
+check "31c 7 of the role's 10 connections held open (below 80%): no alert" eq "$(pgconns)/$(st ops.db_conns.st)/$(nev firing ops db_conns)" 7//0
+pgfree; pghold 8; wrun
+check "31d 8 of 10 held: one sample is pending, nothing sent (db_conn_for=2 here, 5 in production)" \
+  eq "$(pgconns)/$(st ops.db_conns.st)/$(nev firing ops db_conns)" 8/pending/0
+wrun
+check "31e the second sample fires, one notification" eq "$(st ops.db_conns.st)/$(nev firing ops db_conns)" firing/1
+check "31f its detail: 8 of 10, the limit read from the server" jdet '8 of 10 database connections in use (the limit of its role tando_ops'
+"$R" status -a ops > "$E/status-ops2.out" 2>&1
+check "31g tando status shows the connections and the alert" \
+  eval 'grep -Eq "database +postgres +[0-9.]+ MB, 8 of 10 connections" "$E/status-ops2.out" && grep -q "db_conns" "$E/status-ops2.out"'
+wruns 2
+check "31h no repeat while they stay open" eq "$(nev firing ops db_conns)/$(nev resolved ops db_conns)" 1/0
+pgfree; wruns 2
+check "31i released: resolved, one notification" eq "$(pgconns)/$(st ops.db_conns.st)/$(nev resolved ops db_conns)" 0/ok/1
+# PostgreSQL stopped while an app has a database: one host alert (down_after=2 samples)
+pgdown() { ! srv 'pg_isready -q -h 127.0.0.1'; }
+srv 'sudo systemctl stop postgresql'; until_ 30 pgdown
+wrun
+check "31j PostgreSQL stopped: one failed question is pending" eq "$(st _host.postgres.st)/$(nev firing host postgres)" pending/0
+wrun
+check "31k the second fires host/postgres once, naming the app that needs it; no alert of the app's connections" \
+  eval '[ "$(nev firing host postgres)" = 1 ] && jdet "PostgreSQL does not answer (.*); used by ops: sudo systemctl status postgresql" &&
+        [ "$(nev firing ops db_conns)" = 1 ]'
+wruns 2
+check "31l no repeat while it is down, and the run still ends (the question has a timeout)" eq "$(nev firing host postgres)" 1
+srv 'sudo systemctl start postgresql'; until_ 30 srv 'pg_isready -q -h 127.0.0.1'
+wruns 2
+check "31m started again: resolved once" eq "$(st _host.postgres.st)/$(nev resolved host postgres)" ok/1
+aset db_conn_for=
 
 # ---- 29 (tandod), 27h, 27i (the dead man's check in a local time zone): test/e2e-alerts-daemon.sh ----
 srv 'sudo systemctl start tando-watch.timer'

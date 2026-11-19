@@ -41,6 +41,7 @@ func firstChecks() []hostCheck {
 		hostFunc{"caddy", checkCaddy},
 		hostFunc{"caddy_config", checkCaddyConfig},
 		hostFunc{"oom slices", checkOOMSlices},
+		hostFunc{"postgres", checkPostgres}, // one question for every app with a database; they judge its answer below
 	}
 }
 
@@ -54,7 +55,9 @@ func appCheckList() []appCheck {
 		appFunc{"oom", checkOOM},
 		appFunc{"memory", checkMemory},
 		appFunc{"backup", checkBackup},
-		appFunc{"disk", checkAppDisk}, // and the disk guard
+		appFunc{"jobs", checkJobs},        // its scheduled jobs: how each last ended (not held with the app)
+		appFunc{"db conns", checkDBConns}, // its database role's connections against the role's limit
+		appFunc{"disk", checkAppDisk},     // and the disk guard
 		appFunc{"uptime class", classify},
 		appFunc{"health queue", queueProbe}, // probed together below
 		appFunc{"tls", checkTLS},
@@ -67,6 +70,7 @@ func lastChecks() []hostCheck {
 		hostFunc{"health", checkHealth}, // and liveness
 		hostFunc{"logscan", checkLogscan},
 		hostFunc{"uptime", recordUptime},
+		hostFunc{"jobs gone", dropJobs}, // alerts of jobs that are no longer scheduled
 		hostFunc{"host disk", checkHostDisk},
 		hostFunc{"firewall", checkFirewall},
 		hostFunc{"host memory", checkHostMemory}, // memory, swap, load

@@ -87,8 +87,9 @@ func checkOffsite(t *tick, a *appTick) {
 	}
 }
 
-// checkAppDisk: the app's own files (shared/, data_dir, releases, incoming) against app_max_mb,
-// measured every disk_every minutes (du as root, one file system, no links followed). Over the
+// checkAppDisk: the app's own files (shared/, data_dir, releases, incoming) and its PostgreSQL
+// database against app_max_mb, the files measured every disk_every minutes (du as root, one file
+// system, no links followed), the database as the server last gave its size. Over the
 // cap: an alert. Over it while its file system is disk_stop_pct full: the app is stopped (503
 // page; tando start brings it back), so one app cannot take every other app's writes and deploys.
 func checkAppDisk(t *tick, a *appTick) {
@@ -118,17 +119,34 @@ func checkAppDisk(t *tick, a *appTick) {
 	t.vs.set("dumb."+a.name, mb)
 	k := a.key("disk")
 	limit := num(t.host["app_max_mb"], 8192)
-	if num(mb, 0) <= limit {
+	// its database is its disk use too (the size PostgreSQL last gave, check_postgres.go)
+	files, db := num(mb, 0), int64(0)
+	if a.conf["database"] == "postgres" {
+		db = t.vs.n("pgsz."+a.name, 0) >> 20
+	}
+	if files+db <= limit {
 		t.sample(k, a.name, "disk", ok, "", 1)
 		return
 	}
-	det := a.name + " uses " + mb + " MB of disk, over the " + decimal.Itoa(limit) + " MB allowed per app (host setup app_max_mb=N)"
+	det := a.name + " uses " + decimal.Itoa(files+db) + " MB of disk"
+	if db > 0 {
+		det += " (files " + mb + " MB, database " + decimal.Itoa(db) + " MB)"
+	}
+	det += ", over the " + decimal.Itoa(limit) + " MB allowed per app (host setup app_max_mb=N)"
 	var fsp int64
-	if u, ok := t.w.df(filepath.Join(d, "shared"), t.w.mounts()); ok {
-		fsp = num(u.pct, 0)
+	mounts := t.w.mounts()
+	shared, isFS := t.w.df(filepath.Join(d, "shared"), mounts)
+	if isFS {
+		fsp = num(shared.pct, 0)
+	}
+	// the guard stops an app to keep its file system from filling: the database counts for it
+	// only when PostgreSQL keeps its data on that file system
+	guard := files
+	if pg, ok := t.w.df(t.w.PgData, mounts); db > 0 && ok && isFS && pg.target == shared.target {
+		guard += db
 	}
 	sp := t.cfg.num("disk_stop_pct", a.name)
-	if sp > 0 && fsp >= sp && a.hasUnit && !a.stopped && t.w.agentOutside(t.ctx, "stop", a.name, "stop "+a.name+" (its file system is full)", 120*time.Second) {
+	if sp > 0 && guard > limit && fsp >= sp && a.hasUnit && !a.stopped && t.w.agentOutside(t.ctx, "stop", a.name, "stop "+a.name+" (its file system is full)", 120*time.Second) {
 		det += "; its file system is " + decimal.Itoa(fsp) + "% full: " + a.name + " was stopped (free space, then tando start -a " + a.name + ")"
 	}
 	t.sample(k, a.name, "disk", bad, det, 1)

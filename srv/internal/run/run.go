@@ -16,8 +16,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -46,6 +49,10 @@ type Cmd struct {
 	// to the command itself, as stdin and stdout are); the error then carries no stderr text.
 	// nil: the start of stderr goes into the error of a failed command.
 	Stderr io.Writer
+	// User, when set, runs the command as that user: its uid and primary group, no other groups.
+	// For a program that must not run as root (psql as postgres, whom the server knows by its
+	// uid). It only ever drops privileges, and only root can: for anyone else the start fails.
+	User string
 }
 
 // Runner runs commands. Exec is the real one; tests pass a Func.
@@ -110,6 +117,14 @@ func (Exec) Output(ctx context.Context, c Cmd) ([]byte, error) {
 		cmd.Stderr = c.Stderr
 	}
 
+	if c.User != "" {
+		cred, err := credential(c.User)
+		if err != nil {
+			return nil, err
+		}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
+	}
+
 	err = cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("%s: timed out after %s", name, timeout)
@@ -124,6 +139,20 @@ func (Exec) Output(ctx context.Context, c Cmd) ([]byte, error) {
 		return nil, nil
 	}
 	return stdout.Bytes(), nil
+}
+
+// credential is the uid and primary group of a local user (from /etc/passwd).
+func credential(name string) (*syscall.Credential, error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return nil, fmt.Errorf("run: no user %s on this host", name)
+	}
+	uid, err1 := strconv.ParseUint(u.Uid, 10, 32)
+	gid, err2 := strconv.ParseUint(u.Gid, 10, 32)
+	if err1 != nil || err2 != nil {
+		return nil, fmt.Errorf("run: user %s has no numeric uid and gid", name)
+	}
+	return &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}, nil
 }
 
 // lookPath finds name in the PATH of env (not of this process: under sudo or a CI login that

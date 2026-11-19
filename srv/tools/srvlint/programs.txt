@@ -47,6 +47,7 @@ watch	du
 watch	journalctl
 watch	nft
 watch	nice tando-logs
+watch	psql
 watch	systemctl
 watch	systemd-run sendmail
 watch	systemd-run tando-agent

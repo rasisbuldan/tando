@@ -98,6 +98,8 @@ hl_one() {
   ui_kv "uptime 24h" "$(hl_pct "$u1")  ${UI_DIM}of $n1 minutes judged${UI_NC}"
   ui_kv "uptime 7d" "$(hl_pct "$u7")  ${UI_DIM}of $n7 minutes, $ni incidents${UI_NC}"
   ui_kv latency "$(hl_spark "$sp")  ${UI_DIM}p50${UI_NC} $(hl_ms "$p50")  ${UI_DIM}p95${UI_NC} $(hl_ms "$p95")"
+  local pgn; pgn=$(pg_note "$TMPD/hl" "$APP")   # its PostgreSQL database: size, connections of its role
+  [ -z "$pgn" ] || ui_kv database "$pgn"
   {
     local k=0
     printf '#\tSTART (GMT)\tLASTED\tCHECK\tCAUSE\n'
@@ -134,5 +136,6 @@ hl_json() {
   to_json "app:s,uptime_24h_pct:n,uptime_7d_pct:n,minutes_24h:n,minutes_7d:n,incidents_7d:n,p50_ms:n,p95_ms:n,last:s,firing:s" < "$TMPD/hl.j1"
   printf ',"incidents":'
   to_json "app:s,start:n,end:n,check:s,cause:s" < "$TMPD/hl.j2"
+  [ -z "$APP" ] || pg_json "$TMPD/hl" "$APP"
   printf '}\n'
 }

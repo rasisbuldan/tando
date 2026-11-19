@@ -22,6 +22,7 @@ import (
 //	   <p50 ms 24h> <p95 ms 24h> <avg probe ms per hour, 24 values oldest first> <last class> <last ms>
 //	   <firing checks, comma-separated|->
 //	inc <app> <start> <end|-> <check> <cause>      newest first (15 for one app, 3 for all)
+//	pg <app> <bytes|-> <connections|-> <limit|->   one app with a PostgreSQL database: its size, its role's connections
 //	tail <app> <time> <line>                       one app: the last lines before its last crash
 //
 // A minute counts as up when the probe passed (or the app has no probe and runs); hold (deploys,
@@ -44,9 +45,14 @@ func (w Watch) Health(o *out.Writer, args []string) error {
 	}
 	for _, a := range list {
 		var fir []string
-		for _, c := range []string{"down", "health", "oom", "restarts", "http", "slow", "errors", "logs", "memory", "disk"} {
+		for _, c := range []string{"down", "health", "oom", "restarts", "http", "slow", "errors", "logs", "memory", "disk", "db_conns"} {
 			if st.get(a+"."+c+".st") == "firing" {
 				fir = append(fir, c)
+			}
+		}
+		for _, k := range st.keys() { // its scheduled jobs that failed: job.<name>
+			if c, ok := strings.CutPrefix(k, a+".job."); ok && strings.HasSuffix(c, ".st") && st.get(k) == "firing" {
+				fir = append(fir, "job."+strings.TrimSuffix(c, ".st"))
 			}
 		}
 		firs := or(strings.Join(fir, ","), "-")
@@ -74,6 +80,7 @@ func (w Watch) Health(o *out.Writer, args []string) error {
 			o.Row("inc", a, f[0], f[1], f[2], f[3])
 		}
 		if one {
+			w.pgRow(o, newStore(loadQuiet(w.vstatePath())), a)
 			for _, l := range tailLines(filepath.Join(w.Dir, "tail", a), 1<<30) {
 				f := bashread.Fields(l, 2)
 				o.Row("tail", a, f[0], f[1])
