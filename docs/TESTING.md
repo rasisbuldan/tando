@@ -406,6 +406,7 @@ and the Linux/BusyBox portability checks on the runner, and **macos** runs the l
 macOS's bash 3.2. Nothing is scheduled: the nightly and weekly tiers are local commands
 (`test/all.sh --tier nightly`), run when the machine is free.
 
-This layout was written on 19 Nov 2026. Until its first run on GitHub is recorded here, treat it
-as unproven. The assumptions about the runners (systemd boots in a privileged container, x86_64,
+This layout first ran on GitHub on 19 Nov 2026 (commit 441265e): **checks** passed in 5 min 5 s and
+**smoke** in 2 min 15 s; **tier** and **macos** were skipped, as they should be on a push. The
+manual jobs have not been run there yet. The assumptions about the runners (systemd boots in a privileged container, x86_64,
 network for the image build, `*.localhost`) held on the runs of 17 Nov 2026.
