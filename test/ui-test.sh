@@ -301,6 +301,9 @@ else bad "adopt site edit (one-line form): $(cat "$AS/oneline.new")"; fi
 as_case have "6 1 1 1 1 1" 'example.com {\n\tlog {\n\t\toutput file /var/log/tando/shop/./access.log\n\t}\n\thandle {\n\t\treverse_proxy 127.0.0.1:3100 {\n\t\t\tlb_try_duration 15s\n\t\t}\n\t}\n}\n'
 as_case ownlog "3 0 0 1 1 0" 'example.com {\n\tlog\n\treverse_proxy 127.0.0.1:3100\n}\n'
 as_case two "-1 0 0 0 0 0" 'a.example {\n\treverse_proxy 127.0.0.1:3100\n}\nb.example {\n\treverse_proxy 127.0.0.1:3100\n}\n'
+# several reverse_proxy lines to the port are never edited; they count as held only when each holds
+as_case twoheld "-1 0 1 0 0 0" 'a.example {\n\thandle /api/* {\n\t\treverse_proxy 127.0.0.1:3100 {\n\t\t\tlb_try_duration 15s\n\t\t}\n\t}\n\treverse_proxy 127.0.0.1:3100 {\n\t\tlb_try_duration 5s\n\t}\n}\n'
+as_case twohalf "-1 0 0 0 0 0" 'a.example {\n\thandle /api/* {\n\t\treverse_proxy 127.0.0.1:3100 {\n\t\t\tlb_try_duration 15s\n\t\t}\n\t}\n\treverse_proxy 127.0.0.1:3100\n}\n'
 as_case none "0 0 0 0 0 0" 'a.example {\n\treverse_proxy 127.0.0.1:31000\n\timport sites/*\n}\n'
 rm -rf "$AS"
 

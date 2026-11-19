@@ -327,19 +327,30 @@ Example: `tando unlock`
 Example: `tando recipes`
 
 ### adopt
-`tando adopt plan|apply <unit> [--health /path] [--no-jobs] [--yes]` ·
-`tando adopt undo|status <app>` · `tando adopt site <app> [--apply]`. Flags:
-`-H --health --no-jobs --yes --apply`. Subcommands: plan, apply, undo, status, site (1 argument
-each). `-a` is refused.
+`tando adopt plan|apply <unit> [--health /path] [--no-jobs] [--yes] [--accept-502]` ·
+`tando adopt undo|status <app>` · `tando adopt site <app|unit> [--health /path] [--apply]`. Flags:
+`-H --health --no-jobs --yes --apply --accept-502`. Subcommands: plan, apply, undo, status, site
+(1 argument each). `-a` is refused.
 Takes over a hand-deployed Next.js app (systemd unit behind Caddy) in place: `plan` is read-only,
 `apply` backs up, switches and rolls back on failure, `undo` returns to the recorded state.
+The order is `plan`, `site --apply`, `apply`.
 `site` shows what your own Caddy site lacks next to one tando renders: `lb_try_duration` in the
 app's `reverse_proxy` (requests wait while the app restarts instead of getting 502) and the request
 log that `tando requests`, `tando errors` and the 5xx alert read. `site --apply` adds them: a copy of
-the Caddyfile is kept in `/var/backups/tando/<app>/`, the new file is validated, Caddy is reloaded
-(never restarted) and the app is checked through it; a failure puts the previous file back. A site
-it cannot read with certainty (several `reverse_proxy` lines to the port, a log of its own, an
-imported file) is not edited: the lines to add by hand are printed.
+the Caddyfile is kept, the new file is validated, Caddy is reloaded (never restarted) and the app is
+checked through it; a failure puts the previous file back. A site it cannot read with certainty
+(several `reverse_proxy` lines to the port, a log of its own, an imported file) is not edited: the
+lines to add by hand are printed.
+Before adoption `site` takes the unit, as `plan` does (with the same `--health`), and reports and
+adds the hold only: the request log needs the app's log directory, so it comes with a second
+`site --apply` after adoption. The copy of the Caddyfile is kept in `/opt/tando/adopt/<unit>/`
+(root only) before adoption and in `/var/backups/tando/<app>/` after it.
+Without the hold, every request that arrives while the app restarts gets 502: during the adoption
+and during every later deploy, rollback or restart. `plan` says so in a section of its own, with
+the command that adds the hold, and `apply` refuses to start (nothing is changed) unless
+`--accept-502` is given. That flag is also the way to adopt behind a site `site` cannot edit, when
+you do not add the two lines by hand first. `apply` itself never edits the Caddyfile, so `undo`
+returns to the site as it was when `apply` started: with the hold, if you added it before.
 See docs/MIGRATION.md.
 Example: `tando adopt plan bakery -H vps --health /order/new`
 

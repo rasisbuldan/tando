@@ -3,6 +3,7 @@
 # test/all.sh --save-durations on 2026-11-19). test/all.sh warns when a suite takes over 1.5 times
 # its line here and at least 60 s more, and starts the longest suites first by it.
 e2e	296
+e2e-adopt	99
 e2e-alerts	582
 e2e-alerts-daemon	245
 e2e-alerts-timer	728

@@ -36,7 +36,7 @@ lib/ui.sh                lint ui-test e2e-cli e2e-ease e2e-top e2e-status
 lib/views.sh             lint ui-test e2e-cli e2e-status e2e-data e2e
 lib/help.txt             lint ui-test e2e-cli install-test
 completions/*            lint ui-test e2e-cli install-test
-lib/cmd-adopt.sh         lint ui-test e2e-cli
+lib/cmd-adopt.sh         lint ui-test e2e-cli e2e-adopt
 lib/cmd-alerts.sh        lint ui-test e2e-cli @alerts
 lib/cmd-health.sh        lint ui-test e2e-cli @alerts
 lib/cmd-audit.sh         lint ui-test e2e-cli e2e-logs e2e-ci
@@ -57,7 +57,7 @@ lib/hostcare.sh          lint ui-test e2e-cli e2e-host
 lib/offsite.sh           lint ui-test e2e-cli e2e-offsite e2e-data
 
 # ---- server side
-server/tando-adopt       lint ui-test e2e-ci e2e-status
+server/tando-adopt       lint ui-test e2e-ci e2e-status e2e-adopt
 server/legacy/*          lint install-test e2e-status @alerts
 srv/watch/*              go @alerts e2e-status e2e-host e2e-faults-q4
 srv/logs/*               go e2e-logs e2e e2e-ci @alerts

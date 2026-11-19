@@ -92,7 +92,7 @@ _tando() {
     errors) subs="" flags="$flags --since -n --json -a -H --last" args="apps";;
     requests) subs="tail errors summary" flags="$flags --since -a -H --last -n -f --4xx" args="apps";;
     audit) subs="" flags="$flags -n -H -a" args="apps";;
-    adopt) subs="plan apply undo status site" flags="$flags --health --no-jobs --yes -H --apply" args="apps";;
+    adopt) subs="plan apply undo status site" flags="$flags --health --no-jobs --yes --accept-502 -H --apply" args="apps";;
     help) subs="" flags="$flags " args="";;
     cheat) subs="" flags="$flags " args="";;
     go) subs="" flags="$flags --port --key --domain --dns --yes --forget" args="";;

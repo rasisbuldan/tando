@@ -1,9 +1,16 @@
 # Moving bakery and magazine onto tando (`tando adopt`)
 
 A runbook for the owner's VPS. Rehearsed on a local replica of that server
-(a replica container and an e2e suite, `e2e-adopt`, kept outside this repository because they
+(a replica container and a rehearsal suite, kept outside this repository because they
 reproduce a private server). bakery was then adopted on the real server on 19 Nov 2026:
 see "On the real server" at the end. magazine, timers and `adopt undo` are replica-only so far.
+`test/e2e-adopt.sh` in this repository runs the same steps (without timers) against a synthetic
+hand-deployed app on a test server.
+
+The order is: `adopt plan`, `adopt site --apply` (the request hold), `adopt apply`. The second
+step is there because of what the real server showed: 36 visitor requests got 502, 16 during the
+adoption and 20 during the first deploy, because the hand-written site did not hold requests
+while the app restarted, and the hold could then only be added after adoption.
 
 ## What adopt does, in one paragraph
 
@@ -34,7 +41,7 @@ and then compares the server with the record.
 | The image cache | Per release, as today (`next_cache = release`). | tando normally shares `.next/cache` across releases. bakery's `minimumCacheTTL` is 31 days because its cache is rebuilt with every release (next.config comment): a shared cache would serve an old photo for a month after it changes. |
 | Regenerated pages (R2) | Per-release writable copies of `.next/server/app` **and `.next/server/route-cache`**. | Next 16 writes ISR output to `.next/server/route-cache` too. With tando's default (`app` only) every regeneration logs `EACCES: mkdir .next/server/route-cache` (seen on the replica). Adopt detects directories the app wrote at runtime. |
 | The old deploy scripts | `/opt/<app>/incoming` becomes a file saying the app is managed by tando; the directory is kept as `incoming.pre-tando`. | `deploy-vps.sh` starts with `mkdir -p /opt/bakery/incoming`, so it now stops before it changes anything. Without this it would switch `/opt/bakery/current` to a release Node does not serve and restart a disabled unit: static files from one build, HTML from another. Tested on the replica. |
-| Downtime | One restart: from `systemctl stop bakery` to the first healthy answer through Caddy. The old unit gets 20 s to stop, then SIGKILL. | The hand-written block has no request holding, so requests in that window get 502. Static files switch with no gap (the link moves first, both point at identical files). On the replica a Next server once ignored SIGTERM until systemd's default 90 s stop timeout (the hand-written units do not lower it); it kept serving meanwhile, but the switch waited. tando's own units stop within 20 s. |
+| Downtime | One restart: from `systemctl stop bakery` to the first healthy answer through Caddy. The old unit gets 20 s to stop, then SIGKILL. With the request hold in the site (`adopt site --apply`, step 2 below) requests wait for that restart and are then served; `adopt apply` refuses to start without the hold unless `--accept-502` is given. | A hand-written block usually has no request holding, so requests in that window get 502. Static files switch with no gap (the link moves first, both point at identical files). On the replica a Next server once ignored SIGTERM until systemd's default 90 s stop timeout (the hand-written units do not lower it); it kept serving meanwhile, but the switch waited. tando's own units stop within 20 s. |
 
 ## Before you start: read-only checks on the real server
 
@@ -100,7 +107,8 @@ twice:
   requests in flight for about a second.
 
 Both changes are validated first (`caddy validate`); the previous file is put back if Caddy rejects
-the new one. Adopt itself never touches the Caddyfile, and neither do deploys of adopted apps. Back
+the new one. `adopt apply` and `adopt undo` never touch the Caddyfile, and neither do deploys of
+adopted apps; only `adopt site --apply` edits it, when you run it. Back
 up the Caddyfile before `host setup` (the tar command above does), and check
 `systemctl status caddy` afterwards.
 
@@ -127,7 +135,32 @@ while :; do printf '%s %s\n' "$(date +%T)" "$(curl -s -o /dev/null -w '%{http_co
    also the user of another unit or process. Anything under **blocked**, or a risk you
    did not expect: stop and compare with the replica.
 
-2. Apply. Run it in the bakery source directory: it writes `tando.conf` there (or
+   When the site does not hold requests while the app restarts, the plan has a section
+   **request hold: missing**: what it costs (every request that arrives during the adoption and
+   during every later deploy, rollback or restart fails with 502) and the command of step 2.
+
+2. Add the request hold to your Caddy site, before anything is switched.
+
+   ```sh
+   tando adopt site bakery -H vps --health /order/new           # what it would add
+   tando adopt site bakery -H vps --health /order/new --apply
+   ```
+
+   It adds `lb_try_duration 15s` and `lb_try_interval 100ms` to the `reverse_proxy` of the app's
+   port, nothing else. The app must answer through Caddy first; the Caddyfile is validated before
+   and after the edit, the previous file is kept as `/opt/tando/adopt/bakery/Caddyfile.<time>`
+   (root only; there is no app directory or app backup yet, and the adoption record will live in
+   the same place), Caddy is reloaded (not restarted) and the app is checked through it. Anything
+   that fails puts the previous file back. This also helps a deploy with the old script. The
+   request log is not added now: it needs the app's log directory, which adoption makes (step 5).
+
+   A site it cannot edit with certainty (no `reverse_proxy` to the port in the Caddyfile itself,
+   or more than one) is left alone and the two lines to add by hand are printed. Add them to each
+   `reverse_proxy` of the port, `caddy validate`, `systemctl reload caddy`, and the plan stops
+   reporting the hold as missing. If you would rather adopt without the hold, step 3 takes
+   `--accept-502`.
+
+3. Apply. Run it in the bakery source directory: it writes `tando.conf` there (or
    `tando.conf.adopted` if one exists).
 
    ```sh
@@ -135,12 +168,15 @@ while :; do printf '%s %s\n' "$(date +%T)" "$(curl -s -o /dev/null -w '%{http_co
    tando adopt apply bakery -H vps --health /order/new
    ```
 
-   Steps: check, backup, register (pre-flight of a copy of the live release in tando's sandbox on
-   port 4100), switch (the restart), jobs, verify. A dropped ssh connection does not stop it
-   (`tando adopt status bakery -H vps` re-attaches). Any failure after the backup returns
-   everything to the recorded state and says so.
+   Without the hold it refuses before it changes anything and names step 2;
+   `--accept-502` starts it anyway. Steps: check, backup, register (pre-flight of a copy of the
+   live release in tando's sandbox on port 4100), switch (the restart), jobs, verify. A dropped
+   ssh connection does not stop it (`tando adopt status bakery -H vps` re-attaches). Any failure
+   after the backup returns everything to the recorded state and says so. `apply` does not edit
+   the Caddyfile: the state `adopt undo` returns to is the one `apply` found, with the hold of
+   step 2.
 
-3. Fix the build line in `tando.conf` before the first deploy (tando cannot know it). For bakery,
+4. Fix the build line in `tando.conf` before the first deploy (tando cannot know it). For bakery,
    the same build `deploy-vps.sh` does, including the precompressed files Caddy serves:
 
    ```
@@ -149,7 +185,11 @@ while :; do printf '%s %s\n' "$(date +%T)" "$(curl -s -o /dev/null -w '%{http_co
 
    tando replaces the macOS `sharp` packages with the server's (linux-x64) itself.
 
-4. Retire `scripts/deploy-vps.sh` (it would stop at its first step anyway). Deploy with
+5. Add the request log to the site, now that the app has a log directory:
+   `tando adopt site bakery -H vps --apply` (this copy of the Caddyfile goes to
+   `/var/backups/tando/bakery/`). `tando requests`, `tando errors` and the 5xx alert read it.
+
+6. Retire `scripts/deploy-vps.sh` (it would stop at its first step anyway). Deploy with
    `tando deploy`; roll back with `tando rollback`.
 
 ### Verify
@@ -173,6 +213,7 @@ Same steps, with its health path (whatever `remote.sh` checks; the replica uses 
 ```sh
 cd <magazine source>
 tando adopt plan magazine -H vps --health /api/health
+tando adopt site magazine -H vps --health /api/health --apply    # the request hold, first
 tando adopt apply magazine -H vps --health /api/health
 tando jobs -a magazine -H vps                  # six jobs, next runs at the same times as before
 systemctl list-timers --all | grep magazine    # tando-magazine-job-* active, magazine-* inactive
@@ -261,10 +302,11 @@ Every failed request is an HTTP 502 from Caddy during one restart (the deliberat
 now pause before the switch). Run 3 had longer gaps from a 0.5 s polling interval in the new bounded
 stop (fixed in runs 4 and 5).
 
-**Recommended after adoption (optional, the owner's call):** the 502s come from the hand-written block,
-which does not hold requests while the app restarts (tando-rendered sites do).
-`tando adopt site <app> --apply` adds this and the request log; by hand it is two lines in each
-`reverse_proxy` block of the Caddyfile:
+**The request hold (now step 2, before adoption):** the 502s in the table above come from the
+hand-written block, which did not hold requests while the app restarted (tando-rendered sites do).
+The rehearsals ran before `adopt site` existed. `tando adopt site <unit> --apply` adds the hold
+before adoption (and the request log after it); by hand it is two lines in each `reverse_proxy`
+block of the Caddyfile:
 
 ```
 reverse_proxy 127.0.0.1:3100 {
@@ -360,6 +402,10 @@ Also seen then, and changed in 0.1.1:
 - Adopt left the hold and the request log to the owner. `tando adopt site <app>` now shows what the
   hand-written site lacks and `--apply` adds it (copy, validate, reload, check, and the previous
   file back on failure). `adopt apply` ends with the same list.
+- In 0.1.1 `adopt site` still refused an app that was not adopted yet, so the hold could only be
+  added after the 36 failed requests above. Since then `adopt site <unit> --apply` adds the hold
+  before adoption, `adopt plan` reports a missing hold with its cost, and `adopt apply` refuses
+  to start without it unless `--accept-502` is given.
 - The image cache was empty after adopt and after every deploy, and nothing checked the image
   optimiser (the old deploy script did both). The pre-flight of a Next.js release now loads
   `sharp` as the app's user and requests the optimised images of the health page and the start

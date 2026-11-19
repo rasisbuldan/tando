@@ -1,12 +1,16 @@
 # lib/cmd-adopt.sh: tando adopt: bring a hand-deployed Next.js app under tando, in place.
-# help: adopt plan|apply <unit> [--health /path] [--no-jobs] | undo|status <app> | site <app> [--apply]   take over a hand-deployed app
+# help: adopt plan|apply <unit> [--health /path] [--no-jobs] | undo|status <app> | site <app|unit> [--apply]   take over a hand-deployed app
 #
 #   tando adopt plan <unit> -H <host>     read-only: what changes, what does not, downtime, risks
 #   tando adopt apply <unit> -H <host>    backup, register, switch, timers, verify; rolls back on failure
 #   tando adopt undo <app> -H <host>      back to the recorded hand-managed state, verified
 #   tando adopt status <app> -H <host>    the steps of the latest apply or undo
 #   tando adopt site <app> -H <host>      what the hand-written Caddy site lacks (request hold, request
-#                                         log); --apply adds it: copy, validate, reload, check
+#                                         log); --apply adds it: copy, validate, reload, check.
+#                                         Before adoption it takes the unit and adds the hold only.
+#
+# Order: plan, site --apply (the hold), apply. Without the hold every request that arrives while
+# the app restarts gets 502, so apply refuses to start unless --accept-502 says that is accepted.
 #
 # The server does the work: tando-agent adopt-* with server/tando-adopt, which this file installs.
 # Nothing here reads or prints an env file:
@@ -26,12 +30,13 @@ ad_wrap() {
   done < <(printf '%s\n' "$2" | fold -s -w "$w")
 }
 
-ad_opts() { # sets AD_UNIT AD_HEALTH AD_JOBS AD_YES from ARGS[2..]
+ad_opts() { # sets AD_UNIT AD_HEALTH AD_JOBS AD_YES AD_APPLY AD_HOLD from ARGS[2..]
   local i=2 n=${#ARGS[@]}
-  AD_UNIT="" AD_HEALTH=/ AD_JOBS=yes AD_YES="" AD_APPLY=""
+  AD_UNIT="" AD_HEALTH=/ AD_JOBS=yes AD_YES="" AD_APPLY="" AD_HOLD=need AD_HEALTH_SET=""
   while [ $i -lt $n ]; do
     case ${ARGS[$i]} in
-      --health) i=$((i + 1)); AD_HEALTH=${ARGS[$i]:-};;
+      --health) i=$((i + 1)); AD_HEALTH=${ARGS[$i]:-}; AD_HEALTH_SET=1;;
+      --accept-502) AD_HOLD=accept;;
       --no-jobs) AD_JOBS=no;;
       --yes) AD_YES=1;;
       --apply) AD_APPLY=apply;;
@@ -57,7 +62,35 @@ ad_scan() {
   agent sudo adopt-scan "$AD_UNIT" "health=$AD_HEALTH" > "$TMPD/scan"
   kv_read "$TMPD/scan" unit app port user root link link_target path start data_dir data_owner data_size \
     data_files data_env env_file env_mode env_names memory check_url public_dirs preflight_port jobs \
-    ready_ms backup_script health blocked baseline writable
+    ready_ms backup_script health blocked baseline writable hold
+  K_hold_detail=$(awk -F "$AD_TAB" '$1 == "hold" { print $3; exit }' "$TMPD/scan")
+}
+
+# ad_cmd sub: the command line for another adopt step of the same unit, with the options given
+ad_cmd() {
+  local h=""
+  [ "$AD_HEALTH" = / ] || h=" --health $AD_HEALTH"
+  case $1 in
+    site) echo "tando adopt site $AD_UNIT -H $HOST$h --apply";;
+    *) echo "tando adopt $1 $AD_UNIT -H $HOST$h";;
+  esac
+}
+
+# ad_hold_box: the plan's section about the request hold of the hand-written site, when it is missing
+ad_hold_box() {
+  [ "$K_hold" = have ] && return 0
+  ui_box_sep "request hold: missing"
+  ad_wrap "  ${UI_RED}✗${UI_NC} " "Your Caddy site does not hold requests while the app restarts. Every request that arrives during the adoption, and during every later deploy, rollback or restart, fails with 502. On the first real server adopted without the hold, 36 requests did."
+  if [ "$K_hold" = add ]; then
+    ad_wrap "  ${UI_YELLOW}+${UI_NC} " "$K_hold_detail"
+    ad_wrap "  " "Add it first (a copy of the Caddyfile is kept, the new one is validated, Caddy is reloaded, the previous file comes back on any failure):"
+    ui_box_line "    $(ad_cmd site)"
+  else
+    ad_wrap "  ${UI_YELLOW}!${UI_NC} " "tando cannot add it to this site itself. By hand: $K_hold_detail"
+    ad_wrap "  " "Then: sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && sudo systemctl reload caddy"
+  fi
+  ad_wrap "  " "To adopt without it and accept the 502s:"
+  ui_box_line "    $(ad_cmd apply) --accept-502"
 }
 
 ad_plan_box() { # title
@@ -94,7 +127,12 @@ ad_plan_box() { # title
     ui_table "l,l!2,l,l:8-" < "$TMPD/jobs"
   fi
   ui_box_sep "downtime"
-  ad_wrap "  " "One restart of the app: Caddy answers 502 from the moment ${K_unit}.service stops until tando-$K_app answers; its last start took ${K_ready_ms:-?} ms here. Static files switch with no gap. Timers hand over between two runs."
+  if [ "$K_hold" = have ]; then
+    ad_wrap "  " "One restart of the app: Caddy holds requests from the moment ${K_unit}.service stops until tando-$K_app answers, then serves them (lb_try_duration in your site); its last start took ${K_ready_ms:-?} ms here. Static files switch with no gap. Timers hand over between two runs."
+  else
+    ad_wrap "  " "One restart of the app: Caddy answers 502 from the moment ${K_unit}.service stops until tando-$K_app answers; its last start took ${K_ready_ms:-?} ms here. Static files switch with no gap. Timers hand over between two runs."
+  fi
+  ad_hold_box
   ui_box_sep "risks"
   for lvl in high medium low; do
     case $lvl in high) col=$UI_RED;; medium) col=$UI_YELLOW;; *) col=$UI_DIM;; esac
@@ -141,6 +179,7 @@ ad_site_rows() {
     case $st in
       have) mark="${UI_GREEN}✓${UI_NC}";;
       add) mark="${UI_YELLOW}+${UI_NC}"; AD_SITE_TODO=$((AD_SITE_TODO + 1));;
+      later) mark="${UI_DIM}·${UI_NC}";;
       *) mark="${UI_YELLOW}!${UI_NC}"; AD_SITE_TODO=$((AD_SITE_TODO + 1));;
     esac
     ad_wrap "  $mark $(printf '%-5s' "$what")" "$det"
@@ -175,11 +214,22 @@ cmd_adopt() {
       ad_opts; resolve 0; ad_install; ad_scan
       ad_plan_box "adopt plan $AD_UNIT"
       if [ "$K_blocked" = 1 ]; then ui_box_close "nothing can be adopted yet"; exit 1; fi
-      ui_box_close "tando adopt apply $AD_UNIT -H $HOST${AD_HEALTH:+ --health $AD_HEALTH}";;
+      case $K_hold in
+        have) ui_box_close "$(ad_cmd apply)";;
+        add) ui_box_close "first: $(ad_cmd site)";;
+        *) ui_box_close "request hold missing: add it by hand, or apply with --accept-502";;
+      esac;;
     apply)
       ad_opts; resolve 0; ad_install; ad_scan
       ad_plan_box "adopt plan $AD_UNIT"
       if [ "$K_blocked" = 1 ]; then ui_box_close "blocked: nothing was changed"; exit 1; fi
+      if [ "$K_hold" != have ] && [ "$AD_HOLD" != accept ]; then
+        ui_box_close "refused: the site has no request hold; nothing was changed"
+        if [ "$K_hold" = add ]; then note "Add the hold first: $(ad_cmd site)"
+        else note "Add the hold to the Caddyfile by hand first (the lines are above)."; fi
+        note "Or accept the 502s during the adoption and every later restart: $(ad_cmd apply) --accept-502"
+        exit 1
+      fi
       ui_box_close "full backup first; any failed check returns to the hand-managed state"
       APP=$K_app
       if [ -z "$AD_YES" ]; then
@@ -187,7 +237,7 @@ cmd_adopt() {
         IFS= read -r typed || typed=""
         [ "$typed" = "$APP" ] || die "not confirmed; nothing was changed"
       fi
-      agent sudo adopt-apply "$AD_UNIT" "health=$AD_HEALTH" "jobs=$AD_JOBS" > "$TMPD/o"
+      agent sudo adopt-apply "$AD_UNIT" "health=$AD_HEALTH" "jobs=$AD_JOBS" "hold=$AD_HOLD" > "$TMPD/o"
       ui_box_open "adopt $APP" "$HOST"
       trap 'echo; note "detached: the adoption continues on the server (tando adopt status $APP)"; exit 130' INT TERM
       ad_follow "adopt $APP" 6
@@ -229,15 +279,19 @@ cmd_adopt() {
       ad_opts; resolve 0; APP=$AD_UNIT
       valid_app "$APP" || die "bad app name: $APP"
       ad_install
-      agent sudo adopt-site "$APP" $AD_APPLY > "$TMPD/site"
-      kv_read "$TMPD/site" changes kept result
+      # an adopted app, or the unit before adoption (then --health says what to check: the hold only)
+      agent sudo adopt-site "$APP" $AD_APPLY ${AD_HEALTH_SET:+"health=$AD_HEALTH"} > "$TMPD/site"
+      kv_read "$TMPD/site" changes kept result state
       ui_box_open "adopt site $APP" "$HOST"
+      [ "$K_state" = unit ] && ui_kv state "$APP.service is not adopted yet: the request hold only"
       ad_site_rows "$TMPD/site"
       if [ -n "$AD_APPLY" ]; then
-        [ -n "$K_kept" ] && ui_kv "copy" "$K_kept (the Caddyfile as it was)"
-        if [ "$K_result" = added ]; then ui_box_close "added and reloaded; $APP answers through Caddy"
+        [ -n "$K_kept" ] && ad_wrap "$(printf '%-12s' copy)" "$K_kept (the Caddyfile as it was)"
+        if [ "$K_result" = added ]; then
+          [ "$K_state" = unit ] && ui_kv next "$(ad_cmd apply)"
+          ui_box_close "added and reloaded; $APP answers through Caddy"
         else ui_box_close "${K_result:-nothing changed}"; fi
-      elif [ "${K_changes:-0}" -gt 0 ]; then ui_box_close "tando adopt site $APP -H $HOST --apply"
+      elif [ "${K_changes:-0}" -gt 0 ]; then ui_box_close "$(ad_cmd site)"
       else ui_box_close "nothing to add automatically"; fi;;
     status)
       ad_opts; resolve 0; APP=$AD_UNIT
@@ -247,6 +301,6 @@ cmd_adopt() {
       ad_follow "status $APP" 6
       [ -n "$K_message" ] && ad_wrap "  " "$K_result: $K_message"
       ui_box_close;;
-    *) die "usage: tando adopt plan|apply <unit> [--health /path] [--no-jobs] [--yes] | undo|status <app> | site <app> [--apply]";;
+    *) die "usage: tando adopt plan|apply <unit> [--health /path] [--no-jobs] [--yes] [--accept-502] | undo|status <app> | site <app|unit> [--health /path] [--apply]";;
   esac
 }

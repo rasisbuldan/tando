@@ -40,7 +40,7 @@ uses; `test/server/down.sh` with the same `TANDO_TEST_NAME` removes it).
 |---|---|
 | `lib/ui.sh`, `lib/help.txt`, `completions/`, any `lib/cmd-*.sh` | `ui-test`, `e2e-cli`, and the command's own suite (`test/suites.map` lists them) |
 | `lib/deploy.sh`, `lib/common.sh`, `lib/build.sh`, `bin/tando`, `server/tando-agent` | everything: use the full tier |
-| `server/tando-adopt`, `lib/cmd-adopt.sh` | `ui-test` (the Caddyfile scan and edit on fixtures), `e2e-ci` (it must parse). No suite here adopts a real app: say that the adopt path itself was not exercised. |
+| `server/tando-adopt`, `lib/cmd-adopt.sh` | `e2e-adopt` (plan, site, apply, deploy, rollback, undo on a synthetic hand-deployed app), `ui-test` (the Caddyfile scan and edit on fixtures), `e2e-ci` (it must parse). Timers that become tando jobs are not in it: say so when you touch them. |
 | `srv/<package>` | `go`, and the suite of that package's feature: watch, hostcare → the alerts suites and `e2e-host`; logs → `e2e-logs`; offsite → `e2e-offsite`; status, metrics → `e2e-status`, `e2e-top`; gate → `e2e-ci`, `e2e-sec2`. `srv/internal`, `srv/daemon`, `srv/cmd`: everything. |
 | Next.js handling (`recipe = next`, sharp, the image pre-flight) | `e2e-next` |
 | backups, restore | `e2e-data`, `e2e-offsite` |
@@ -74,7 +74,8 @@ The map is a shortcut. When you are not sure what a change can reach, run the fu
 
 Say so when your change touches one of these; do not imply it was tested.
 
-- `tando adopt apply` and `undo` on a hand-deployed app (rehearsed on a private replica and run once
-  on a real server; see docs/MIGRATION.md).
+- `tando adopt` with timers that become tando jobs, and with a real Next.js build (`e2e-adopt`
+  adopts a small stand-in app without timers; the rest was rehearsed on a private replica and run
+  once on a real server; see docs/MIGRATION.md).
 - A real x86-64 server, real DNS and public certificates, a real reboot, offsite backup against a
   real bucket (docs/STATUS.md lists what was verified where and when).
