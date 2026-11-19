@@ -183,7 +183,8 @@ its scenarios).
 
 `test/e2e-alerts.sh` was one suite of 25 minutes, most of it waiting for real minutes. It is three
 suites on three servers now, sharing `test/alerts-lib.sh` (helpers, fixtures, setup):
-`e2e-alerts` (sections 1-20 and 23-28: checks started by hand), `e2e-alerts-timer` (22, then 21:
+`e2e-alerts` (sections 1-20, 23-28, 30 and 31: checks started by hand; 30 scheduled jobs that fail, 31
+PostgreSQL, which it installs from the network), `e2e-alerts-timer` (22, then 21:
 the reboot, boot grace and the real timer) and `e2e-alerts-daemon` (29, then 27h and 27i: tandod
 and its fallback). Every check id is in exactly one of them. Waits that prove a quiet period, a
 grace period or a real timer were kept and say so in a comment; waits for an event became polls

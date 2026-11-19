@@ -320,3 +320,12 @@ func TestPythonDoesNotImportFromTheWorkingDirectory(t *testing.T) {
 		t.Errorf("python3 -I imported from the working directory: %v", err)
 	}
 }
+
+// User: the command runs as that user or not at all (a user this host does not have is an error
+// before anything starts).
+func TestUserUnknownStartsNothing(t *testing.T) {
+	_, err := Exec{}.Output(context.Background(), Cmd{Argv: []string{"echo", "x"}, User: "tando-no-such-user"})
+	if err == nil || !strings.Contains(err.Error(), "no user tando-no-such-user") {
+		t.Errorf("err = %v", err)
+	}
+}

@@ -49,6 +49,28 @@ to_json() {
 json_str() { printf '%s' "$1" | LC_ALL=C awk '{ gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); printf "\"%s\"", $0 }'; }
 secs() { case $1 in ""|*[!0-9.]*) printf -- '-';; *) ui_dur "$1";; esac; }
 mb() { if ui_int "$1" && [ "$1" -gt 0 ]; then ui_bytes "$1"; else printf -- '-'; fi; }
+# pg_note <rows file> <app>: "12 MB, 3 of 10 connections", from the pg row of tando-watch: the size
+# of the app's PostgreSQL database and the connections of its role against the role's limit, as
+# the checks last read them (the size every 10 minutes, the connections every minute). Nothing
+# when there is no such row (no database, alerts off, PostgreSQL not answering and never asked).
+pg_note() {
+  local r a b c l o=""
+  while IFS=$TAB read -r r a b c l; do
+    [ "$r" = pg ] && [ "$a" = "$2" ] || continue
+    o=""
+    ui_int "$b" && o=$(ui_bytes "$b")
+    ui_int "$c" || continue
+    if ui_int "$l" && [ "$l" -gt 0 ]; then o="${o:+$o, }$c of $l connections"; else o="${o:+$o, }$c connections"; fi
+  done < "$1"
+  printf '%s' "$o"
+}
+# pg_json <rows file> <app>: the same as ,"database":{...} for --json (nothing without the row)
+pg_json() {
+  local o
+  o=$(awk -F '\t' -v OFS='\t' -v a="$2" '$1 == "pg" && $2 == a { print $3, $4, $5 }' "$1" | tail -n 1 |
+    to_json "bytes:n,connections:n,connection_limit:n" | sed 's/^\[//; s/\]$//')
+  [ -z "$o" ] || printf ',"database":%s' "$o"
+}
 badge() { case $1 in rolledback) ui_badge rolled-back;; *) ui_badge "$1";; esac; }
 marks() { # current-flag last-good-flag
   local m=""
@@ -277,7 +299,10 @@ render_status() {
     if [ "$g" = firing ]; then ui_kv alert "$(ui_badge failed "$c") $rel ${UI_DIM}since $(ago "$up")${UI_NC}"
     else ui_kv alert "$(ui_badge pending "$c pending") $rel"; fi
   done < "$TMPD/st"
-  [ "$db" != - ] && ui_kv database "$db"
+  if [ "$db" != - ]; then
+    local pgn; pgn=$(pg_note "$TMPD/st" "$APP")
+    ui_kv database "$db${pgn:+  $pgn}"
+  fi
   if ui_int "${lb:-}"; then   # disk use of journal + request log, the journal cap, 24 h of lines
     # retention from the logcfg row (keep hours, request log budget); an older agent sends none
     local lkh="" lrq="" lw
@@ -343,6 +368,7 @@ status_json() {
   printf ',"history":'; hist_json
   printf ',"alerts":'
   awk -F '\t' -v OFS='\t' '$1 == "alert" { print $2, $3, $4, $5, $6 }' "$TMPD/st" | to_json "app:s,check:s,state:s,since:n,detail:s"
+  pg_json "$TMPD/st" "$APP"
   printf '}\n'
 }
 cmd_status() {

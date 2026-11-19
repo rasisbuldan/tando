@@ -2,8 +2,10 @@ package watch
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -40,6 +42,10 @@ type fakeHost struct {
 	cache   *Cache   // kept between runs, as tandod does (nil: none)
 	disks   []string // measured by the host disk check (none: the laptop's disk is no fixture)
 	boot    int64    // when the fake host started (its /proc/uptime follows the clock)
+	pg      string   // psql's answer about the connections (the m and r rows); pgErr: it fails with this
+	pgSizes string   // its answer about the sizes (the d rows), given only when asked
+	pgErr   string
+	pgCmds  []run.Cmd // every psql started
 }
 
 func (f *fakeHost) setUptime() {
@@ -165,6 +171,15 @@ func (f *fakeHost) cmd(ctx context.Context, c run.Cmd) ([]byte, error) {
 			return []byte(f.scan), nil
 		}
 		return nil, nil
+	case "psql":
+		f.pgCmds = append(f.pgCmds, c)
+		if f.pgErr != "" {
+			return nil, errors.New(f.pgErr)
+		}
+		if slices.Contains(argv, "--command="+pgSizesSQL) {
+			return []byte(f.pgSizes + f.pg), nil
+		}
+		return []byte(f.pg), nil
 	case "du":
 		return []byte(f.du + "\t" + argv[len(argv)-1] + "\n" + f.du + "\ttotal\n"), nil
 	}

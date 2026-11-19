@@ -91,13 +91,16 @@ tando alerts heartbeat                       # outside dead man's switch (see "W
 | `tls` | the link's certificate (as Caddy serves it) has less than 20% of its lifetime left, or none can be read; `tls=auto` only, every 6 h | |
 | `backup` | apps with daily backups: the last backup is older than 50 h (absent field: counts from app creation). With offsite copies on (docs/BACKUP.md): also a backup that has not reached the bucket after `alert_hours` (6 h), or bucket credentials that stopped working, read from `/var/lib/tando/offsite/state/<app>` (format in docs/BACKUP.md, "Monitoring"; the watch side of this is being wired in) | |
 | `stuck` | an activation has been running for more than 20 min, or it died: its phase is not idle and nothing holds the app's lock (SIGKILL, full disk) | 2 samples for a dead one |
-| `disk` | the app's own files (shared/, its `data_dir`, releases, incoming) take more than `app_max_mb` (host setup, 8192 MB by default), measured with `du` every 10 min. When its file system is also 95% full (`disk_stop_pct`), the app is **stopped** (as `tando stop`: a 503 page; `tando start -a <app>` after freeing space), so one app cannot fill the disk under every other app's writes and deploys | 1 measurement |
+| `disk` | the app's own files (shared/, its `data_dir`, releases, incoming) and its PostgreSQL database together take more than `app_max_mb` (host setup, 8192 MB by default); the files measured with `du`, the database as the server gives its size, every 10 min. The detail says which: `shop uses 9100 MB of disk (files 400 MB, database 8700 MB), over the 8192 MB allowed per app`. When its file system is also 95% full (`disk_stop_pct`), the app is **stopped** (as `tando stop`: a 503 page; `tando start -a <app>` after freeing space), so one app cannot fill the disk under every other app's writes and deploys (the database counts for the stop only when PostgreSQL keeps its data on that file system) | 1 measurement |
+| `job.<name>` | a scheduled job (`job.<name>` in tando.conf) failed: its last run ended with a non-zero exit status, a signal, its timeout or the memory limit. One message per failed run: `FIRING shop/job.nightly: job nightly failed at 11-19 03:00 UTC: exit status 1; tando jobs run nightly -a shop runs it again and shows its output` (`killed by its timeout`, `killed at its memory limit 256M`, `killed by SIGKILL`); a run that fails again while it fires is one more message. See "Scheduled jobs" below | fires at once; resolves at the job's next success |
+| `db_conns` | apps with `database = postgres`: the app's database role holds at least 80% (`db_conn_pct`) of the role's connection limit (10 as tando sets it; read from the server, `pg_roles.rolconnlimit`). At the limit PostgreSQL refuses the app's next connection: a pool larger than the limit, connections never given back, a second instance during a deploy. Idle connections count: the limit counts them | 5 samples in a row (`db_conn_for`) |
 | host `disk`, `inodes` | `/`, `/var` or `/opt/tando` at or above 90% | 1 sample |
 | host `firewall` | the per-app loopback rules (nftables table `inet tando`) differ from `/opt/tando/firewall.nft`: after `nft flush ruleset` (the stock `/etc/nftables.conf`, a firewall tool). The run loads them again at once, writes an audit line (`fw-restore`) and fires; it resolves on the next good runs. `tando-firewall.service` also reloads them whenever `nftables.service` (re)starts | 1 sample |
 | host `memory` | MemAvailable below 5% of RAM, or memory PSI "some" avg60 at or above 30% (when the kernel has PSI) | 5 samples |
 | host `swap` | 80% of swap used | 5 samples |
 | host `load` | 5-minute load at or above 100% of the CPU count | 15 samples |
 | host `oom` | an OOM kill outside the tando apps (Caddy, PostgreSQL, a job, an ssh session) | as `oom` |
+| host `postgres` | only while an app has `database = postgres`: PostgreSQL does not answer (stopped, failed, still starting, refusing): `PostgreSQL does not answer (connection to server on socket ... failed: No such file or directory); used by shop, notes: sudo systemctl status postgresql`; or its usable slots (`max_connections` less the reserved ones: 17 of 20 as tando sets it) are 80% taken (`db_conn_pct`), all apps together | 2 samples (`down_after`) for no answer; 5 (`db_conn_for`) for the slots |
 | host `caddy` | caddy.service is not active (a restart in progress is not counted): every app is unreachable | 1 sample |
 | host `monitor` | tandod does not run the checks: it handed them to the timer (a panic, failed runs, runs it did not survive; the reason is in the detail), its unit failed or keeps restarting, or it restarted twice since the last run. The timer runs the checks meanwhile | 1 sample |
 | host `caddy_config` | `caddy validate` rejects the config on disk (a hand edit that would break the next reload or restart); run only when a file under /etc/caddy changed, at most every 5 min | 1 sample |
@@ -116,14 +119,64 @@ One sample is one run, once a minute. While Caddy is down, no app's health is pr
 would all fail with it), so a dead Caddy is one alert, not one per app. While an activation is
 alive its app is not checked; once its activation died, the app is checked again (a release left
 live and failing its health check is then reported). While `down` is not ok, `health`, `memory` and `restarts`
-of that app are not evaluated, so a dead app gives one alert, not four.
+of that app are not evaluated, so a dead app gives one alert, not four. While PostgreSQL does not
+answer, no app's `db_conns` is judged: one host alert, not one per app.
+
+### Scheduled jobs
+
+The agent writes one systemd unit per job of the live release (`tando-<app>-job-<name>.service`,
+started by its timer or by `tando jobs run`). How a job last ended is read where `tando jobs`
+reads it: the unit's state and result, the exit status of its process and the time the run ended,
+asked in the run's one question to systemd for every app unit. No program is started and no
+journal read for it.
+
+- **Once per failed run.** A failed run fires `job.<name>` at once. While it fires, nothing is
+  sent again for the same run (and no reminder is needed to know: `tando alerts` shows it); the
+  next run that fails is one more message with its own exit status and time. A job that fails on
+  every run flaps like any check: after `flap_max` (3) firings within `flap_window` one
+  "flapping" notice, then silence until it is quiet, so a job scheduled every minute does not
+  send 60 messages an hour.
+- **Resolved by the next success**, at once (one good run, not `resolve_after` samples).
+- **Never ran, or running now**: not a failure, nothing changes.
+- **`tando jobs run <name>` by hand** starts the same unit: a run by hand that fails fires (or is
+  the "next failed run"), one that succeeds resolves. That is the way to clear an alert after
+  fixing the job, without waiting for its schedule.
+- **Removed from tando.conf** (and deployed, or gone with a rollback: the jobs are those of the
+  live release): its alert resolves once with "the job is no longer scheduled" and its state is dropped.
+- **Not held with the app**: a job's alert does not wait for deploys, `tando stop` or `down`.
+- **After a restart of the host** systemd no longer knows the last run: an alert that fires stays
+  until the job next succeeds; a failure from before the restart that was not yet seen is lost.
+- `job=off` or `<app>.job=off` turns it off (all jobs of the app; there is no switch per job).
+
+### PostgreSQL
+
+Asked once per run, and only on a host where an app has `database = postgres`: one `psql` as the
+`postgres` user over the local socket, as the agent connects (a superuser slot: it gets in when
+the apps hold every other slot), with a connect timeout of 3 s, a statement timeout of 4 s and
+8 s for the whole call, after which the run goes on without an answer (that is the `postgres`
+alert). One query reads `max_connections`, the reserved slots, the number of client sessions,
+and each `tando_*` role's connection limit and sessions; every `disk_every` minutes (10) a second
+one in the same call reads the databases' sizes (`pg_database_size`, which stats every file of a
+database: not every minute).
+
+- **The size has no threshold of its own**: no number fits (50 MB and 50 GB are both healthy
+  databases). What matters is the disk, so the database counts as the app's disk use against the
+  existing per-app allowance `app_max_mb` (check `disk` above), and the host's `disk` check
+  watches the file system itself. `tando status <app>` and `tando health <app>` show it:
+  `database  postgres  412 MB, 3 of 10 connections` (`--json`: `"database":{"bytes":...,
+  "connections":...,"connection_limit":...}`), as last read (the size up to 10 minutes old).
+- **The limit is the server's**: `db_conns` compares against the role's `CONNECTION LIMIT` as
+  PostgreSQL reports it, so a limit changed by hand is followed; a role without a limit is only
+  covered by the host's slots.
+- Measured cost: see "Cost".
 
 ### Settings
 
 `tando alerts set` shows every setting; `tando alerts set key=value` changes it in
 `/opt/tando/alerts.conf`. `<app>.<key>=value` overrides it for one app, `<check>=off` (or
 `<app>.<check>=off`) turns a check off, `key=` goes back to the default. Host checks that share a
-name with an app check are switched with `host_memory=off` and `host_oom=off`.
+name with an app check are switched with `host_memory=off` and `host_oom=off`; every job of an
+app with `job=off` (or `<app>.job=off`).
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -147,6 +200,7 @@ name with an app check are switched with `host_memory=off` and `host_oom=off`.
 | `backup_hours` | 50 | |
 | `disk_every`, `disk_stop_pct` | 10, 95 | minutes between measurements of each app's disk use; % full of its file system at which an app over `app_max_mb` is stopped (0 = never) |
 | `stuck_min` | 20 | |
+| `db_conn_pct`, `db_conn_for` | 80, 5 | connections of an app's database role as % of the role's limit (8 of 10), and for host `postgres` the server's client sessions as % of its usable slots; samples in a row |
 | `caddy_every` | 5 | minutes between Caddy config validations (only after a change) |
 | `resolve_after` | 2 | good samples in a row before a firing alert resolves |
 | `sample_seconds` | 60 | seconds one sample stands for: a second run within it (tandod's tick and one asked for, the agent's run after a rollback) re-evaluates but does not count again; 0: every run counts (the test suites) |
@@ -330,8 +384,15 @@ Other blind spots, stated plainly:
 - **Slow, not dead**: a probe that answers within 10 s is healthy. Latency and error rates of
   real traffic are not measured.
 - **Inside the app**: a health endpoint that answers 200 while the app is broken.
-- **Jobs**: scheduled jobs (`job.*`) that fail are not alerted (`tando jobs` shows them); their
-  OOM kills count as host `oom`.
+- **Jobs that do not run**: a failed run of a scheduled job is alerted (`job.<name>`), a job that
+  never starts (a schedule that never matches, a timer disabled by hand) or runs for ever is not:
+  jobs have no timeout unless their unit is given one, and no "expected by" time. A job that
+  exits 0 without doing its work is a success. A job's OOM kill also counts as host `oom`.
+- **PostgreSQL from inside**: the checks see that the server answers on its local socket, how
+  many connections each role holds and how large each database is. Slow queries, locks, bloat,
+  replication, a full `max_connections` caused by roles tando did not make, and a server that
+  answers locally but not on 127.0.0.1:5432 are not seen (the apps' own health checks are). An
+  app that uses a database tando did not create (its own `DATABASE_URL`) is not watched at all.
 - **Kernel and hardware**: disk I/O errors, a read-only remount, clock synchronisation and the
   journal's size are host care's (docs/HOSTCARE.md), checked hourly, not every minute.
 - **OOM attribution** uses the journal when the slice counter rises; with a journal that has
@@ -367,6 +428,26 @@ At 100 apps most of the 127 ms is `journalctl --since=-24h` started by the log s
 whose journal has no entry yet (their cursor is never saved, so every minute is a first scan):
 a known issue of srv/logs. Repeated measurements on the shared test machine varied by up to
 50% (3 apps: tandod 5.9 and 6.6 ms, the shell 94 and 140 ms); the ratios held.
+
+**Jobs and PostgreSQL.** Watching jobs starts nothing: their units are asked on the same bus
+connection as the apps' (the one-shot: in its one `systemctl show`). The PostgreSQL question is
+the one program the checks start every minute, and only on a host where an app has
+`database = postgres`. Measured on the 1-CPU / 2 GB arm64 test container with 5 apps (4 node, 1
+static; one with a database and a job), PostgreSQL 18, 3 rounds of 20 runs each, CPU per run of
+tandod's cgroup (psql is its child) and of the PostgreSQL cluster's unit:
+
+| | tandod | PostgreSQL |
+|---|---|---|
+| no app with a database (nothing asked) | 6.8 - 7.4 ms | 0 ms |
+| the question (connections) | 21.4 - 22.4 ms | 3.7 - 4.0 ms |
+| the question with the sizes (one run in ten) | 22.9 - 23.5 ms | 4.7 ms |
+
+So about 15 ms in psql (most of it starting the program: it loads libpq and what that needs) and
+4 ms in the server for the session, 19 ms a run in all: about 27 s of CPU a day, 0.03% of one
+CPU. A run with the question took 51 ms of wall time. The call cannot hold a run: psql gives up
+connecting after 3 s, the server ends a statement after 4 s, and the program is killed after 8 s.
+Speaking the protocol from tandod itself would save the 15 ms but needs a password login for a
+monitoring role; not done.
 
 **The Go tando-watch.** `tando-watch run` alone, in a transient unit (systemd's CPU accounting of
 its cgroup, children included), shell and Go interleaved, 20 runs each, median [min-max], on the
@@ -434,7 +515,8 @@ once delivered). A day with 20 transitions writes well under 100 KB.
 /var/lib/tando/watch/history.tsv            transitions; trimmed to 1000 lines past 2000 (root 600)
 /var/lib/tando/watch/out/<name>/            queued messages (root 700; no secrets)
 /var/lib/tando/watch/commit                 a run's decided effects until applied (root 600, see Notifiers)
-/run/tando-watch/                           volatile: last run, heartbeat time, per-app counters (tmpfs, 700)
+/run/tando-watch/                           volatile: last run, heartbeat time, per-app counters, the last
+                                            size and connections of each app's database (tmpfs, 700)
 /var/lib/tando/watch/probe/<app>            one line per run: time, class, probe ms; 7 days (root 600)
 /var/lib/tando/watch/incidents/<app>.tsv    start, end, check, cause; at most 200 (root 600)
 /var/lib/tando/watch/tail/<app>             the app's last 10 lines at its last crash/restart (root 600)
@@ -447,7 +529,7 @@ once delivered). A day with 20 transitions writes well under 100 KB.
 
 Server verbs (`/opt/tando/bin/tando-watch <verb>`): `run` (timer), `install`, `uninstall`,
 `show`, `history [n]`, `doctor` and `brief [app]` (no root; rows for `tando doctor` and
-`tando status`), `health [app]` (rows for `tando health`), `set`, `notifier-add`, `notifier-rm`, `heartbeat` (stdin), `silence`, `test`,
+`tando status`: alerts, and as root the `pg` row of one app's database), `health [app]` (rows for `tando health`), `set`, `notifier-add`, `notifier-rm`, `heartbeat` (stdin), `silence`, `test`,
 `forget <app>` (drops an app's alert state at once; `tando destroy` calls it), `version`. The
 program is Go (`srv/watch`, structure in srv/README.md); the shell original is
 `server/legacy/tando-watch`.

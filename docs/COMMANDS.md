@@ -108,7 +108,9 @@ Example: `tando history -n 10`
 
 ### status
 `tando status [app] [--watch N] [-H host] [--json]`. Flags also `-a`. Arguments: 0-1.
-One app in detail: state, release, memory, cpu, last 16 minutes, logs, alerts, backups, releases,
+One app in detail: state, release, memory, cpu, last 16 minutes, logs, alerts, its database
+(`database  postgres  412 MB, 3 of 10 connections`: the size and the connections of its role
+against the role's limit, as the alert checks last read them), backups, releases,
 recent deploys. Outside a project without an app it shows `tando ls`. `--watch N` repaints.
 Example: `tando status --watch 2`
 
@@ -162,6 +164,9 @@ Example: `tando env set STRIPE_KEY`
 The app's scheduled jobs (`job.<name> = <schedule> | <command>` in tando.conf): schedule, next run,
 last run and result. Not retried. `run` runs one now, as the app's user: its output, then
 `job <name>: ok in Ns` or `failed (<result>, exit N)`; tando exits with the job's status.
+A run that fails is alerted, by its timer or by hand alike: check `job.<name>`, one message per
+failed run, resolved by the job's next success (so `tando jobs run <name>` after a fix clears it);
+a job removed from tando.conf takes its alert with it (docs/MONITORING.md, "Scheduled jobs").
 Jobs belong to a release: each release keeps the `job.` lines it was deployed with, and the
 scheduled jobs are always those of the live release. A job added in a deploy is scheduled once
 that release is verified (after its soak; `tando jobs` lists it from tando.conf before that, with
@@ -211,13 +216,18 @@ Example: `tando ls --all`
 `set [key=value ...]` · `silence <app|all> <30m|2h|1d|off>` ·
 `notifier add <name> webhook|slack|telegram|ntfy|email` · `notifier rm <name>` · `notifier ls` ·
 `heartbeat [off]`. Flags: `-a -H --watch -n`. Default subcommand: show.
-What is firing on the server and where alerts go; checks run every minute (docs/MONITORING.md).
+What is firing on the server and where alerts go; checks run every minute (docs/MONITORING.md):
+the apps (down, health, memory, disk, failed jobs as `job.<name>`, database connections as
+`db_conns`, ...) and the host (disk, memory, Caddy, `postgres`, ...). `set` without arguments lists
+every setting; `job=off`, `db_conns=off`, `postgres=off` turn the newest checks off, `db_conn_pct`
+(80) and `db_conn_for` (5) are the connection threshold and its samples.
 Secrets are read without echo. `notifiers` = `notifier` (mismatch 9).
 Example: `tando alerts notifier add phone ntfy`
 
 ### health
 `tando health [app] [--json]` · `tando health <app> --forget N`. Flags: `-a -H --json --forget`.
 Uptime over 24 h and 7 d, incidents (start, how long, cause), probe latency; for one app also the
+size and connections of its PostgreSQL database (as `tando status` shows them) and the
 last lines it wrote before its last crash. Recorded once a minute by tando-watch (docs/MONITORING.md).
 `--forget N` drops incident N of the app's list (1 is the newest) when it was a false alarm: the
 line goes and its minutes are no longer counted in the uptime. An incident that is still open is refused.

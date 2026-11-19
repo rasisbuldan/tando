@@ -35,8 +35,8 @@ type unitBus interface {
 // propIface: the D-Bus interface of each property the checks and the sample read.
 var propIface = map[string]string{
 	"ActiveState": "org.freedesktop.systemd1.Unit", "SubState": "org.freedesktop.systemd1.Unit",
-	"ActiveEnterTimestampMonotonic": "org.freedesktop.systemd1.Unit",
-	"Result":                        "org.freedesktop.systemd1.Service", "NRestarts": "org.freedesktop.systemd1.Service",
+	"ActiveEnterTimestampMonotonic": "org.freedesktop.systemd1.Unit", "InactiveEnterTimestampMonotonic": "org.freedesktop.systemd1.Unit",
+	"Result": "org.freedesktop.systemd1.Service", "NRestarts": "org.freedesktop.systemd1.Service",
 	"MemoryMax": "org.freedesktop.systemd1.Service", "ExecMainCode": "org.freedesktop.systemd1.Service",
 	"ExecMainStatus": "org.freedesktop.systemd1.Service", "CPUUsageNSec": "org.freedesktop.systemd1.Service",
 	"ExecMainStartTimestampMonotonic": "org.freedesktop.systemd1.Service", "StatusText": "org.freedesktop.systemd1.Service",
@@ -47,7 +47,7 @@ var propIface = map[string]string{
 // app): asking would load and parse its unit file every minute.
 var freshProps = map[string]string{"ActiveState": "inactive", "SubState": "dead", "Result": "success",
 	"NRestarts": "0", "ExecMainCode": "0", "ExecMainStatus": "0", "ActiveEnterTimestampMonotonic": "0",
-	"ExecMainStartTimestampMonotonic": "0", "MainPID": "0"}
+	"ExecMainStartTimestampMonotonic": "0", "MainPID": "0", "InactiveEnterTimestampMonotonic": "0"}
 
 func (b *busRunner) Output(ctx context.Context, c run.Cmd) ([]byte, error) {
 	a := c.Argv

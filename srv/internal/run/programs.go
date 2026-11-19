@@ -24,6 +24,7 @@ var Programs = []string{
 	"nft",
 	"nice",
 	"node",
+	"psql",
 	"python3",
 	"rsync",
 	"sendmail",

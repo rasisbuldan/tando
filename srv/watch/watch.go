@@ -10,7 +10,8 @@
 //	check_*.go       one file per check or family: caddy, oom, stuck, down, restarts, memory,
 //	                 backup, disk (and the disk guard), health (+ liveness), tls, logscan (http,
 //	                 slow, errors, logs, new errors), host (disk, inodes, memory, swap, load),
-//	                 firewall
+//	                 firewall, jobs (scheduled jobs that fail), postgres (the server, each
+//	                 app's connections, the size of its database)
 //	machine.go       the state machine of one (app, check): sample, flapping
 //	reconcile.go     what to tell the notifiers: firing, resolved, reminders, silences
 //	events.go        transitions: the history, the per-app incidents, the crash tail
@@ -71,6 +72,7 @@ type Watch struct {
 	PID    int           // names this run's queue files (the shell's $$)
 	Seq    *atomic.Int64 // with PID: every commit of a long-running process its own queue file
 	Disks  []string      // the file systems tando writes to: /, /var, /opt/tando
+	PgData string        // where PostgreSQL keeps the databases: /var/lib/postgresql
 
 	Probe Prober     // health and liveness probes (HTTP through Caddy or to the app's port)
 	Certs CertReader // the certificate Caddy serves for a site
@@ -95,6 +97,7 @@ func New(e env.Env, pid int) Watch {
 		PID:    pid,
 		Seq:    new(atomic.Int64),
 		Disks:  []string{"/", "/var", e.Root},
+		PgData: "/var/lib/postgresql",
 	}
 	w.Probe = httpProber{header: filepath.Join(e.Root, "probe.header"), loopback: "127.0.0.1"}
 	w.Certs = tlsCerts{loopback: "127.0.0.1"}

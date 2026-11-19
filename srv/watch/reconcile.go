@@ -23,7 +23,8 @@ func (m message) line() string {
 // reconcile decides what to tell the notifiers. The last notified state (ns) follows the true
 // state unless the app is silenced or the check is flapping; a reminder goes out every
 // remind_hours while it keeps firing. A check that was turned off resolves (once, if it had been
-// sent) instead of staying stuck. An ok check with nothing left to remember leaves the state.
+// sent) instead of staying stuck. A firing check that failed anew this run (t.again: a job's next
+// failed run) is told once more. An ok check with nothing left to remember leaves the state.
 func (t *tick) reconcile() {
 	W := t.st
 	for _, key := range W.keys() {
@@ -33,6 +34,9 @@ func (t *tick) reconcile() {
 		}
 		a, c, _ := strings.Cut(k, ".")
 		sw, sa := c, a
+		if strings.HasPrefix(c, "job.") {
+			sw = "job" // every job of the app is one switch: job=off, <app>.job=off
+		}
 		if a == "_host" {
 			sa = ""
 			if c == "memory" || c == "oom" {
@@ -71,6 +75,10 @@ func (t *tick) reconcile() {
 		case st == "ok" && ns == "firing":
 			t.out = append(t.out, message{"resolved", da, c, t.resolved[k], t.now})
 			W.del(k+".ns", k+".nt")
+		case st == "firing" && t.again[k]:
+			// it failed anew while firing (a job's next failed run): one more message, with the new detail
+			t.out = append(t.out, message{"firing", da, c, W.get(k + ".det"), W.n(k+".since", t.now)})
+			W.set(k+".nt", decimal.Itoa(t.now))
 		case st == "firing":
 			rem := t.cfg.num("remind_hours", sa)
 			if rem > 0 && t.now-W.n(k+".nt", 0) >= rem*3600 {
@@ -83,7 +91,7 @@ func (t *tick) reconcile() {
 		if st == "ok" && W.get(k+".ns") == "" && W.or(k+".flap", "0") == "0" {
 			fl := W.get(k + ".fl")
 			if fl == "" || t.now-num(lastOf(fl), 0) >= t.cfg.num("flap_window", sa)*60 {
-				W.del(k+".st", k+".fl", k+".flap")
+				W.del(k+".st", k+".fl", k+".flap", k+".run")
 			}
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"tando/srv/internal/fsinfo"
 	"tando/srv/internal/out"
 	"tando/srv/internal/systemd"
+	"tando/srv/internal/valid"
 )
 
 // watchRows is the dead man's check, as rows of type rt for `tando doctor` (check) and `tando
@@ -308,7 +309,8 @@ func (w Watch) History(o *out.Writer, args []string) error {
 }
 
 // Brief is the verb `brief [app]`: firing and pending alerts as rows, for `tando status` (no
-// root needed: without it the state cannot be read and there are none).
+// root needed: without it the state cannot be read and there are none); for one app also its
+// database's size and connections (pgRow).
 func (w Watch) Brief(o *out.Writer, args []string) {
 	st := newStore(loadQuiet(w.statePath()))
 	only := ""
@@ -326,4 +328,18 @@ func (w Watch) Brief(o *out.Writer, args []string) {
 		}
 		o.Row("alert", display(a), c, st.get(key), st.get(k+".since"), st.get(k+".det"))
 	}
+	if only != "" && valid.App(only) {
+		w.pgRow(o, newStore(loadQuiet(w.vstatePath())), only)
+	}
+}
+
+// pgRow is what the checks last learned about the app's PostgreSQL database (root: the volatile
+// state is root's), for tando status and tando health; nothing for an app without one:
+//
+//	pg <app> <size in bytes|-> <connections of its role|-> <the role's connection limit|->
+func (w Watch) pgRow(o *out.Writer, vs *store, a string) {
+	if !vs.has("pgsz."+a) && !vs.has("pgc."+a) {
+		return
+	}
+	o.Row("pg", a, vs.get("pgsz."+a), vs.get("pgc."+a), vs.get("pgl."+a))
 }
