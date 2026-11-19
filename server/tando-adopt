@@ -907,3 +907,118 @@ cmd_adopt_undo_run() {
   mv -f "$AD/$A/record" "$AD/$A/record.undone-$(date -u +%Y%m%d-%H%M%S)"
   ap_result ok "back to the hand-managed ${F[unit]}.service; the adopt backup stays in ${F[backup]}"
 }
+
+# ---- adopt site: what a hand-written Caddy site lacks next to a tando-rendered one ----------
+#
+# Two things, both optional and both the owner's call (adopt itself never edits the site):
+#   hold  lb_try_duration in the reverse_proxy of the app's port: requests wait while the app
+#         restarts (a deploy, a rollback, a crash) instead of getting 502
+#   log   the request log tando requests, tando errors and the 5xx alert read
+# Without "apply" it only reports. With it, the Caddyfile is edited, validated, kept as a copy
+# beside the app's backups, reloaded (never restarted) and checked through Caddy; anything that
+# fails puts the previous file back. Whatever does not have the shape expected here (one
+# reverse_proxy to the port, in a site block that opens with "<names> {") is reported as
+# "manual" with the lines to add by hand, and nothing is edited.
+
+# site_scan file port: sets SP (the reverse_proxy line number, 0 none, -1 several), SPB (1 when it
+# opens a block), SPHOLD (1 when that block has lb_try_duration), SO (the line that opens the
+# site block around it), SLOG (1: a log directive in that site block), SLOGT (1: tando's)
+site_scan() {
+  local r
+  r=$(awk -v port="$2" -v app="$A" '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    { raw[NR] = $0; l = $0; sub(/[ \t]#.*$/, "", l); if (l ~ /^[ \t]*#/) l = ""; t[NR] = trim(l) }
+    END {
+      sp = 0; d = 0
+      for (i = 1; i <= NR; i++) {
+        dep[i] = d
+        if (t[i] ~ /^reverse_proxy[ \t]/ && t[i] ~ ("(127\\.0\\.0\\.1|localhost|\\[::1\\]):" port "([ \t]|$)")) sp = sp ? -1 : i
+        if (t[i] ~ /\{$/) { if (d == 0) open0 = i; own[i] = open0; d++ } else own[i] = (d > 0 ? open0 : 0)
+        if (t[i] == "}") { d--; if (d < 0) d = 0 }
+      }
+      if (sp <= 0) { print sp, 0, 0, 0, 0, 0; exit }
+      spb = (t[sp] ~ /\{$/) ? 1 : 0; hold = 0
+      if (spb) for (i = sp + 1; i <= NR && dep[i] > dep[sp]; i++) if (t[i] ~ /^lb_try_duration[ \t]/) hold = 1
+      so = own[sp]; lg = 0; lt = 0
+      if (so && t[so] == "{") so = 0                         # the global options block
+      if (so) for (i = so + 1; i <= NR && dep[i] >= 1; i++) {
+        if (dep[i] == 1 && (t[i] ~ /^log([ \t]|$)/)) lg = 1
+        if (index(raw[i], "/var/log/tando/" app "/")) lt = 1
+      }
+      print sp, spb, hold, so, lg, lt
+    }' "$1")
+  read -r SP SPB SPHOLD SO SLOG SLOGT <<< "$r"
+}
+
+# site_edit file snippet hold log: the file with the hold lines and the log block added (after
+# site_scan of the same file)
+site_edit() {
+  local ind
+  ind=$(sed -n "${SP}s/^\([[:space:]]*\).*/\1/p" "$1")
+  awk -v sp="$SP" -v spb="$SPB" -v so="$SO" -v hold="$3" -v lg="$4" -v snip="$2" -v ind="$ind" '
+    NR == sp && hold {
+      l = $0
+      if (!spb) { sub(/[ \t]+$/, "", l); l = l " {" }
+      print l
+      print ind "\t# added by tando adopt site: requests wait while the app restarts instead of 502"
+      print ind "\tlb_try_duration 15s"
+      print ind "\tlb_try_interval 100ms"
+      if (!spb) print ind "}"
+      next
+    }
+    { print }
+    NR == so && lg { while ((getline x < snip) > 0) print x }' "$1"
+}
+
+cmd_adopt_site() { # app [apply]
+  need_root; app "$1"
+  local apply=${2:-} cf=/etc/caddy/Caddyfile new snip keep need_hold=0 need_log=0 verr
+  [[ -n ${C[adopted_from]:-} && ${C[caddy]:-} == external ]] || die "$A is not an adopted app: its site is tando's own and already has both"
+  [[ -f $cf ]] || die "no $cf on <host>"
+  [[ -z $apply || $apply == apply ]] || die "bad option: $apply"
+  site_scan "$cf" "${C[port]}"
+  case $SP in
+    0) row site hold manual "no reverse_proxy to port ${C[port]} in $cf (an imported file?): add  lb_try_duration 15s  and  lb_try_interval 100ms  to it"
+       row site log manual "add the output of  sudo $R/bin/tando-logs caddy-log $A  to the site block that serves $A";;
+    -1) row site hold manual "more than one reverse_proxy to port ${C[port]} in $cf: add  lb_try_duration 15s  and  lb_try_interval 100ms  to each"
+        row site log manual "add the output of  sudo $R/bin/tando-logs caddy-log $A  to the site block that serves $A";;
+    *)
+      if ((SPHOLD)); then row site hold have "requests wait while $A restarts (lb_try_duration, line $SP)"
+      else need_hold=1; row site hold add "line $SP: lb_try_duration 15s, lb_try_interval 100ms in the reverse_proxy to port ${C[port]} (without them, requests get 502 while $A restarts)"; fi
+      if ((SLOGT)); then row site log have "request log in /var/log/tando/$A"
+      elif ((SO == 0)); then row site log manual "could not find the site block around line $SP: add the output of  sudo $R/bin/tando-logs caddy-log $A  to it"
+      elif ((SLOG)); then row site log manual "the site has a log of its own, and Caddy takes one per site: tando requests stays empty unless it is replaced by the output of  sudo $R/bin/tando-logs caddy-log $A"
+      elif [[ ! -x $LOGS ]]; then row site log manual "tando-logs is not installed: tando host setup <host>"
+      else need_log=1; row site log add "after line $SO: a request log to /var/log/tando/$A/access.log (headers and query strings left out), for tando requests, tando errors and the 5xx alert"; fi;;
+  esac
+  if [[ -z $apply ]]; then echo "changes=$((need_hold + need_log))"; return 0; fi
+  if ((need_hold + need_log == 0)); then
+    # the file as it is now is what adopt undo compares with
+    [[ -f $AD/$A/fingerprint ]] && sed -i "s|^caddyfile .*|caddyfile $(sha "$cf")|" "$AD/$A/fingerprint"
+    echo "changes=0"; echo "result=nothing to add"; return 0
+  fi
+  lock 120; caddy_lock
+  caddy validate --config "$cf" --adapter caddyfile &> /dev/null || die "$cf does not validate as it is (sudo caddy validate --config $cf --adapter caddyfile): nothing was changed"
+  new=$(mktemp /etc/caddy/.Caddyfile.tando.XXXXXX) snip=$(mktemp)
+  sdie() { rm -f "$new" "$snip"; die "$@"; }   # (the EXIT trap is the audit line's)
+  if ((need_log)); then
+    "$LOGS" app-setup "$A" > /dev/null || sdie "log setup failed"
+    "$LOGS" caddy-log "$A" > "$snip" && [[ -s $snip ]] || sdie "could not render the log block"
+  fi
+  site_edit "$cf" "$snip" "$need_hold" "$need_log" > "$new" || sdie "could not write the new Caddyfile"
+  chmod --reference="$cf" "$new"; chown --reference="$cf" "$new"
+  if ! verr=$(caddy validate --config "$new" --adapter caddyfile 2>&1); then
+    sdie "Caddy rejects the edited file, so nothing was changed: $(tail -1 <<< "$verr" | cut -c1-300)"
+  fi
+  install -d -m 700 -o root -g root "$BK" "$BK/$A"
+  keep=$BK/$A/Caddyfile.$(date -u +%Y%m%d-%H%M%S)
+  cp -p "$cf" "$keep" || sdie "could not keep a copy of $cf"
+  mv -f "$new" "$cf"
+  if ! verr=$(systemctl reload caddy 2>&1) || ! via_caddy ""; then
+    cp -p "$keep" "$cf"; systemctl reload caddy &> /dev/null
+    sdie "after the reload the site did not answer (${verr:-$PROBE_WHY}): the previous Caddyfile is back"
+  fi
+  [[ -f $AD/$A/fingerprint ]] && sed -i "s|^caddyfile .*|caddyfile $(sha "$cf")|" "$AD/$A/fingerprint"
+  rm -f "$snip"
+  echo "changes=$((need_hold + need_log))"; echo "kept=$keep"; echo "result=added"
+}

@@ -88,11 +88,11 @@ _tando() {
     recipes) subs="" flags="$flags " args="";;
     ci) subs="setup rotate ls revoke github hook" flags="$flags -a -H --ref --repo --branch --node --env --force --remove" args="";;
     alerts) subs="enable disable test history set silence notifier rm ls heartbeat show notifiers" flags="$flags --watch -n -a -H" args="apps";;
-    health) subs="" flags="$flags --json -a -H" args="apps";;
+    health) subs="" flags="$flags --json -a -H --forget" args="apps";;
     errors) subs="" flags="$flags --since -n --json -a -H --last" args="apps";;
     requests) subs="tail errors summary" flags="$flags --since -a -H --last -n -f --4xx" args="apps";;
     audit) subs="" flags="$flags -n -H -a" args="apps";;
-    adopt) subs="plan apply undo status" flags="$flags --health --no-jobs --yes -H" args="apps";;
+    adopt) subs="plan apply undo status site" flags="$flags --health --no-jobs --yes -H --apply" args="apps";;
     help) subs="" flags="$flags " args="";;
     cheat) subs="" flags="$flags " args="";;
     go) subs="" flags="$flags --port --key --domain --dns --yes --forget" args="";;

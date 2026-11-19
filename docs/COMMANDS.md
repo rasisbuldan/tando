@@ -216,9 +216,11 @@ Secrets are read without echo. `notifiers` = `notifier` (mismatch 9).
 Example: `tando alerts notifier add phone ntfy`
 
 ### health
-`tando health [app] [--json]`. Flags: `-a -H --json`.
+`tando health [app] [--json]` · `tando health <app> --forget N`. Flags: `-a -H --json --forget`.
 Uptime over 24 h and 7 d, incidents (start, how long, cause), probe latency; for one app also the
 last lines it wrote before its last crash. Recorded once a minute by tando-watch (docs/MONITORING.md).
+`--forget N` drops incident N of the app's list (1 is the newest) when it was a false alarm: the
+line goes and its minutes are no longer counted in the uptime. An incident that is still open is refused.
 Example: `tando health shop`
 
 ### errors
@@ -326,10 +328,18 @@ Example: `tando recipes`
 
 ### adopt
 `tando adopt plan|apply <unit> [--health /path] [--no-jobs] [--yes]` ·
-`tando adopt undo|status <app>`. Flags: `-H --health --no-jobs --yes`. Subcommands: plan, apply,
-undo, status (1 argument each). `-a` is refused.
+`tando adopt undo|status <app>` · `tando adopt site <app> [--apply]`. Flags:
+`-H --health --no-jobs --yes --apply`. Subcommands: plan, apply, undo, status, site (1 argument
+each). `-a` is refused.
 Takes over a hand-deployed Next.js app (systemd unit behind Caddy) in place: `plan` is read-only,
 `apply` backs up, switches and rolls back on failure, `undo` returns to the recorded state.
+`site` shows what your own Caddy site lacks next to one tando renders: `lb_try_duration` in the
+app's `reverse_proxy` (requests wait while the app restarts instead of getting 502) and the request
+log that `tando requests`, `tando errors` and the 5xx alert read. `site --apply` adds them: a copy of
+the Caddyfile is kept in `/var/backups/tando/<app>/`, the new file is validated, Caddy is reloaded
+(never restarted) and the app is checked through it; a failure puts the previous file back. A site
+it cannot read with certainty (several `reverse_proxy` lines to the port, a log of its own, an
+imported file) is not edited: the lines to add by hand are printed.
 See docs/MIGRATION.md.
 Example: `tando adopt plan bakery -H vps --health /order/new`
 

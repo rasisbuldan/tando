@@ -148,7 +148,8 @@ idle → copy → preflight → switch → verify → idle      (verified, last_
 ```
 
 copy: `cp -a` (no links followed) into a root-owned release, link shared dirs, make `writable`
-dirs app-owned. preflight: the same sandbox on port+100, health-checked. switch: pre-deploy
+dirs app-owned. preflight: the same sandbox on port+100, health-checked; a Next.js release also has to load
+its `sharp` module and answer for the pages' optimised images. switch: pre-deploy
 backup, atomic `current` swap, restart. verify: through Caddy. `recover` (boot and every mutating
 verb) reverts copy/preflight and finishes or reverts switch/verify/rollback.
 

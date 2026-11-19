@@ -79,6 +79,10 @@ arch=$(srv uname -m); case $arch in aarch64) cpu=arm64;; x86_64) cpu=x64;; *) cp
 check "N3a stage has sharp for linux-$cpu and nothing for darwin" eval \
   '[ -d .tando/stage/node_modules/@img/sharp-linux-$cpu ] &&
    ! ls -d .tando/stage/node_modules/@img/*darwin* 2> /dev/null'
+# the pre-flight asked for the page's images on the spare port, so the cache is warm before the
+# first visitor (nothing here has requested an image yet)
+nc=$(srv "sudo find $A/shared/next-cache/images -type f 2> /dev/null | wc -l" | tr -d ' ')
+check "N3p the pre-flight warmed the image cache ($nc files before any request)" test "${nc:-0}" -ge 1
 img=$(curl -s "$(url /demo)" | grep -o '/demo/_next/image?url=[^" ]*' | head -1 | sed 's/&amp;/\&/g')
 ct=$(curl -s -o /dev/null -w '%{http_code} %{content_type}' -H 'Accept: image/webp,*/*' "$(url "$img")")
 check "N3b next/image optimised on the server ($img: $ct)" test "$ct" = "200 image/webp"
@@ -150,6 +154,26 @@ msg=$(srv "sudo $AGENT deploy-status nextdemo $id" | sed -n 's/^message=//p')
 check "N5 release shipping data/ refused ($msg), still version 2" \
   eval 'echo "$msg" | grep -q "data directory .data. ships in the release" && [ "$(version)" = 2 ]'
 srv "rm -rf $A/incoming/data"
+
+# N9. a release whose image optimiser does not work (a sharp binary for another platform shows
+#     the same way) is refused in the pre-flight: the health page alone would have passed
+cp tando.conf "$E/tando.conf.keep"
+cat > break-sharp.sh <<'SH'
+# sharp's entry file (package.json "main") throws, as a binary for another platform makes it do
+find .next/standalone -path '*node_modules/sharp/package.json' | while read -r p; do
+  node -e 'const fs = require("fs"), path = require("path"), p = process.argv[1];
+    const main = JSON.parse(fs.readFileSync(p)).main || "index.js";
+    fs.writeFileSync(path.join(path.dirname(p), main), "throw new Error(\"no sharp for this platform\")\n");' "$p"
+done
+SH
+b=$(sed -n 's/^build *= *//p' tando.conf)
+grep -v '^build *=' tando.conf > tando.conf.tmp && echo "build = ${b:-npm run build} && sh break-sharp.sh" >> tando.conf.tmp && mv tando.conf.tmp tando.conf
+"$R" deploy > "$E/d-sharp.out" 2>&1; rc=$?; cat "$E/d-sharp.out" >&2
+check "N9a a release with a broken image optimiser is refused before the switch (rc=$rc), still version 2" \
+  eval '[ $rc -ne 0 ] && grep -q "5/7  preflight" "$E/d-sharp.out" && grep -q "sharp does not load" "$E/d-sharp.out" && [ "$(version)" = 2 ]'
+cp "$E/tando.conf.keep" tando.conf; rm -f break-sharp.sh
+"$R" deploy > "$E/d-sharp2.out" 2>&1; rc=$?
+check "N9b the same code without the break deploys (rc=$rc)" test $rc = 0 -a "$(version)" = 2
 
 # N6. boxed views show the path
 COLUMNS=120 "$R" ls > "$E/ls.out" 2>&1; cat "$E/ls.out" >&2

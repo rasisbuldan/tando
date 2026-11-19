@@ -76,7 +76,7 @@ valid_backup_id() {
     [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-*) ;;
     *) return 1;;
   esac
-  case ${1#*-*-} in daily|predeploy|manual|safety|final) return 0;; esac
+  case ${1#*-*-} in daily|predeploy|manual|safety|final|adopt) return 0;; esac
   return 1
 }
 is_num() { case $1 in ""|*[!0-9]*) return 1;; esac; }

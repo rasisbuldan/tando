@@ -7,19 +7,41 @@
 # app, the last lines it wrote before its last crash. All times GMT.
 
 cmd_health() {
-  local i=1 a
+  local i=1 a forget=""
   case ${ARGS[1]:-} in ""|-*) ;; *) APP=${ARGS[1]}; i=2;; esac
   while [ "$i" -lt "${#ARGS[@]}" ]; do
     a=${ARGS[$i]}
-    case $a in --json) i=$((i + 1));; *) die "health: unknown argument: $a (tando health [app] [--json])";; esac
+    case $a in
+      --json) i=$((i + 1));;
+      --forget) forget=${ARGS[$((i + 1))]:-}; i=$((i + 2));;
+      --forget=*) forget=${a#--forget=}; i=$((i + 1));;
+      *) die "health: unknown argument: $a (tando health [app] [--json])";;
+    esac
   done
   [ -z "$APP" ] || valid_app "$APP" || die "bad app name: $APP"
   resolve 0
   [ -n "$(type -t watch_raw)" ] || . "$TANDO_HOME/lib/cmd-alerts.sh"
   watch_raw sudo health ${APP:+"$APP"} > "$TMPD/hl" || bail 1
   NOW=$(now)
+  if [ -n "$forget" ]; then hl_forget "$forget"; return; fi
   if [ -n "$JSON" ]; then hl_json; return; fi
   if [ -n "$APP" ]; then hl_one; else hl_all; fi
+}
+
+# hl_forget N: drop the app's Nth incident (1 = newest, the order tando health shows them in)
+hl_forget() {
+  local r a s e c why n=0 hit=""
+  [ -n "$APP" ] || die "health --forget needs the app: tando health <app> --forget N"
+  is_num "$1" && [ "$1" -ge 1 ] || die "health --forget takes the incident's number in tando health $APP (1 is the newest)"
+  while IFS=$TAB read -r r a s e c why; do
+    [ "$r" = inc ] && [ "$a" = "$APP" ] || continue
+    n=$((n + 1)); [ "$n" = "$1" ] && { hit=$s; break; }
+  done < "$TMPD/hl"
+  [ -n "$hit" ] || die "$APP has $n incidents listed: no number $1 (tando health $APP)"
+  is_num "$e" || die "incident $1 of $APP is still open: it can be dropped once it has ended"
+  watch_raw sudo forget-incident "$APP" "$hit" > "$TMPD/hlf" || bail 1
+  ui_utc_v "$hit"
+  printf '%s\n' "dropped the incident of $UI_RET ($c, $(ui_dur "$((e - hit))")): its minutes no longer count in $APP's uptime"
 }
 
 hl_pct() { # x100 -> "99.93%" (or -)
@@ -77,14 +99,16 @@ hl_one() {
   ui_kv "uptime 7d" "$(hl_pct "$u7")  ${UI_DIM}of $n7 minutes, $ni incidents${UI_NC}"
   ui_kv latency "$(hl_spark "$sp")  ${UI_DIM}p50${UI_NC} $(hl_ms "$p50")  ${UI_DIM}p95${UI_NC} $(hl_ms "$p95")"
   {
-    printf 'START (GMT)\tLASTED\tCHECK\tCAUSE\n'
+    local k=0
+    printf '#\tSTART (GMT)\tLASTED\tCHECK\tCAUSE\n'
     while IFS=$TAB read -r r a u1 u7 n1 n7; do
       [ "$r" = inc ] || continue
-      ui_utc_v "$u1"; printf '%s\t%s\t%s\t%s\n' "$UI_RET" "$(hl_dur "$u1" "$u7")" "$n1" "$n7"
+      k=$((k + 1))
+      ui_utc_v "$u1"; printf '%s\t%s\t%s\t%s\t%s\n' "$k" "$UI_RET" "$(hl_dur "$u1" "$u7")" "$n1" "$n7"
     done < "$TMPD/hl"
   } > "$TMPD/hl.inc"
-  ui_box_sep "incidents"
-  if [ "$(wc -l < "$TMPD/hl.inc")" -gt 1 ]; then ui_table "l,l,l,l:10-" < "$TMPD/hl.inc"
+  ui_box_sep "incidents (a false alarm: tando health $APP --forget N)"
+  if [ "$(wc -l < "$TMPD/hl.inc")" -gt 1 ]; then ui_table "r,l,l,l,l:10-" < "$TMPD/hl.inc"
   else ui_box_line "none recorded"; fi
   if grep -q "^tail$TAB" "$TMPD/hl"; then
     ui_box_sep "its last lines before the last crash or restart"

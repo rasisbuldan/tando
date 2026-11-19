@@ -6,7 +6,20 @@ first, grouped by area.
 
 ## Unreleased
 
+## 0.1.1 - 2026-11-19
+
 Found by adopting a live app on a real server (docs/MIGRATION.md, "On the real server").
+
+- Added: `tando adopt site <app> [--apply]` shows what a hand-written Caddy site lacks (holding
+  requests while the app restarts, the request log) and adds it: copy, validate, reload, check.
+- Added: the pre-flight of a Next.js release loads `sharp` and requests the pages' optimised
+  images. A `sharp` binary for the wrong platform fails the deploy before the switch; the image
+  cache starts warm.
+- Added: `tando health <app> --forget N` drops a false alarm from the uptime record.
+- Changed: `tando backup ls` lists the adopt backup. A failed build prints whole lines and keeps
+  its output in `.tando/build.log`.
+- Fixed: a release refused before the switch also left its health path and expected answer in
+  the app's settings.
 
 - Fixed: a release refused at pre-flight left its `start` command in the app's settings, so the
   live release used it at its next restart. Each release now keeps its own start command.

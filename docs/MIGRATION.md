@@ -262,7 +262,8 @@ now pause before the switch). Run 3 had longer gaps from a 0.5 s polling interva
 stop (fixed in runs 4 and 5).
 
 **Recommended after adoption (optional, the owner's call):** the 502s come from the hand-written block,
-which does not hold requests while the app restarts (tando-rendered sites do). Two lines in each
+which does not hold requests while the app restarts (tando-rendered sites do).
+`tando adopt site <app> --apply` adds this and the request log; by hand it is two lines in each
 `reverse_proxy` block of the Caddyfile:
 
 ```
@@ -354,13 +355,21 @@ Four bugs, found here and not on the replica, all fixed:
    printed by `sudo /opt/tando/bin/tando-logs caddy-log <app>` on the server. Validate, then
    `systemctl reload caddy`.
 
-Also seen:
+Also seen then, and changed in 0.1.1:
 
-- After adopt and after every deploy the image cache is empty (it is per release here). The old
-  deploy script requested every image once after the switch; tando has no step for that yet.
-- The old script also failed a deploy when the image optimiser did not work (a `sharp` binary
-  for the wrong platform). tando swaps the binary itself but checks only the health page.
-- `tando backup ls` does not list the adopt backup, only later ones.
-- A failed build prints its last lines cut to the box width, which can hide the reason.
-- The false alert of bug 2 stays in the uptime figures: there is no way to drop an incident.
+- Adopt left the hold and the request log to the owner. `tando adopt site <app>` now shows what the
+  hand-written site lacks and `--apply` adds it (copy, validate, reload, check, and the previous
+  file back on failure). `adopt apply` ends with the same list.
+- The image cache was empty after adopt and after every deploy, and nothing checked the image
+  optimiser (the old deploy script did both). The pre-flight of a Next.js release now loads
+  `sharp` as the app's user and requests the optimised images of the health page and the start
+  page on the spare port: a `sharp` binary for the wrong platform fails the deploy before the
+  switch, and the cache is warm at the switch.
+- A refused release also left its `health` path in the app's settings. Start command, health path
+  and expected answer go back to the live release's when a release is refused before the switch.
+- `tando backup ls` now lists the adopt backup (kind `adopt`, never pruned, restorable).
+- A failed build prints whole lines, wrapped, and keeps all of its output in `.tando/build.log`.
+- A false alarm can be dropped from the uptime record: `tando health <app> --forget N`.
 
+Still open: `path`, `recipe` and `writable` of a refused release are applied to the live app's unit
+and site when the deploy starts (as `memory` is, by design). Change those in a deploy of their own.

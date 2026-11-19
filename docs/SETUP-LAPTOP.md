@@ -28,16 +28,16 @@ It puts `tando` in `~/.local/bin`, the rest in `~/.local/lib/tando`.
 
 **From a release archive** (if a release exists for you; `.sha256` next to it is checked):
 
-1. `./install.sh --from tando-0.1.0.tar.gz`
+1. `./install.sh --from tando-0.1.1.tar.gz`
 
-   You should see `checksum ok`, then `tando 0.1.0 installed`. Or unpack the archive and run the
+   You should see `checksum ok`, then `tando 0.1.1 installed`. Or unpack the archive and run the
    `install.sh` inside it.
 
 **From a git checkout** (needs Go):
 
 1. `git clone <repository URL> && cd tando && ./install.sh`
 
-   You should see `tando 0.1.0 installed`.
+   You should see `tando 0.1.1 installed`.
 
 Other forms:
 

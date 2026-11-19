@@ -392,3 +392,71 @@ func (w Watch) Silence(o *out.Writer, args []string) error {
 	o.KV("until", st.or("_sil."+a, "0"))
 	return nil
 }
+
+// ForgetIncident is the verb `forget-incident <app> <start>`: drop one closed incident from the
+// app's record (a false alarm: the monitor was wrong, not the app). Its line leaves
+// incidents/<app>.tsv, and the minutes it covers, with the failed probes of the 10 minutes that
+// led to it, become "hold": not judged, like a deploy. Uptime is computed from what is left.
+func (w Watch) ForgetIncident(o *out.Writer, args []string) error {
+	if err := needRoot(w.Env); err != nil {
+		return err
+	}
+	if len(args) < 2 || !valid.App(args[0]) || !decimal.IsDigits(args[1]) {
+		return errf("usage: forget-incident <app> <start>")
+	}
+	a, start := args[0], args[1]
+	l, err := w.lockBusy()
+	if err != nil {
+		return err
+	}
+	defer l.Release()
+	incf := filepath.Join(w.Dir, "incidents", a+".tsv")
+	b, _ := os.ReadFile(incf)
+	var keep []string
+	end := ""
+	for _, ln := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		p := strings.Split(ln, "\t")
+		if end == "" && len(p) > 1 && p[0] == start {
+			if !decimal.IsDigits(p[1]) {
+				return errf("that incident is still open: it can be dropped once it has ended")
+			}
+			end = p[1]
+			continue
+		}
+		if ln != "" {
+			keep = append(keep, ln)
+		}
+	}
+	if end == "" {
+		return errf("no incident of %s starts at %s (tando health %s --json lists them)", a, start, a)
+	}
+	from, to := awkNum(start)-600, awkNum(end)
+	pf := filepath.Join(w.Dir, "probe", a)
+	if pb, err := os.ReadFile(pf); err == nil {
+		ls := strings.Split(strings.TrimRight(string(pb), "\n"), "\n")
+		n := 0
+		for i, ln := range ls {
+			ts, rest, _ := strings.Cut(ln, " ")
+			cls, _, _ := strings.Cut(rest, " ")
+			if t := awkNum(ts); t >= from && t <= to && cls != "ok" && cls != "hold" && cls != "stopped" {
+				ls[i] = ts + " hold"
+				n++
+			}
+		}
+		if n > 0 {
+			if err := atomicfile.Write(pf, []byte(strings.Join(ls, "\n")+"\n"), atomicfile.Mode(0o600)); err != nil {
+				return err
+			}
+		}
+		o.KV("minutes", decimal.Itoa(int64(n)))
+	}
+	body := ""
+	if len(keep) > 0 {
+		body = strings.Join(keep, "\n") + "\n"
+	}
+	if err := atomicfile.Write(incf, []byte(body), atomicfile.Mode(0o600)); err != nil {
+		return err
+	}
+	o.KV("ok", "1")
+	return nil
+}

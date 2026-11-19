@@ -359,12 +359,15 @@ deploy, restarts, memory, disk, certificates...). See docs/MONITORING.md.
 Example: tando alerts notifier add phone ntfy
 
 @@ health
-flags: -a= -H= --json
+flags: -a= -H= --json --forget=
 args: 0-1
 usage: tando health [app] [--json]
+usage: tando health <app> --forget N
 Is it up, and was it: uptime over 24 hours and 7 days, incidents (start,
 how long, cause), probe latency; for one app also the last lines it wrote
 before its last crash. Recorded once a minute by the alert checks.
+--forget N drops incident N of the app's list (1 is the newest) when it was a
+false alarm: its minutes are no longer counted in the uptime.
 
 @@ errors
 flags: -a= -H= --since= --last= -n= --json
@@ -392,12 +395,18 @@ Who changed what on the server: one row per deploy, env change, restart,
 backup... with the sudo login and its address.
 
 @@ adopt
-flags: -H= --health= --no-jobs --yes
-subs: plan=1 apply=1 undo=1 status=1
+flags: -H= --health= --no-jobs --yes --apply
+subs: plan=1 apply=1 undo=1 status=1 site=1
 usage: tando adopt plan|apply <unit> [--health /path] [--no-jobs] [--yes]
 usage: tando adopt undo|status <app>
+usage: tando adopt site <app> [--apply]
 Take over an app that was deployed by hand (a systemd unit behind Caddy): plan
 shows what would change, apply does it with a backup, undo goes back.
+site shows what your own Caddy site lacks next to one tando renders: holding
+requests while the app restarts (no 502 during a deploy) and the request log
+tando requests reads. --apply adds them to the Caddyfile: a copy is kept, the
+file is validated and reloaded, and the previous one comes back if the app
+does not answer.
 See docs/MIGRATION.md.
 
 @@ help

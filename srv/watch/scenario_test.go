@@ -692,3 +692,26 @@ func TestHostileBytesInNotifications(t *testing.T) {
 		}
 	}
 }
+
+// A false alarm can be dropped: its incident line goes, and its minutes are no longer judged.
+func TestForgetIncident(t *testing.T) {
+	f := newFakeHost(t)
+	f.write("lib/watch/incidents/shop.tsv", "1000\t1300\thealth\tunhealthy: x\n2000\t-\thealth\topen\n")
+	f.write("lib/watch/probe/shop", "400 unhealthy 5\n460 ok 5\n940 unhealthy 9\n1000 unhealthy 9\n1300 ok 4\n1360 unhealthy 3\n")
+	w := f.watch()
+	var b strings.Builder
+	o := out.New(&b)
+	if err := w.ForgetIncident(o, []string{"shop", "2000"}); err == nil {
+		t.Error("an open incident was dropped")
+	}
+	if err := w.ForgetIncident(o, []string{"shop", "1000"}); err != nil {
+		t.Fatal(err)
+	}
+	rd := func(p string) string { b, _ := os.ReadFile(f.path(p)); return string(b) }
+	if got := rd("lib/watch/incidents/shop.tsv"); got != "2000\t-\thealth\topen\n" {
+		t.Errorf("incidents: %q", got)
+	}
+	if got := rd("lib/watch/probe/shop"); got != "400 hold\n460 ok 5\n940 hold\n1000 hold\n1300 ok 4\n1360 unhealthy 3\n" {
+		t.Errorf("probe: %q", got)
+	}
+}

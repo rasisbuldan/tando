@@ -507,7 +507,12 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   else
     phase_line 1 build fail "$BUILD_SECS"
     box_say "$UI_RED" "the build failed here: ${C_build:-$ENGINE build} exited with an error. Its last lines:"
-    strip < "$TMPD/build.log" | tail -15 | while IFS= read -r l; do ui_box_line "  $l"; done
+    # whole lines, wrapped (the reason is often at the end of a long one), and the full output
+    # kept where it can be read after this command has gone
+    strip < "$TMPD/build.log" | grep . | tail -15 | while IFS= read -r l; do ui_box_wrap "  $l"; done
+    if mkdir -p .tando 2> /dev/null && strip < "$TMPD/build.log" > .tando/build.log 2> /dev/null; then
+      box_say "" "all of it: .tando/build.log"
+    fi
     ui_box_close "build failed; nothing was uploaded"
     exit 1
   fi

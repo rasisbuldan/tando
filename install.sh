@@ -77,7 +77,7 @@ if [ -n "$from" ]; then
   swapped on the way). Use https://, a file path, or --insecure with --sha256 HEX from a trusted place"
       proto="=https,file,http";;
   esac
-  # a relative path (dist/tando-0.1.0.tar.gz) is a path too
+  # a relative path (dist/tando-0.1.1.tar.gz) is a path too
   case $from in /*|file://*|http://*|https://*) ;; *) [ ! -f "$from" ] || from=$PWD/$from;; esac
   case $from in
     /*) cp "$from" "$tmp/a.tgz" || die "cannot read $from"

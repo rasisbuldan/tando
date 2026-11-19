@@ -925,6 +925,7 @@ finish() { # kind [note]
   elif [[ -z ${S[prev]:-} ]]; then switch_to ""; fi      # a first deploy: nothing to go back to
   st phase idle
   jobs_follow
+  [[ $kind == deploy && $id != "$fb" ]] && start_back "$fb"   # app.conf describes the live release again
   pg phase done result rolledback message "after the switch: $PROBE_WHY; back on ${fb:-nothing}"
   hist "$id" "$kind" rolledback "${2:-$PROBE_WHY}"
   [[ $kind == deploy && $id != "$fb" ]] && drop_release "$id"
@@ -2089,6 +2090,37 @@ link_shared() { # release dir
   fi
 }
 
+# next_images port release-dir: load sharp where the release ships it, then request every
+# /_next/image URL of the health page and the start page once (at most 60, for at most 60 s).
+# False, with PROBE_WHY, when sharp does not load or the optimiser answers 5xx.
+next_images() { # port release-dir
+  local base="http://127.0.0.1:$1" pg u code n=0 bad=0 first="" end sh err
+  local -A seen=()
+  # the module itself first: images already in the cache are served without it, so the requests
+  # below would not notice a sharp that cannot load (as the app's user, in its sandbox)
+  sh=$(find "$2" -maxdepth 4 -path '*/node_modules/sharp/package.json' -not -path '*/node_modules/*/node_modules/*' 2> /dev/null | head -1)
+  if [[ -n $sh ]] && command -v node > /dev/null; then
+    if ! err=$(as_app_unit node -e 'require(process.argv[1])' "${sh%/package.json}" 2>&1); then
+      PROBE_WHY="the image optimiser cannot start: sharp does not load in this release ($(grep -m1 -E 'Error|error' <<< "$err" | cut -c1-200)). A release built on another kind of machine needs sharp for this server's platform"
+      return 1
+    fi
+  fi
+  mono; end=$((MONO + 60))
+  for pg in "$(health_path)" "${C[path]:-/}"; do
+    while IFS= read -r u; do
+      [[ -n $u && -z ${seen[$u]:-} ]] || continue
+      seen[$u]=1
+      mono; ((n < 60 && MONO < end)) || break 2
+      code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' -H 'Accept: image/avif,image/webp,*/*' "$base$u" 2> /dev/null)
+      n=$((n + 1))
+      if [[ $code == 5* ]]; then bad=$((bad + 1)); [[ -n $first ]] || first="HTTP $code for $u"; fi
+    done < <(curl -s -m 10 "$base$pg" 2> /dev/null | grep -o '/[^" ]*_next/image?url=[^" ]*' | sed 's/&amp;/\&/g' | head -100)
+  done
+  ((bad == 0)) && return 0
+  PROBE_WHY="the image optimiser failed for $bad of $n images of the page (${first:0:160}). On a release built on another kind of machine this is usually the sharp package: tando logs --release shows its error"
+  return 1
+}
+
 # metadata of every entry in incoming/ (ctime catches any change); compared around the copy
 upload_sum() { find "$D/incoming" -printf '%P\t%y\t%s\t%C@\t%i\t%n\n' | sort | cksum; }
 # the same without incoming/ itself (its mode is changed after each copy): what was activated last
@@ -2125,6 +2157,7 @@ cmd_run_activation() {
     pg phase done result failed message "$1"
     hist "$id" deploy failed "$1"
     drop_release "$id"
+    start_back "$prev"
     free_lease 2> /dev/null   # (a failure before the copy ended: the upload's lease goes with it)
     exit 1
   }
@@ -2154,6 +2187,15 @@ cmd_run_activation() {
     app_journal -u "$unit" -n 60 --no-pager -o cat > "$D/activation.log" 2>&1
     systemctl stop "$unit" 2> /dev/null
     P[t_preflight]=$(el "$t")     # written with the failure itself, in one pg (no ✓ in between)
+    fail "pre-flight: $PROBE_WHY"
+  fi
+  # Next.js: the pages' optimised images are asked for once on the spare port. A sharp binary for
+  # another platform answers 500 here, before any visitor sees it; and the image cache is warm
+  # when the release goes live (same release directory, or the shared cache)
+  if [[ ${C[recipe]:-} == next ]] && ! next_images "$spare" "$rel"; then
+    app_journal -u "$unit" -n 60 --no-pager -o cat > "$D/activation.log" 2>&1
+    systemctl stop "$unit" 2> /dev/null
+    P[t_preflight]=$(el "$t")
     fail "pre-flight: $PROBE_WHY"
   fi
   has_unit && systemctl stop "$unit"
@@ -2488,7 +2530,9 @@ make_writable() { # release dir
 BK=/var/backups/tando
 
 has_backup_data() { [[ -n ${C[data]:-} || -n ${C[data_dir]:-} || ${C[database]:-} == postgres ]]; }
-valid_backup() { [[ $1 =~ ^[0-9]{8}-[0-9]{6}-(daily|predeploy|manual|safety|final)$ ]]; }
+# (adopt: the full backup `tando adopt` took before it changed anything; its data restores like
+# any other, adopt undo needs its record, it is never pruned and never copied offsite)
+valid_backup() { [[ $1 =~ ^[0-9]{8}-[0-9]{6}-(daily|predeploy|manual|safety|final|adopt)$ ]]; }
 as_app() { (cd / && exec runuser -u "$AU" -- "$@"); }   # cwd / : root's cwd may be private
 # as_app_unit cmd...: the same, inside the app's sandbox (props backup): it sees only what the app
 # sees, so a symlink the app planted cannot make it read anything the app could not
@@ -2579,7 +2623,7 @@ backup_prune() {
     [[ -f $BK/$A/$i/fetched && -n $(find "$BK/$A/$i/fetched" -mmin -1440 2> /dev/null) ]] && continue
     kind=${i#*-*-} keep=0
     case $kind in
-      final) keep=1;;
+      final|adopt) keep=1;;
       daily)
         ndaily=$((ndaily + 1))
         if ((ndaily <= 7)); then keep=1
@@ -3441,11 +3485,27 @@ jobs_snap() { # id: record the jobs of app.conf (C) as release id's
 }
 # The start command belongs to a release too ($D/start/<id>, readable by the app: exec-app runs as
 # its user). A release without such a file starts with app.conf's: it is the newest one.
+# start_back: after a release was refused before the switch, app.conf says again how the live
+# release starts and what its health check is (the refused release's lines would otherwise stay
+# until the next deploy: a monitor asking the old code for the new health path, say)
+start_back() { # live id
+  local k
+  local -A RS=()
+  valid_id "${1:-}" && [[ -f $D/start/$1 ]] || return 0
+  load "$D/start/$1" RS
+  [[ -n ${RS[start]:-} ]] || return 0
+  for k in start start_shell health health_expect; do
+    [[ -n ${RS[$k]+x} ]] || continue                    # (a file from before a key was recorded)
+    if [[ -n ${RS[$k]} ]]; then C[$k]=${RS[$k]}; else unset "C[$k]"; fi
+  done
+  save "$D/app.conf" C
+}
 start_snap() { # id: record how release id starts (app.conf as it is now)
   local g=root
   getent group "tando-m-$A" > /dev/null && g=tando-m-$A
   [[ -d $D/start ]] || { mkdir -m 750 "$D/start" && chown "root:$g" "$D/start"; } || return 1
-  printf 'start=%s\nstart_shell=%s\n' "${C[start]:-}" "${C[start_shell]:-}" > "$D/start/$1.tmp" &&
+  printf 'start=%s\nstart_shell=%s\nhealth=%s\nhealth_expect=%s\n' "${C[start]:-}" "${C[start_shell]:-}" \
+    "${C[health]:-}" "${C[health_expect]:-}" > "$D/start/$1.tmp" &&
     chown "root:$g" "$D/start/$1.tmp" && chmod 640 "$D/start/$1.tmp" &&
     mv -f "$D/start/$1.tmp" "$D/start/$1" || { rm -f "$D/start/$1.tmp"; return 1; }
 }
@@ -3629,7 +3689,7 @@ case $verb in
     need_root
     [[ -x $R/bin/tando-host ]] || die "host care is not installed on <host>: tando host setup <host> installs it"
     exec "$R/bin/tando-host" "$@";;
-  adopt-scan|adopt-apply|adopt-run|adopt-status|adopt-undo|adopt-undo-run)
+  adopt-scan|adopt-apply|adopt-run|adopt-status|adopt-undo|adopt-undo-run|adopt-site)
     # `tando adopt` (docs/MIGRATION.md): the client installs $R/bin/tando-adopt before calling these
     [[ -f $R/bin/tando-adopt && $(stat -c %U:%a "$R/bin/tando-adopt") == root:[67][04][04] ]] ||
       die "the adopt helper is not installed: run tando adopt from the laptop"

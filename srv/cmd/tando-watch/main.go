@@ -10,6 +10,7 @@
 //	tando-watch brief [app]               firing and pending alerts for tando status (no root)
 //	tando-watch health [app]              uptime and incidents for tando health
 //	tando-watch forget <app>              drop an app's alert state (tando destroy)
+//	tando-watch forget-incident <app> <start>   drop one closed incident (a false alarm)
 //	tando-watch set                       key=value lines on stdin
 //	tando-watch notifier-add <name> <type>   fields as key=value lines on stdin (secrets)
 //	tando-watch notifier-rm <name>
@@ -79,6 +80,8 @@ func run(args []string) error {
 		err = w.Health(o, args)
 	case "forget":
 		err = w.Forget(o, args)
+	case "forget-incident":
+		err = w.ForgetIncident(o, args)
 	case "show":
 		err = w.Show(ctx, o, args)
 	case "history":

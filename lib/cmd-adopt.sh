@@ -1,10 +1,12 @@
 # lib/cmd-adopt.sh: tando adopt: bring a hand-deployed Next.js app under tando, in place.
-# help: adopt plan|apply <unit> [--health /path] [--no-jobs] | undo|status <app>   take over a hand-deployed app
+# help: adopt plan|apply <unit> [--health /path] [--no-jobs] | undo|status <app> | site <app> [--apply]   take over a hand-deployed app
 #
 #   tando adopt plan <unit> -H <host>     read-only: what changes, what does not, downtime, risks
 #   tando adopt apply <unit> -H <host>    backup, register, switch, timers, verify; rolls back on failure
 #   tando adopt undo <app> -H <host>      back to the recorded hand-managed state, verified
 #   tando adopt status <app> -H <host>    the steps of the latest apply or undo
+#   tando adopt site <app> -H <host>      what the hand-written Caddy site lacks (request hold, request
+#                                         log); --apply adds it: copy, validate, reload, check
 #
 # The server does the work: tando-agent adopt-* with server/tando-adopt, which this file installs.
 # Nothing here reads or prints an env file:
@@ -26,12 +28,13 @@ ad_wrap() {
 
 ad_opts() { # sets AD_UNIT AD_HEALTH AD_JOBS AD_YES from ARGS[2..]
   local i=2 n=${#ARGS[@]}
-  AD_UNIT="" AD_HEALTH=/ AD_JOBS=yes AD_YES=""
+  AD_UNIT="" AD_HEALTH=/ AD_JOBS=yes AD_YES="" AD_APPLY=""
   while [ $i -lt $n ]; do
     case ${ARGS[$i]} in
       --health) i=$((i + 1)); AD_HEALTH=${ARGS[$i]:-};;
       --no-jobs) AD_JOBS=no;;
       --yes) AD_YES=1;;
+      --apply) AD_APPLY=apply;;
       -*) die "adopt: unknown option ${ARGS[$i]}";;
       *) [ -z "$AD_UNIT" ] || die "adopt: one unit at a time"; AD_UNIT=${ARGS[$i]};;
     esac
@@ -129,6 +132,21 @@ ad_conf() { # file
   } > "$1"
 }
 
+# ad_site_rows file: the "site" rows of adopt-site as box lines; AD_SITE_TODO counts what is missing
+ad_site_rows() {
+  local kind what st det mark
+  AD_SITE_TODO=0
+  while IFS="$AD_TAB" read -r kind what st det; do
+    [ "$kind" = site ] || continue
+    case $st in
+      have) mark="${UI_GREEN}✓${UI_NC}";;
+      add) mark="${UI_YELLOW}+${UI_NC}"; AD_SITE_TODO=$((AD_SITE_TODO + 1));;
+      *) mark="${UI_YELLOW}!${UI_NC}"; AD_SITE_TODO=$((AD_SITE_TODO + 1));;
+    esac
+    ad_wrap "  $mark $(printf '%-5s' "$what")" "$det"
+  done < "$1"
+}
+
 ad_follow() { # title total: poll adopt-status until a result; steps as they finish
   local shown="" kind n name st secs det errs=0
   while :; do
@@ -179,6 +197,13 @@ cmd_adopt() {
           ui_kv backup "$K_backup"
           if [ ! -f tando.conf ]; then ad_conf tando.conf; ui_kv tando.conf "written here (check its build line)"
           else ad_conf tando.conf.adopted; ui_kv tando.conf "exists; the adopted settings are in tando.conf.adopted"; fi
+          # what the hand-written site lacks next to one tando renders (never edited by apply)
+          if agent_raw sudo adopt-site "$APP" > "$TMPD/site" 2> /dev/null; then
+            if grep -q "^site${AD_TAB}[a-z]*${AD_TAB}\(add\|manual\)${AD_TAB}" "$TMPD/site"; then
+              ui_box_sep "your Caddy site"; ad_site_rows "$TMPD/site"
+              ad_wrap "  " "tando adopt site $APP -H $HOST --apply adds what is marked +, with a copy of the Caddyfile, a validation and a reload."
+            fi
+          fi
           ui_box_close "adopted: tando deploy ships the next release; tando adopt undo goes back"
           ;;
         *)
@@ -200,6 +225,20 @@ cmd_adopt() {
       ad_follow "undo $APP" 2
       if [ "$K_result" = ok ]; then ui_box_close "$K_message"
       else ad_wrap "${UI_RED}" "$K_message${UI_NC}"; ui_box_close "$K_result"; exit 1; fi;;
+    site)
+      ad_opts; resolve 0; APP=$AD_UNIT
+      valid_app "$APP" || die "bad app name: $APP"
+      ad_install
+      agent sudo adopt-site "$APP" $AD_APPLY > "$TMPD/site"
+      kv_read "$TMPD/site" changes kept result
+      ui_box_open "adopt site $APP" "$HOST"
+      ad_site_rows "$TMPD/site"
+      if [ -n "$AD_APPLY" ]; then
+        [ -n "$K_kept" ] && ui_kv "copy" "$K_kept (the Caddyfile as it was)"
+        if [ "$K_result" = added ]; then ui_box_close "added and reloaded; $APP answers through Caddy"
+        else ui_box_close "${K_result:-nothing changed}"; fi
+      elif [ "${K_changes:-0}" -gt 0 ]; then ui_box_close "tando adopt site $APP -H $HOST --apply"
+      else ui_box_close "nothing to add automatically"; fi;;
     status)
       ad_opts; resolve 0; APP=$AD_UNIT
       valid_app "$APP" || die "bad app name: $APP"
@@ -208,6 +247,6 @@ cmd_adopt() {
       ad_follow "status $APP" 6
       [ -n "$K_message" ] && ad_wrap "  " "$K_result: $K_message"
       ui_box_close;;
-    *) die "usage: tando adopt plan|apply <unit> [--health /path] [--no-jobs] [--yes] | undo|status <app>";;
+    *) die "usage: tando adopt plan|apply <unit> [--health /path] [--no-jobs] [--yes] | undo|status <app> | site <app> [--apply]";;
   esac
 }
