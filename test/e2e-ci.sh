@@ -757,8 +757,9 @@ check "8n ci hook --remove" test ! -e "$HR/.git/hooks/pre-push"
 log "9. security review findings"
 cd "$E/w/alpha" || exit 1
 KUID=$(srv 'id -u tando-d-alpha')
-# cron and at, to test that revoke clears them (needs the Ubuntu mirror once; SKIP without it)
-srv 'command -v crontab > /dev/null || { sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq &&
+# cron and at, to test that revoke clears them: in the test server's image (test/server/Dockerfile);
+# on a server without them (an image built before they were added) installed now, from the mirror
+srv 'command -v crontab > /dev/null && command -v at > /dev/null || { sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq &&
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cron at; } > /dev/null 2>&1'
 ATK=$ROOT/test/.work-sec-ci/attacks
 if [ -f "$ATK/f3-remote.sh" ] && [ -f "$ATK/f3-kssh" ]; then

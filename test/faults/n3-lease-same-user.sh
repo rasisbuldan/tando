@@ -6,7 +6,7 @@
 . "$(dirname "$0")/lib-fault.sh"
 f_init n3 "second deploy of the same user during an upload" "upload"
 A=fn3; f_fresh $A
-cp "$FW/big/blob.bin" "$W/$A/"; echo 3 > "$W/$A/marker"
+f_big; cp "$FW/big/blob.bin" "$W/$A/"; echo 3 > "$W/$A/marker"
 mkdir -p "$W/b"; cp -R "$W/$A" "$W/b/"; rm -f "$W/b/$A/blob.bin"; echo 9 > "$W/b/$A/marker"; echo 9 > "$W/b/$A/VERSION"
 loop_start $A
 setv $A 3 ok; client_bg $A deploy

@@ -9,12 +9,12 @@ p=$(app_port $A)
 (cd "$W/$A" && "$R" stop > /dev/null 2>&1)
 stray_start $p
 (cd "$W/$A" && "$R" start > "$W/start.out" 2>&1); src=$?
-sleep 6
+sleep 6   # kept: time for the unit to try (and fail) to bind while the stray holds the port
 u=$(srv "systemctl is-active tando-$A; systemctl show -P NRestarts tando-$A" | tr '\n' ' ')
 log "start rc=$src ($(tail -1 "$W/start.out")); unit: $u; Caddy answers: $(curl -s -m 3 "$(url $A)")"
 [ "$src" = 0 ] && untruth "tando start reported healthy while its process cannot bind (unit: $u); the stray answers"
 deploy $A 3 ok; log "deploy rc=$DRC: $(grep -E 'live in|rolled|failed' "$W/$A.d3.out" | head -1)"
-sleep 5
+sleep 5   # kept: a deploy that reported live must still be answered by the app, not the stray, 5 s on
 u=$(srv "systemctl is-active tando-$A; systemctl show -P NRestarts tando-$A" | tr '\n' ' ')
 body=$(curl -s -m 3 "$(url $A)"); log "after deploy: unit $u, Caddy answers [$body]"
 [ "$DRC" = 0 ] && [ "$body" = stray ] && untruth "deploy v3 reported live and verified, but a stray process answers and tando-$A is $u"

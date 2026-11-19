@@ -5,6 +5,10 @@
 # destroy are finished by running them again.
 . "$(dirname "$0")/lib-fault.sh"
 f_init n5 "re-runs: setup, deploy, env, domain, stop/start, destroy, up" "idempotency"
+# the long soak, for f_fresh too: "deploy of an unchanged tree" below is "already live" only when
+# its settings (the soak among them) are those of the live release, so f_fresh must deploy with
+# the soak the scenario's own deploy sends (seen failing with FAULT_SETUP_SOAK=2)
+FAULT_SETUP_SOAK=${TANDO_SOAK:-}
 A=fn5; f_fresh $A
 snap() { srv "sudo bash -s" <<'SH'
 for f in /etc/caddy/Caddyfile /etc/caddy/tando/* /etc/systemd/system/tando* /opt/tando/host.conf /opt/tando/firewall.nft \

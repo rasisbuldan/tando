@@ -1,11 +1,21 @@
-# Tests for the tando repository itself. Written without being able to run it (no GitHub access
-# while it was made): see docs/TESTING.md "CI" for the assumptions and what to check first.
+# Tests for the tando repository. Kept small on purpose: the tiers (docs/TESTING.md) are run on
+# the developer's machine, where a full run takes under 20 minutes. Here, every push gets two
+# jobs: the checks that need no server, and one smoke deploy on a test server. Everything else
+# is started by hand (Actions, "Run workflow") when a second machine's opinion is wanted.
 name: test
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "also run a whole tier on a test server here: none, full, nightly or weekly"
+        default: none
+      macos:
+        description: "also run the laptop side on macOS (/bin/bash 3.2): yes or no"
+        default: "no"
 
 permissions:
   contents: read
@@ -19,21 +29,16 @@ env:
   TANDO_COLOR: never
 
 jobs:
-  secrets:
-    # credentials and private details (keys, tokens, real addresses, home paths, e-mail): no
-    # baseline, any finding fails; deliberate fixtures are in scripts/secret-scan.allow
+  checks:
+    # no server: secrets, lint, the Go programs, the terminal UI, install and uninstall, the
+    # reproducible release archive, and that the suite map and every tier's plan are sound
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: the scanner catches every kind it claims (fixtures made at test time)
-        run: test/secret-scan-test.sh
-      - name: scan every file in the repository
-        run: scripts/secret-scan.sh
-
-  lint:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
+      - name: the secret scanner catches every kind it claims, and the tree is clean
+        run: |
+          test/secret-scan-test.sh
+          scripts/secret-scan.sh
       - name: "shellcheck ${{ env.SHELLCHECK_VERSION }} (pinned: the baseline depends on its version)"
         run: |
           curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
@@ -45,67 +50,108 @@ jobs:
           go-version-file: srv/go.mod
           cache: false
       - name: lint (new findings fail; the baseline is test/lint-baseline.txt)
-        run: test/lint.sh
-      - name: Go server programs (gofmt, vet, tests, no-shell lint, layering, both CPUs)
-        run: test/go.sh
+        run: test/lint.sh --no-cache
+      - name: Go server programs (gofmt, vet, tests, race, no-shell lint, layering, both CPUs)
+        run: test/go.sh --no-cache
+      - name: terminal UI
+        run: BASH_BIN=/bin/bash /bin/bash test/ui-test.sh
+      - name: install from the checkout and from a release archive, uninstall
+        run: test/install-test.sh
       - name: release archive is reproducible (binaries included)
         run: scripts/release.sh --check
-
-  ui:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5   # the Go server programs (srv/go.mod); same Go, same binary bytes
-        with:
-          go-version-file: srv/go.mod
-          cache: false
-      - name: ui tests (macOS /bin/bash is 3.2.57)
-        run: BASH_BIN=/bin/bash /bin/bash test/ui-test.sh
-      - name: laptop side under macOS /bin/bash (bash -n, ui-test, local commands)
-        if: runner.os == 'macOS'
-        run: test/portability.sh mac
-      - name: install and uninstall from the checkout
+      - name: the suite map names only suites that exist, and every tier has a plan
         run: |
-          ./install.sh --prefix "$RUNNER_TEMP/p"
-          "$RUNNER_TEMP/p/bin/tando" help > /dev/null
-          ./uninstall.sh --prefix "$RUNNER_TEMP/p"
+          test/select.sh --files lib/cmd-health.sh srv/watch/x.go test/faults/x.sh README.md
+          for t in quick full nightly weekly; do test/all.sh --tier "$t" --list --files bin/tando > /dev/null; done
 
-  e2e:
-    # The test server is Ubuntu with systemd as PID 1 in Docker (test/server). Assumptions:
-    # - ubuntu-24.04 runners use cgroup v2 and allow `docker run --privileged --cgroupns=private`
-    #   (test/server/up.sh does this); systemd then boots in the container.
-    # - Building the image downloads Caddy (apt) and Node 24 (nodejs.org): network is available.
-    # - curl resolves *.localhost to 127.0.0.1 (curl >= 7.78 does it itself).
-    # - The runner is x86_64; the Dockerfile maps amd64 -> x64 for Node.
-    # e2e-next needs npm (setup-node); e2e-data installs PostgreSQL inside the container.
+  smoke:
+    # one real deploy path on a test server (Ubuntu with systemd as PID 1 in Docker, test/server):
+    # the first-server trial and a Next.js app. Assumptions, checked on the first runs: the
+    # runner boots systemd in `docker run --privileged --cgroupns=private`, is x86_64, reaches the
+    # Caddy apt repo and nodejs.org when the image is built, and curl resolves *.localhost itself.
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - uses: actions/setup-go@v5   # the Go server programs (srv/go.mod); same Go, same binary bytes
+      - uses: actions/setup-go@v5
         with:
           go-version-file: srv/go.mod
           cache: false
       - name: build the test server image
         run: docker build -q -t tando-testvm:latest test/server
-      - name: all server suites, in parallel, each on its own test server
-        # (e2e-faults takes about 1.5 hours by itself: run it by hand, test/all.sh --only e2e-faults)
-        run: test/all.sh --skip ui-test,lint,e2e-faults
+      - name: e2e-trial and e2e-next
+        run: test/all.sh --only e2e-trial,e2e-next
+      - name: logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-smoke
+          path: .tando/all/
+          retention-days: 7
+
+  tier:
+    # by hand only: a whole tier on this runner (4 CPUs: about an hour for the full tier)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.tier != 'none'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: srv/go.mod
+          cache: false
+      - name: "shellcheck ${{ env.SHELLCHECK_VERSION }}"
+        run: |
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            | tar -xJ -C "$RUNNER_TEMP"
+          echo "SHELLCHECK=$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}/shellcheck" >> "$GITHUB_ENV"
+      - run: sudo apt-get install -y --no-install-recommends zsh
+      - name: build the test server image
+        run: docker build -q -t tando-testvm:latest test/server
+      - name: the tier
+        env:
+          TIER: ${{ github.event.inputs.tier }}
+        run: |
+          case $TIER in full|nightly|weekly) ;; *) echo "tier must be full, nightly or weekly" >&2; exit 2;; esac
+          test/all.sh --tier "$TIER"
+      - name: where the time went
+        if: always()
+        run: test/all.sh --slow 25 || true
       - name: Linux and BusyBox clients
         run: test/portability.sh linux busybox debian
       - name: logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-logs
+          name: test-logs-tier
           path: |
             .tando/all/
             test/.portability/
           retention-days: 7
+
+  macos:
+    # by hand only: GitHub's macOS runners are scarce (jobs have been cancelled unstarted after
+    # 15 minutes in the queue) and the same checks run on the developer's Mac
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.macos == 'yes'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: srv/go.mod
+          cache: false
+      - name: ui tests (macOS /bin/bash is 3.2.57)
+        run: BASH_BIN=/bin/bash /bin/bash test/ui-test.sh
+      - name: laptop side under macOS /bin/bash (bash -n, ui-test, local commands)
+        run: test/portability.sh mac
+      - name: install and uninstall from the checkout
+        run: |
+          ./install.sh --prefix "$RUNNER_TEMP/p"
+          "$RUNNER_TEMP/p/bin/tando" help > /dev/null
+          ./uninstall.sh --prefix "$RUNNER_TEMP/p"

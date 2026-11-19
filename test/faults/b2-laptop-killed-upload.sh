@@ -4,13 +4,15 @@
 . "$(dirname "$0")/lib-fault.sh"
 f_init b2 "laptop killed (SIGKILL)" "during upload"
 A=fb2; f_fresh $A
-cp "$FW/big/blob.bin" "$W/$A/"
+f_big; cp "$FW/big/blob.bin" "$W/$A/"
 loop_start $A
 setv $A 3 ok; client_bg $A deploy
 wait_rsync; ok "upload running" test $? = 0
 client_sig KILL
 client_wait 10
 loop_stop; ok "no failed request" test "$F_BAD" = 0
+# kept (not an event to poll for): the server takes over the lease of a client that went away when
+# the same user asks again 5 s or more after its begin (tando-agent begin); this is that wait
 sleep 5
 truth $A 2
 facts $A > /dev/null 2>&1; log "lease after the kill: $(fact lease)"

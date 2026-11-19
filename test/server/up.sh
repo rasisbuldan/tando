@@ -9,6 +9,9 @@ NAME=${TANDO_TEST_NAME:-tando-testvm} CADDY=${TANDO_TEST_CADDY:-upstream}
 IMAGE=tando-testvm:latest; [ "$CADDY" = upstream ] || IMAGE=tando-testvm:caddy-$CADDY
 # TANDO_TEST_BARE=1: a fresh VM (systemd, sshd, a sudo user; no Caddy, Node, rsync or curl)
 BARE=${TANDO_TEST_BARE:-0}; [ "$BARE" = 1 ] && IMAGE=tando-testvm:bare
+# TANDO_TEST_NODE=latest: the newest Node 24.x instead of the pinned one (the Dockerfile says why)
+NODE=${TANDO_TEST_NODE:-}; NODEARG=()
+if [ -n "$NODE" ] && [ "$BARE" != 1 ]; then IMAGE=$IMAGE-node-$NODE; NODEARG=(--build-arg "NODE=$NODE"); fi
 SSHP=${TANDO_TEST_SSH_PORT:-2222} HTTPP=${TANDO_TEST_HTTP_PORT:-8080}
 READY=$D/.ready; [ "$NAME" = tando-testvm ] || READY=$D/.ready-$NAME
 rm -f "$READY"
@@ -21,7 +24,7 @@ if [ ! -f "$D/id_test" ]; then
   until [ -f "$D/id_test" ] && [ -f "$D/id_test.pub" ]; do sleep 0.2; done
 fi
 
-docker build -q --build-arg "CADDY=$CADDY" --build-arg "BARE=$BARE" -t "$IMAGE" "$D" >/dev/null
+docker build -q --build-arg "CADDY=$CADDY" --build-arg "BARE=$BARE" ${NODEARG[@]+"${NODEARG[@]}"} -t "$IMAGE" "$D" >/dev/null
 if ! docker container inspect "$NAME" >/dev/null 2>&1; then
   docker run -d --name "$NAME" --hostname "$NAME" --label tando.test=1 \
     --privileged --cgroupns=private \

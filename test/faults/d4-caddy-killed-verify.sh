@@ -9,7 +9,9 @@ setv $A 3 slow@live:3; client_bg $A deploy
 wait_phase $A verify 60
 srv "sudo systemctl kill -s KILL caddy"
 client_wait 120; log "deploy rc=$(client_rc): $(grep -E 'live in|rolled|message|answer' "$W/client.out" | head -2 | tr '\n' ' ')"
-sleep 5
+# systemd restarting Caddy is the event: poll for it, within the 5 s this scenario gave it before
+caddy_active() { [ "$(srv "systemctl is-active caddy")" = active ]; }
+until_ 5 caddy_active; sleep 1
 caddy=$(srv "systemctl is-active caddy"); log "caddy after SIGKILL: $caddy"
 ok "Caddy is running again by itself" test "$caddy" = active
 loop_stop

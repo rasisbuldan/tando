@@ -6,6 +6,12 @@ first, grouped by area.
 
 ## Unreleased
 
+- Tests: tiers (`test/all.sh --tier check|quick|full|nightly|weekly`), `test/check.sh`, suite selection
+  by changed files (`test/suites.map`), fault scenarios in shards; the full tier takes about 16 minutes
+  on the reference laptop (was about 2 hours). AGENTS.md says what to run when.
+- `host setup`: apt is tried three times and waits for the package lock.
+- CI on GitHub: two jobs per push; the long tiers run by hand only.
+
 ## 0.1.1 - 2026-11-19
 
 Found by adopting a live app on a real server (docs/MIGRATION.md, "On the real server").

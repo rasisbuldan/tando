@@ -1,7 +1,19 @@
 #!/bin/bash
 # test/all.sh: run every test suite, in parallel where it is safe, each on its own test server.
 #
-#   test/all.sh                      ui-test, lint, go, install-test, e2e, e2e-next and every other test/e2e-*.sh
+#   test/all.sh                      the full tier: every suite (docs/TESTING.md, "Tiers")
+#   test/all.sh --tier quick         only the suites the changed files can break (test/suites.map),
+#                                    plus one smoke deploy; --base REF or --files a b choose the change
+#   test/all.sh --tier full          every suite; the fault scenarios as four parallel shards
+#   test/all.sh --tier nightly       full, the fault scenarios as two chains split at a place that
+#                                    moves every day
+#   test/all.sh --tier weekly        full, the fault scenarios as one chain with the long soak
+#   test/all.sh --failed             only the suites that failed in the last run
+#   test/all.sh --slow [N]           where the last run's time went: the N longest waits between
+#                                    two checks (default 25), and the suites by duration
+#   test/all.sh --save-durations     record the last run's suite times in test/durations.tsv (only
+#                                    when every suite passed): later runs warn about a suite that
+#                                    takes half as long again, so the time does not creep back
 #   test/all.sh --only e2e,lint      just these suites (names without .sh)
 #   test/all.sh --skip e2e-next      all but these
 #   test/all.sh --repeat 3           run everything 3 times and report checks that do not pass
@@ -25,8 +37,10 @@
 # keeps the apps a suite left, which the next suite would trip over): ${TANDO_ALL_PREFIX:-tando-test-q}<n>
 # with ssh port ${TANDO_ALL_SSH_BASE:-2310}+n and http ${TANDO_ALL_HTTP_BASE:-8310}+n, where n is the
 # suite's place among all server suites (the same n with --only/--skip). A suite that uses a second
-# server (TANDO_TEST_NAME2) gets <name>b on ports +50. At most ${TANDO_ALL_SLOTS:-4} server suites run
-# at once; a suite's server is created when it starts and removed when it ends (unless --keep).
+# server (TANDO_TEST_NAME2) gets <name>b on ports +50. At most TANDO_ALL_SLOTS server suites run
+# at once (default: the CPUs less two, at most 8, at least 2), the longest first (by
+# test/durations.tsv); a suite's server is created when it starts and removed when it ends (unless --keep).
+# Local suites (no server) start at once, beside the server suites.
 # A suite marked "# all.sh: own-server" creates its server itself (all.sh only picks its name and
 # ports). The plan is checked first: two suites that would share a name or a port stop the run.
 # Logs: .tando/all/<run>/[round-<r>/]<suite>.log (git-ignored); .tando/all/latest links the last run.
@@ -37,14 +51,27 @@ cd "$ROOT" || exit 2
 
 PREFIX=${TANDO_ALL_PREFIX:-tando-test-q}
 SSH_BASE=${TANDO_ALL_SSH_BASE:-2310} HTTP_BASE=${TANDO_ALL_HTTP_BASE:-8310}
-NSLOTS=${TANDO_ALL_SLOTS:-4}
+ncpu=$( { getconf _NPROCESSORS_ONLN || sysctl -n hw.ncpu; } 2> /dev/null | head -1)
+case $ncpu in ""|*[!0-9]*) ncpu=4;; esac
+defslots=$((ncpu - 2)); [ "$defslots" -gt 8 ] && defslots=8; [ "$defslots" -lt 2 ] && defslots=2
+NSLOTS=${TANDO_ALL_SLOTS:-$defslots}
 repeat=1 only="" skipl="" keep=0 list=0 asis=0 porta=0 report="" allow_skip=${TANDO_ALLOW_SKIP:-0}
+tier=${TANDO_TIER:-full} failed=0 slow="" selargs=() savedur=0
+DUR=$ROOT/test/durations.tsv
 
 while [ $# -gt 0 ]; do
   case $1 in
     --repeat) repeat=${2:-}; shift
       case $repeat in ""|*[!0-9]*|0) echo "all: --repeat needs a number" >&2; exit 2;; esac;;
     --only) only=,${2:-},; shift;;
+    --tier) tier=${2:-}; shift;;
+    --base) selargs=(--base "${2:?--base needs a ref}"); shift;;
+    --files) selargs=(--files)   # the paths up to the next option
+      while [ $# -gt 1 ]; do case $2 in --*) break;; *) selargs+=("$2"); shift;; esac; done
+      [ ${#selargs[@]} -gt 1 ] || { echo "all: --files needs at least one path" >&2; exit 2; };;
+    --failed) failed=1;;
+    --save-durations) savedur=1;;
+    --slow) slow=25; case ${2:-} in ""|*[!0-9]*) ;; *) slow=$2; shift;; esac;;
     --skip) skipl=,${2:-},; shift;;
     --keep) keep=1;;
     --list) list=1;;
@@ -60,6 +87,48 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+case $tier in
+  check) exec "$ROOT/test/check.sh" ${selargs[@]+"${selargs[@]}"};;
+  quick|full|nightly|weekly) ;;
+  *) echo "all: --tier is check, quick, full, nightly or weekly (got '$tier')" >&2; exit 2;;
+esac
+
+# ---- the reference durations (--save-durations) ------------------------------------------------
+# a run with --repeat keeps its results in round-<n>: its last round is what is read
+rundir() { local d=$1 r n=0; ls "$d"/*.rc > /dev/null 2>&1 && { echo "$d"; return; }
+  for r in "$d"/round-*; do [ -d "$r" ] && [ "${r##*-}" -gt "$n" ] && n=${r##*-}; done
+  if [ "$n" -gt 0 ]; then echo "$d/round-$n"; else echo "$d"; fi; }
+if [ "$savedur" = 1 ]; then
+  d=$(rundir "$ROOT/.tando/all/latest")
+  ls "$d"/*.rc > /dev/null 2>&1 || { echo "all: no run in $d" >&2; exit 2; }
+  for f in "$d"/*.rc; do read -r rc _ < "$f"; [ "$rc" = 0 ] || { echo "all: ${f##*/} did not pass in the last run: durations not saved" >&2; exit 1; }; done
+  {
+    echo "# test/durations.tsv: seconds each suite took in a passing run on the reference machine"
+    echo "# ($(sysctl -n machdep.cpu.brand_string 2> /dev/null || uname -m), $ncpu CPUs, $NSLOTS servers at once; written by"
+    echo "# test/all.sh --save-durations on $(date +%F)). test/all.sh warns when a suite takes over 1.5 times"
+    echo "# its line here and at least 60 s more, and starts the longest suites first by it."
+    for f in "$d"/*.rc; do read -r rc secs < "$f"; f=${f##*/}; printf '%s\t%.0f\n' "${f%.rc}" "$secs"; done | sort
+  } > "$DUR.tmp" && { grep -v '^#' "$DUR" 2> /dev/null | while IFS='	' read -r n secs; do
+      grep -q "^$n	" "$DUR.tmp" || printf '%s\t%s\n' "$n" "$secs"; done >> "$DUR.tmp"; } && mv "$DUR.tmp" "$DUR"
+  echo "all: saved $(grep -vc '^#' "$DUR") suite durations in test/durations.tsv"
+  exit 0
+fi
+
+# ---- where the time went (--slow) -------------------------------------------------------------
+# <suite>.times of a run: "<seconds since the suite started> TAB <seconds since the previous
+# mark> TAB <line>" for every PASS/FAIL/SKIP line and every "---- section" line of its log
+if [ -n "$slow" ]; then
+  d=${report:-$ROOT/.tando/all/latest}
+  [ -d "$d" ] || { echo "all: no run to report on in $d" >&2; exit 2; }
+  d=$(rundir "$d")
+  ls "$d"/*.times > /dev/null 2>&1 || { echo "all: $d has no timings (a run from before they were recorded)" >&2; exit 2; }
+  echo "Suites, slowest first:"
+  for f in "$d"/*.rc; do read -r rc secs < "$f"; f=${f##*/}; printf '  %7.0f s  %s%s\n' "$secs" "${f%.rc}" "$([ "$rc" = 0 ] || echo '  (failed)')"; done | sort -rn
+  echo "The $slow longest waits before a check or a section (seconds, suite, what came next):"
+  for f in "$d"/*.times; do n=${f##*/}; awk -F'\t' -v s="${n%.times}" '{ printf "%8.1f  %-18s %s\n", $2, s, substr($3, 1, 110) }' "$f"; done |
+    sort -rn | head -n "$slow"
+  exit 0
+fi
 
 # ---- suites -----------------------------------------------------------------------------------
 
@@ -87,13 +156,58 @@ for f in test/ui-test.sh test/lint.sh test/go.sh test/install-test.sh test/e2e.s
   case " ${ALL[*]+${ALL[*]}} " in *" $n "*) continue;; esac
   ALL+=("$n")
 done
+# in_tier <suite>: the fault scenarios run as one chain (e2e-faults, weekly), as two chains whose
+# split moves daily (e2e-faults-h1/h2, nightly) or as four shards (e2e-faults-q1..q4, full, quick);
+# every other suite is in every tier
+in_tier() {
+  case $1 in
+    e2e-faults) [ "$tier" = weekly ];;
+    e2e-faults-h[0-9]*) [ "$tier" = nightly ];;
+    e2e-faults-q[0-9]*) [ "$tier" = full ] || [ "$tier" = quick ];;
+    *) return 0;;
+  esac
+}
+# the quick tier: what the changed files can break (test/select.sh), and one smoke deploy
+QUICK=""
+if [ "$tier" = quick ] && [ -z "$only" ] && [ "$failed" = 0 ] && [ -z "$report" ]; then
+  QUICK=$("$ROOT/test/select.sh" ${selargs[@]+"${selargs[@]}"}) || { echo "all: test/select.sh failed (see above)" >&2; exit 2; }
+  case $QUICK in
+    NONE) echo "all: nothing changed${selargs[*]+ (${selargs[*]})}: nothing to run in the quick tier"; exit 0;;
+    ALL) echo "all: quick tier: a core file changed (test/select.sh --why says which): every suite";;
+    *) QUICK="$QUICK e2e-trial"; echo "all: quick tier: $QUICK";;
+  esac
+fi
+# --failed: the suites of the last run that did not pass
+FAILED=""
+if [ "$failed" = 1 ]; then
+  for f in "$ROOT"/.tando/all/latest/*.rc; do
+    [ -f "$f" ] || continue
+    read -r rc _ < "$f"; f=${f##*/}
+    [ "$rc" = 0 ] || FAILED="$FAILED ${f%.rc}"
+  done
+  [ -n "$FAILED" ] || { echo "all: no suite failed in the last run (.tando/all/latest)"; exit 0; }
+  echo "all: rerunning the failed suites:$FAILED"
+fi
 SUITES=()
 for n in ${ALL[@]+"${ALL[@]}"}; do
   case $n in portability) [ "$porta" = 1 ] || continue;; esac
-  case $only in "") ;; *",$n,"*) ;; *) continue;; esac
   case $skipl in *",$n,"*) continue;; esac
+  if [ -n "$only" ]; then case $only in *",$n,"*) ;; *) continue;; esac       # named: whatever the tier
+  elif [ "$failed" = 1 ]; then case " $FAILED " in *" $n "*) ;; *) continue;; esac
+  else
+    in_tier "$n" || continue
+    case $QUICK in ""|ALL) ;; *) case " $QUICK " in *" $n "*) ;; *) continue;; esac;; esac
+  fi
   SUITES+=("$n")
 done
+# what a tier means for the suites themselves: the quick tier may reuse cached results and skips
+# the race detector; the others recompute everything; weekly keeps the long soak in every deploy
+case $tier in
+  quick) export GO_QUICK=${GO_QUICK:-1};;
+  *) export GO_NOCACHE=${GO_NOCACHE:-1} LINT_NO_CACHE=${LINT_NO_CACHE:-1};;
+esac
+[ "$tier" = weekly ] && export FAULT_SETUP_SOAK=${FAULT_SETUP_SOAK:-25} TANDO_TEST_NODE=${TANDO_TEST_NODE:-latest}
+export TANDO_TIER=$tier
 [ ${#SUITES[@]} -gt 0 ] || { echo "all: no suites selected" >&2; exit 2; }
 
 # plan: every suite gets a mode (local | param | fixed | pinned) and a server number (0 = none)
@@ -133,7 +247,7 @@ how() { # index
     wd="; WARNING fixed work dir, clobbers (and is clobbered by) another run of it";; esac
   case $m:$s in
     pinned:*) echo "SKIPPED: sets TANDO_TEST_NAME/PORT itself (would reset a server all.sh does not own)";;
-    local:0) echo "local, first: parallel, before any server suite starts";;
+    local:0) echo "local: starts at once";;
     local:*) echo "own server $(slot_name "$s") ($(slot_ssh "$s")/$(slot_http "$s"))";;
     param:*) echo "own server $(slot_name "$s") ($(slot_ssh "$s")/$(slot_http "$s"))$(uses_b "${SUITES[$1]}" &&
       echo " + $(slot_name "$s")b ($((SSH_BASE + 50 + s))/$((HTTP_BASE + 50 + s)))")$wd";;
@@ -306,11 +420,27 @@ start() {
                 s/(?<![0-9])8080(?![0-9])/$TANDO_TEST_HTTP_PORT/g" "$ROOT/test/$n.sh" > "$f"
       chmod +x "$f"
     fi
-    case $n in
-      ui-test) BASH_BIN=${BASH_BIN:-/bin/bash} /bin/bash "$f";;
-      *) /bin/bash "$f";;
-    esac > "$out/$n.log" 2>&1 < /dev/null
-    rc=$?
+    # the log as before, and beside it <suite>.times: when each check and section line was
+    # printed (--slow reads it). The suite's exit status travels in a file: it is behind a pipe.
+    {
+      case $n in
+        ui-test) BASH_BIN=${BASH_BIN:-/bin/bash} /bin/bash "$f";;
+        *) /bin/bash "$f";;
+      esac 2>&1 < /dev/null
+      echo $? > "$out/$n.exit"
+    } | perl -MTime::HiRes=time -e '
+        open my $log, ">", $ARGV[0] or die; open my $tm, ">", $ARGV[1] or die;
+        select((select($log), $| = 1)[0]); select((select($tm), $| = 1)[0]);
+        my $t0 = time; my $last = $t0;
+        while (my $l = <STDIN>) {
+          print $log $l;
+          if ($l =~ /^(?:PASS|FAIL|SKIP|----) /) {
+            my $now = time; chomp(my $c = $l);
+            printf $tm "%.1f\t%.1f\t%s\n", $now - $t0, $now - $last, $c; $last = $now;
+          }
+        }' "$out/$n.log" "$out/$n.times"
+    rc=$(cat "$out/$n.exit" 2> /dev/null); rm -f "$out/$n.exit"
+    case $rc in ""|*[!0-9]*) rc=1;; esac
     [ "$s" != 0 ] && slot_down "$i"
     echo "$rc $(awk -v a="$t" -v b="$(clock)" 'BEGIN { printf "%.1f", b - a }')" > "$out/$n.rc"
   ) &
@@ -328,28 +458,24 @@ counts() {
   esac
 }
 
-# round <dir>: run all suites once; local and param suites in parallel, fixed ones in order
-# is_local <index>: a suite that needs no server; these run first, alone, in every round, so
-# wall-clock checks (ui-test's frame time) are not measured next to busy test servers
-is_local() { [ "${PLAN_MODE[$1]}" = local ] && [ "${PLAN_SLOT[$1]}" = 0 ]; }
-
-# round <dir>: run all suites once, in two phases: the local suites in parallel until they all
-# finish, then the server suites. A server suite starts as soon as its slot is free, so suites on
-# different slots run in parallel, suites sharing a slot (hard-coded ones, or more suites than
-# slots) one after the other, in order.
+# est <suite>: how long it took in the last run that has it (else a built-in guess), to start
+# the longest suites first: the run then ends when the longest suite does, not after a queue
+# (from test/durations.tsv, the same order on every machine and in every run; a suite without a
+# line there is taken for a long one, so a new suite is not what the run waits for at the end)
+est() {
+  local secs
+  secs=$(awk -F'\t' -v n="$1" '$1 == n { print $2; exit }' "$DUR" 2> /dev/null)
+  echo "${secs:-900}"
+}
+# round <dir>: run all suites once. Local suites (no server) start at once; a server suite
+# starts as soon as fewer than TANDO_ALL_SLOTS run, the longest first. Suites sharing a server
+# (hard-coded ones with --as-is) run one after the other.
 round() {
-  local out=$1 i n phase queue
+  local out=$1 i=0 n queue
   mkdir -p "$out"
   PIDS=()
-  for phase in local server; do
-    queue="" i=0
-    for n in "${SUITES[@]}"; do
-      if [ "$phase" = local ]; then is_local $i && queue="$queue $i"
-      else is_local $i || queue="$queue $i"; fi
-      i=$((i + 1))
-    done
-    run_queue "$out" "$queue"
-  done
+  queue=$(for n in "${SUITES[@]}"; do echo "$(est "$n") $i"; i=$((i + 1)); done | sort -rn | awk '{ printf " %s", $2 }')
+  run_queue "$out" "$queue"
 }
 
 # slot_key <index>: what a suite occupies while it runs ("" for none)
@@ -406,6 +532,14 @@ run_queue() {
 }
 
 if [ -z "$report" ]; then
+  # the Go server programs, once for the whole run: every `tando host setup` of every suite
+  # installs them from dist/server and would otherwise build them again (4 s each, some fifty
+  # times, in the busiest minutes). Built from this checkout now, so never older than its source;
+  # a suite that works from a copy of the tree (another TANDO_HOME) still builds its own.
+  if [ -f "$ROOT/srv/go.mod" ] && command -v go > /dev/null 2>&1; then
+    "$ROOT/scripts/build-server.sh" -q || { echo "all: could not build the server programs (scripts/build-server.sh)" >&2; exit 2; }
+    export TANDO_HELPERS_BUILT=$ROOT
+  fi
   i=0
   echo "test/all.sh: ${#SUITES[@]} suites, $repeat round(s); logs in ${RUN#"$ROOT"/}"
   for n in "${SUITES[@]}"; do printf '  %-14s %s\n' "$n" "$(how $i)"; i=$((i + 1)); done
@@ -451,9 +585,19 @@ for n in "${SUITES[@]}"; do
 $n	$res	$sp	$sf	$sk	$UI_RET	${d#"$ROOT"/}/$n.log"
 done
 total=$(cat "$RUN/elapsed" 2> /dev/null || echo 0)
-ui_box_open "test/all.sh" "$(date '+%Y-%m-%d %H:%M')"
+ui_box_open "test/all.sh --tier ${TANDO_TIER:-full}" "$(date '+%Y-%m-%d %H:%M')"
 ui_table "l,l,r,r,r,r,l!1" <<< "$rows"
 ui_box_close "$([ "$fails" = 0 ] && echo "all passed" || echo "$fails suite(s) failed")  total $(ui_dur "$total")"
+
+# ---- slower than the reference (test/durations.tsv) -------------------------------------------
+if [ -z "$report" ] && [ "$repeat" = 1 ] && [ -f "$DUR" ]; then
+  for n in "${SUITES[@]}"; do
+    [ -f "$RUN/$n.rc" ] || continue
+    read -r rc secs < "$RUN/$n.rc"
+    awk -F'\t' -v n="$n" -v s="$secs" '$1 == n && s > $2 * 1.5 && s - $2 >= 60 {
+      printf "all: %s took %.0f s, its reference is %s s (test/durations.tsv): test/all.sh --slow shows where\n", n, s, $2 }' "$DUR"
+  done
+fi
 
 # ---- flaky checks -----------------------------------------------------------------------------
 

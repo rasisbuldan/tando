@@ -78,6 +78,13 @@ lines_eq() { # expected-file actual-file
   sed 's/^/    /' "$E/diff" >&2; return 1
 }
 
+# wait_since <epoch> <seconds> <why>: sleep until <seconds> have passed since <epoch>; nothing when
+# they already have (the checks that ran in between took the time)
+wait_since() {
+  local left=$(($1 + $2 - $(date +%s)))
+  [ "$left" -le 0 ] || { log "waiting $left s: $3"; sleep "$left"; }
+}
+
 if [ "${1:-}" = --no-reset ]; then t_server_up || exit 1; else t_server_up --reset || exit 1; fi
 mkdir -p "$W"
 log "tree: $TANDO_TREE"
@@ -121,19 +128,8 @@ check "2e main journal untouched by the flood (caddy lines $pre_main -> $post_ma
 tot=$(root du -sB1 /var/log/journal | cut -f1)
 check "2f all journals within the sum of caps ($tot bytes)" test "$tot" -le $(((128 + 5 * 50) * 1048576))
 
-# rate limit: an app with the default limit keeps at most about burst x journald's disk factor
-emit filt "rate-marker"
-curl -s -o /dev/null -m 120 "http://filt.localhost:$HP/flood/60000?size=60"
-burst_kept() { "$R" logs -a filt -n 100000 --since 2m --grep 'flood ' | wc -l | tr -d ' '; }
-settled() { local k; k=$(burst_kept); [ "$k" -gt 0 ] && [ "$k" = "${kept:-}" ]; local r=$?; kept=$k; return $r; }
-kept=""; t_until 15 settled   # the kept count no longer grows
-log "rate-limited app kept $kept of 60000 burst lines"
-check "2g per-app rate limit drops a burst ($kept of 60000 kept)" test "$kept" -lt 60000 -a "$kept" -gt 1000
-
-
 # ---- 3. filters return exactly the expected lines ---------------------------------------------
 log "filters"
-sleep 31   # let the filt app's rate-limit window pass
 "$R" restart -a filt > /dev/null 2>&1
 T0=$(( $(date +%s) + 1 )); sleep 1.5      # --since takes whole seconds: start on the next one
 emit filt "A1 alpha plain"
@@ -222,8 +218,6 @@ echo "R2 in release two" > "$E/x"
 check "3s --release of the next release ($r2)" lines_eq "$E/x" "$E/o"
 "$R" logs -a filt --deploy "$r2" -n 200 > "$E/dep"
 check "3t --deploy shows the history line, the pre-flight start and the activation unit" deploy_ok "$E/dep" "$r2"
-check "2h the burst's drop shows in tando logs as a journald notice" \
-  has_line filt 'messages from tando-filt.service'
 check "3u --release of a release that was never live fails" \
   sh -c "! '$R' logs -a filt --release 20200101-000000 2> /dev/null"
 
@@ -289,9 +283,109 @@ done
 q_logged() { "$SSH" sudo cat /var/log/tando/req/access.log | grep -q '"uri":"/status/401?-"'; }
 check "6a the request was logged, query string replaced" q_logged
 
+T6=$(date +%s)   # the last request to req before section 7, which needs a minute without any
+
+# ---- 2 (again). the rate limit, here because filt must then stay unused for journald's interval
+# (30 s) and req for a minute: sections 10 to 12 use neither, and run meanwhile
+# rate limit: an app with the default limit keeps at most about burst x journald's disk factor
+emit filt "rate-marker"
+curl -s -o /dev/null -m 120 "http://filt.localhost:$HP/flood/60000?size=60"
+burst_kept() { "$R" logs -a filt -n 100000 --since 2m --grep 'flood ' | wc -l | tr -d ' '; }
+settled() { local k; k=$(burst_kept); [ "$k" -gt 0 ] && [ "$k" = "${kept:-}" ]; local r=$?; kept=$k; return $r; }
+kept=""; t_until 15 settled   # the kept count no longer grows
+log "rate-limited app kept $kept of 60000 burst lines"
+check "2g per-app rate limit drops a burst ($kept of 60000 kept)" test "$kept" -lt 60000 -a "$kept" -gt 1000
+TB=$(date +%s)
+
+# ---- 10. audit: each action exactly once -------------------------------------------------------
+log "audit"
+a0=$(root wc -l /var/log/tando/audit.log | awk '{ print $1 }')
+"$R" env set -a hello GREETING=hi > /dev/null 2>&1
+"$R" restart -a hello > /dev/null 2>&1
+"$R" stop -a hello > /dev/null 2>&1
+"$R" start -a hello > /dev/null 2>&1
+"$R" env ls -a hello > /dev/null 2>&1
+"$R" rollback -a hello > /dev/null 2>&1       # fails: hello has a single release
+echo "// v2" >> "$W/hello/server.js"
+(cd "$W/hello" && "$R" deploy > /dev/null 2>&1)
+"$R" rollback -a hello > /dev/null 2>&1
+t_until 10 eval '[ "$(root wc -l /var/log/tando/audit.log | awk "{ print \$1 }")" -ge $((a0 + 8)) ]'
+root tail -n +$((a0 + 1)) /var/log/tando/audit.log > "$E/aud"
+cut -f4,5,6 "$E/aud" | sed 's/	/ /g' > "$E/o"
+printf '%s\n' "env-set hello ok" "restart hello ok" "stop hello ok" "start hello ok" "env-ls hello ok" \
+  "rollback hello fail(1)" "deploy hello ok" "rollback hello ok" > "$E/x"
+check "10a audit: each action recorded exactly once, in order, with its result" lines_eq "$E/x" "$E/o"
+check "10b audit: who and from" sh -c "awk -F'\t' '\$2 != \"vmadmin\" || \$3 !~ /^[0-9a-f.:]+\$/ { exit 1 }' '$E/aud'"
+check "10c audit: the failed rollback says why" grep -q 'no earlier verified release' "$E/aud"
+COLUMNS=100 "$R" audit hello > "$E/audbox"
+aud_render() { grep -q 'rollback' "$E/audbox" && grep -q '^╭' "$E/audbox" && fits 100 "$E/audbox" &&
+  grep -q 'TIME (GMT)' "$E/audbox" &&
+  grep -qE " $(TZ=UTC date '+%m-%d') [0-9]{2}:[0-9]{2}:[0-9]{2} " "$E/audbox"; }
+check "10d tando audit renders boxed, 100 columns" aud_render
+aud_journal() { "$SSH" sudo journalctl -t tando-audit -q --no-pager | grep -q 'verb=env-set app=hello result=ok'; }
+check "10e audit also copied to the main journal" aud_journal
+
+# ---- 11. log size visibility ----------------------------------------------------------------
+log "log stats"
+root /opt/tando/bin/tando-agent log-stats > "$E/st1"
+check "11a log-stats: one row per app" test "$(grep -c '^logs	' "$E/st1")" = 5
+check "11b log-stats: flood journal bytes within cap, lines counted" awk -F'\t' '
+  $2 == "flood" { ok = ($3 > 1000000 && $3 <= $4 && $6 > 10000) } END { exit !ok }' "$E/st1"
+t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+root /opt/tando/bin/tando-agent log-stats > "$E/st2"
+t1=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+check "11c log-stats: second call served from the cache" awk -F'\t' '$1 == "logs" && $11 > 60 { exit 1 }' "$E/st2"
+log "log-stats cached call: $(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.2f", b - a }') s wall incl. ssh"
+
+# ---- 12. destroy removes the app's logs, and only that app's -----------------------------------
+log "destroy"
+mkapp flood-2                    # a name that starts with "flood-": globs like tando-flood-* match it
+up flood-2 || fail "12x up flood-2"
+emit flood-2 "flood-2-marker"
+curl -s -o /dev/null --connect-to "flood-2.localhost:80:127.0.0.1:$HP" "http://flood-2.localhost/status/201"
+t_until 10 has_line flood-2 flood-2-marker
+printf 'flood\n' | "$R" destroy -a flood --purge > /dev/null 2>&1
+check "12a destroy removes the journal namespace and request log" \
+  gone /etc/systemd/journald@tando-flood.conf '/var/log/journal/*.tando-flood' /var/log/tando/flood
+kept() { # the logs of flood-2 survive the destroy of flood
+  "$SSH" "sudo test -f /etc/systemd/journald@tando-flood-2.conf && sudo test -f /var/log/tando/flood-2/access.log" &&
+    has_line flood-2 flood-2-marker &&
+    "$SSH" sudo cat /var/log/tando/flood-2/access.log | grep -q '"status":201'
+}
+check "12b destroying flood keeps the journal and request log of flood-2" kept
+
+# journald writes its "Suppressed N messages" when the app logs again after the interval (30 s:
+# a real interval of journald, kept; only what is left of it is waited for)
+wait_since "$TB" 31 "the rate-limit interval of filt"
+emit filt "after-the-burst"; t_until 10 has_line filt after-the-burst
+check "2h the burst's drop shows in tando logs as a journald notice" \
+  has_line filt 'messages from tando-filt.service'
+
+# ---- 9. -f survives a killed ssh connection ----------------------------------------------------
+log "follow"
+"$R" logs -a filt -f -n 1 > "$E/follow" 2> "$E/follow.err" &
+FP=$!
+followed() { grep -q "$1" "$E/follow"; }
+reconnects() { [ "$(grep -c reconnecting "$E/follow.err")" -ge "$1" ]; }
+t_until 15 test -s "$E/follow"                 # connected: the last line is there
+emit filt "F1 follow"; emit filt "F2 follow"; t_until 10 followed "F2 follow"
+pkill -f "logs filt spec"; t_until 10 reconnects 1
+emit filt "F3 written while disconnected"; t_until 20 followed "F3 written"
+emit filt "F4 after reconnect"; t_until 10 followed "F4 after"
+pkill -f "logs filt spec"; emit filt "F5 follow"; t_until 10 reconnects 2; t_until 20 followed "F5 follow"
+emit filt "F6 follow"; t_until 10 followed "F6 follow"
+kill "$FP" 2> /dev/null; pkill -f "logs filt spec"; wait "$FP" 2> /dev/null
+body < "$E/follow" | grep '^F[0-9]' > "$E/o"
+printf '%s\n' "F1 follow" "F2 follow" "F3 written while disconnected" "F4 after reconnect" \
+  "F5 follow" "F6 follow" > "$E/x"
+check "9a -f resumes after two killed connections, every line exactly once" lines_eq "$E/x" "$E/o"
+check "9b -f reported the reconnects" test "$(grep -c reconnecting "$E/follow.err")" -ge 2
+
 # ---- 7. request statistics against a known traffic pattern ------------------------------------
 log "request statistics"
-sleep 61   # the 1-minute window used below must not include earlier requests
+# the 1-minute window used below must not include earlier requests (the last one: T6; sections
+# 10 to 12 and 9 ran since, so usually nothing is left to wait)
+wait_since "$T6" 61 "a minute without requests to req"
 T7=$(date +%s)
 reqlines() { root cat /var/log/tando/req/access.log | wc -l | tr -d ' '; }
 n7=$(reqlines)
@@ -351,83 +445,6 @@ check "8c rolled files keep owner and mode" \
   sh -c "! grep 'access-' '$E/rot' | grep -v '^-rw-r----- .* caddy tando-req '"
 root /opt/tando/bin/tando-agent req-summary req 900 > "$E/sum2"
 check "8d summary reads across rolled files" test "$(sed -n 's/^files=//p' "$E/sum2")" -ge 2
-
-# ---- 9. -f survives a killed ssh connection ----------------------------------------------------
-log "follow"
-"$R" logs -a filt -f -n 1 > "$E/follow" 2> "$E/follow.err" &
-FP=$!
-followed() { grep -q "$1" "$E/follow"; }
-reconnects() { [ "$(grep -c reconnecting "$E/follow.err")" -ge "$1" ]; }
-t_until 15 test -s "$E/follow"                 # connected: the last line is there
-emit filt "F1 follow"; emit filt "F2 follow"; t_until 10 followed "F2 follow"
-pkill -f "logs filt spec"; t_until 10 reconnects 1
-emit filt "F3 written while disconnected"; t_until 20 followed "F3 written"
-emit filt "F4 after reconnect"; t_until 10 followed "F4 after"
-pkill -f "logs filt spec"; emit filt "F5 follow"; t_until 10 reconnects 2; t_until 20 followed "F5 follow"
-emit filt "F6 follow"; t_until 10 followed "F6 follow"
-kill "$FP" 2> /dev/null; pkill -f "logs filt spec"; wait "$FP" 2> /dev/null
-body < "$E/follow" | grep '^F[0-9]' > "$E/o"
-printf '%s\n' "F1 follow" "F2 follow" "F3 written while disconnected" "F4 after reconnect" \
-  "F5 follow" "F6 follow" > "$E/x"
-check "9a -f resumes after two killed connections, every line exactly once" lines_eq "$E/x" "$E/o"
-check "9b -f reported the reconnects" test "$(grep -c reconnecting "$E/follow.err")" -ge 2
-
-# ---- 10. audit: each action exactly once -------------------------------------------------------
-log "audit"
-a0=$(root wc -l /var/log/tando/audit.log | awk '{ print $1 }')
-"$R" env set -a hello GREETING=hi > /dev/null 2>&1
-"$R" restart -a hello > /dev/null 2>&1
-"$R" stop -a hello > /dev/null 2>&1
-"$R" start -a hello > /dev/null 2>&1
-"$R" env ls -a hello > /dev/null 2>&1
-"$R" rollback -a hello > /dev/null 2>&1       # fails: hello has a single release
-echo "// v2" >> "$W/hello/server.js"
-(cd "$W/hello" && "$R" deploy > /dev/null 2>&1)
-"$R" rollback -a hello > /dev/null 2>&1
-t_until 10 eval '[ "$(root wc -l /var/log/tando/audit.log | awk "{ print \$1 }")" -ge $((a0 + 8)) ]'
-root tail -n +$((a0 + 1)) /var/log/tando/audit.log > "$E/aud"
-cut -f4,5,6 "$E/aud" | sed 's/	/ /g' > "$E/o"
-printf '%s\n' "env-set hello ok" "restart hello ok" "stop hello ok" "start hello ok" "env-ls hello ok" \
-  "rollback hello fail(1)" "deploy hello ok" "rollback hello ok" > "$E/x"
-check "10a audit: each action recorded exactly once, in order, with its result" lines_eq "$E/x" "$E/o"
-check "10b audit: who and from" sh -c "awk -F'\t' '\$2 != \"vmadmin\" || \$3 !~ /^[0-9a-f.:]+\$/ { exit 1 }' '$E/aud'"
-check "10c audit: the failed rollback says why" grep -q 'no earlier verified release' "$E/aud"
-COLUMNS=100 "$R" audit hello > "$E/audbox"
-aud_render() { grep -q 'rollback' "$E/audbox" && grep -q '^╭' "$E/audbox" && fits 100 "$E/audbox" &&
-  grep -q 'TIME (GMT)' "$E/audbox" &&
-  grep -qE " $(TZ=UTC date '+%m-%d') [0-9]{2}:[0-9]{2}:[0-9]{2} " "$E/audbox"; }
-check "10d tando audit renders boxed, 100 columns" aud_render
-aud_journal() { "$SSH" sudo journalctl -t tando-audit -q --no-pager | grep -q 'verb=env-set app=hello result=ok'; }
-check "10e audit also copied to the main journal" aud_journal
-
-# ---- 11. log size visibility ----------------------------------------------------------------
-log "log stats"
-root /opt/tando/bin/tando-agent log-stats > "$E/st1"
-check "11a log-stats: one row per app" test "$(grep -c '^logs	' "$E/st1")" = 5
-check "11b log-stats: flood journal bytes within cap, lines counted" awk -F'\t' '
-  $2 == "flood" { ok = ($3 > 1000000 && $3 <= $4 && $6 > 10000) } END { exit !ok }' "$E/st1"
-t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
-root /opt/tando/bin/tando-agent log-stats > "$E/st2"
-t1=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
-check "11c log-stats: second call served from the cache" awk -F'\t' '$1 == "logs" && $11 > 60 { exit 1 }' "$E/st2"
-log "log-stats cached call: $(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.2f", b - a }') s wall incl. ssh"
-
-# ---- 12. destroy removes the app's logs, and only that app's -----------------------------------
-log "destroy"
-mkapp flood-2                    # a name that starts with "flood-": globs like tando-flood-* match it
-up flood-2 || fail "12x up flood-2"
-emit flood-2 "flood-2-marker"
-curl -s -o /dev/null --connect-to "flood-2.localhost:80:127.0.0.1:$HP" "http://flood-2.localhost/status/201"
-t_until 10 has_line flood-2 flood-2-marker
-printf 'flood\n' | "$R" destroy -a flood --purge > /dev/null 2>&1
-check "12a destroy removes the journal namespace and request log" \
-  gone /etc/systemd/journald@tando-flood.conf '/var/log/journal/*.tando-flood' /var/log/tando/flood
-kept() { # the logs of flood-2 survive the destroy of flood
-  "$SSH" "sudo test -f /etc/systemd/journald@tando-flood-2.conf && sudo test -f /var/log/tando/flood-2/access.log" &&
-    has_line flood-2 flood-2-marker &&
-    "$SSH" sudo cat /var/log/tando/flood-2/access.log | grep -q '"status":201'
-}
-check "12b destroying flood keeps the journal and request log of flood-2" kept
 
 # ---- 13. settings: leading zeros, values ending in "=", the requests subcommand names ----------
 log "settings"
@@ -530,6 +547,9 @@ check "15h ... without restarting the app (pid $pid0, restarts $nr0)" \
   test "$(srv systemctl show -P MainPID tando-filt) $(srv systemctl show -P NRestarts tando-filt)" = "$pid0 $nr0"
 check "15i ... and its lines before and after the change are both there" \
   sh -c "'$R' logs -a filt -n 100 | grep -q before-limit-change && '$R' logs -a filt -n 100 | grep -q after-limit-change"
+# (the flood of 15p, here: the checks up to 15o do not touch filt, and its 30 s pass meanwhile)
+curl -s -o /dev/null -m 120 "http://filt.localhost:$HP/flood/60000?size=60"
+T15=$(date +%s)
 # shrinking: a full journal is cut to the new cap at once (vacuum), circular from then on
 curl -s -o /dev/null -m 120 "http://keep.localhost:$HP/flood/200000?size=100"
 t_until 15 has_line keep 'flood 199999 '
@@ -555,9 +575,8 @@ root /opt/tando/bin/tando-agent req-summary keep 900 > "$E/sum.keep"
 tot=$(sed -n 's/^total=//p' "$E/sum.keep")
 check "15o the whole burst is still counted across the gzip'd files ($tot of 20000)" test "${tot:-0}" -ge 20000
 # the journald rate limit is visible: tando logs ends with a note when lines were dropped
-curl -s -o /dev/null -m 120 "http://filt.localhost:$HP/flood/60000?size=60"
 # journald writes its "Suppressed N messages" when the app logs again after the interval (30 s)
-sleep 31; emit filt "after-the-flood"
+wait_since "$T15" 31 "the rate-limit interval of filt"; emit filt "after-the-flood"
 t_until 10 eval "'$R' logs -a filt -n 5 | grep -q '^# note: journald dropped [0-9]* lines'"
 check "15p tando logs notes the lines journald dropped in the window shown" \
   sh -c "'$R' logs -a filt -n 5 | grep -q '^# note: journald dropped [0-9]* lines in this window (over log_rate 5000/30s)'"

@@ -4,7 +4,7 @@
 . "$(dirname "$0")/lib-fault.sh"
 f_init b3 "ssh connection dropped (45 s)" "during upload"
 A=fb3; f_fresh $A
-cp "$FW/big/blob.bin" "$W/$A/"
+f_big; cp "$FW/big/blob.bin" "$W/$A/"
 loop_start $A
 setv $A 3 ok; client_bg $A deploy
 wait_rsync; ok "upload running" test $? = 0

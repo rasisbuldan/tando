@@ -11,6 +11,9 @@ loop_start $A
 T0=$(date +%s)
 deploy $A 3 "$BEH"
 log "deploy rc=$DRC in $(( $(date +%s) - T0 ))s: $(grep -E 'live in|rolled|failed|pre-flight|after the switch|crash|exited|answer' "$W/$A.d3.out" | head -3 | tr '\n' ' ')"
+# kept (not an event to poll for): the release is watched under load for 60 s after the deploy
+# returned; a late crash loop, a rollback or a return of the bad release would show as a failed
+# request or as the wrong version in truth below. For e8 (log flood) the 60 s are the fault.
 sleep 60
 loop_stop
 case $WANT in

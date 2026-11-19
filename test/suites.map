@@ -1,0 +1,107 @@
+# test/suites.map: which suites a changed file can break. Read by test/select.sh (and so by
+# `test/all.sh --tier quick`). One rule per line:  <pattern>  <suite or @group or ALL> ...
+#
+# - Patterns are shell patterns matched against the path from the repository root; "*" also
+#   matches "/". EVERY rule that matches a file counts: the suites are added up.
+# - A changed file that no rule matches selects ALL (unknown means: run everything).
+# - ALL = every suite of the full tier. Groups are defined with "@name = ...".
+# - This map is a shortcut for the quick tier only. The full tier never reads it. When a suite
+#   starts using another part of the tree, add the rule here; when in doubt, write ALL.
+
+@local   = lint ui-test go install-test
+@alerts  = e2e-alerts e2e-alerts-timer e2e-alerts-daemon
+@faults  = e2e-faults-q1 e2e-faults-q2 e2e-faults-q3 e2e-faults-q4
+
+# ---- the core: everything depends on it
+bin/*                    ALL
+lib/common.sh            ALL
+lib/deploy.sh            ALL
+lib/build.sh             ALL
+lib/args.sh              ALL
+server/tando-agent       ALL
+server/tando-install-recover  ALL
+srv/internal/*           ALL
+srv/cmd/*                ALL
+srv/go.mod               ALL
+srv/daemon/*             ALL
+VERSION                  ALL
+test/lib.sh              ALL
+test/all.sh              ALL
+test/select.sh           ALL
+test/suites.map          ALL
+test/server/*            ALL
+
+# ---- laptop side
+lib/ui.sh                lint ui-test e2e-cli e2e-ease e2e-top e2e-status
+lib/views.sh             lint ui-test e2e-cli e2e-status e2e-data e2e
+lib/help.txt             lint ui-test e2e-cli install-test
+completions/*            lint ui-test e2e-cli install-test
+lib/cmd-adopt.sh         lint ui-test e2e-cli
+lib/cmd-alerts.sh        lint ui-test e2e-cli @alerts
+lib/cmd-health.sh        lint ui-test e2e-cli @alerts
+lib/cmd-audit.sh         lint ui-test e2e-cli e2e-logs e2e-ci
+lib/cmd-cheat.sh         lint ui-test e2e-cli e2e-ease
+lib/cmd-ci.sh            lint ui-test e2e-cli e2e-ci e2e-sec2
+lib/cmd-domain.sh        lint ui-test e2e-cli e2e-ease e2e
+lib/cmd-errors.sh        lint ui-test e2e-cli e2e-logs
+lib/cmd-go.sh            lint ui-test e2e-cli e2e-ease e2e-bootstrap e2e-trial
+lib/cmd-link.sh          lint ui-test e2e-cli e2e-ease
+lib/cmd-logx.sh          lint ui-test e2e-cli e2e-logs
+lib/cmd-next.sh          lint ui-test e2e-cli e2e-ease
+lib/cmd-open.sh          lint ui-test e2e-cli e2e-ease
+lib/cmd-requests.sh      lint ui-test e2e-cli e2e-logs
+lib/cmd-restore.sh       lint ui-test e2e-cli e2e-data e2e-offsite
+lib/cmd-ssh.sh           lint ui-test e2e-cli e2e
+lib/cmd-top.sh           lint ui-test e2e-cli e2e-top
+lib/hostcare.sh          lint ui-test e2e-cli e2e-host
+lib/offsite.sh           lint ui-test e2e-cli e2e-offsite e2e-data
+
+# ---- server side
+server/tando-adopt       lint ui-test e2e-ci e2e-status
+server/legacy/*          lint install-test e2e-status @alerts
+srv/watch/*              go @alerts e2e-status e2e-host e2e-faults-q4
+srv/logs/*               go e2e-logs e2e e2e-ci @alerts
+srv/offsite/*            go e2e-offsite e2e-data
+srv/status/*             go e2e-status e2e-top e2e-cli
+srv/metrics/*            go e2e-status e2e-top @alerts
+srv/gate/*               go e2e-ci e2e-sec2
+srv/hostcare/*           go e2e-host @alerts
+srv/tools/*              go
+srv/README.md            lint
+
+# ---- packaging, examples, docs
+install.sh               lint install-test e2e-bootstrap
+uninstall.sh             lint install-test e2e-bootstrap
+Makefile                 lint install-test
+scripts/*                lint install-test go e2e-bootstrap
+packaging/*              lint install-test
+examples/*               lint e2e e2e-next e2e-recipes e2e-ease e2e-bootstrap e2e-data e2e-logs e2e-trial
+templates/*              lint e2e-ci
+docs/*                   lint ui-test e2e-cli install-test
+*.md                     lint ui-test e2e-cli install-test
+LICENSE                  lint
+.gitignore               lint
+.github/*                lint
+bench/*                  lint
+
+# ---- the tests themselves
+test/lint*               lint
+test/go.sh               go
+test/ui-test*            ui-test lint
+test/pty-run.sh          ui-test e2e-top lint
+test/top-pty.py          e2e-top
+test/install-test.sh     install-test lint
+test/secret-scan-test.sh lint
+test/check.sh            lint
+test/durations.tsv       lint
+test/portability*        lint
+test/offsite-r2-check.sh lint
+test/ui-demo.sh          lint
+test/alerts-lib.sh       @alerts lint
+test/e2e-alerts*         @alerts lint
+test/e2e-faults*         @faults lint
+test/faults/*            @faults lint
+test/sec2/*              e2e-sec2 lint
+test/sec3/*              e2e-sec2 lint
+test/load/*              lint
+test/race/*              lint

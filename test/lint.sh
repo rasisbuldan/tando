@@ -9,10 +9,14 @@
 #   test/lint.sh --update-baseline   record every current finding as known (whole tree only)
 #   test/lint.sh --list              print the files that would be linted, with their side
 #   test/lint.sh --no-shellcheck     only the tando checks (no shellcheck, no Docker)
+#   test/lint.sh --no-cache          ignore and do not write the shellcheck result cache (LINT_NO_CACHE=1)
 #   test/lint.sh [options] file...   lint these files only
 #
 # The shellcheck binary is $SHELLCHECK, else `shellcheck` on PATH, else the Docker image
-# $SHELLCHECK_IMAGE (default koalaman/shellcheck:stable). Configuration: .shellcheckrc.
+# $SHELLCHECK_IMAGE (default koalaman/shellcheck:stable), one run per batch of files (LINT_JOBS
+# batches at a time, default 8). Configuration: .shellcheckrc. Results are cached per file in
+# .tando/lint-cache, keyed by file content, path, options, .shellcheckrc and the shellcheck version
+# or image id; --no-cache or LINT_NO_CACHE=1 bypasses it (neither reads nor writes).
 # Severities: shellcheck error and warning -> error; info and style -> info. The tando checks
 # (RL01-RL11) are described in docs/TESTING.md. Silence one line with a comment on it or above
 # it: `# lint: allow RL05 <reason>` (shellcheck codes: shellcheck's own disable directive).
@@ -25,6 +29,8 @@ cd "$ROOT" || exit 2
 BASELINE=${LINT_BASELINE:-test/lint-baseline.txt}
 IMG=${SHELLCHECK_IMAGE:-koalaman/shellcheck:stable}
 mode=show sc=1 list=0 all=0 strict=0
+nocache=${LINT_NO_CACHE:-0}
+[ "$nocache" = 0 ] || nocache=1
 files=()
 
 while [ $# -gt 0 ]; do
@@ -34,6 +40,7 @@ while [ $# -gt 0 ]; do
     --update-baseline) mode=update;;
     --no-shellcheck) sc=0;;
     --list) list=1;;
+    --no-cache) nocache=1;;
     -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0;;
     -*) echo "lint: unknown option $1" >&2; exit 2;;
     *) files+=("$1");;
@@ -111,6 +118,9 @@ for f in ${files[@]+"${files[@]}"}; do
   esac
 done
 
+# Shellcheck runner: $SHELLCHECK, else `shellcheck` on PATH, else the Docker image. Paths stay
+# relative to the tree (the container mounts it at /mnt and works there), so findings read
+# `lib/x.sh:3:1: ...` either way.
 run_shellcheck() { # [shellcheck options] -- files...
   if [ -n "${SHELLCHECK:-}" ]; then "$SHELLCHECK" -f gcc "$@"
   elif command -v shellcheck > /dev/null 2>&1; then shellcheck -f gcc "$@"
@@ -118,29 +128,139 @@ run_shellcheck() { # [shellcheck options] -- files...
   fi
 }
 
+# One perl helper does the cache work (hashing 230 files in bash would cost a fork each):
+#   lintcache plan  <cachedir> <ctx> <tmp> < "mode TAB file"   hits -> $tmp/hits; misses -> $tmp/miss.<mode>
+#   lintcache store <cachedir> <ctx> <tmp>                      split $tmp/batch.* per file, save, -> $tmp/new
+# Cache key = sha256(ctx, mode (= the shellcheck options), path, file content); ctx = the shellcheck
+# version or image id and the .shellcheckrc. A file that has a `# shellcheck source=` directive is
+# never cached (its findings can come from the file it follows) and runs in the "raw" mode.
+lintcache() {
+  perl -MDigest::SHA=sha256_hex -e '
+    my ($cmd, $dir, $ctx, $tmp) = @ARGV;
+    my %opt = (frag => "-e SC2034", prog => "", rawfrag => "-e SC2034", rawprog => "");
+    sub slurp { local $/; open my $h, "<", $_[0] or return ""; my $c = <$h>; close $h; defined $c ? $c : "" }
+    # a file that follows others (a `# shellcheck source=` directive, or a literal `. file`) can get
+    # findings from them: their content is part of its key
+    sub deps {
+      my ($f, $c) = @_; my @d;
+      (my $dd = $f) =~ s{[^/]*$}{}; $dd = "." if $dd eq "";
+      for my $p ($c =~ /^\s*#\s*shellcheck\s.*\bsource=(\S+)/mg, $c =~ /^\s*(?:\.|source)\s+["\x27]?([^\s"\x27\$`()]+)/mg) {
+        next if $p eq "/dev/null";
+        push @d, "$dd/$p", $p, "$dd/../$p";
+      }
+      return join("\0", map { $_ . "\0" . (-f $_ ? slurp($_) : "-") } @d);
+    }
+    sub key { my $c = slurp($_[1]); sha256_hex(join("\0", $ctx, $opt{$_[0]}, $_[1], $c, $_[0] =~ /^raw/ ? deps($_[1], $c) : "")) }
+    if ($cmd eq "plan") {
+      my (%miss, %fmode);
+      open my $hits, ">", "$tmp/hits" or die; open my $keys, ">", "$tmp/keys" or die;
+      my $nocache = $ENV{LINT_NO_CACHE_EFFECTIVE};
+      while (<STDIN>) {
+        chomp; my ($m, $f) = split /\t/, $_, 2;
+        { my $c = slurp($f);
+          $m = "raw$m" if $c =~ /^\s*#\s*shellcheck\s.*\bsource(?:-path)?=/m || $c =~ /^\s*(?:\.|source)\s+["\x27]?[^\s"\x27\$`()]/m; }
+        my $k = key($m, $f);
+        if (!$nocache && -f "$dir/$k") { print $hits slurp("$dir/$k"); next }
+        push @{$miss{$m}}, $f; print $keys "$k\t$f\t$m\n";
+      }
+      for my $m (keys %miss) { open my $o, ">", "$tmp/miss.$m" or die; print $o "$_\n" for @{$miss{$m}} }
+    } else {
+      my (%m, %k, %out, $raw);
+      open my $keys, "<", "$tmp/keys" or die;
+      while (<$keys>) { chomp; my ($k, $f, $mm) = split /\t/; $k{$f} = $k; $m{$f} = $mm; $out{$f} = "" }
+      open my $new, ">", "$tmp/new" or die;
+      # raw files: one run each, in miss order (batch.raw.<n>); the whole output is theirs
+      for my $rm (qw(rawfrag rawprog)) {
+        open my $rl, "<", "$tmp/miss.$rm" or next;
+        my $n = 0;
+        while (<$rl>) { chomp; $out{$_} = slurp("$tmp/batch.$rm.$n"); $n++ }
+      }
+      for my $b (grep { !/batch\.(?:err|raw)/ } glob "$tmp/batch.*") {
+        open my $h, "<", $b or next;
+        while (<$h>) {
+          if (/^(.+?):\d+:\d+: / && exists $out{$1} && $m{$1} !~ /^raw/) { $out{$1} .= $_ } else { print $new $_ }
+        }
+      }
+      if ($dir ne "") {
+        require File::Path; File::Path::make_path($dir); 
+        for my $f (keys %out) {
+          open my $o, ">", "$dir/$k{$f}.$$" or next; print $o $out{$f}; close $o;
+          rename "$dir/$k{$f}.$$", "$dir/$k{$f}";
+        }
+      }
+      print $new $out{$_} for sort keys %out;
+    }' -- "$@"
+}
+
+# The tando rules (lint.pl, several seconds) and the secret scan do not depend on shellcheck: they
+# run now, in the background, while shellcheck works; their results are collected below, in the
+# order the sequential version used.
+if [ ${#frag[@]} -gt 0 ] || [ ${#prog[@]} -gt 0 ]; then
+  ( perl "$ROOT/test/lint.pl" rules ${frag[@]+"${frag[@]}"} ${prog[@]+"${prog[@]}"} > "$tmp/f.rules"; echo $? > "$tmp/f.rules.rc" ) &
+fi
+if [ ${#gof[@]} -gt 0 ]; then
+  ( perl "$ROOT/test/lint.pl" gorules ${gof[@]+"${gof[@]}"} > "$tmp/f.gorules"; echo $? > "$tmp/f.gorules.rc" ) &
+fi
+if [ "$partial" = 0 ] && [ "$list" = 0 ]; then
+  ( "$ROOT/test/secret-scan-test.sh" > "$tmp/secrets-test" 2>&1; echo $? > "$tmp/secrets-test.rc" ) &
+  ( "$ROOT/scripts/secret-scan.sh" > "$tmp/secrets" 2>&1; echo $? > "$tmp/secrets.rc" ) &
+fi
+
 : > "$tmp/found"
 if [ "$sc" = 1 ] && [ $((${#frag[@]} + ${#prog[@]})) -gt 0 ]; then
-  if [ -z "${SHELLCHECK:-}" ] && ! command -v shellcheck > /dev/null 2>&1 &&
-     ! docker image inspect "$IMG" > /dev/null 2>&1 && ! docker pull -q "$IMG" > /dev/null 2>&1; then
-    echo "lint: no shellcheck (install it, or start Docker; --no-shellcheck skips it)" >&2
-    exit 2
+  ctx=""
+  if [ -n "${SHELLCHECK:-}" ] || command -v shellcheck > /dev/null 2>&1; then
+    ctx=$(run_shellcheck --version 2>&1 | tr '\n' ' ')
+  else
+    if ! docker image inspect "$IMG" > /dev/null 2>&1 && ! docker pull -q "$IMG" > /dev/null 2>&1; then
+      echo "lint: no shellcheck (install it, or start Docker; --no-shellcheck skips it)" >&2
+      exit 2
+    fi
+    ctx=$(docker image inspect --format '{{.Id}}' "$IMG" 2> /dev/null)
   fi
-  # one shellcheck per file, LINT_JOBS at a time (a Docker run costs seconds; files are independent)
-  i=0
-  for f in ${frag[@]+"${frag[@]}"} ${prog[@]+"${prog[@]}"}; do
-    while [ "$(jobs -pr | wc -l)" -ge "${LINT_JOBS:-8}" ]; do sleep 0.2; done
-    case $f in
-      lib/*.sh|test/lib.sh) run_shellcheck -e SC2034 "$f";;
-      *) run_shellcheck "$f";;
-    esac > "$tmp/sc.$i" 2> "$tmp/sc.err.$i" &
-    i=$((i + 1))
+  [ -n "$ctx" ] || ctx=unknown
+  ctx="$ctx|$(cat .shellcheckrc 2> /dev/null)"
+  cdir=.tando/lint-cache
+  LINT_NO_CACHE_EFFECTIVE=$nocache
+  export LINT_NO_CACHE_EFFECTIVE
+  : > "$tmp/hits"
+  {
+    for f in ${frag[@]+"${frag[@]}"}; do printf 'frag\t%s\n' "$f"; done
+    for f in ${prog[@]+"${prog[@]}"}; do printf 'prog\t%s\n' "$f"; done
+  } | lintcache plan "$cdir" "$ctx" "$tmp" || exit 2
+  # the files that missed the cache: a few shellcheck runs, each over many files (a Docker run
+  # costs a second or more), LINT_JOBS batches at a time, balanced by file size (a 3700-line script
+  # takes shellcheck far longer than a 30-line one: the biggest ones must not share a batch)
+  jobs_n=${LINT_JOBS:-8}
+  for mf in "$tmp"/miss.*; do
+    [ -f "$mf" ] || continue
+    m=${mf##*/miss.}
+    case $m in frag|rawfrag) o="-e SC2034";; *) o="";; esac
+    n=$(wc -l < "$mf" | tr -d ' ')
+    [ "$n" -gt 0 ] || continue
+    [ "$n" -lt "$jobs_n" ] && j=$n || j=$jobs_n
+    if [ "${m#raw}" != "$m" ]; then   # one run per file (output not split): bin = line number
+      j=$n; awk '{ print NR - 1, $0 }' "$mf" > "$tmp/bins.$m"
+    else    # shellcheck disable=SC2046 # file names have no spaces
+    wc -c $(cat "$mf") | grep -v ' total$' | sort -rn |
+      awk -v j="$j" '{ b = 0; for (k = 1; k < j; k++) if (s[k] < s[b]) b = k; s[b] += $1; print b, $2 }' > "$tmp/bins.$m"
+    fi
+    i=0
+    while [ "$i" -lt "$j" ]; do
+      # shellcheck disable=SC2046,SC2086 # file names have no spaces; $o is "" or one option pair
+      run_shellcheck $o -- $(awk -v i="$i" '$1 == i { print $2 }' "$tmp/bins.$m") \
+        > "$tmp/batch.$m.$i" 2> "$tmp/batch.err.$m.$i" &
+      i=$((i + 1))
+    done
   done
   wait
-  cat "$tmp"/sc.[0-9]* > "$tmp/sc" 2> /dev/null
-  cat "$tmp"/sc.err.* > "$tmp/sc.err" 2> /dev/null
+  cat "$tmp"/batch.err.* > "$tmp/sc.err" 2> /dev/null
   if [ -s "$tmp/sc.err" ]; then
     echo "lint: shellcheck failed:" >&2; head -5 "$tmp/sc.err" >&2; exit 2
   fi
+  : > "$tmp/new"
+  lintcache store "$([ "$nocache" = 1 ] && echo '' || echo "$cdir")" "$ctx" "$tmp" || exit 2
+  cat "$tmp/hits" "$tmp/new" > "$tmp/sc"
   # file:line:col: severity: message [SCnnnn]  ->  file TAB line TAB col TAB sev TAB code TAB message
   perl -ne 'next unless /^(.+?):(\d+):(\d+): (\w+): (.*) \[(SC\d+)\]$/;
     my %s = (error => "error", warning => "error", note => "info");
@@ -165,9 +285,12 @@ if [ "$partial" = 0 ] && [ -x completions/gen.sh ] && ! completions/gen.sh --che
     >> "$tmp/found"
 fi
 
-[ ${#frag[@]} -eq 0 ] && [ ${#prog[@]} -eq 0 ] ||
-  perl "$ROOT/test/lint.pl" rules ${frag[@]+"${frag[@]}"} ${prog[@]+"${prog[@]}"} >> "$tmp/found" || exit 2
-[ ${#gof[@]} -eq 0 ] || perl "$ROOT/test/lint.pl" gorules ${gof[@]+"${gof[@]}"} >> "$tmp/found" || exit 2
+wait
+for r in rules gorules; do
+  [ -f "$tmp/f.$r" ] || continue
+  [ "$(cat "$tmp/f.$r.rc")" = 0 ] || exit 2
+  cat "$tmp/f.$r" >> "$tmp/found"
+done
 
 echo "lint: ${#files[@]} files ($((${#frag[@]} + ${#prog[@]})) bash, ${#zshf[@]} zsh, ${#gof[@]} go)," \
   "shellcheck $([ "$sc" = 1 ] && echo on || echo off)"
@@ -178,12 +301,12 @@ rc=$?
 # credentials and private details in what git would commit (whole-tree runs only). Not part of the
 # baseline on purpose: --update-baseline must never be a way to accept a secret.
 if [ "$partial" = 0 ] && [ "$list" = 0 ]; then
-  if ! "$ROOT/test/secret-scan-test.sh" > "$tmp/secrets-test" 2>&1; then
+  if [ "$(cat "$tmp/secrets-test.rc")" != 0 ]; then
     echo "lint: the secret scanner fails its own test (test/secret-scan-test.sh):"
     grep '^FAIL' "$tmp/secrets-test" | sed 's/^/lint: /'
     [ "$rc" = 0 ] && rc=1
   fi
-  "$ROOT/scripts/secret-scan.sh" > "$tmp/secrets" 2>&1 || { [ "$rc" = 0 ] && rc=1; }
+  [ "$(cat "$tmp/secrets.rc")" = 0 ] || { [ "$rc" = 0 ] && rc=1; }
   sed 's/^/lint: /' "$tmp/secrets"
 fi
 exit "$rc"

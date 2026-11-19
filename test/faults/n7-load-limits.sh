@@ -17,8 +17,9 @@ const http = require('http'), v = require('fs').readFileSync(__dirname + '/VERSI
 http.createServer((q, s) => q.url === '/health' ? s.end('ok\n') : setTimeout(() => s.end('v' + v + '\n'), 2000))
   .listen(Number(process.env.PORT), '127.0.0.1');
 JS
-deploy $A 1 ok up; ok "the busy app is up (rc=$DRC)" test "$DRC" = 0
-deploy $B 1 ok up; ok "the neighbour is up (rc=$DRC)" test "$DRC" = 0
+# (these two only put the apps there, as f_fresh does elsewhere: the setup soak)
+setup_deploy $A 1 ok up; ok "the busy app is up (rc=$DRC)" test "$DRC" = 0
+setup_deploy $B 1 ok up; ok "the neighbour is up (rc=$DRC)" test "$DRC" = 0
 # limits set in app.conf (as tando.conf's max_conns/max_requests/cpu/tasks would), applied by a restart
 srv "sudo bash -c 'printf \"max_conns=2\nmax_requests=4\nhold=5\ncpu=20%%\ntasks=200\n\" >> /opt/tando/apps/$A/app.conf'"
 "$R" host setup test public_port="$HP" > /dev/null 2>&1      # (re-renders every app's units and slice)

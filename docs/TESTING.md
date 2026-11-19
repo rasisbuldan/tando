@@ -10,10 +10,40 @@
 | `test/e2e.sh`, `test/e2e-*.sh` | end-to-end against a throwaway Ubuntu+systemd container | Docker (OrbStack), some need npm |
 | `test/portability.sh` (`make portability`) | macOS bash 3.2, Debian, Linux and BusyBox clients | Docker |
 
+## Tiers
+
+What to run when. [AGENTS.md](../AGENTS.md) has the short version and the rules.
+
+| Tier | Command | When | What runs |
+|---|---|---|---|
+| check | `test/check.sh` | after every edit | on the changed files only: `bash -n` (3.2, and the server's bash for `server/`), lint, gofmt/vet/test of the changed Go packages, the secret scan, and that `test/suites.map` knows the change. No server. |
+| quick | `test/all.sh --tier quick` | before saying a change works | the suites `test/select.sh` maps the changed files to (`test/suites.map`), plus `e2e-trial` as a smoke deploy. Go without the race detector; lint and Go may reuse cached results. A core file, or a file no rule knows, selects every suite. |
+| full | `test/all.sh` | before a push to main and before a tag | every suite, nothing cached, the fault scenarios as four parallel shards (`e2e-faults-q1` to `q4`). The map is not read. |
+| nightly | `test/all.sh --tier nightly` | by hand, when the machine is free for half an hour (not in CI) | full, with the fault scenarios as two chains (`e2e-faults-h1`, `h2`) whose split moves every day, so over a week every scenario runs right after every neighbour. |
+| weekly | `test/all.sh --tier weekly` | by hand, about once a week and before a release that touched deploys (not in CI) | full, with the fault scenarios as one chain (`e2e-faults`) and the 25 s soak on every deploy (`FAULT_SETUP_SOAK=25`): the suite as it was before it was made faster. |
+
+Why the fault scenarios differ by tier: they are independent by design, but a scenario that leaves
+something behind is only found by the one that runs after it (the upload lease left by a refused
+activation was found that way). Shards are fast and lose most neighbours; the chains keep them.
+Anything a faster tier skips still runs in a slower one.
+
+`test/select.sh` prints what a change selects (`--why`: which file selected what; `--base REF`;
+`--files a b`). By default the change is everything since the upstream branch, plus uncommitted and
+untracked files. `test/suites.map` holds the rules: every rule that matches a file adds its
+suites, a file no rule matches selects everything, and a suite named there that does not exist is
+an error. When a suite starts using another part of the tree, add the rule.
+
+`test/all.sh --failed` reruns the suites that failed in the last run. `test/all.sh --slow [N]`
+shows where the last run's time went: the suites by duration and the N longest waits before a
+check or a section line (from `<suite>.times`, written beside each log).
+
 ## test/all.sh
 
 ```
-test/all.sh                      every suite once
+test/all.sh                      every suite once (the full tier)
+test/all.sh --tier quick         see Tiers; also nightly, weekly; --base REF, --files a b
+test/all.sh --failed             the suites that failed in the last run
+test/all.sh --slow 30            where the last run's time went
 test/all.sh --only e2e,lint      some suites (names without .sh); --skip e2e-next
 test/all.sh --repeat 3           three rounds; lists checks that did not pass every time
 test/all.sh --list               the plan: how and where each suite will run
@@ -31,8 +61,11 @@ suite (a server keeps the apps a suite left, which the next suite would trip ove
 port `<http base>+n` (2310 and 8310 by default, `TANDO_ALL_SSH_BASE`, `TANDO_ALL_HTTP_BASE`), where n
 is the suite's place among all server suites, the same n with `--only`/`--skip`. A suite that uses a
 second server (`TANDO_TEST_NAME2`, e2e-ease) gets `<name>b` on ports +50. At most
-`TANDO_ALL_SLOTS` (default 4) server suites run at once; a suite's server is created when it starts
-and removed when it ends (unless `--keep`). A suite marked `# all.sh: own-server` creates its server
+`TANDO_ALL_SLOTS` server suites run at once (default: the CPUs less two, at most 8, at least 2),
+the longest first, by `test/durations.tsv` (the same order in every run; `--save-durations`
+rewrites it from the last passing run, and a run warns about a suite that took over 1.5 times its
+line there); a
+suite's server is created when it starts and removed when it ends (unless `--keep`). A suite marked `# all.sh: own-server` creates its server
 itself; all.sh only picks its name and ports. The plan is checked first: two suites that would share
 a name or a port stop the run. Suites may reset (`TANDO_TEST_OWNED=1`) only the servers this run
 created. One all.sh per user and prefix runs at a time (lock
@@ -46,10 +79,10 @@ counts as a pass. `t_done` in test/lib.sh applies the same rule to a suite on it
 
 How a suite runs depends on what it supports (`--list` shows it):
 
-- **local** (ui-test, lint, go, install-test): no server. In every round (also with `--repeat`) they run first, in
-  parallel with each other, and the server suites start only when they have all finished:
-  ui-test's frame-time check (limit 50 ms; about 27 ms on an idle Mac) read 73-82 ms when it ran
-  next to busy test servers. `portability` uses a server, so it runs with the server suites.
+- **local** (ui-test, lint, go, install-test): no server. They start at once, beside the server
+  suites. (They used to run first, alone: ui-test's frame-time check read 73-82 ms of wall clock
+  next to busy test servers, against a limit of 50. It now measures CPU time, about 28 ms with the
+  machine idle or at load 20.) `portability` uses a server, so it runs with the server suites.
 - **param**: the suite reads `TANDO_TEST_NAME` / `TANDO_TEST_SSH_PORT` / `TANDO_TEST_HTTP_PORT`
   (or uses `test/lib.sh`). In parallel, each on its own server, with `TANDO_TEST_OWNED=1` and
   `T_WORK=test/.all-<suite>`.
@@ -125,10 +158,44 @@ empty process, systemctl show, tando-logs log-stats, tando-watch brief);
 plus `tando ls` and `tando status` from the laptop with and without tando-status.
 
 `TANDO_SOAK` (seconds) is sent as the apps' soak when tando.conf has none; test/lib.sh and the
-older suites set 2 to stay fast, e2e-faults 25. test/all.sh runs them all, at most 4 at once, each
-on its own server.
+older suites set 2 to stay fast, e2e-faults 25 for the deploy a scenario tests and
+`FAULT_SETUP_SOAK` (2) for the deploys that only prepare or close it. test/all.sh runs them all,
+each on its own server.
+
+### The fault scenarios in shards
+
+`test/e2e-faults.sh` runs the whole list in order on one server (the weekly tier, with
+`FAULT_SETUP_SOAK=25`: every deploy soaks 25 s, the suite as it was). `--shard i/K` runs the i-th
+of K chunks of the list, balanced by the scenarios' known durations, s00 first in each;
+`--rotate N` (or `auto`: by the day of the year) rotates the list before it is cut; `--plan`
+prints the chunks and runs nothing. `test/e2e-faults-q1.sh` to `q4.sh` are the four quarters (full
+and quick tiers), `test/e2e-faults-h1.sh` and `h2.sh` the two halves with `--rotate auto`
+(nightly). The script fails at once when a scenario of the list has no file or would be in no
+shard. Scenarios that need the long soak everywhere say so themselves (n5 compares the settings of
+two deploys; m1, m2 and m5 set `soak =` in tando.conf).
+
+Measured on 19 Nov 2026 with the four quarters at once, on a machine that was also running other
+suites: 824 to 1081 s per quarter, 41 of 41 scenarios passed. One chain with the long soak took
+5749 s on 17 Nov. One chain with the short setup soak was not measured (about 3100 s by the sum of
+its scenarios).
+
+### The alerts suites
+
+`test/e2e-alerts.sh` was one suite of 25 minutes, most of it waiting for real minutes. It is three
+suites on three servers now, sharing `test/alerts-lib.sh` (helpers, fixtures, setup):
+`e2e-alerts` (sections 1-20 and 23-28: checks started by hand), `e2e-alerts-timer` (22, then 21:
+the reboot, boot grace and the real timer) and `e2e-alerts-daemon` (29, then 27h and 27i: tandod
+and its fallback). Every check id is in exactly one of them. Waits that prove a quiet period, a
+grace period or a real timer were kept and say so in a comment; waits for an event became polls
+or runs started by hand. Measured the same day: 493, 600 and 261 s.
 
 ## test/go.sh
+
+Modes: by default Go's own test cache is used (an unchanged package is not run again) and g7, g8
+run beside g3. `--no-cache` or `GO_NOCACHE=1` adds `-count=1` (the full, nightly and weekly tiers
+set it); `--quick` or `GO_QUICK=1` skips g8, the race detector, with a SKIP line (the quick tier);
+`GO_SERIAL=1` runs one check after the other. The cache does not see the clock, the network or
+Docker: a test that depends on those must not be trusted from a cached pass.
 
 The Go server programs (srv/README.md), one check each: `g1` `gofmt -l` prints nothing, `g2`
 `go vet ./...`, `g3` `go test ./...` (table-driven unit tests of every package: parsers, file
@@ -142,7 +209,7 @@ with the numbers of its list, no shell in a call into `run` after folding consta
 a constant and in `srv/tools/srvlint/programs.txt`, every argument constant, validated or after `--` (`args.txt`), the fixed forms of rsync, nft, du, sendmail, crontab, caddy, python3 and node, systemd-run properties on a list, no module outside the standard library; its own
 tests are in `srv/tools/srvlint` with fixtures in `testdata/`), `g5` the layering (srvlint: `internal/*`
 imports no domain package, no domain package imports another, only `cmd/*` imports `daemon`, one
-listed exception), `g8` `go test -race -count=1 ./...` (SKIP, with the reason, where the race
+listed exception), `g8` `go test -race ./...` (SKIP, with the reason, where the race
 detector does not work: it needs cgo and a C compiler), `g6` every `srv/cmd/*` builds as a static ELF for
 linux/amd64 and linux/arm64. Runs with `GOTOOLCHAIN=local` (nothing is downloaded); without Go it
 is one SKIP. The programs' behaviour on a server is covered by the end-to-end suites
@@ -240,7 +307,14 @@ test/lint.sh --strict           new warnings fail too (combines with --all)
 test/lint.sh --update-baseline  accept every current finding (then review the diff of the file)
 test/lint.sh lib/deploy.sh      some files only
 test/lint.sh --list             files and their side (laptop / linux)
+test/lint.sh --no-cache         run shellcheck on every file again (LINT_NO_CACHE=1; the full tiers)
 ```
+
+shellcheck runs once per batch of files (`LINT_JOBS` batches at a time, default 8), from a native
+`shellcheck` or `$SHELLCHECK` when there is one, else in Docker. Its findings per file are kept in
+`.tando/lint-cache`, keyed by the file's path and content, the options, `.shellcheckrc`, the
+shellcheck version or image, and the content of the files it sources; cached and fresh runs give
+the same bytes (compared on the whole tree).
 
 Files: `bin/`, `lib/`, `server/`, `test/` (not `test/.*`), `install.sh`, `uninstall.sh`,
 `completions/`, `scripts/`; shell files by extension or shebang. zsh files get `zsh -n`. Go files
@@ -319,17 +393,19 @@ unless `TANDO_TEST_*` are set.
 
 ## CI
 
-`.github/workflows/test.yml` (not run yet; it was written without GitHub access):
+Small on purpose (`.github/workflows/test.yml`): the tiers are run on the developer's machine.
+Every push and pull request gets two jobs:
 
-- **lint** on ubuntu-24.04 with shellcheck v0.11.0 downloaded and pinned, plus the
-  reproducible-release check.
-- **ui** on macos-latest (/bin/bash 3.2: ui-test, `portability.sh mac`, install/uninstall) and
-  ubuntu-24.04.
-- **e2e** on ubuntu-24.04: builds the test server image, `test/all.sh --skip ui-test,lint`, then
-  `portability.sh linux busybox debian`; logs uploaded on failure.
+- **checks** (no server): the secret scan and its own test, lint with shellcheck v0.11.0 pinned,
+  test/go.sh, ui-test, install-test, the reproducible-release check, and that the suite map and
+  every tier's plan are sound.
+- **smoke**: builds the test server image and runs `e2e-trial` and `e2e-next`.
 
-Assumptions to check on the first run: GitHub's ubuntu-24.04 runners (cgroup v2) boot systemd in
-`docker run --privileged --cgroupns=private` (what up.sh uses); building the image reaches the
-Caddy apt repo and nodejs.org; the runner is x86_64 (the Dockerfile maps amd64 to Node's x64);
-curl resolves `*.localhost` itself. If systemd does not boot, try adding
-`-v /sys/fs/cgroup:/sys/fs/cgroup:rw` through `TANDO_TEST_DOCKER_ARGS`.
+By hand only (Actions, "Run workflow"): **tier** runs a whole tier (`full`, `nightly` or `weekly`)
+and the Linux/BusyBox portability checks on the runner, and **macos** runs the laptop side under
+macOS's bash 3.2. Nothing is scheduled: the nightly and weekly tiers are local commands
+(`test/all.sh --tier nightly`), run when the machine is free.
+
+This layout was written on 19 Nov 2026. Until its first run on GitHub is recorded here, treat it
+as unproven. The assumptions about the runners (systemd boots in a privileged container, x86_64,
+network for the image build, `*.localhost`) held on the runs of 17 Nov 2026.

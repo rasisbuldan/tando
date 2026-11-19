@@ -3,6 +3,8 @@
 # server rolls back, and tando-watch sends exactly one alert naming the app, the release and why.
 . "$(dirname "$0")/lib-fault.sh"
 f_init m1 "app crashes in the soak, client gone" "soak (alert)"
+# (soak = 25 in tando.conf wins over TANDO_SOAK and FAULT_SETUP_SOAK: every deploy here soaks
+# 25 s. Kept: v3 must crash inside its soak, 20 s after it starts, with the client gone.)
 A=fm1; f_fresh $A "soak = 25"
 # a webhook receiver in the container (root, 127.0.0.1:9998): one line per request body
 srv 'sudo tee /root/m1-recv.js' > /dev/null <<'JS'

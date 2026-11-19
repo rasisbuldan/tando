@@ -38,20 +38,21 @@ case $FAULT in
   powerloss) docker_powerloss;;
   reload) srv "sudo systemctl daemon-reload";;
   sshdrop) srv "sudo nft add table inet fault; sudo nft 'add chain inet fault in { type filter hook input priority -10; }'; sudo nft add rule inet fault in tcp dport 22 drop" ;
-           sleep 40; docker exec "$TANDO_TEST_NAME" nft delete table inet fault;;
+           sleep 40   # kept: the 40 s without a network are the fault
+           docker exec "$TANDO_TEST_NAME" nft delete table inet fault;;
 esac
 # the client must come back on its own (it polls until the activation's result is final)
 t=0; while kill -0 $CL 2> /dev/null && [ $t -lt 120 ]; do sleep 1; t=$((t + 1)); done
 if kill -0 $CL 2> /dev/null; then
   ok "client ends by itself within 120 s of the fault" false
-  kill $CL 2> /dev/null; pkill -f "deploy-status $A" 2> /dev/null
+  kill $CL 2> /dev/null; pkill -f "deploy-status $A( |\$)" 2> /dev/null
 else ok "client ended ($(grep '^rc=' "$W/client.out")) in ${t}s" true; fi
 tail -4 "$W/client.out" >&2
 # serving again, without any tando command
 case $want in 2or3) until_ 60 serves_any $A 2 3;;
   *) until_ 60 serves $A "$want";; esac
 rc=$?; ok "serves v$want again within 60 s ($(( $(date +%s) - T0 ))s after the fault)" test $rc = 0
-sleep 5
+sleep 5   # kept: 5 s more of requests after it serves again (none may fail)
 loop_stop
 got=$(ver $A); [ "$want" = 2or3 ] && want=$got
 # for faults that take the server down, failed requests during the outage are expected

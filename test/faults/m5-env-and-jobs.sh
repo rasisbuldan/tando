@@ -31,6 +31,8 @@ ok "the staged value is root's only" srv "sudo stat -c %U:%a /opt/tando/staged/$
 ok "env ls shows the staged key" grep -q NEED "$W/stage-ls.out"
 o=$(printf 'X=1\n' | srv "sudo $AG env-set $B")
 ok "the agent says staged, not restarted" sh -c "printf '%s' '$o' | grep -q staged=1 && printf '%s' '$o' | grep -q restarted=0"
+# (soak = 20 in tando.conf wins over TANDO_SOAK and FAULT_SETUP_SOAK, for next_deploy too. Kept:
+# the env set below must find a release soaking.)
 f_app $B 'job.hi = daily | echo "hello-from-job $(id -un)"; echo err-from-job >&2; exit 3' "soak = 20"
 deploy $B 1 needenv up
 ok "the first up with the staged NEED works (rc=$DRC)" sh -c "[ $DRC = 0 ] && [ \"\$(curl -s -m 5 $(url $B))\" = v1 ]"

@@ -19,6 +19,28 @@ cmds() {
   done
 }
 
+# help_bad <prefix> <tag>: the commands whose `--help` fails (rc != 0 or no output) from this
+# install, space-separated in command order. Each runs in its own process, INSTALL_JOBS (8) at a
+# time; every result goes to its own file, so the answer does not depend on who finished first.
+help_bad() {
+  local P=$1 d=$E/help.$2 c i=0 n=${INSTALL_JOBS:-8} bad="" f pids="" p live
+  rm -rf "${d:?}"; mkdir -p "$d"
+  for c in $(cmds); do
+    while :; do   # count only our own jobs (the release build runs in the background too)
+      live=0; for p in $pids; do kill -0 "$p" 2> /dev/null && live=$((live + 1)); done
+      [ "$live" -lt "$n" ] && break; sleep 0.05
+    done
+    (
+      out=$(cd "$E" && TANDO_CONFIG_DIR=$E/cfg "$P/bin/tando" "$c" --help 2>&1)
+      [ $? = 0 ] && [ -n "$out" ] || echo "$c" > "$d/$(printf %04d "$i")"
+    ) &
+    pids="$pids $!"; i=$((i + 1))
+  done
+  for p in $pids; do wait "$p"; done
+  for f in "$d"/*; do [ -f "$f" ] && bad="$bad $(cat "$f")"; done
+  printf '%s' "$bad"
+}
+
 # check_tree <prefix> <label>: the installed tree and its commands
 check_tree() {
   local P=$1 L=$2 home=$1/lib/tando missing="" p c bad="" out
@@ -44,10 +66,7 @@ check_tree() {
   done
   [ -e "$home/server/legacy" ] && missing="$missing (and server/legacy)"
   check "$L.6 the Go server programs for amd64 and arm64${missing:+ (missing:$missing)}" test -z "$missing"
-  for c in $(cmds); do
-    out=$(cd "$E" && TANDO_CONFIG_DIR=$E/cfg "$P/bin/tando" "$c" --help 2>&1)
-    [ $? = 0 ] && [ -n "$out" ] || bad="$bad $c"
-  done
+  bad=$(help_bad "$P" "$L")
   check "$L.3 '<command> --help' works for every command from the install${bad:+ (failed:$bad)}" test -z "$bad"
   out=$(cd "$E" && TANDO_CONFIG_DIR=$E/cfg "$P/bin/tando" ci github --help 2>&1)
   check "$L.4 'ci github --help' from the install" test $? = 0 -a -n "$out"
@@ -62,6 +81,12 @@ TANDO_HOME=$ROOT bash -c '. "$1/lib/common.sh"; install_helpers_script' _ "$ROOT
 check "I0 the server-side install script has no single quote and parses (bash -n)" \
   eval '! grep -q "'"'"'" "$E/ihs.sh" && bash -n "$E/ihs.sh" && grep -q "^recover()" "$E/ihs.sh"'
 check "I0 tando-install-recover is executable and parses" eval '[ -x server/tando-install-recover ] && bash -n server/tando-install-recover'
+
+# the release archive (about 30 s, reads only the checkout) is built while the first install and its
+# checks run; I2 waits for it
+rm -rf "${E:?}/dist"
+/bin/bash scripts/release.sh --out "$E/dist" > "$E/rel.out" 2>&1 &
+relpid=$!
 
 P1=$E/p-checkout
 /bin/bash install.sh --prefix "$P1" > "$E/i1.out" 2>&1
@@ -91,7 +116,7 @@ for l in hb/bin/tando deb/usr/bin/tando npm/bin/tando abs/tando; do
 done
 check "I5 the launcher works through Homebrew, Debian, npm and absolute symlinks${bad:+ (failed:$bad)}" test -z "$bad"
 
-/bin/bash scripts/release.sh --out "$E/dist" > "$E/rel.out" 2>&1
+wait "$relpid"
 v=$(cat VERSION)
 check "I2 release archive builds" test -s "$E/dist/tando-$v.tar.gz"
 P2=$E/p-archive

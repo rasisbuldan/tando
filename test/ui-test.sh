@@ -267,13 +267,42 @@ for ((i = 0; i < 40; i++)); do
 done
 rows=("${UI_TROWS[@]}")
 frame() { UI_TROWS=("${rows[@]}"); ui_frame_begin; ui_box_open "tando ls" "vps-1"; ui_table_a "l,l,l!4,r!3,r!5,l,r!6,l:16-40!2"; ui_box_close "40 apps"; ui_frame_end; }
-TIMEFORMAT=%R
+TIMEFORMAT="%U %S"   # CPU time, not wall clock: the same on a machine busy with test servers
 t=$( { time { for ((k = 0; k < 20; k++)); do frame; done > /dev/null; } ; } 2>&1 )
 echo "$t"
 ' _ "$here")
-ms=$(perl -e 'printf "%.1f", $ARGV[0] * 1000 / 20' "$timing")
+ms=$(perl -e '@t = split " ", $ARGV[0]; printf "%.1f", ($t[0] + $t[1]) * 1000 / 20' "$timing")
 echo "timing: 40-row table frame at 120 columns, colour on: ${ms} ms per frame ($("$BASH_BIN" -c 'echo $BASH_VERSION'))"
-if perl -e 'exit($ARGV[0] < 50 ? 0 : 1)' "$ms"; then ok; else bad "40-row frame took ${ms} ms (limit 50)"; fi
+if perl -e 'exit($ARGV[0] < 50 ? 0 : 1)' "$ms"; then ok; else bad "40-row frame took ${ms} ms of CPU (limit 50)"; fi
+
+# ---- tando adopt site: the scan and the edit of a hand-written Caddyfile (server/tando-adopt) ----
+# (the two functions are plain bash and awk: run here on fixtures, with this machine's awk)
+AS=$(mktemp -d)
+eval "$(sed -n '/^site_scan() {$/,/^}$/p; /^site_edit() {$/,/^}$/p' "$here/server/tando-adopt")"
+# shellcheck disable=SC2034  # A is read by site_scan
+A=shop
+printf '\tlog {\n\t\toutput file /var/log/tando/shop/./access.log\n\t}\n' > "$AS/snip"
+as_case() { # name want-scan file-body
+  printf '%b' "$3" > "$AS/$1"
+  site_scan "$AS/$1" 3100
+  if [[ "$SP $SPB $SPHOLD $SO $SLOG $SLOGT" == "$2" ]]; then ok; else bad "adopt site scan $1: got '$SP $SPB $SPHOLD $SO $SLOG $SLOGT', want '$2'"; fi
+}
+as_case block "8 1 0 4 0 0" '{\n\tadmin off\n}\nexample.com, www.example.com {\n\tencode gzip\n\t# a comment {\n\thandle {\n\t\treverse_proxy 127.0.0.1:3100 {\n\t\t\theader_up X-Real-IP {remote_host}\n\t\t}\n\t}\n}\nother.example {\n\treverse_proxy 127.0.0.1:3200\n}\n'
+site_edit "$AS/block" "$AS/snip" 1 1 > "$AS/block.new"
+site_scan "$AS/block.new" 3100
+if [[ "$SPHOLD $SLOGT" == "1 1" ]] && [[ $(grep -c lb_try_duration "$AS/block.new") == 1 ]] &&
+   [[ $(sed -n 5p "$AS/block.new") == *"log {"* ]] && diff <(grep -v -e lb_try -e 'tando adopt site' -e 'log {' -e 'output file' -e '^	}$' "$AS/block.new") \
+     <(grep -v '^	}$' "$AS/block") > /dev/null; then ok
+else bad "adopt site edit (block form): $(cat "$AS/block.new")"; fi
+as_case oneline "2 0 0 1 0 0" 'example.com {\n\treverse_proxy localhost:3100\n}\n'
+site_edit "$AS/oneline" "$AS/snip" 1 0 > "$AS/oneline.new"
+if [[ $(cat "$AS/oneline.new") == $'example.com {\n\treverse_proxy localhost:3100 {\n\t\t# added by tando adopt site: requests wait while the app restarts instead of 502\n\t\tlb_try_duration 15s\n\t\tlb_try_interval 100ms\n\t}\n}' ]]; then ok
+else bad "adopt site edit (one-line form): $(cat "$AS/oneline.new")"; fi
+as_case have "6 1 1 1 1 1" 'example.com {\n\tlog {\n\t\toutput file /var/log/tando/shop/./access.log\n\t}\n\thandle {\n\t\treverse_proxy 127.0.0.1:3100 {\n\t\t\tlb_try_duration 15s\n\t\t}\n\t}\n}\n'
+as_case ownlog "3 0 0 1 1 0" 'example.com {\n\tlog\n\treverse_proxy 127.0.0.1:3100\n}\n'
+as_case two "-1 0 0 0 0 0" 'a.example {\n\treverse_proxy 127.0.0.1:3100\n}\nb.example {\n\treverse_proxy 127.0.0.1:3100\n}\n'
+as_case none "0 0 0 0 0 0" 'a.example {\n\treverse_proxy 127.0.0.1:31000\n\timport sites/*\n}\n'
+rm -rf "$AS"
 
 echo "$checks checks, $fails failed"
 [[ $fails == 0 ]]

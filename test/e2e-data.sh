@@ -41,6 +41,20 @@ npm ci --no-audit --no-fund > "$E/npm.out" 2>&1 || { cat "$E/npm.out" >&2; exit 
 
 # D1. host setup installs PostgreSQL; measure what it adds
 "$R" host add test vmadmin@127.0.0.1 --port $SP --key "$ROOT/test/server/id_test" --yes >&2
+# apt fails once on the way (a mirror that stalls does this): setup tries again by itself. The
+# stand-in sits before the real apt-get in root's PATH, fails its first "install" and then gets
+# out of the way.
+srv 'sudo tee /usr/local/sbin/apt-get > /dev/null && sudo chmod 755 /usr/local/sbin/apt-get' <<'SHIM'
+#!/bin/sh
+case " $* " in *" install "*)
+  if [ ! -e /root/apt-failed-once ]; then
+    touch /root/apt-failed-once
+    echo "E: Failed to fetch http://archive.example/pool/x.deb  Connection timed out (test stand-in)" >&2
+    exit 100
+  fi;;
+esac
+exec /usr/bin/apt-get "$@"
+SHIM
 mem0=$(srv "free -m | awk '/^Mem:/ {print \$3}'")
 t0=$SECONDS
 "$R" host setup test public_port=$HP postgres=yes > "$E/setup.out" 2>&1; rc=$?; cat "$E/setup.out" >&2
@@ -57,6 +71,10 @@ echo "postgres memory: $unit memory.current $((${pgmem:-0} / 1048576)) MB, anon+
   "$((${pganon:-0} / 1048576)) MB, host used memory $mem0 -> $mem1 MB, setup ${secs}s" > "$E/pgmem"
 check "D1 host setup postgres=yes (${secs}s): PostgreSQL accepting connections" \
   eval '[ $rc = 0 ] && srv "pg_isready -q -h 127.0.0.1"'
+tries=$(srv "sudo grep -c 'apt try 1 of 3 .* failed' /var/log/tando-apt.log")
+check "D1r apt failed once (the stand-in) and setup tried again by itself ($tries failed try in the log)" \
+  eval '[ $rc = 0 ] && [ "$tries" = 1 ] && srv "sudo test -e /root/apt-failed-once"'
+srv 'sudo rm -f /usr/local/sbin/apt-get'
 
 # D2. up creates the role, database and DATABASE_URL; the app answers
 "$R" up > "$E/up.out" 2>&1; rc=$?; cat "$E/up.out" >&2

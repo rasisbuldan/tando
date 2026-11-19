@@ -1,0 +1,33 @@
+# test/durations.tsv: seconds each suite took in a passing run on the reference machine
+# (Apple M1 Pro, 10 CPUs, 8 servers at once; written by
+# test/all.sh --save-durations on 2026-11-19). test/all.sh warns when a suite takes over 1.5 times
+# its line here and at least 60 s more, and starts the longest suites first by it.
+e2e	296
+e2e-alerts	582
+e2e-alerts-daemon	245
+e2e-alerts-timer	728
+e2e-bootstrap	198
+e2e-ci	432
+e2e-cli	163
+e2e-data	95
+e2e-ease	158
+e2e-faults-q1	802
+e2e-faults-q2	885
+e2e-faults-q3	839
+e2e-faults-q4	722
+e2e-host	72
+e2e-logs	246
+e2e-next	59
+e2e-offsite	171
+e2e-recipes	134
+e2e-sec2	222
+e2e-status	144
+e2e-top	123
+e2e-trial	15
+go	155
+install-test	37
+lint	108
+ui-test	54
+e2e-faults	5749
+e2e-faults-h1	1780
+e2e-faults-h2	1773

@@ -11,7 +11,7 @@
 ## Making a release
 
 ```
-test/all.sh && test/portability.sh             # everything green, on a Mac
+test/all.sh && test/portability.sh             # the full tier and portability green, on a Mac
 $EDITOR VERSION CHANGELOG.md                   # 0.2.0; move "Unreleased" under "## 0.2.0 - <date>"
 completions/gen.sh                             # if commands changed (lint warns RL12 otherwise)
 scripts/release.sh                             # dist/tando-0.2.0.tar.gz, .sha256, SHA256SUMS
@@ -33,7 +33,7 @@ runs `scripts/build-server.sh` first.
 dependencies: the same source and Go version give the same bytes on any machine (verified on
 macOS: a second build with an empty Go cache and another output directory). A different Go
 version gives different bytes, so build releases with the Go that `srv/go.mod` names. Sizes at
-0.1.0: tando-metrics 2.3 MB per CPU; the archive went from about 0.3 MB to 2.3 MB.
+0.1.1: the archive is 33 MB, nearly all of it the eight Go programs for two CPU types.
 
 **Reproducible**: same input files, same bytes. The tar is written by perl's Archive::Tar from a
 sorted list; every entry gets mtime `SOURCE_DATE_EPOCH` (default: the last commit's time, 0 when

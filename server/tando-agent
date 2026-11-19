@@ -2762,9 +2762,18 @@ apt_install() { # packages...
   # apt's own output goes to a log, so a failure can point at it and a success prints nothing
   # NEEDRESTART_SUSPEND: Ubuntu's needrestart would otherwise restart every service that uses an
   # outdated library after a noninteractive install, including sites tando does not manage
-  { apt-get update -qq &&
-    DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y -qq "${missing[@]}"; } \
-    >> /var/log/tando-apt.log 2>&1 || die "could not install ${missing[*]} with apt: sudo tail -20 /var/log/tando-apt.log on the server shows why"
+  # Up to three tries, 5 s and 15 s apart: a package mirror that stalls or answers half an index
+  # is the usual reason, and the next try gets another mirror or a complete file. A lock held by
+  # another apt (the daily upgrade) is waited for, up to two minutes, instead of failing at once.
+  local try
+  for try in 1 2 3; do
+    { apt-get -o DPkg::Lock::Timeout=120 update -qq &&
+      DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get -o DPkg::Lock::Timeout=120 install -y -qq "${missing[@]}"; } \
+      >> /var/log/tando-apt.log 2>&1 && return 0
+    echo "tando-agent: apt try $try of 3 for ${missing[*]} failed ($(date -u +%FT%TZ))" >> /var/log/tando-apt.log
+    ((try < 3)) && sleep $((try * 10 - 5))
+  done
+  die "could not install ${missing[*]} with apt (3 tries): sudo tail -20 /var/log/tando-apt.log on the server shows why"
 }
 
 pg_setup() {

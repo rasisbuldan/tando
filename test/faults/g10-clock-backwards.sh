@@ -18,7 +18,9 @@ deploy $A 3 ok; ok "deploy v3 works" test $DRC = 0
 (cd "$W/$A" && "$R" rollback > "$W/rb.out" 2>&1); rrc=$?
 log "rollback rc=$rrc: $(tail -3 "$W/rb.out" | tr '\n' ' ')"
 ok "rollback goes back to the previous deploy (v2)" sh -c "[ $rrc = 0 ] && [ \"\$(curl -s -m 3 $(url $A))\" = v2 ]"
-for v in 4 5 6 7 8 9; do deploy $A $v ok > /dev/null; done
+# (six releases only to have more than are kept: which ones prune and rollback pick depends on the
+# order of the deploys, not on how long each soaked: the setup soak)
+for v in 4 5 6 7 8 9; do setup_deploy $A $v ok > /dev/null; done
 ok "after 6 more deploys v9 serves" serves $A 9
 (cd "$W/$A" && "$R" rollback > "$W/rb2.out" 2>&1); rrc=$?
 log "rollback 2 rc=$rrc: $(tail -3 "$W/rb2.out" | tr '\n' ' ')"

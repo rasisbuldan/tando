@@ -13,6 +13,12 @@ mkdir -p "$FW"
 export TANDO_CONFIG_DIR=$FW/cfg-$TANDO_TEST_NAME TANDO_COLOR=never
 SSH=$ROOT/test/server/ssh.sh
 HP=$TANDO_TEST_HTTP_PORT
+# FAULT_SETUP_SOAK: the soak (TANDO_SOAK, seconds) of the deploys that only prepare or close a
+# scenario: f_fresh's v1 and v2, next_deploy, and setup_deploy. The deploy a scenario makes as the
+# thing under test keeps the caller's TANDO_SOAK (test/e2e-faults.sh: 25). A tando.conf with its
+# own `soak =` (m1, m2, m5) wins over both. FAULT_SETUP_SOAK=25 is the unmodified (weekly) run.
+FAULT_SETUP_SOAK=${FAULT_SETUP_SOAK:-2}
+case $FAULT_SETUP_SOAK in ""|*[!0-9]*) echo "lib-fault: FAULT_SETUP_SOAK is seconds (got \"$FAULT_SETUP_SOAK\")" >&2; exit 2;; esac
 F_FAILS=0 F_NOTES="" F_TRUTH=y F_RECOVER=y F_DOWN=0 F_BAD=0 F_N=0
 
 log() { echo "---- $*" >&2; }
@@ -30,10 +36,16 @@ f_init() { # id fault point
   F_ID=$1 F_FAULT=$2 F_POINT=$3
   W=$FW/run/$TANDO_TEST_NAME/$F_ID
   rm -rf "$W"; mkdir -p "$W"
-  log "scenario $F_ID: $F_FAULT @ $F_POINT ($TANDO_TEST_NAME)"
-  # an upload that takes a while (b1-b3): random, so neither rsync nor the disk compress it
-  [ -s "$FW/big/blob.bin" ] || { mkdir -p "$FW/big"; head -c 209715200 /dev/urandom > "$FW/big/blob.bin"; }
+  log "scenario $F_ID: $F_FAULT @ $F_POINT ($TANDO_TEST_NAME, setup soak $FAULT_SETUP_SOAK s)"
   f_host
+}
+# f_big: $FW/big/blob.bin, 200 MB for an upload that takes a while (b1-b3, n3): random, so neither
+# rsync nor the disk compress it. Made on first use, one per work dir (shards on different servers
+# each have their own), and renamed into place so a half-written one is never taken for it.
+f_big() {
+  [ -s "$FW/big/blob.bin" ] && return 0
+  mkdir -p "$FW/big"
+  head -c 209715200 /dev/urandom > "$FW/big/blob.bin.$$" && mv -f "$FW/big/blob.bin.$$" "$FW/big/blob.bin"
 }
 
 # the host registered and set up once per server
@@ -63,14 +75,16 @@ deploy() {
   (cd "$W/$1" && "$R" "${4:-deploy}" > "$W/$1.d$2.out" 2>&1); DRC=$?
   return $DRC
 }
+# setup_deploy: `deploy` for a release that only prepares the scenario (soak FAULT_SETUP_SOAK)
+setup_deploy() { TANDO_SOAK=$FAULT_SETUP_SOAK deploy "$@"; }
 # fresh app with v1 and v2 deployed and verified (a last good and an older release)
 f_fresh() { # app [extra conf lines]
   local a=$1; shift
   srv "sudo test -d /opt/tando/apps/$a" 2> /dev/null && { echo "$a" | (cd "$W" && "$R" destroy -a "$a" --purge > /dev/null 2>&1); }
   f_app "$a" "$@"
   # a deploy that fails here is a regression, not an environment problem: exit 1 (FAIL), never 2 (SKIP)
-  deploy "$a" 1 ok up || { cat "$W/$a.d1.out" >&2; echo "f_fresh: up failed" >&2; exit 1; }
-  deploy "$a" 2 ok || { cat "$W/$a.d2.out" >&2; echo "f_fresh: deploy 2 failed" >&2; exit 1; }
+  setup_deploy "$a" 1 ok up || { cat "$W/$a.d1.out" >&2; echo "f_fresh: up failed" >&2; exit 1; }
+  setup_deploy "$a" 2 ok || { cat "$W/$a.d2.out" >&2; echo "f_fresh: deploy 2 failed" >&2; exit 1; }
   [ "$(ver "$a")" = 2 ] || { echo "f_fresh: v2 not served" >&2; exit 1; }
 }
 rid() { sed -n 's/.*release \([0-9-]*\) *│/\1/p' "$1" | head -1; }
@@ -145,9 +159,10 @@ truth() { # app want_ver
   fi
 }
 
-# self-recovery: the next deploy, untouched, works
+# self-recovery: the next deploy, untouched, works (it must go live and be verified; how long it
+# soaks is not what is asked here: FAULT_SETUP_SOAK)
 next_deploy() { # app version
-  if deploy "$1" "$2" ok && [ "$(ver "$1")" = "$2" ]; then echo "  ok   next deploy v$2 works" >&2
+  if setup_deploy "$1" "$2" ok && [ "$(ver "$1")" = "$2" ]; then echo "  ok   next deploy v$2 works" >&2
   else F_RECOVER=n; F_NOTES="$F_NOTES; next deploy v$2 failed (rc=$DRC): $(grep -E 'busy|lease|failed|error|tando:' "$W/$1.d$2.out" | head -2 | tr '\n' ' ')"
     echo "  FAIL next deploy v$2 (rc=$DRC)" >&2; tail -5 "$W/$1.d$2.out" >&2; fi
 }
@@ -164,6 +179,7 @@ f_end() {
 wait_phase() { # app phase secs
   srv "sudo bash -c 'for i in \$(seq $(( $3 * 10 ))); do grep -qx phase=$2 /opt/tando/apps/$1/state 2>/dev/null && exit 0; sleep 0.1; done; exit 1'"
 }
+act_gone() { [ -z "$(act_unit "$1")" ]; }      # until_ 20 act_gone <app>: its activation unit ended
 act_unit() { srv "systemctl list-units --plain --no-legend 'tando-$1-act-*'" | awk '{print $1}' | head -1; }
 kill9_act() { # app: SIGKILL every process of the activation unit
   local u; u=$(act_unit "$1")

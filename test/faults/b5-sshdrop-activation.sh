@@ -8,7 +8,8 @@ loop_start $A
 setv $A 3 slow@pre:6; client_bg $A deploy
 wait_phase $A preflight 60; ok "activation in preflight" test $? = 0
 docker exec "$TANDO_TEST_NAME" sh -c "nft add table inet fault; nft 'add chain inet fault in { type filter hook input priority -10; }'; nft add rule inet fault in tcp dport 22 drop"
-sleep 30; docker exec "$TANDO_TEST_NAME" nft delete table inet fault
+sleep 30   # kept: the 30 s without a network are the fault
+docker exec "$TANDO_TEST_NAME" nft delete table inet fault
 client_wait 120; ok "client ends" test $? = 0
 tail -3 "$W/client.out" >&2
 ok "client reports success (rc=$(client_rc))" test "$(client_rc)" = 0

@@ -8,7 +8,7 @@ lg=$(srv "sudo sed -n 's/^last_good=//p' /opt/tando/apps/$A/state")
 srv "sudo rm -rf /opt/tando/apps/$A/releases/$lg"
 loop_start $A
 deploy $A 3 unhealthy@live; log "deploy rc=$DRC: $(grep -E 'back on|after the switch' "$W/$A.d3.out" | head -1)"
-sleep 10; loop_stop
+sleep 10; loop_stop   # kept: 10 s of requests after the failed deploy (the app must keep answering)
 log "Caddy answers $(curl -s -o /dev/null -w '%{http_code}' -m 20 "$(url $A)"); unit $(srv "systemctl is-active tando-$A")"
 ok "the app still answers 200 ($F_BAD failed)" test "$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$(url $A)")" = 200
 truth $A "$(ver $A)"

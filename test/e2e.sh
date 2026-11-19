@@ -319,7 +319,12 @@ check "21c start under load: $n requests, $bad failed (503 only before the switc
 # fails its health check, test n2 of e2e-faults)
 srv "sudo sh -c 'echo CRASH_VERSION=\"$live@$port\" >> /opt/tando/apps/hello/env && systemctl restart tando-hello'" > /dev/null 2>&1
 until_ 40 eval 'srv "systemctl show -P ActiveState tando-hello" | grep -qx failed'
-sleep 2
+# the 503 page is put in place by the unit's failure handler (tando-down@), which runs after the
+# unit failed and ends with a Caddy reload: wait until the server has recorded it (a fixed 2 s was
+# too short once in a census of five full runs on a busy machine: the request was held), then ask
+dn_t0=$(date +%s)
+until_ 30 eval 'srv "sudo grep -qx down=1 /opt/tando/apps/hello/state"'
+echo "21d: the failure handler had the page in place within $(($(date +%s) - dn_t0)) s of the unit failing" >&2
 dn=$(curl -s -o "$E/down.body" -w '%{http_code} %{time_total}' http://hello.localhost:$HP/)
 check "21d a unit that gave up: 503 \"unavailable\" at once, not a held request ($dn)" \
   eval 'echo "$dn" | grep -qE "^503 0\.[0-4]" && grep -q "hello is unavailable" "$E/down.body"'

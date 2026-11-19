@@ -251,12 +251,13 @@ compare_all() {
   cmp_case 3o sudo history web 0010
 }
 
-# mid-activation: slow's next release soaks 60 s, the app's lock held. A release queued behind it
+# mid-activation: slow's next release soaks 30 s, the app's lock held (the comparisons 4a-4g take
+# about 3 s, also on a busy machine, and 4h fails if the soak ended under them). A release queued behind it
 # is what `activate` leaves before its activation gets the lock: a directory in releases/ without
 # a status (the client itself waits out a soak before it uploads, so one is made here by hand)
 mid_activation() {
   [ -d "$W/slow" ] || hello slow   # (--reuse: the work directory was emptied)
-  printf 'soak = 60\n' >> "$W/slow/tando.conf"
+  printf 'soak = 30\n' >> "$W/slow/tando.conf"
   echo 2 > "$W/slow/VERSION"
   (cd "$W/slow" && TANDO_WAIT=1 "$R" deploy --force > "$E/slow1.out" 2>&1) &   # (--reuse: maybe another checkout last)
   local p1=$! cur q=20991231-000000

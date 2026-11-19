@@ -1,173 +1,30 @@
 #!/bin/bash
 # End-to-end test of tando alerts (server/tando-watch, lib/cmd-alerts.sh) against a clean test
-# container. One PASS/FAIL line per check; exits non-zero on any failure. Takes about 15 minutes
-# (two parts wait for the real once-a-minute timer and one restarts the container).
+# container. One PASS/FAIL line per check; exits non-zero on any failure. Takes about 8 minutes
+# (three of them the two quiet periods it waits out, sections 9 and 10).
 #
-# Notifications go to a receiver inside the container (Node, 127.0.0.1:9999); nothing leaves
-# this machine. Most checks stop the timer and start the check run by hand (`systemctl start
-# tando-watch.service`, exactly what the timer does) so each sample is deterministic; the timer
-# itself is tested for detection time and for surviving a restart.
+# This is the bulk: every check, notifier, setting and verb, with the check runs started by hand
+# (one run stands for a minute). Two parts that need a server of their own run beside it:
+#   test/e2e-alerts-timer.sh    the real once-a-minute timer and a restart of the host (21, 22)
+#   test/e2e-alerts-daemon.sh   tandod killed, stopped, panicking, an upgrade (29, 27h, 27i)
+# The helpers and fixtures of all three are in test/alerts-lib.sh (the environment variables too).
 #
 # Usage: test/e2e-alerts.sh [--no-reset]
-#   TANDO_TREE=<dir with bin/ lib/ server/>   the tando to test (default: this repository)
-#   TANDO_TEST_NAME / TANDO_TEST_SSH_PORT / TANDO_TEST_HTTP_PORT   which test container
-#     (defaults tando-test-alerts, 2303, 8303). The container is reset (and, in check 22,
-#     restarted) only when it is that default, does not exist yet, or TANDO_TEST_OWNED=1;
-#     otherwise the suite reuses it and only removes its own apps (hello, hog).
-#   T_WORK=<dir>   work directory (default test/.e2e-alerts-<server>)
-#   TANDO_TEST_NO_DAEMON=1   tandod stopped and disabled after every host setup: the checks run as
-#     the one-shot (the fallback path of a host without the daemon); section 29 is skipped
+#   server by default: tando-test-alerts, ssh 2303, http 8303
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
-. "$ROOT/test/lib.sh"   # t_until (this suite keeps its own pass/fail/check, defined below)
-TREE=${TANDO_TREE:-$ROOT}
-export TANDO_TEST_NAME=${TANDO_TEST_NAME:-tando-test-alerts}
-export TANDO_TEST_SSH_PORT=${TANDO_TEST_SSH_PORT:-2303} TANDO_TEST_HTTP_PORT=${TANDO_TEST_HTTP_PORT:-8303}
-E=${T_WORK:-$ROOT/test/.e2e-alerts-$TANDO_TEST_NAME} R=$TREE/bin/tando
-W=$E/w
-OWNED=0
-if [ "${TANDO_TEST_OWNED:-}" = 1 ] || [ "$TANDO_TEST_NAME" = tando-test-alerts ] ||
-   ! docker container inspect "$TANDO_TEST_NAME" > /dev/null 2>&1; then OWNED=1; fi
-export TANDO_CONFIG_DIR=$E/cfg TANDO_COLOR=never COLUMNS=100
-export TANDO_SOAK=${TANDO_SOAK:-2} TANDO_WAIT=1   # a short soak (30 s by default) keeps the suite fast
-HP=$TANDO_TEST_HTTP_PORT
-SSHX=$ROOT/test/server/ssh.sh
-FAILS=0
+. "$ROOT/test/alerts-lib.sh"
+alerts_server tando-test-alerts 2303 8303 0
+t_init e2e-alerts
+alerts_setup "$@"
 
-pass() { echo "PASS $*"; }
-fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
-check() { local n=$1; shift; if "$@"; then pass "$n"; else fail "$n"; fi; }
-not() { ! "$@"; }
-log() { echo "---- $*" >&2; }
-srv() { "$SSHX" "$@"; }
-get() { curl -s -m 5 "http://$1.localhost:$HP$2"; }
-wrun() { srv 'sudo systemctl start tando-watch.service'; }              # one check run, as the timer does
-wruns() { local i; for ((i = 0; i < $1; i++)); do wrun; done; }
-st() { srv "sudo sed -n 's/^$1=//p' /var/lib/tando/watch/state"; }      # state of <app>.<check>.st
-aset() { "$R" alerts set "$@" > /dev/null 2>&1 || fail "tando alerts set $*"; }
-# notification counting, from the webhook notifier "hook" (the others are compared at the end)
-MARK=0
-mark() { MARK=$(srv 'sudo cat /root/recv.log 2>/dev/null | wc -l' | tr -d ' '); }
-since_mark() { srv "sudo tail -n +$((MARK + 1)) /root/recv.log | grep '\"path\":\"/hook/'"; }
-nev() { since_mark | grep -o "\"$1 $2 $3\"" | wc -l | tr -d ' '; }      # state app check
-nmsg() { since_mark | grep -c . | tr -d ' '; }                          # messages to hook
-eq() { [ "$1" = "$2" ] || { echo "     expected $2, got $1" >&2; return 1; }; }
-until_() { t_until "$@"; }
-wrun_and() { wrun; "$@"; }                                               # one run, then a condition
-# no run going on: neither the one-shot units nor a tick of tandod (its status text says "ticking")
-idle() { [ "$(srv 'systemctl show -P ActiveState tando-watch.service tando-watch-fallback.service; systemctl show -P StatusText tandod' |
-  grep -c 'activating\|ticking')" = 0 ]; }
-# dtick: the epoch of tandod's last tick (0: none, or tandod not running)
-dtick() { srv 'systemctl show -P StatusText tandod' | sed -n 's/.*last tick \([0-9]*\).*/\1/p' | grep . || echo 0; }
-nrestarts() { srv "systemctl show -P NRestarts tando-$1"; }
-# restarted <app> <count before>: systemd restarted the app since then and it answers its health again
-restarted() { [ "$(nrestarts "$1")" -gt "$2" ] && [ "$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://$1.localhost:$HP/health")" = 200 ]; }
-firing() { [ "$(st "$1")" = firing ]; }
-seen() { [ "$(nev "$1" "$2" "$3")" = "${4:-1}" ]; }                       # for until_
-
-if [ "${1:-}" != --no-reset ] && [ $OWNED = 1 ]; then
-  log "resetting test server $TANDO_TEST_NAME (1 CPU, 2 GB like the real VPS)"
-  TANDO_TEST_DOCKER_ARGS="--cpus 1 --cpuset-cpus 0 --memory 2g" "$ROOT/test/server/up.sh" --reset >&2 || exit 1
-else
-  log "reusing test server $TANDO_TEST_NAME (not ours to reset)"
-  "$ROOT/test/server/up.sh" >&2 || exit 1
-fi
-case $E in /?*/?*) rm -rf "${E:?}";; *) echo "refusing work dir $E" >&2; exit 2;; esac
-mkdir -p "$W"
-cp -R "$TREE/examples/hello" "$TREE/examples/site" "$W/"
-
-# ---- fixtures: the receiver (+ a fake sendmail) in the container, and the "hog" test app ----
-cat > "$E/recv.js" <<'EOF'
-// local notification receiver; logs one JSON line per request to /root/recv.log (root 600),
-// with secret markers redacted. /ctl/fail/<word>, /ctl/ok/<word>: requests whose path contains
-// <word> answer 500 (or never, when the word starts with "slow").
-const http = require('http'), fs = require('fs');
-const bad = new Set();
-const mk = new RegExp('S3' + 'CR3T[A-Za-z0-9_-]*', 'g');   // no marker in this file
-const red = s => s.replace(mk, '<S>');
-http.createServer((req, res) => {
-  let body = '';
-  req.on('data', d => body += d);
-  req.on('end', () => {
-    const m = req.url.match(/^\/ctl\/(fail|ok)\/(.+)$/);
-    if (m) { m[1] === 'fail' ? bad.add(m[2]) : bad.delete(m[2]); res.end('ok\n'); return; }
-    const hit = [...bad].find(w => req.url.includes(w));
-    const rec = { t: Date.now() / 1000, path: red(req.url), had_secret: req.url.includes('S3' + 'CR3T'),
-      title: req.headers['title'] || '', auth: red(req.headers['authorization'] || ''),
-      status: hit ? (hit.startsWith('slow') ? 'hang' : 500) : 200, body: red(body) };
-    try { const j = JSON.parse(body); if (j.events) rec.ev = j.events.map(e => `${e.state} ${e.app} ${e.check}`); } catch (e) {}
-    fs.appendFileSync('/root/recv.log', JSON.stringify(rec) + '\n', { mode: 0o600 });
-    if (hit && hit.startsWith('slow')) return;
-    res.writeHead(hit ? 500 : 200, { 'content-type': 'application/json' });
-    res.end(hit ? '{"ok":false}' : '{"ok":true}');
-  });
-}).listen(9999, '127.0.0.1');
-EOF
-mkdir -p "$W/hog"
-cat > "$W/hog/server.js" <<'EOF'
-// hog: test app. /health is 200 unless /sick was called (until /well). /grow?mb=N keeps N MB
-// more allocated; /free drops it; /exit exits with status 1.
-const http = require('http');
-let sick = false, keep = [];
-http.createServer((req, res) => {
-  const u = new URL(req.url, 'http://x');
-  const say = (c, t) => { res.writeHead(c, { 'content-type': 'text/plain' }); res.end(t + '\n'); };
-  switch (u.pathname) {
-    case '/health': return say(sick ? 500 : 200, sick ? 'sick' : 'ok');
-    case '/sick': sick = true; return say(200, 'now sick');
-    case '/well': sick = false; return say(200, 'now well');
-    case '/grow': { const n = Number(u.searchParams.get('mb') || 10);
-      for (let i = 0; i < n; i++) keep.push(Buffer.alloc(1048576, 1));
-      return say(200, 'kept ' + keep.length + ' MB'); }
-    case '/free': keep = []; if (global.gc) global.gc(); return say(200, 'freed');
-    case '/exit': say(200, 'bye'); return setTimeout(() => process.exit(1), 50);
-    case '/shm': { const fs = require('fs'), mb = Buffer.alloc(1048576, 1);   // 1 MB at a time
-      fs.writeFileSync('/dev/shm/hog', '');
-      for (let i = 0; i < Number(u.searchParams.get('mb') || 10); i++) fs.appendFileSync('/dev/shm/hog', mb);
-      return say(200, 'shm written'); }
-    case '/shm-free': try { require('fs').unlinkSync('/dev/shm/hog'); } catch (e) {} return say(200, 'shm freed');
-    default: return say(200, 'hog');
-  }
-}).listen(Number(process.env.PORT), '127.0.0.1');
-process.on('SIGTERM', () => process.exit(0));
-EOF
-printf 'app = hog\nrecipe = node\nstart = node --expose-gc server.js\nhealth = /health\nmemory = 96M\nhealth_timeout = 15\ndata = data\n' > "$W/hog/tando.conf"
-srv 'sudo tee /root/recv.js > /dev/null && printf "[Unit]\nDescription=alerts test receiver\n[Service]\nExecStart=/usr/local/bin/node /root/recv.js\nUMask=0077\n[Install]\nWantedBy=multi-user.target\n" | sudo tee /etc/systemd/system/testrecv.service > /dev/null &&
-  sudo install -d -m 700 /var/lib/testmail && printf "#!/bin/sh\ncat > /var/lib/testmail/mail.\$\$\n" | sudo tee /usr/sbin/sendmail > /dev/null && sudo chmod 755 /usr/sbin/sendmail &&
-  sudo systemctl daemon-reload && sudo systemctl enable -q --now testrecv' < "$E/recv.js" || { echo "FAIL fixtures"; exit 1; }
-
-# ---- 1. setup installs the timer; apps; notifiers (secrets on stdin) ----
-"$R" host add t vmadmin@127.0.0.1 --port "$TANDO_TEST_SSH_PORT" --key "$ROOT/test/server/id_test" --yes > /dev/null 2>&1 ||
-  { echo "FAIL host add (the normal path: host key shown and trusted with --yes)"; exit 1; }
-"$R" host setup t public_port=$HP > "$E/setup.out" 2>&1 || { cat "$E/setup.out"; echo "FAIL host setup"; exit 1; }
-# nodaemon: with TANDO_TEST_NO_DAEMON=1, tandod off (host setup enables and starts it every time)
-nodaemon() { [ "${TANDO_TEST_NO_DAEMON:-}" = 1 ] && srv 'sudo systemctl disable -q --now tandod'; true; }
-nodaemon
-if [ $OWNED = 0 ]; then   # a reused server: start from none of our apps and no alert state
-  for a in hello hog site; do echo $a | "$R" destroy --purge -a $a > /dev/null 2>&1; done
-  srv 'sudo rm -rf /var/lib/tando/watch /opt/tando/alerts.d /opt/tando/alerts.conf; sudo truncate -s0 /root/recv.log 2>/dev/null; true'
-fi
-(cd "$W/hello" && "$R" up > "$E/up-hello.out" 2>&1) && (cd "$W/hog" && "$R" up > "$E/up-hog.out" 2>&1) &&
-  (cd "$W/site" && "$R" up > "$E/up-site.out" 2>&1) ||
-  { tail -5 "$E"/up-*.out; echo "FAIL up"; exit 1; }
-"$R" alerts enable > /dev/null 2>&1    # idempotent; a host set up before alerts existed needs it
+# ---- 1. setup installs the timer; apps; notifiers (secrets on stdin): done by alerts_setup ----
 check "1a host setup + alerts enable: tando-watch.timer enabled and active" \
   test "$(srv 'systemctl is-enabled tando-watch.timer; systemctl is-active tando-watch.timer' | tr '\n' ' ')" = "enabled active "
-"$R" alerts > "$E/alerts-empty.out" 2>&1
 check "1c no notifier yet: tando alerts says the checks run and gives one line per notifier type, ntfy first" \
   sh -c "grep -q 'already watching every app' '$E/alerts-empty.out' &&
     grep -n 'notifier add' '$E/alerts-empty.out' | head -1 | grep -q 'phone ntfy'"
-{
-  printf 'http://127.0.0.1:9999/hook/S3CR3Thook1\n' | "$R" alerts notifier add hook webhook
-  printf 'http://127.0.0.1:9999/slack/S3CR3Tslack1\n' | "$R" alerts notifier add sl slack
-  printf 'S3CR3Ttg:abc\n-100123\n' | "$R" alerts notifier add tg telegram api=http://127.0.0.1:9999/tg
-  printf 'http://127.0.0.1:9999/ntfy/S3CR3Tntfy1\nS3CR3Tntfytok\n' | "$R" alerts notifier add nt ntfy
-  printf 'ops@example.com\n' | "$R" alerts notifier add mail email
-  printf 'http://127.0.0.1:9999/broken/S3CR3Tbroken1\n' | "$R" alerts notifier add broken webhook
-  printf 'http://127.0.0.1:9999/hb/S3CR3Thb1\n' | "$R" alerts heartbeat
-} > "$E/notifiers.out" 2>&1
 check "1b five notifier types and a heartbeat added (secrets on stdin)" test "$(grep -c '^added notifier' "$E/notifiers.out")" = 6
-srv 'curl -s http://127.0.0.1:9999/ctl/fail/broken > /dev/null'
 
 # ---- 2. alerts test: per-notifier result; a failing one does not stop the others ----
 "$R" alerts test > "$E/test.out" 2>&1
@@ -220,13 +77,7 @@ get hog /sick > /dev/null; wrun; get hog /well > /dev/null; wruns 3
 check "5 a single failed health probe: no notification" eq "$(nmsg)" 0
 
 # ---- 6. dead app (crash loop): "down" fires once, health/restarts stay quiet ----
-# a crash loop from outside the app: every start fails (tando env set refuses an env the app
-# crashes with, since its pre-check: it can no longer make one). A runtime drop-in, gone at reboot
-crash_on() { srv "sudo sh -c 'mkdir -p /run/systemd/system/tando-$1.service.d &&
-  printf \"[Service]\\nExecStartPre=/bin/sh -c \\\"exit 3\\\"\\n\" > /run/systemd/system/tando-$1.service.d/zz-test-crash.conf &&
-  systemctl daemon-reload && systemctl restart tando-$1'" > /dev/null 2>&1; true; }
-crash_off() { srv "sudo sh -c 'rm -f /run/systemd/system/tando-$1.service.d/zz-test-crash.conf; systemctl daemon-reload;
-  systemctl reset-failed tando-$1; systemctl restart tando-$1'" > /dev/null 2>&1; true; }
+# (crash_on, crash_off: test/alerts-lib.sh)
 mark
 crash_on hello
 # down needs two samples of a unit that keeps failing: run checks until it fires (at most 60 s)
@@ -277,6 +128,7 @@ wrun
 check "9a OOM kill: fires once" eq "$(nev firing hog oom)" 1
 check "9b OOM kill: detail names the kernel OOM killer" srv 'sudo grep -q "OOM killer" /var/lib/tando/watch/state'
 srv 'sudo systemctl revert tando-hog > /dev/null 2>&1; sudo systemctl daemon-reload'
+# (kept: the quiet period itself, a real minute without a new kill; runs are started meanwhile)
 log "waiting for oom_quiet (1 min in this test, 30 in production)"
 T_UNTIL_STEP=5 until_ 120 wrun_and seen resolved hog oom
 check "9c OOM: resolves once after oom_quiet without new kills" eq "$(nev resolved hog oom)" 1
@@ -287,6 +139,7 @@ mark
 for i in 1 2 3; do n0=$(nrestarts hog); get hog /exit > /dev/null; until_ 30 restarted hog "$n0"; wrun; done
 check "10a 3 restarts within restarts_window: fires once" eq "$(nev firing hog restarts)" 1
 check "10b ... and no down alert (the app is up between restarts)" eq "$(nev firing hog down)" 0
+# (kept: the window itself, two real minutes; the alert must not resolve on a run started sooner)
 log "waiting for the restart window to pass (2 min here, 15 in production)"
 T_UNTIL_STEP=5 until_ 200 wrun_and seen resolved hog restarts
 check "10c restarts: resolves once" eq "$(nev resolved hog restarts)" 1
@@ -330,6 +183,7 @@ echo 2 > "$W/hello/VERSION"
 LP=$!
 (cd "$W/hello" && "$R" deploy > "$E/d2.out" 2>&1)
 echo 3 > "$W/hello/VERSION"; (cd "$W/hello" && "$R" deploy > "$E/d3.out" 2>&1)
+# (kept: the runs go on until deploy_grace, 5 s here, is over after the rollback: quiet then too)
 sleep 6; touch "$E/stop.loop"; wait $LP; rm -f "$E/stop.loop"
 (cd "$W/hello" && "$R" env unset SLOW_START UNHEALTHY_VERSION > /dev/null 2>&1)
 wruns 3
@@ -428,69 +282,10 @@ srv 'sudo systemctl stop tando-watch.timer'
 check "20b timer stopped: doctor fails it" grep -q 'alerts .*fail.*not running' "$E/doctor2.out"
 check "20c timer stopped: tando alerts says NOT RUNNING" grep -q 'NOT RUNNING' "$E/alerts-dead.out"
 
-# ---- 21. production defaults with the real timer: time to detect a dead app ----
+# ---- 21, 22 (the real timer, a restart of the host): test/e2e-alerts-timer.sh ----
+# From here on the production defaults of these settings, as section 21 leaves them (23-28 set
+# what they need themselves)
 aset oom_quiet= restarts_window= deploy_grace= boot_grace= mem_for= heartbeat_every=
-srv 'sudo systemctl start tando-watch.timer'
-until_ 60 idle; mark   # the timer's first run (if any) is over: its messages are not counted
-t0=$(date +%s)
-crash_on hello
-until_ 300 seen firing hello down
-t1=$(date +%s)
-echo "time to detect a dead app with the real timer and production defaults: $((t1 - t0)) s" >> "$E/numbers"
-# worst case by design: the first tick that sees the activation (up to 60 s after t0) starts
-# deploy_grace (120 s), and down_after needs 2 samples a minute apart: 60 + 120 + 60 = 240 s.
-# Measured 142-194 s over six runs; the earlier 180 s bound failed about one run in three.
-check "21a dead app detected by the timer within 4 minutes ($((t1 - t0)) s)" test $((t1 - t0)) -le 240
-crash_off hello
-until_ 300 seen resolved hello down
-t2=$(date +%s)
-echo "time to announce recovery: $((t2 - t1)) s" >> "$E/numbers"
-check "21b recovery announced within 3 minutes ($((t2 - t1)) s)" test $((t2 - t1)) -le 180
-
-# ---- 22. whole host restart: the timer survives, state survives, no alert storm ----
-if [ $OWNED = 0 ]; then
-  echo "SKIP 22 whole host restart: $TANDO_TEST_NAME is not ours to restart"
-else
-aset disk_pct=1; until_ 120 firing _host.disk
-until_ 60 idle; mark   # that run has delivered its notification
-log "docker restart $TANDO_TEST_NAME"
-docker restart "$TANDO_TEST_NAME" > /dev/null
-until_ 60 srv true || { # (why the server does not answer after its restart, for the log)
-  docker inspect -f 'state {{.State.Status}} exit {{.State.ExitCode}} restarts {{.RestartCount}}' "$TANDO_TEST_NAME" >&2
-  docker exec "$TANDO_TEST_NAME" sh -c 'systemctl is-system-running; systemctl list-jobs --no-pager | head -20; ls -la /run/nologin;
-    systemctl --failed --no-pager --no-legend; systemctl status ssh ssh.socket --no-pager | head -30; journalctl -b -p warning --no-pager | tail -40' >&2
-  "$ROOT/test/server/ssh.sh" -v true 2>&1 | tail -15 >&2
-  docker exec "$TANDO_TEST_NAME" sh -c 'ip -4 addr show scope global; ss -ltn | head -12' >&2
-  # Seen with other test containers starting and stopping beside this one (Docker on OrbStack):
-  # the container is up, systemd runs and ssh.socket listens, but the published ports reach
-  # nothing (ssh and http alike, no connection arrives inside). A second restart brings them back.
-  log "the server's published ports do not answer after the restart: restarting it once more"
-  docker restart "$TANDO_TEST_NAME" > /dev/null
-  until_ 60 srv true
-}
-until_ 30 test "$(curl -s -o /dev/null -w '%{http_code}' "http://hog.localhost:$HP/health")" = 200
-check "22a the timer is active again after the restart" test "$(srv 'systemctl is-active tando-watch.timer')" = active
-[ "${TANDO_TEST_NO_DAEMON:-}" = 1 ] ||
-  check "22e tandod runs again after the restart, with its socket and its active mark" \
-    srv 'systemctl -q is-active tandod && sudo test -S /run/tandod/tandod.sock && sudo test -e /run/tandod/active'
-# watch the notifications until the timer has run twice with the app checks back on: the first
-# run after the restart sends the reboot notice and boot_grace (180 s) holds the app checks, so a
-# storm would come after it. Runs are counted from the journal, not guessed with a sleep.
-boot=$(srv 'date +%s')
-# (tandod runs the checks: two runs after boot_grace are a tick 60 s after the first one possible)
-truns() { if [ "$(dtick)" -ge $((boot + 240)) ]; then echo 2; else
-  srv "journalctl -u tando-watch.service -u tando-watch-fallback.service --since @$((boot + 180)) --no-pager -o cat | grep -c '^Finished'"; fi; }
-log "watching notifications until the timer ran twice after boot_grace"
-T_UNTIL_STEP=10 until_ 400 eval '[ "$(truns)" -ge 2 ]'; until_ 60 idle
-c22b() { [ "$(dtick)" -gt "$boot" ] || srv 'test -n "$(systemctl show -P ExecMainStartTimestamp tando-watch-fallback.service)"'; }
-check "22b the checks ran after the restart (tandod, or the timer's fallback)" c22b
-srv "sudo tail -n +$((MARK + 1)) /root/recv.log | grep '\"path\":\"/hook/'" > "$E/after-restart.log"
-check "22c after the restart: exactly one notification (host restarted), no storm" \
-  eq "$(grep -c . "$E/after-restart.log")/$(grep -c '"reboot host reboot"' "$E/after-restart.log")" 1/1
-check "22d the alert firing before the restart is still firing and was not sent again" \
-  eq "$(st _host.disk.st)/$(nev firing host disk)" firing/0
-fi
-aset disk_pct=
 
 # ---- 23. certificate check, with Caddy's internal CA (public certificates need a real domain) ----
 mark
@@ -538,7 +333,7 @@ wrun
 check "25a an invalid Caddyfile on disk fires once" eq "$(nev firing host caddy_config)" 1
 check "25b ... the running Caddy (old config) keeps serving: no app alert" eq "$(nev firing hog health)/$(nmsg)" 0/1
 vt() { srv 'sudo sed -n "s/^caddy_t=//p" /run/tando-watch/vstate'; }
-t0=$(vt); sleep 1; wruns 2
+t0=$(vt); sleep 1; wruns 2   # (kept: caddy_t is in seconds, a new validation must show as another one)
 check "25c no new validation while nothing under /etc/caddy changed" eq "$(vt)" "$t0"
 srv 'sudo cp -p /root/Caddyfile.good /etc/caddy/Caddyfile && sudo touch /etc/caddy/Caddyfile'; wruns 2
 check "25d config fixed: resolves once" eq "$(nev resolved host caddy_config)" 1
@@ -561,6 +356,9 @@ srv 'sudo systemctl kill -s KILL "tando-hello-act-*"'
 until_ 30 srv '! systemctl list-units --plain --no-legend "tando-hello-act-*" | grep -q " active "' 
 kill $DP 2> /dev/null; wait $DP 2> /dev/null
 wruns 2
+# (the agent may be recovering it itself at this very moment: a run leaves an app alone while its
+# lock is held, so the state is read when the lock is free, an event; no further run is started)
+until_ 15 srv 'sudo flock -n /opt/tando/apps/hello/lock true'
 if srv 'sudo grep -q "^phase=idle" /opt/tando/apps/hello/state'; then
   check "26d SIGKILL of a real activation: the agent recovered it itself, nothing to report" eq "$(nev firing hello stuck)" 0
 else
@@ -714,6 +512,7 @@ check "28t error spike: 12 error events within 5 min fire errors once" eq "$(nev
 aset err_spike=
 
 # lines journald dropped (log_rate 200/10s in tando.conf): a low-severity alert, and a note in logs
+# (kept: journald reports what it dropped when the app logs again after its interval, 10 s here)
 mark; breq "/flood?n=3000"; sleep 11; breq "/say?w=after"; sleep 1; wrun
 c28u() { [ "$(nev firing boom logs)" = 1 ] && since_mark | grep -q 'FIRING boom/logs (low): journald dropped'; }
 check "28u journald dropped lines: logs fires, marked low severity" c28u
@@ -722,7 +521,9 @@ check "28v tando logs ends with a note on the dropped lines" grep -q '^# note: j
 
 # a crash loop: the exit status and the last lines (kept on the server, not sent by default)
 mark
-for i in 1 2 3; do breq /crash; sleep 2; t_until 20 restarted boom "$(nrestarts boom)" 2> /dev/null; wrun; done
+# (the restart count is read before the crash, as in section 10: read after it, the wait for a
+# restart "since then" never ended before its 20 s were over)
+for i in 1 2 3; do n0=$(nrestarts boom); breq /crash; until_ 20 restarted boom "$n0"; wrun; done
 srv 'sudo grep "^boom.restarts.det=" /var/lib/tando/watch/state' > "$E/crash.det"
 check "28w restarts: the detail names the exit status" grep -q 'last: exit status 3' "$E/crash.det"
 c28x() { since_mark | grep -q 'restarts' && ! since_mark | grep -q 'crashing on purpose'; }
@@ -758,109 +559,6 @@ cpu=0; for i in 1 2 3 4 5; do d0=$(dcpu); wrun; c=$(srv 'systemctl show -P CPUUs
 echo "watch run CPU (5 runs, average): $((cpu / 5)) ms" >> "$E/numbers"
 check "28zc a check run costs under 0.5 s of CPU on average ($((cpu / 5)) ms)" test $((cpu / 5)) -lt 500
 
-# ---- 29. tandod: running after setup, killed in the middle of a run, stopped, an upgrade ----
-if [ "${TANDO_TEST_NO_DAEMON:-}" = 1 ]; then
-  echo "SKIP 29 tandod: TANDO_TEST_NO_DAEMON=1"
-else
-check "29a tandod runs after host setup; its socket is root 600 in a root 700 directory" \
-  srv 'systemctl -q is-active tandod && [ "$(sudo stat -c "%a %U" /run/tandod /run/tandod/tandod.sock | tr "\n" " ")" = "700 root 600 root " ]'
-check "29b a user that is not root cannot reach the socket; tando-watch brief works without it" \
-  srv '! ls /run/tandod > /dev/null 2>&1 && /opt/tando/bin/tando-watch brief > /dev/null'
-srv 'sudo systemctl stop tando-watch.timer'; until_ 60 idle
-# kill -9 in the middle of a run: hog/health fires in one run; "hook" answers at once, "slowd" never
-# (the run waits for it, 15 s), and tandod is killed while it waits
-printf 'http://127.0.0.1:9999/slowd/S3CR3Tslowd\n' | "$R" alerts notifier add slowd webhook > /dev/null 2>&1
-srv 'curl -s http://127.0.0.1:9999/ctl/fail/slowd > /dev/null'
-aset hog.health_fails=1; wrun; mark
-get hog /sick > /dev/null
-p0=$(srv 'systemctl show -P MainPID tandod')
-srv 'sudo systemctl start --no-block tando-watch.service'; sleep 6
-srv 'sudo systemctl kill -s KILL tandod'
-newpid() { [ "$(srv 'systemctl show -P MainPID tandod')" != "$p0" ] && srv 'systemctl -q is-active tandod'; }
-until_ 30 newpid
-check "29c killed with SIGKILL in the middle of a run: systemd restarts tandod" srv 'systemctl -q is-active tandod && sudo test -S /run/tandod/tandod.sock'
-srv 'curl -s http://127.0.0.1:9999/ctl/ok/slowd > /dev/null'
-wruns 2
-slowd() { srv "sudo tail -n +$((MARK + 1)) /root/recv.log | grep '\"path\":\"/slowd/' | grep -c '\"firing hog health\"'"; }
-check "29d no notification repeated or lost: hook got the firing once, slowd at least once (it had it but never answered)" \
-  eq "$(nev firing hog health)/$(slowd | sed 's/^[1-9][0-9]*$/n/')" 1/n
-get hog /well > /dev/null; wruns 3; aset hog.health_fails=
-"$R" alerts notifier rm slowd > /dev/null 2>&1
-# stopped: the timer's fallback runs the checks within 2 minutes
-srv 'sudo systemctl stop tandod; sudo systemctl start tando-watch.timer'
-f0=$(srv 'systemctl show -P ExecMainStartTimestampMonotonic tando-watch-fallback.service')
-check "29e tandod stopped: its socket and its active mark are gone" srv '! sudo test -e /run/tandod/tandod.sock && ! sudo test -e /run/tandod/active'
-T_UNTIL_STEP=5 until_ 130 eval '[ "$(srv "systemctl show -P ExecMainStartTimestampMonotonic tando-watch-fallback.service")" != "$f0" ]'
-check "29f ... and the timer's fallback ran the checks within 2 minutes" \
-  sh -c "[ \"\$($SSHX 'systemctl show -P ExecMainStartTimestampMonotonic tando-watch-fallback.service')\" != '$f0' ]"
-"$R" doctor > "$E/doctor-nod.out" 2>&1
-check "29g doctor: tandod not running is a warning, the checks still run" \
-  sh -c "grep -q 'tandod .*not running' '$E/doctor-nod.out' && grep -q 'alerts .*checks ran' '$E/doctor-nod.out'"
-# a run of the checks that panics: a tandod built with -tags tandotest (the test suites' build,
-# never shipped) panics in every tick with TANDOD_TEST_PANIC=1. It must keep running, hand the
-# checks to the timer's fallback within 2 minutes, say so in doctor and through the notifiers
-c=$(srv 'uname -m'); case $c in x86_64) c=amd64;; *) c=arm64;; esac
-(cd "$ROOT/srv" && CGO_ENABLED=0 GOOS=linux GOARCH=$c GOTOOLCHAIN=local go build -tags tandotest -o "$E/tandod-test" ./cmd/tandod) ||
-  fail "29k (could not build the test tandod)"
-srv 'sudo install -m 755 /dev/stdin /opt/tando/bin/tandod.test' < "$E/tandod-test"
-mark   # (before the panic: the fallback may run in the very minute of it and send the notice then)
-srv 'sudo mkdir -p /run/systemd/system/tandod.service.d && printf "[Service]\nExecStart=\nExecStart=/opt/tando/bin/tandod.test\nEnvironment=TANDOD_TEST_PANIC=1\n" |
-  sudo tee /run/systemd/system/tandod.service.d/zz-test-panic.conf > /dev/null && sudo systemctl daemon-reload && sudo systemctl start tandod'
-until_ 60 eval '[ "$(srv "systemctl show -P StatusText tandod" | grep -c "1 panics")" = 1 ]'   # the first tick of the minute
-f1=$(srv 'systemctl show -P ExecMainStartTimestampMonotonic tando-watch-fallback.service')
-T_UNTIL_STEP=5 until_ 130 eval '[ "$(srv "systemctl show -P ExecMainStartTimestampMonotonic tando-watch-fallback.service")" != "$f1" ]'
-check "29k a tick that panics: tandod keeps running, the timer's fallback runs the checks within 2 minutes" \
-  sh -c "$SSHX 'systemctl -q is-active tandod && ! sudo test -e /run/tandod/active' &&
-    [ \"\$($SSHX 'systemctl show -P ExecMainStartTimestampMonotonic tando-watch-fallback.service')\" != '$f1' ]"
-until_ 60 idle
-"$R" doctor > "$E/doctor-panic.out" 2>&1
-# (doctor's detail wraps: each piece on its own)
-check "29l doctor warns: tandod had a panic and handed the checks to the timer" \
-  sh -c "grep -q 'tandod .*warn .*problems: 1 panics' '$E/doctor-panic.out' && grep -q 'handed the checks to the timer' '$E/doctor-panic.out'"
-check "29m ... and the owner was told through the notifiers: the monitor alert fires (FIRING host/monitor ... panic)" \
-  sh -c "$SSHX \"sudo tail -n +$((MARK + 1)) /root/recv.log\" | grep '\"path\":\"/hook/' | grep -q 'FIRING host/monitor: tandod handed the checks to the timer .* (panic: tandod test panic'"
-srv 'sudo rm -f /run/systemd/system/tandod.service.d/zz-test-panic.conf /opt/tando/bin/tandod.test; sudo systemctl daemon-reload; sudo systemctl restart tandod'
-# an upgrade from a host with the timer only (the shell version's units, no tandod): a firing alert
-# stays firing and is not sent again; history and settings are kept
-srv 'sudo systemctl stop tando-watch.timer'; until_ 60 idle
-aset disk_pct=1; wruns 2
-srv 'sudo tee /root/tando-watch.legacy > /dev/null' < "$ROOT/server/legacy/tando-watch"
-srv 'sudo systemctl disable -q --now tandod; sudo rm -f /etc/systemd/system/tandod.service /opt/tando/bin/tandod
-  sudo bash /root/tando-watch.legacy install > /dev/null; sudo systemctl stop tando-watch.timer; sudo bash /root/tando-watch.legacy run'
-hlines() { srv 'sudo cat /var/lib/tando/watch/history.tsv | wc -l'; }
-h0=$(hlines); mark
-check "29h (the shell version's units: no tandod, ExecStartPre in tando-watch.service)" \
-  srv '! systemctl cat tandod > /dev/null 2>&1 && systemctl cat tando-watch.service | grep -q ExecStartPre'
-"$R" host setup t > "$E/upgrade.out" 2>&1 || cat "$E/upgrade.out" >&2
-srv 'sudo systemctl stop tando-watch.timer'; wruns 2
-# lint: allow RL02 shasum first (macOS); sha256sum only where there is no shasum
-sum256() { { shasum -a 256 "$1" 2> /dev/null || sha256sum "$1"; } | cut -d' ' -f1; }
-c29n() { [ "$(srv 'sudo sha256sum /proc/$(systemctl show -P MainPID tandod)/exe' | cut -d' ' -f1)" = "$(sum256 "$ROOT/dist/server/linux-$c/tandod")" ]; }
-check "29n upgraded: the tandod running is the binary host setup installed (the tree's, for this CPU)" c29n
-p1=$(srv 'systemctl show -P MainPID tandod'); "$R" host setup t > /dev/null 2>&1
-check "29o host setup again, nothing changed: tandod is not restarted" test "$(srv 'systemctl show -P MainPID tandod')" = "$p1"
-check "29i upgraded: tandod runs, the timer starts the fallback unit" \
-  srv 'systemctl -q is-active tandod && systemctl cat tando-watch.timer | grep -q "^Unit=tando-watch-fallback.service"'
-check "29j ... the firing alert is still firing and was not sent again; history kept" \
-  eq "$(st _host.disk.st)/$(nev firing host disk)/$(hlines | awk -v h="$h0" '{ print ($1 >= h) }')" firing/0/1
-aset disk_pct=; wruns 2
+# ---- 29 (tandod), 27h, 27i (the dead man's check in a local time zone): test/e2e-alerts-daemon.sh ----
 srv 'sudo systemctl start tando-watch.timer'
-fi
-
-srv 'sudo systemctl start tando-watch.timer'
-sleep 2; until_ 60 idle   # (a run that is starting has no ExecMainStartTimestamp yet)
-# (the timer's: tando-watch.service, referenced by nothing now, is unloaded after a run)
-check "27h systemd prints its timestamps in a local zone here (TZ=WIB-7)" \
-  srv 'TZ=WIB-7 systemctl show -P ActiveEnterTimestamp tando-watch.timer | grep -q WIB'
-# (the daemon tests above leave tandod just restarted and degraded, with no run on record yet:
-# the timer's fallback runs within two minutes)
-until_ 150 srv '/opt/tando/bin/tando-watch doctor | grep -q "checks ran"'
-srv 'TZ=WIB-7 /opt/tando/bin/tando-watch doctor; systemctl show -p StatusText,ActiveState tandod; systemctl show -p ActiveState,Result,ExecMainStartTimestampMonotonic tando-watch.service tando-watch-fallback.service; cat /proc/uptime' >&2
-check "27i the dead man's check still reads the last run's age under that zone" \
-  srv 'TZ=WIB-7 /opt/tando/bin/tando-watch doctor | grep -q "checks ran"'
-"$R" alerts > "$E/alerts-final.out" 2>&1; cat "$E/alerts-final.out" >&2
-[ -f "$E/numbers" ] && cat "$E/numbers" >&2
-
-echo
-if [ $FAILS -eq 0 ]; then echo "ALL PASS"; else echo "$FAILS FAILED"; fi
-[ $FAILS -eq 0 ]
+alerts_done

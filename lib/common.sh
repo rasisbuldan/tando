@@ -487,6 +487,9 @@ helper_file() {
 # quarter of a second, and a binary older than its source would be installed otherwise)
 helpers_build() {
   [ -f "$TANDO_HOME/srv/go.mod" ] && command -v go > /dev/null 2>&1 || return 0
+  # (test/all.sh has built this checkout's programs once for its whole run and says so by naming
+  # the checkout: its suites make some fifty host setups, each of which would build again)
+  [ "${TANDO_HELPERS_BUILT:-}" = "$TANDO_HOME" ] && return 0
   "$TANDO_HOME/scripts/build-server.sh" -q 2> "$TMPD/build.err" ||
     die "could not build the server programs: $(tail -3 "$TMPD/build.err" | tr '\n' ' ')"
 }
