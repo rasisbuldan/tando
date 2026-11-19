@@ -28,6 +28,14 @@ note() { curl -s -m 5 -X POST "http://notes.localhost:$HP/notes?text=$1" > /dev/
 psql_as() { # role password db sql
   srv "PGPASSWORD=$2 psql -X -At -h 127.0.0.1 -U $1 -d $3 -c \"$4\"" 2>&1
 }
+psql_in() { # role password db: statements on stdin, one session; an error does not end it
+  srv "PGPASSWORD=$2 psql -X -At -h 127.0.0.1 -U $1 -d $3" 2>&1
+}
+pgsu() { # db: statements on stdin as the superuser
+  srv "sudo -u postgres psql -X -At -d $1" 2>&1
+}
+oom_adj() { srv "cat /proc/$1/oom_score_adj"; }
+pg_rows() { srv "sudo $AGENT doctor" 2> /dev/null | grep "postgresql $1"; }   # the doctor row "postgresql <name>"
 
 if [ "${1:-}" != --no-reset ] && { [ "$TN" = tando-testvm ] || [ "${TANDO_TEST_OWNED:-}" = 1 ]; }; then
   log "resetting test server"
@@ -76,6 +84,22 @@ check "D1r apt failed once (the stand-in) and setup tried again by itself ($trie
   eval '[ $rc = 0 ] && [ "$tries" = 1 ] && srv "sudo test -e /root/apt-failed-once"'
 srv 'sudo rm -f /usr/local/sbin/apt-get'
 
+# P1. out of memory, the kernel must not pick the postmaster; a connection's process stays killable
+pv=$(srv "ls /etc/postgresql")   # the major version this server installed
+pm=$(srv "head -1 /run/postgresql/$pv-main.pid")
+kid=$(srv "pgrep -P $pm | head -1")
+check "P1a oom_score_adj: postmaster $(oom_adj "$pm") (-900), one of its processes $(oom_adj "$kid") (0)" \
+  eval '[ "$(oom_adj "$pm")" = -900 ] && [ "$(oom_adj "$kid")" = 0 ]'
+check "P1b tando's drop-in is part of the unit, and the version is recorded in host.conf ($pv)" \
+  eval 'srv "systemctl show -P DropInPaths postgresql@$pv-main" | grep -q "postgresql@.service.d/tando.conf" &&
+        srv "systemctl show -P OOMScoreAdjust postgresql@$pv-main" | grep -qx -- -900 &&
+        srv "grep -qx postgres_version=$pv /opt/tando/host.conf"'
+check "P1c doctor: postgresql memory ok" eval 'pg_rows memory | grep -q "^check.ok.*postmaster last (-900)"'
+srv "echo 0 | sudo tee /proc/$pm/oom_score_adj > /dev/null"
+check "P1d doctor reads the live value: a postmaster at 0 is a warning" \
+  eval 'pg_rows memory | grep -q "^check.warn.*postmaster 0"'
+srv "echo -900 | sudo tee /proc/$pm/oom_score_adj > /dev/null"
+
 # D2. up creates the role, database and DATABASE_URL; the app answers
 "$R" up > "$E/up.out" 2>&1; rc=$?; cat "$E/up.out" >&2
 check "D2 up with database = postgres: app answers ($(page))" test "$(page)" = "notes v1 db=0 file=0"
@@ -102,6 +126,24 @@ check "D4b another app's database: refused ($(echo "$out" | tail -1))" eval 'ech
 out=$(psql_as tando_notes "$pw" postgres 'SELECT 1')
 check "D4c the postgres database: refused" eval 'echo "$out" | grep -q "permission denied"'
 
+# P2. the role's limits: defaults on both apps; tando db shows what PostgreSQL holds
+"$R" db > "$E/db1.out" 2>&1; cat "$E/db1.out" >&2
+check "P2a tando db: 30s statement timeout, 5min idle in transaction, 1GB temporary files" \
+  eval 'grep -q "statement timeout *30s" "$E/db1.out" && grep -q "idle in transaction *5min" "$E/db1.out" &&
+        grep -q "temporary files *1GB" "$E/db1.out" && grep -q "tando_notes .*PostgreSQL $pv/main" "$E/db1.out"'
+url2=$(cd "$W/notes2" && "$R" db url --show); pw2=${url2#postgres://tando_notes2:}; pw2=${pw2%%@*}
+# P2b-c. a setting the client refuses, and one the server refuses
+cp tando.conf "$E/tando.conf.orig"
+echo "db_statement_timeout = 30" >> tando.conf
+"$R" deploy > "$E/badconf.out" 2>&1; rc=$?
+check "P2b the client refuses db_statement_timeout = 30 (no unit) and says what it takes (rc=$rc)" \
+  eval '[ $rc != 0 ] && grep -q "db_statement_timeout is a time like" "$E/badconf.out"'
+cp "$E/tando.conf.orig" tando.conf
+out=$(printf 'recipe=node\ndb_temp_limit=4X\n' | srv "sudo $AGENT configure notes" 2>&1)
+check "P2c the server refuses db_temp_limit=4X ($out)" eval 'echo "$out" | grep -q "bad db_temp_limit: 4X"'
+# from the next deploy (D6): notes gets short limits of its own, notes2 keeps the defaults
+printf 'db_statement_timeout = 1s\ndb_idle_tx_timeout = 2s\ndb_temp_limit = 4M\n' >> tando.conf
+
 # D5-D6. write data, deploy: a pre-deploy backup is taken, data stays
 note one; note two; note three
 check "D5 three notes in the database and the data file" test "$(page)" = "notes v1 db=3 file=3"
@@ -112,6 +154,108 @@ check "D6a deploy v2 keeps the data ($(page))" test $rc = 0 -a "$(page)" = "note
 check "D6b a pre-deploy backup holds data and db" grep -qE 'predeploy .* data db' "$E/bls.out"
 check "D6c backup ls: TIME (GMT) column in UTC" \
   eval 'grep -q "TIME (GMT)" "$E/bls.out" && grep -qE " $(TZ=UTC date +%m-%d) [0-9]{2}:[0-9]{2} " "$E/bls.out"' 
+
+# P3. a statement over the app's statement_timeout (1s) is cancelled; the session goes on
+t0=$SECONDS
+out=$(psql_in tando_notes "$pw" tando_notes <<'SQL'
+SELECT pg_sleep(8);
+SELECT 'next ' || count(*) FROM notes;
+SQL
+)
+check "P3a a query over the 1s limit is cancelled ($((SECONDS - t0))s), the session's next query answers" \
+  eval '[ $((SECONDS - t0)) -lt 6 ] && echo "$out" | grep -q "canceling statement due to statement timeout" &&
+        echo "$out" | grep -qx "next 3"'
+check "P3b the app itself still answers ($(page))" test "$(page)" = "notes v2 db=3 file=3"
+# P4. the second app is not under the first one's limits
+out=$(psql_in tando_notes2 "$pw2" tando_notes2 <<'SQL'
+SELECT pg_sleep(2);
+SHOW statement_timeout;
+SHOW temp_file_limit;
+SQL
+)
+check "P4 notes2 keeps the defaults: a 2 s query runs, 30s and 1GB ($(echo "$out" | tr '\n' ' '))" \
+  eval '! echo "$out" | grep -q cancel && echo "$out" | grep -qx 30s && echo "$out" | grep -qx 1GB'
+# P5. a session idle inside a transaction for longer than 2 s is closed (a real timer: it waits)
+out=$(psql_in tando_notes "$pw" tando_notes <<'SQL'
+BEGIN;
+SELECT 'in transaction';
+\! sleep 4
+SELECT 'still here';
+SQL
+)
+check "P5 idle in transaction over 2s: the connection is closed ($(echo "$out" | grep -i -m1 'idle\|closed'))" \
+  eval 'echo "$out" | grep -qx "in transaction" && echo "$out" | grep -q "idle-in-transaction timeout" &&
+        ! echo "$out" | grep -qx "still here"'
+# P6. temporary files over 4 MB: the statement fails; the role cannot lift that limit itself
+out=$(psql_in tando_notes "$pw" tando_notes <<'SQL'
+SET statement_timeout = 0;
+SELECT count(*) FROM (SELECT g FROM generate_series(1, 2000000) g ORDER BY g DESC) s;
+SET temp_file_limit = -1;
+SELECT 'after';
+SQL
+)
+check "P6 a sort past the temp file limit fails, and the app cannot raise the limit" \
+  eval 'echo "$out" | grep -q "temporary file size exceeds .\{0,1\}temp_file_limit" &&
+        echo "$out" | grep -q "permission denied to set parameter \"temp_file_limit\"" && echo "$out" | grep -qx after'
+# P7. a migration raises the timeout for itself: SET for the session, SET LOCAL for a transaction
+out=$(psql_in tando_notes "$pw" tando_notes <<'SQL'
+BEGIN;
+SET LOCAL statement_timeout = '20s';
+SELECT pg_sleep(2);
+SELECT 'local done';
+COMMIT;
+SHOW statement_timeout;
+SET statement_timeout = 0;
+SELECT pg_sleep(2);
+SELECT 'session done';
+SQL
+)
+check "P7 SET LOCAL and SET statement_timeout let a 2 s statement through; after COMMIT it is 1s again" \
+  eval '! echo "$out" | grep -q cancel && echo "$out" | grep -qx "local done" && echo "$out" | grep -qx 1s &&
+        echo "$out" | grep -qx "session done"'
+# P8. tando db psql (a person at a prompt): the two timeouts are off, the temp file limit stays
+out=$(echo 'SHOW statement_timeout; SHOW idle_in_transaction_session_timeout; SHOW temp_file_limit;' |
+  srv "sudo $AGENT db-psql notes" 2>&1)
+check "P8 db psql: timeouts 0, temp_file_limit 4MB ($(echo "$out" | grep -c '^ 0$') zeros)" \
+  eval '[ "$(echo "$out" | grep -c "^ 0\$")" = 2 ] && echo "$out" | grep -q "^ 4MB\$"'
+# P9. a backup that takes longer than the app's statement_timeout: pg_dump waits 5 s for a table
+# lock (one statement, 1s limit for the role) and still succeeds
+pgsu tando_notes > /dev/null <<'SQL' &
+BEGIN; LOCK TABLE notes IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(7); COMMIT;
+SQL
+locked() { [ "$(echo "SELECT count(*) FROM pg_locks WHERE mode = 'AccessExclusiveLock' AND granted AND relation = 'notes'::regclass" | pgsu tando_notes)" = 1 ]; }
+T_UNTIL_STEP=0.2 t_until 10 locked
+out=$(psql_as tando_notes "$pw" tando_notes 'SELECT count(*) FROM notes')
+t0=$SECONDS
+idl=$("$R" backup now 2>&1 | sed -n 's/^backed up [a-z0-9-]*: \([^ ]*\).*/\1/p')
+took=$((SECONDS - t0))
+wait
+check "P9a the app's own query on the locked table is cancelled at 1s" \
+  eval 'echo "$out" | grep -q "canceling statement due to statement timeout"'
+check "P9b backup now waited ${took}s for the lock (over the 1s limit) and succeeded: $idl" \
+  eval '[ "$took" -ge 3 ] && echo "$idl" | grep -qE "^[0-9]{8}-[0-9]{6}-manual$" &&
+        srv "sudo test -s $BK/notes/$idl/db.dump"'
+# P10. a restore builds indexes through temporary files (18 MB here, the app's limit is 4 MB):
+# the limit is lifted for the restore and is back after it
+pgsu tando_notes > /dev/null <<'SQL'
+SET ROLE tando_notes;
+CREATE TABLE big AS SELECT g, md5(g::text) AS t FROM generate_series(1, 500000) g;
+CREATE INDEX big_t ON big (t);
+SQL
+idb=$("$R" backup now 2>&1 | sed -n 's/^backed up [a-z0-9-]*: \([^ ]*\).*/\1/p')
+"$R" backup restore "$idb" --yes > "$E/restore-big.out" 2>&1; rc=$?; cat "$E/restore-big.out" >&2
+out=$(psql_in tando_notes "$pw" tando_notes <<'SQL'
+SET statement_timeout = 0;
+SELECT 'rows ' || count(*) FROM big;
+SELECT 'index ' || count(*) FROM pg_indexes WHERE indexname = 'big_t';
+SHOW temp_file_limit;
+SQL
+)
+check "P10a restore of a database with a large index succeeds under a 4 MB temp limit (rc=$rc, $(page))" \
+  eval '[ $rc = 0 ] && echo "$out" | grep -qx "rows 500000" && echo "$out" | grep -qx "index 1" &&
+        [ "$(page)" = "notes v2 db=3 file=3" ]'
+check "P10b the limit is back after the restore (4MB)" eval 'echo "$out" | grep -qx 4MB'
+echo "DROP TABLE big" | psql_in tando_notes "$pw" tando_notes > /dev/null
 
 # D7-D9. backup now, destroy the data, restore
 id=$("$R" backup now 2>&1 | sed -n 's/^backed up [a-z0-9-]*: \([^ ]*\).*/\1/p')
@@ -183,8 +327,41 @@ own2=$(srv "stat -c %U:%G:%a /etc/systemd/system;
 check "S4b restore refuses it too and writes nothing there (rc=$rc, $own2)" \
   eval '[ $rc != 0 ] && [ "$own2" = "root:root:755 0 " ]'
 srv "sudo -u tando-notes sh -c 'cd /opt/tando/apps/notes/shared && rm data && mv data.real data'"
+# (this deploy also carries new limits for P11: one off, one changed, one back to its default)
+{ cat "$E/tando.conf.orig"; printf 'db_statement_timeout = off\ndb_idle_tx_timeout = 10m\n'; } > "$W/notes/tando.conf"
 (cd "$W/notes" && "$R" deploy > /dev/null 2>&1); rc=$?
 check "S4c after the link is gone, deploys work again (rc=$rc, $(page))" test $rc = 0
+
+# P11. off, an override, and a setting taken out of tando.conf (back to the default)
+(cd "$W/notes" && "$R" db) > "$E/db2.out" 2>&1; cat "$E/db2.out" >&2
+out=$(psql_in tando_notes "$pw" tando_notes <<'SQL'
+SELECT pg_sleep(2);
+SHOW statement_timeout;
+SQL
+)
+check "P11 db_statement_timeout = off (a 2 s query runs), idle 10min, temp files 1GB again" \
+  eval 'grep -q "statement timeout *off" "$E/db2.out" && grep -q "idle in transaction *10min" "$E/db2.out" &&
+        grep -q "temporary files *1GB" "$E/db2.out" && ! echo "$out" | grep -q cancel && echo "$out" | grep -qx 0'
+
+# P12. the PostgreSQL version is recorded and kept. A newer major appears (its configuration
+# directory, as after a distribution upgrade); host setup runs again
+echo "ALTER ROLE tando_notes2 RESET ALL" | pgsu postgres > /dev/null   # an app from before the limits
+srv "sudo mkdir -p /etc/postgresql/99/main/conf.d"
+pm1=$(srv "head -1 /run/postgresql/$pv-main.pid")
+"$R" host setup test public_port=$HP postgres=yes > "$E/setup2.out" 2>&1; rc=$?; cat "$E/setup2.out" >&2
+check "P12a host setup with a newer version beside it: tando stays on $pv (rc=$rc), nothing written for 99" \
+  eval '[ $rc = 0 ] && srv "grep -qx postgres_version=$pv /opt/tando/host.conf" &&
+        srv "sudo test ! -e /etc/postgresql/99/main/conf.d/tando.conf" && grep -q "postgresql $pv" "$E/setup2.out"'
+check "P12b doctor says a newer version is there and that tando does not switch" \
+  eval 'pg_rows version | grep -q "^check.warn.*PostgreSQL 99 is on this server too. tando keeps using $pv/main"'
+check "P12c host setup again did not restart PostgreSQL (pid $pm1), the app answers ($(page))" \
+  eval '[ "$(srv "head -1 /run/postgresql/$pv-main.pid")" = "$pm1" ] && [ "$(page)" = "notes v3 db=3 file=3" ]'
+(cd "$W/notes2" && "$R" db) > "$E/db3.out" 2>&1
+check "P12d host setup gave an app without limits (set up by an older tando) the defaults" \
+  eval 'grep -q "statement timeout *30s" "$E/db3.out" && grep -q "temporary files *1GB" "$E/db3.out"'
+srv "sudo rm -rf /etc/postgresql/99"
+check "P12e without the newer version the doctor row is ok again" \
+  eval 'pg_rows version | grep -q "^check.ok.*$pv/main"'
 
 # D15. destroy keeps a final backup and drops the database
 echo notes2 | (cd "$W/notes2" && "$R" destroy) > "$E/destroy.out" 2>&1; rc=$?; cat "$E/destroy.out" >&2

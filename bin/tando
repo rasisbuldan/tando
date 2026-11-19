@@ -154,6 +154,7 @@ cmd_host() {
         case $kv in
           apps_domain=*|tls=*|unit_drop=*|public_port=*) ;;
           postgres=yes|podman=yes|python=yes|node=yes|node=[0-9][0-9]) feats="$feats ${kv%=yes}";;
+          postgres_version=[1-9]|postgres_version=[1-9][0-9]) feats="$feats postgres";;
           swap=yes|swap=no|ufw=yes|ufw=no) ;;
           domain_tls=auto|domain_tls=internal|domain_tls=off) ;;
           journal_max=*|log_max=*|log_keep=*|log_rate=*|access_log=*|access_size=*|access_keep=*) ;;
@@ -390,9 +391,27 @@ cmd_backup() {
   esac
 }
 
+# db_limit_show value off-value: a limit as PostgreSQL holds it, for people
+db_limit_show() {
+  case $1 in "") printf 'not set (the next deploy sets it)';; "$2") printf 'off';; *) printf '%s' "$1";; esac
+}
+db_info() {
+  agent sudo db-info "$APP" > "$TMPD/o"
+  kv_read "$TMPD/o" role cluster server size conns conn_limit statement_timeout \
+    idle_in_transaction_session_timeout temp_file_limit
+  ui_box_open "$APP" "database"
+  ui_kv database "$K_role  ${UI_DIM}PostgreSQL ${K_cluster:-$K_server}, $(ui_bytes "${K_size:-0}")${UI_NC}" 19
+  ui_kv connections "${K_conns:-0} of ${K_conn_limit:-?}" 19
+  ui_kv "statement timeout" "$(db_limit_show "$K_statement_timeout" 0)  ${UI_DIM}db_statement_timeout${UI_NC}" 19
+  ui_kv "idle in transaction" "$(db_limit_show "$K_idle_in_transaction_session_timeout" 0)  ${UI_DIM}db_idle_tx_timeout${UI_NC}" 19
+  ui_kv "temporary files" "$(db_limit_show "$K_temp_file_limit" -1)  ${UI_DIM}db_temp_limit${UI_NC}" 19
+  ui_box_close "tando db psql · limits are set in tando.conf and applied by a deploy"
+}
+
 cmd_db() {
   resolve 1
-  case ${ARGS[1]:-} in
+  case ${ARGS[1]:-info} in
+    info) db_info;;
     psql) ssh -t "${SSHO[@]}" "$TARGET" "sudo -n $AGENT_BIN db-psql $APP";;
     url)
       [ -n "$SHOW" ] || die "this prints the database password: use tando db url --show"
@@ -430,7 +449,7 @@ pos_app() {
   k=""
   if [ -n "$sub" ]; then
     case $cmd:${ARGS[pos[0]]} in
-      env:ls|backup:ls|backup:now|db:psql|db:url|domain:ls|jobs:ls|requests:summary|requests:tail|requests:errors)
+      env:ls|backup:ls|backup:now|db:info|db:psql|db:url|domain:ls|jobs:ls|requests:summary|requests:tail|requests:errors)
         [ ${#pos[@]} -ge 2 ] && k=${pos[1]};;
     esac
   else

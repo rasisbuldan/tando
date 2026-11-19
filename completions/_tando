@@ -36,7 +36,7 @@ _tando() {
     'top:A live full-screen dashboard of every registered server - apps, graphs, logs'
     'env:The apps environment variables, stored on the server (root, 640), never in'
     'jobs:run <name> runs a scheduled job now and shows its output and exit code.'
-    'db:The apps PostgreSQL database (database = postgres in tando.conf). psql opens a'
+    'db:The apps PostgreSQL database (database = postgres in tando.conf). Without a'
     'backup:Backups of the apps data directory and database (daily when the app has one).'
     'restore:Put a backup back - the same as tando backup restore, and a backup that is only'
     'host:add registers a server (a fresh Ubuntu 24.04+ with sshd and a login with'
@@ -92,7 +92,7 @@ _tando() {
         top) subs="" flags="--watch --read-only -H" args="hosts" ;;
         env) subs="ls set unset import" flags="--show -a -H" args="apps" ;;
         jobs) subs="run ls" flags="-H -a" args="apps" ;;
-        db) subs="psql url" flags="-a -H --show" args="apps" ;;
+        db) subs="psql url info" flags="-a -H --show" args="apps" ;;
         backup) subs="ls now restore pull offsite" flags="-a -H --yes --show --saved --import --rotate" args="apps" ;;
         restore) subs="" flags="-a --yes -H --from-host --all" args="" ;;
         host) subs="add setup ls rm status care update reboot" flags="--port --key --yes --force --insecure-test --no-check --deploy --json --watch --all --now --updates --reboot --window --tz --lead --even-with-other-sites" args=""

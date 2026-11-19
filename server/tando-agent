@@ -1377,6 +1377,7 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
       public_port=*) [[ ${kv#*=} =~ ^[0-9]{0,5}$ ]] || die "bad public_port"; H[public_port]=${kv#*=};;
       unit_drop=*) [[ ${kv#*=} =~ ^[A-Za-z,]*$ ]] || die "bad unit_drop"; H[unit_drop]=${kv#*=};;
       postgres=yes|podman=yes|python=yes|node=yes) feats+=("${kv%=yes}");;
+      postgres_version=*) pg_repin "${kv#*=}"; feats+=(postgres);;   # after a manual upgrade (pg_repin)
       node=[0-9]*) [[ ${kv#*=} =~ ^[0-9]{2}$ ]] || die "bad node version (a major, like 24)"; feats+=("$kv");;
       swap=yes|swap=no) swap=${kv#*=};;
       ufw=no|ufw=yes) ufw=${kv#*=};;
@@ -1518,6 +1519,7 @@ EOF
     step "$f" ok "$RT_DETAIL"
   done
 
+  [[ ${H[postgres]:-} == yes ]] && pg_host_sync   # the service drop-in, every app's role limits
   step apps run
   # settings such as tls change every site: re-render them (each reloads Caddy only if it changed)
   local n=0
@@ -1554,7 +1556,7 @@ runtime_install() { # node [major] | python | podman | postgres
     podman) apt_install podman slirp4netns; H[podman]=yes; save "$R/host.conf" H
       RT_DETAIL="podman $(podman --version 2> /dev/null | awk '{ print $3 }')";;
     postgres) pg_setup; H[postgres]=yes; save "$R/host.conf" H
-      RT_DETAIL="postgresql $(find /etc/postgresql -mindepth 1 -maxdepth 1 -printf '%f\n' | sort -V | tail -1)";;
+      RT_DETAIL="postgresql ${H[postgres_version]}";;
     *) die "unknown runtime: $1";;
   esac
   chmod 644 "$R/host.conf"
@@ -1700,10 +1702,7 @@ cmd_doctor() {
   if grep -q '^import /etc/caddy/tando/\*\.caddy' /etc/caddy/Caddyfile 2>/dev/null; then
     row check ok "caddy import" "/etc/caddy/tando/*.caddy"
   else row check fail "caddy import" "missing from /etc/caddy/Caddyfile"; fi
-  if [[ ${H[postgres]:-} == yes ]]; then
-    if pg_isready -q -h 127.0.0.1; then row check ok postgresql "accepting connections"
-    else row check fail postgresql "not running"; fi
-  fi
+  [[ ${H[postgres]:-} == yes ]] && pg_doctor
   if [[ -x $R/bin/tando-gate ]]; then   # CI: sshd reads deploy keys as tando-keys (docs/CI.md)
     if getent passwd tando-keys > /dev/null && [[ -f /etc/ssh/sshd_config.d/50-tando-ci.conf ]]; then
       row check ok "ci keys" "sshd reads them as tando-keys; $(ls -d "$R"/ci/*/ 2> /dev/null | wc -l) apps with keys"
@@ -1830,7 +1829,8 @@ cmd_configure() {
   unset "C[path]" "C[data]" "C[start_shell]" "C[writable]" "C[backup]" "C[database]" "C[image]" "C[soak]" \
     "C[container_port]" "C[build_memory]" "C[log_max]" "C[log_keep]" "C[log_rate]" "C[access_log]" \
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
-    "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]"
+    "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" \
+    "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -1857,6 +1857,7 @@ cmd_configure() {
                 done;;
       backup) [[ $v =~ ^(daily|off)$ ]] || die "backup must be daily or off";;
       database) [[ $v =~ ^(postgres|sqlite)$ ]] || die "database must be postgres or sqlite";;
+      db_statement_timeout|db_idle_tx_timeout|db_temp_limit) db_guc "$k" "$v" > /dev/null || die "bad $k: $v ($DB_GUC_HINT)";;
       memory) [[ $v =~ ^[0-9]+[KMG]$ ]] || die "bad memory: $v";;
       health_timeout) [[ $v =~ ^[0-9]{1,3}$ ]] || die "bad health_timeout: $v";;
       soak) [[ $v =~ ^[0-9]{1,3}$ ]] || die "bad soak: $v (seconds)";;
@@ -2727,8 +2728,18 @@ cmd_backup_restore() {
   fi
   if [[ -f $dir/db.dump ]]; then
     db_creds
+    # A restore builds every index again, and the sort of a large one goes through temporary
+    # files: the role's temp_file_limit (only a superuser can change it) is lifted for the restore
+    # and set again after it, also when it failed. The app is stopped, so nothing else uses the
+    # lift. Should this agent die in between, the next deploy sets the limits again (applied "").
+    # (statement_timeout and the idle timeout: pg_restore's own first statements set them to 0)
+    local was=${S[applied]:-} rrc
+    st applied ""
+    pgsql -c "ALTER ROLE $DB_ROLE SET temp_file_limit = -1" || rfail "could not prepare the database role for the restore"
     PGPASSWORD=$DB_PW as_app pg_restore --clean --if-exists --no-owner -h 127.0.0.1 -U "$DB_ROLE" \
-      -d "$DB_ROLE" < "$dir/db.dump" || rfail "database restore failed"
+      -d "$DB_ROLE" < "$dir/db.dump"; rrc=$?
+    db_limits "$DB_ROLE" && st applied "$was"
+    ((rrc == 0)) || rfail "database restore failed"
   fi
   [[ -n ${S[current]:-} ]] || { echo healthy=1; return; }
   restart_app
@@ -2752,7 +2763,12 @@ sync_backup_timer() {
 
 # ---- PostgreSQL: one role and one database per app, named tando_<app> ---------------------
 
-pgsql() { (cd / && exec runuser -u postgres -- psql -X -q -At -v ON_ERROR_STOP=1 "$@"); }
+# pgsql: SQL as the superuser, in tando's own cluster (PGCLUSTER: with a second cluster on the
+# server, the distribution's psql wrapper would otherwise choose one itself)
+pgsql() {
+  (cd / && exec runuser -u postgres -- ${H[postgres_version]:+env "PGCLUSTER=${H[postgres_version]}/main"} \
+    psql -X -q -At -v ON_ERROR_STOP=1 "$@")
+}
 
 apt_missing() { local p m=""; for p; do dpkg -s "$p" > /dev/null 2>&1 || m+="${m:+ }$p"; done; echo "$m"; }
 apt_install() { # packages...
@@ -2776,13 +2792,67 @@ apt_install() { # packages...
   die "could not install ${missing[*]} with apt (3 tries): sudo tail -20 /var/log/tando-apt.log on the server shows why"
 }
 
+# Which PostgreSQL: H[postgres_version] in host.conf, the major version whose cluster "main" holds
+# the apps' databases. Recorded once, when tando first uses the cluster, and kept: a newer major
+# that a distribution upgrade installs beside it (an empty cluster on another port) is never
+# picked up by itself. tando doctor reports it; moving is a manual step (docs/COMMANDS.md,
+# "Upgrading PostgreSQL") that ends with `tando host setup <host> postgres_version=<N>`.
+pg_majors() { # every major version with a configuration directory or binaries here, oldest first
+  { ls /etc/postgresql 2> /dev/null; ls /usr/lib/postgresql 2> /dev/null; } | grep -x '[0-9][0-9]*' | sort -n -u
+}
+pg_port() { pg_lsclusters -h 2> /dev/null | awk -v v="$1" '$1 == v && $2 == "main" { print $3 }'; }
+# pg_pin [lock]: record the version if none is recorded: the cluster "main" on port 5432, where
+# the apps' DATABASE_URL points. lock: the caller is not host setup (it takes the host lock itself
+# and reads host.conf again). Returns 1 with PG_PIN_ERR when the server does not say which.
+pg_pin() {
+  [[ ${H[postgres_version]:-} =~ ^[0-9]+$ ]] && return 0
+  if [[ ${1:-} == lock ]]; then
+    host_lock; load "$R/host.conf" H
+    [[ ${H[postgres_version]:-} =~ ^[0-9]+$ ]] && return 0
+  fi
+  local on
+  on=$(pg_lsclusters -h 2> /dev/null | awk '$2 == "main" && $3 == 5432 { print $1 }')
+  if [[ ! $on =~ ^[0-9]+$ ]]; then
+    PG_PIN_ERR="no PostgreSQL cluster named main listens on port 5432 (pg_lsclusters on the server lists them): say which version holds the apps' databases with tando host setup <host> postgres_version=<N>"
+    return 1
+  fi
+  H[postgres_version]=$on
+  save "$R/host.conf" H && chmod 644 "$R/host.conf"
+}
+# pg_repin N (host setup postgres_version=N): the databases were moved to version N by hand
+pg_repin() {
+  [[ $1 =~ ^[1-9][0-9]?$ ]] || die "bad postgres_version: $1 (a major version, like 18)"
+  [[ -f /etc/postgresql/$1/main/postgresql.conf ]] || die "no PostgreSQL cluster $1/main on this server (pg_lsclusters lists them)"
+  [[ $(pg_port "$1") == 5432 ]] ||
+    die "PostgreSQL $1/main listens on port $(pg_port "$1"), and the apps connect to 5432: move it there first (docs/COMMANDS.md, Upgrading PostgreSQL)"
+  H[postgres_version]=$1
+}
+
+# pg_protect: the kernel's out-of-memory killer must not pick the postmaster: killing it takes
+# every app's database down at once. Its children (one per connection) stay at 0, so the backend
+# of a runaway query can still be killed, and an app (OOMScoreAdjust=500) goes before any of them.
+# The distribution's unit and pg_ctlcluster already do this (-900; PG_OOM_ADJUST_FILE resets the
+# children); the drop-in keeps it so whatever a later package's unit says, and tando doctor reads
+# the live values. The values do not change, so PostgreSQL is not restarted for it.
+PG_DROPIN=/etc/systemd/system/postgresql@.service.d/tando.conf
+pg_protect() {
+  local before
+  mkdir -p "${PG_DROPIN%/*}"
+  before=$(cksum < "$PG_DROPIN" 2> /dev/null)
+  printf '# written by tando (host setup): the OOM killer spares the postmaster\n[Service]\nOOMScoreAdjust=-900\n' |
+    write_if_changed "$PG_DROPIN" || return 1
+  [[ $before == "$(cksum < "$PG_DROPIN")" ]] || systemctl daemon-reload
+}
+
 pg_setup() {
-  local ver conf
+  local ver conf changed=0
   if ! command -v pg_ctlcluster > /dev/null; then
     apt_install postgresql
   fi
-  ver=$(ls /etc/postgresql | sort -V | tail -1)
+  pg_pin || die "$PG_PIN_ERR"
+  ver=${H[postgres_version]}
   conf=/etc/postgresql/$ver/main/conf.d/tando.conf
+  [[ -d ${conf%/*} ]] || die "PostgreSQL $ver/main, where tando's databases are, has no ${conf%/*}: pg_lsclusters on the server shows what is there (docs/COMMANDS.md, Upgrading PostgreSQL)"
   # sized for a 1-2 GB machine shared with the apps
   cat > "$conf.tmp" <<EOF
 listen_addresses = 'localhost'
@@ -2797,19 +2867,68 @@ max_wal_size = 256MB
 authentication_timeout = 5s
 superuser_reserved_connections = 3
 EOF
-  if ! cmp -s "$conf.tmp" "$conf"; then mv "$conf.tmp" "$conf"; else rm -f "$conf.tmp"; fi
-  # the install can restart dbus or systemd libraries: retry until systemctl answers and
-  # the server accepts connections
+  if ! cmp -s "$conf.tmp" "$conf"; then mv "$conf.tmp" "$conf"; changed=1; else rm -f "$conf.tmp"; fi
+  pg_protect || die "could not write $PG_DROPIN"
+  # restarted only for changed settings or when it does not answer (a re-run of host setup leaves
+  # the apps' connections alone). The install can restart dbus or systemd libraries: retry until
+  # systemctl answers and the server accepts connections
   local i
-  for i in $(seq 30); do
-    systemctl restart postgresql 2> /dev/null && break
-    sleep 1
-  done
+  if ((changed)) || ! pg_isready -q -h 127.0.0.1; then
+    for i in $(seq 30); do
+      systemctl restart postgresql 2> /dev/null && break
+      sleep 1
+    done
+  fi
   for i in $(seq 30); do pg_isready -q -h 127.0.0.1 && break; sleep 1; done
   systemctl enable -q postgresql
   # apps reach only their own database: no default CONNECT on the shared databases
   pgsql -c "REVOKE CONNECT ON DATABASE postgres FROM PUBLIC" -c "REVOKE CONNECT ON DATABASE template1 FROM PUBLIC" ||
     die "could not configure postgresql"
+}
+
+# pg_host_sync (host setup, with PostgreSQL on the host): what an older tando did not set yet: the
+# recorded version, the drop-in, and every app's role limits (db_ensure). A problem here is a
+# warning, never a failed host setup: tando doctor shows the same.
+pg_host_sync() {
+  command -v pg_lsclusters > /dev/null || return 0
+  pg_pin || { echo "tando-agent: $PG_PIN_ERR" >&2; return 0; }
+  pg_protect || echo "tando-agent: could not write $PG_DROPIN" >&2
+  local a
+  for a in "$R"/apps/*/app.conf; do
+    [[ -f $a ]] && grepq -x 'database=postgres' "$a" || continue
+    a=${a%/app.conf}; a=${a##*/}
+    ( app "$a"; lock 300; db_ensure > /dev/null ) ||
+      echo "tando-agent: could not set the database limits of $a (is PostgreSQL running? tando doctor)" >&2
+  done
+  return 0
+}
+
+# pg_doctor: rows for tando doctor
+pg_doctor() {
+  local ver=${H[postgres_version]:-} port x newer="" pm kid padj kadj
+  if pg_isready -q -h 127.0.0.1; then row check ok postgresql "${ver:+$ver/main, }accepting connections"
+  else row check fail postgresql "not running: sudo systemctl start postgresql (sudo journalctl -u 'postgresql@*' -n 20 says why)"; fi
+  if [[ -z $ver ]]; then
+    row check warn "postgresql version" "not recorded yet (set up by an older tando): tando host setup <host> records the cluster the apps use"
+    return 0
+  fi
+  port=$(pg_port "$ver")
+  for x in $(pg_majors); do ((x > ver)) && newer=$x; done
+  if [[ $port != 5432 ]]; then
+    row check fail "postgresql version" "tando's databases are recorded in $ver/main, which ${port:+listens on port $port}${port:-is gone}; the apps connect to 5432. If you moved them to another version: tando host setup <host> postgres_version=<N> (docs/COMMANDS.md, Upgrading PostgreSQL)"
+  elif [[ -n $newer ]]; then
+    row check warn "postgresql version" "PostgreSQL $newer is on this server too. tando keeps using $ver/main, where the apps' databases are, and does not switch by itself. To move them: docs/COMMANDS.md, Upgrading PostgreSQL"
+  else row check ok "postgresql version" "$ver/main (recorded; a newer version is not picked up by itself)"; fi
+  # the live values: the postmaster and one of its children
+  pm=$(head -1 "/run/postgresql/$ver-main.pid" 2> /dev/null)
+  [[ $pm =~ ^[0-9]+$ ]] || return 0
+  padj=$(cat "/proc/$pm/oom_score_adj" 2> /dev/null)
+  kid=$(pgrep -P "$pm" | head -1); kadj=$(cat "/proc/$kid/oom_score_adj" 2> /dev/null)
+  if [[ $padj =~ ^-?[0-9]+$ ]] && ((padj <= -900)) && [[ $kadj =~ ^-?[0-9]+$ ]] && ((kadj >= 0 && kadj < 500)); then
+    row check ok "postgresql memory" "out of memory, the kernel kills an app first (500), then a connection's process ($kadj), the postmaster last ($padj)"
+  else
+    row check warn "postgresql memory" "oom_score_adj: postmaster ${padj:-?}, a connection's process ${kadj:-?} (wanted -900 and 0): out of memory, the kernel may kill the whole database server. Run tando host setup <host>, then sudo systemctl restart postgresql in a quiet moment"
+  fi
 }
 
 db_role() { echo "tando_${A//-/_}"; }
@@ -2827,12 +2946,13 @@ db_creds() {
 # create the role and database if missing; (re)write DATABASE_URL with a new password if absent
 db_ensure() {
   [[ ${H[postgres]:-} == yes ]] || die "no PostgreSQL on this host: tando host setup <host> postgres=yes"
+  pg_pin lock || die "$PG_PIN_ERR"
   local r pw
   r=$(db_role)
   declare -A E
   env_load E
   if [[ -n ${E[DATABASE_URL]:-} ]] && [[ $(pgsql -c "SELECT 1 FROM pg_roles WHERE rolname = '$r'") == 1 ]]; then
-    db_limit "$r"; return 0
+    db_limits "$r" || die "could not set the limits of role $r"; return 0
   fi
   pw=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
   # statements on stdin, so the password never appears in a process list
@@ -2849,12 +2969,48 @@ db_ensure() {
     die "could not restrict database $r"
   E[DATABASE_URL]="postgres://$r:$pw@127.0.0.1:5432/$r"
   env_save E || die "could not write the env file of $A (disk full?)"
-  db_limit "$r"
+  db_limits "$r" || die "could not set the limits of role $r"
 }
 # db_limit role: one app holds at most DB_CONN_LIMIT of the server's connections (max_connections
 # 20, 3 kept for the superuser): a leaking pool cannot take every slot from the other apps
 DB_CONN_LIMIT=10
-db_limit() { pgsql -c "ALTER ROLE $1 CONNECTION LIMIT $DB_CONN_LIMIT" || die "could not limit the connections of role $1"; }
+# What one app may take from the cluster all apps share, as defaults of its role (ALTER ROLE ...
+# SET: every new connection of the role starts with them). Per app in tando.conf, "off" for none:
+#   db_statement_timeout  30s  a statement running longer is cancelled (the connection stays)
+#   db_idle_tx_timeout    5m   a connection idle inside a transaction that long is closed: it
+#                              holds locks, and old row versions cannot be cleaned up meanwhile
+#   db_temp_limit         1G   temporary files of one connection (sorts, hashes): over it the
+#                              statement fails, instead of the disk all apps share filling up
+# The two timeouts are ordinary settings: a session can SET them (a long migration does: docs).
+# PostgreSQL has no way to forbid that, so they stop accidents, not an app that wants to hog.
+# temp_file_limit only a superuser can change: the app cannot raise it. lock_timeout is left alone.
+# Not under them: tando's backups and restores (pg_dump and pg_restore set the timeouts to 0
+# themselves; cmd_backup_restore lifts the temp limit) and tando db psql (cmd_db_psql).
+DB_GUC_HINT="a time like 500ms, 30s, 5m, 2h, a size like 512M or 2G for db_temp_limit, or off"
+# db_guc key value -> the value as PostgreSQL takes it; 1 when the value is not valid
+db_guc() {
+  local v=${2:-}
+  case $1 in
+    db_statement_timeout|db_idle_tx_timeout)
+      [[ $v == off ]] && { echo 0; return 0; }
+      [[ $v =~ ^[1-9]([0-9]{0,8}ms|[0-9]{0,5}s|[0-9]{0,3}m|[0-9]?h)$ ]] || return 1
+      [[ $v == *ms ]] || v=${v/%m/min}; echo "$v";;
+    db_temp_limit)
+      [[ $v == off ]] && { echo -1; return 0; }
+      [[ $v =~ ^[1-9]([0-9]{0,5}M|[0-9]{0,2}G)$ ]] || return 1
+      echo "${v}B";;
+    *) return 1;;
+  esac
+}
+# db_limits role: the connection limit and the three settings, from app.conf (C) or the defaults
+db_limits() {
+  local st it tf
+  st=$(db_guc db_statement_timeout "${C[db_statement_timeout]:-30s}") &&
+    it=$(db_guc db_idle_tx_timeout "${C[db_idle_tx_timeout]:-5m}") &&
+    tf=$(db_guc db_temp_limit "${C[db_temp_limit]:-1G}") || return 1
+  pgsql -c "ALTER ROLE $1 CONNECTION LIMIT $DB_CONN_LIMIT" -c "ALTER ROLE $1 SET statement_timeout = '$st'" \
+    -c "ALTER ROLE $1 SET idle_in_transaction_session_timeout = '$it'" -c "ALTER ROLE $1 SET temp_file_limit = '$tf'"
+}
 
 db_drop() {
   local r
@@ -2865,10 +3021,30 @@ db_drop() {
 cmd_db_url() { need_root; app "$1"; [[ ${C[database]:-} == postgres ]] || die "$A has no database"
   db_creds; echo "url=$DB_URL"; }
 
+# db-info app: what the server has for the app's database (the limits as PostgreSQL holds them)
+cmd_db_info() {
+  need_root; app "$1"; [[ ${C[database]:-} == postgres ]] || die "$A has no database"
+  local r k v out; r=$(db_role)
+  out=$(pgsql -F ' ' -c "SELECT 'server', current_setting('server_version_num')::int / 10000" \
+    -c "SELECT 'size', pg_database_size('$r')" \
+    -c "SELECT 'conns', count(*) FROM pg_stat_activity WHERE usename = '$r'" \
+    -c "SELECT 'conn_limit', rolconnlimit FROM pg_roles WHERE rolname = '$r'" \
+    -c "SELECT replace(unnest(setconfig), '=', ' ') FROM pg_db_role_setting s JOIN pg_roles o ON o.oid = s.setrole
+        WHERE o.rolname = '$r' AND s.setdatabase = 0") || die "PostgreSQL does not answer: tando doctor"
+  echo "role=$r"; echo "cluster=${H[postgres_version]:-}${H[postgres_version]:+/main}"
+  while read -r k v; do
+    case $k in server|size|conns|conn_limit|statement_timeout|idle_in_transaction_session_timeout|temp_file_limit)
+      [[ $v =~ ^[A-Za-z0-9.-]+$ ]] && echo "$k=$v";; esac
+  done <<< "$out"
+}
+
 cmd_db_psql() { # interactive, over ssh -t; runs as the app user with the app's role
   need_root; app "$1"; [[ ${C[database]:-} == postgres ]] || die "$A has no database"
   db_creds
   export PGPASSWORD=$DB_PW PSQL_HISTORY=/dev/null
+  # a person at a prompt: a long query or a pause inside a transaction is meant, so the role's
+  # two timeouts are off in this session (the temp file limit stays: only a superuser lifts it)
+  export PGOPTIONS='-c statement_timeout=0 -c idle_in_transaction_session_timeout=0'
   audit_done 0
   cd /tmp && exec runuser -u "$AU" -- psql -h 127.0.0.1 -U "$DB_ROLE" -d "$DB_ROLE"
 }
@@ -3690,6 +3866,7 @@ case $verb in
   backup-restore) cmd_backup_restore "$@";;
   db-url) cmd_db_url "$@";;
   db-psql) cmd_db_psql "$@";;
+  db-info) cmd_db_info "$@";;
   shell) cmd_shell "$@";;
   shell-put) cmd_shell_put "$@";;
   busy) cmd_busy "$@";;

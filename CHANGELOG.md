@@ -6,6 +6,20 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: limits on each app's PostgreSQL role, so one app cannot take the shared database from the
+  others: `db_statement_timeout` (30s), `db_idle_tx_timeout` (5m), `db_temp_limit` (1G) in
+  tando.conf, `off` for none. Set by the next deploy and by `tando host setup`. A statement over
+  30 s is now cancelled: a long migration sets `SET statement_timeout = 0` for itself
+  (docs/COMMANDS.md, "Database limits"). Backups, restores and `tando db psql` are not cut.
+- Added: `tando db` shows the database's size, connections and limits.
+- Changed: the PostgreSQL major version is recorded (`postgres_version` in host.conf) and kept; a
+  newer one installed beside it is not picked up, `tando doctor` reports it, and
+  `host setup postgres_version=N` moves the record after a manual upgrade (runbook in
+  docs/COMMANDS.md, not rehearsed). `host setup postgres=yes` restarts PostgreSQL only when its
+  settings changed.
+- Added: tando's own drop-in keeps the PostgreSQL postmaster out of the OOM killer's reach
+  (-900, as the Ubuntu packages already set); `tando doctor` reads the live values.
+
 - Tests: tiers (`test/all.sh --tier check|quick|full|nightly|weekly`), `test/check.sh`, suite selection
   by changed files (`test/suites.map`), fault scenarios in shards; the full tier takes about 16 minutes
   on the reference laptop (was about 2 hours). AGENTS.md says what to run when.
