@@ -6,6 +6,17 @@ first, grouped by area.
 
 ## Unreleased
 
+Found by adopting a live app on a real server (docs/MIGRATION.md, "On the real server").
+
+- Fixed: a release refused at pre-flight left its `start` command in the app's settings, so the
+  live release used it at its next restart. Each release now keeps its own start command.
+- Fixed: for an adopted app the monitor probed `<app>.<apps_domain>` instead of the app's own
+  site and reported it unhealthy. Health, certificate and after-reboot checks use the real site.
+- Fixed: `adopt plan` reported no backup when the owner's backup script runs from a systemd
+  timer rather than cron.
+- Added: the request log directory is prepared for adopted apps, so `tando requests` works once
+  the log block is pasted into the hand-written site.
+
 ## 0.1.0 - 2026-11-18
 
 First public release.

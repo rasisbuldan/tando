@@ -139,7 +139,11 @@ func (h *Host) probes() []appProbe {
 		if hp == "" {
 			hp = "/"
 		}
-		res = append(res, appProbe{App: a, URL: scheme + a + "." + dom + conf["path"] + hp, Expect: conf["health_expect"],
+		url := scheme + a + "." + dom + conf["path"] + hp
+		if cu := conf["check_url"]; cu != "" { // adopted app behind a hand-written Caddy site
+			url = cu + conf["path"] + hp
+		}
+		res = append(res, appProbe{App: a, URL: url, Expect: conf["health_expect"],
 			Timeout: time.Duration(timeout) * time.Second})
 	}
 	return res

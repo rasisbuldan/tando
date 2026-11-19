@@ -15,6 +15,10 @@ func queueProbe(t *tick, a *appTick) {
 	if !t.cfg.on("health", a.name) || a.hold || !t.caddyUp {
 		return // (held: the state is left alone)
 	}
+	if cu := a.conf["check_url"]; cu != "" { // adopted app behind a hand-written Caddy site: its own address
+		a.probeURL = cu + a.conf["path"] + or(a.conf["health"], "/")
+		return
+	}
 	scheme := "https://"
 	if or(t.host["tls"], "off") == "off" {
 		scheme = "http://"
@@ -211,6 +215,13 @@ func checkTLS(t *tick, a *appTick) {
 	defer t.vs.set("tls."+a.name, decimal.Itoa(t.now))
 	k := a.key("tls")
 	site := t.site(a.name)
+	if cu := a.conf["check_url"]; cu != "" { // adopted app: the certificate of its own site
+		host, ok := strings.CutPrefix(cu, "https://")
+		if !ok {
+			return
+		}
+		site, _, _ = strings.Cut(host, "/")
+	}
 	nb, na, err := t.w.Certs.Cert(t.ctx, site, tlsMode != "internal")
 	switch {
 	case err == errNoVerify:

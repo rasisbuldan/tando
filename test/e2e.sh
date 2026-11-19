@@ -334,6 +334,20 @@ id8=$(rid "$E/d8.out")
 check "3f fails after switch: rolled back automatically (rc=$rc, v$(ver), $id8 $(rel_status "$id8"))" \
   test $rc -ne 0 -a "$(ver)" = 6 -a -z "$(rel_status "$id8")" -a "$(cur_status)" = verified   # (its files deleted)
 
+# 3g. a release whose start command is wrong fails pre-flight. The live release keeps its own
+#     start command: when it crashes afterwards, systemd brings it back (found on a real server:
+#     the refused deploy's start line stayed in app.conf and the live app could not restart)
+"$R" env unset UNHEALTHY_VERSION >&2
+conf_set tando.conf start "node missing-on-purpose.js"
+"$R" deploy > "$E/d3g.out" 2>&1; rc=$?; cat "$E/d3g.out" >&2
+srv "sudo systemctl kill -s KILL tando-hello"
+sleep 2; until_ 30 eqv 6
+check "3g refused release (rc=$rc) does not change how the live one restarts (v$(ver) after a kill)" \
+  test $rc -ne 0 -a "$(ver)" = 6
+conf_set tando.conf start "node server.js"
+"$R" restart > /dev/null 2>&1
+check "3h and a plain restart of the live release still works (v$(ver))" eqv 6
+
 # 12. a crash-looping release fails fast after the switch, not after the health timeout;
 #     env unset clears a variable
 conf_set tando.conf health_timeout 60

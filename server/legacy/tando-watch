@@ -649,10 +649,12 @@ cmd_run() {
     local site="$a.${H[apps_domain]:-localhost}" path="${C[path]:-}${C[health]:-/}"
     if enabled health "$a"; then
       if ((hold || !caddy_up)); then sample "$k.health" "$a" health hold "" 1
+      elif [[ -n ${C[check_url]:-} ]]; then q_url+=("${C[check_url]}$path"); q_app+=("$a")  # adopted: its own site
       elif [[ ${H[tls]:-off} == off ]]; then q_url+=("http://$site$path"); q_app+=("$a")
       else q_url+=("https://$site$path"); q_app+=("$a"); fi
     fi
-    if [[ ${H[tls]:-off} != off ]] && enabled tls "$a"; then
+    if [[ -n ${C[check_url]:-} ]]; then site=${C[check_url]#*://} site=${site%%/*}; fi
+    if [[ ${H[tls]:-off} != off && ${C[check_url]:-https://} == https://* ]] && enabled tls "$a"; then
       cfgv t tls_every "$a"
       if ((NOW - ${VS[tls.$a]:-0} >= t * 60)); then tls_check "$a" "$site"; vs "tls.$a" "$NOW"; fi
     fi

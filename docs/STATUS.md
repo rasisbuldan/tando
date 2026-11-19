@@ -30,7 +30,7 @@ kept as they were; "Round of 16-17 Nov" says what changed since and what is not 
 | Empty VM to live, domains (internal CA, fake DNS) | built | dev: e2e-bootstrap 22/22; real server below |
 | CLI argument checking, help, guided setup | built | dev: e2e-cli 263/263, e2e-ease 27/27, ui-test 463/463 |
 | `top` | built | dev: e2e-top 25/25 |
-| `adopt` | built | rehearsed on a private replica of a real server (61/61 on 15 Nov); that suite needs private data and is not in this repository |
+| `adopt` | built | rehearsed on a private replica of a real server (61/61 on 15 Nov; that suite needs private data and is not in this repository), then run on that server on 19 Nov: one app adopted and deployed. `adopt undo` and timers only on the replica |
 | Install, release archive | built | dev: install-test 17/17; lint 0 new errors or warnings |
 | Real-server regressions | built | dev: e2e-trial 11/11 |
 | Limits and load: per-app slice, `max_conns`, `max_requests`, per-client limits | built | load tester (test/load, bench/RESULTS.md); in e2e and e2e-faults |
@@ -268,8 +268,13 @@ to a live site that tando does not manage. Numbers are in bench/RESULTS.md, "Rea
 - The live site answered every check of the monitor during the work and its process and Caddy
   were never restarted. (One 5 s timeout of 11,175 checks on 14 Nov, cause unproven.)
 
+- 19 Nov: `adopt apply` on the live site (a Next.js shop with real orders), then four deploys, a
+  rollback, a refused release, a hard kill, `host setup` three times over the running install, and
+  12,000 requests of load. It found four bugs, all fixed (docs/MIGRATION.md, "On the real
+  server"). One of them took the site's pages down for about 50 s during the test.
+
 Not exercised on the real server: the container recipe (the image must be built for x86-64, and
-this laptop cannot), `adopt apply`, a reboot.
+this laptop cannot), `adopt undo`, adopting an app with timers, a reboot.
 
 ## Still to do on a real server
 

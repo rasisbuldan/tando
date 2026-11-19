@@ -272,11 +272,19 @@ adopt_scan() {
   fi
 
   # timers that call the app (by port, path or unit name), and how each maps to a tando job
-  local tm svc cal mono acc rnd pers cmd n why lt val
+  local tm svc cal mono acc rnd pers cmd n why lt val word
   while read -r tm _; do
     [[ $tm == *.timer && $tm != tando-* ]] || continue
     svc=$(sp "$tm" Unit)
     cmd=$(argv_of "$(sp "$svc" ExecStart)")
+    # a timer that runs a backup script of the data directory (a tar of it) is the owner's backup:
+    # it stays as it is, and is never turned into a job
+    word=${cmd%% *}
+    if [[ -n ${F[data_dir]:-} && $word == /* && -f $word && ! $word =~ ^/(usr/)?bin/ ]] && grep -qsw 'tar' "$word" &&
+       { grep -qsF "${F[data_dir]}" "$word" || grepq -sE "$(dirname "${F[data_dir]}")/? +${F[data_dir]##*/}( |\$)" "$word"; }; then
+      F[backup_script]=$word F[backup_cron]=$(sp "$tm" FragmentPath)
+      continue
+    fi
     [[ $cmd == *":${F[port]:-x}/"* || $cmd == *":${F[port]:-x} "* || $cmd == *"${F[root]}/"* || " $cmd " == *[/\ ]"$unit"[\ .]* ]] || continue
     cal=$(sp "$tm" TimersCalendar | grep -o 'OnCalendar=[^;]*' | sed 's/OnCalendar=//; s/ *$//')
     mono=$(sp "$tm" TimersMonotonic); acc=$(sp "$tm" AccuracyUSec); rnd=$(sp "$tm" RandomizedDelayUSec)
@@ -321,7 +329,7 @@ adopt_scan() {
   F[jobs]=$(IFS=,; echo "${JOBS[*]}")
 
   # cron entries and scripts touching the app; the backup that covers its data (R9)
-  local cfile word dests a newest cnt miss words=()
+  local cfile dests a newest cnt miss words=()
   for cfile in /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/*; do
     [[ -f $cfile ]] || continue
     while IFS= read -r l; do

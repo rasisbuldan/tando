@@ -137,6 +137,9 @@ func (a *app) setup(ctx context.Context) error {
 	}
 	caddy, err1 := a.l.Users.UID("caddy")
 	grp, err2 := a.l.Users.GID("tando-" + a.name)
+	if u := a.conf["user"]; err2 != nil && u != "" { // an adopted app keeps its own user and group
+		grp, err2 = a.l.Users.GID(u)
+	}
 	if err1 != nil || err2 != nil {
 		return nil
 	}

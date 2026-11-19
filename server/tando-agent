@@ -268,7 +268,7 @@ app_units() {
 # drop_release id: a release that failed takes no disk (its history line stays)
 drop_release() {
   valid_id "$1" && [[ -d $D/releases/$1 && $(cur_link) != "$1" ]] || return 0
-  rm -rf --one-file-system "${D:?}/releases/$1"; rm -f "$D/jobs/$1"
+  rm -rf --one-file-system "${D:?}/releases/$1"; rm -f "$D/jobs/$1" "$D/start/$1"
   [[ ${C[recipe]:-} == container ]] && podman rmi -f "localhost/tando-$A:$1" > /dev/null 2>&1
   return 0
 }
@@ -865,7 +865,7 @@ prune() {
     [[ $i == "${S[current]:-}" || $i == "${S[last_good]:-}" || $i == "${S[target]:-}" ]] && keep=1
     [[ -z ${S[status_$i]:-} ]] && keep=1          # reserved by a queued activation
     if ((!keep)); then
-      rm -rf "${D:?}/releases/$i" "${D:?}/jobs/$i"; unset "S[status_$i]" "S[seq_$i]"
+      rm -rf "${D:?}/releases/$i" "${D:?}/jobs/$i" "${D:?}/start/$i"; unset "S[status_$i]" "S[seq_$i]"
       [[ ${C[recipe]:-node} == container ]] && podman rmi -f "localhost/tando-$A:$i" > /dev/null 2>&1
     fi
   done
@@ -1815,6 +1815,9 @@ cmd_configure() {
     load "$D/state" S
     # the live release's jobs are those it was deployed with: keep them before app.conf changes
     [[ -n ${S[current]:-} && ! -f $D/jobs/${S[current]} ]] && valid_id "${S[current]}" && jobs_snap "${S[current]}"
+    # and so is its start command: a release that fails pre-flight must not change how the live
+    # one starts at its next restart
+    [[ -n ${S[current]:-} && ! -f $D/start/${S[current]} ]] && valid_id "${S[current]}" && start_snap "${S[current]}"
   else
     # a user of that name is only taken over when an earlier configure of this app made it and was
     # interrupted before app.conf existed (its marker .creating is in the app's directory)
@@ -3368,6 +3371,12 @@ cmd_exec_app() {
   local dir=${2:-$D/current} argv
   [[ $dir == "$D/current" || $dir == "$D"/releases/* ]] || die "bad dir"
   cd "$dir" || die "no release"
+  # the release's own start command, when a later deploy has changed app.conf since (start_snap)
+  local rid; rid=$(pwd -P); rid=${rid##*/}
+  if valid_id "$rid" && [[ -r $D/start/$rid ]]; then
+    local -A RS=(); load "$D/start/$rid" RS
+    if [[ -n ${RS[start]:-} ]]; then C[start]=${RS[start]} C[start_shell]=${RS[start_shell]:-}; fi
+  fi
   case ${C[recipe]:-node} in
     container) exec_container "$dir";;
     next) export HOSTNAME=127.0.0.1;;      # Next standalone binds to $HOSTNAME
@@ -3429,6 +3438,16 @@ jobs_snap() { # id: record the jobs of app.conf (C) as release id's
   [[ -d $D/jobs ]] || { mkdir -m 700 "$D/jobs" && chown root:root "$D/jobs"; } || return 1
   for k in "${!C[@]}"; do [[ $k != job.* ]] || printf '%s=%s\n' "$k" "${C[$k]}"; done | sort > "$D/jobs/$1.tmp" &&
     mv -f "$D/jobs/$1.tmp" "$D/jobs/$1" || { rm -f "$D/jobs/$1.tmp"; return 1; }
+}
+# The start command belongs to a release too ($D/start/<id>, readable by the app: exec-app runs as
+# its user). A release without such a file starts with app.conf's: it is the newest one.
+start_snap() { # id: record how release id starts (app.conf as it is now)
+  local g=root
+  getent group "tando-m-$A" > /dev/null && g=tando-m-$A
+  [[ -d $D/start ]] || { mkdir -m 750 "$D/start" && chown "root:$g" "$D/start"; } || return 1
+  printf 'start=%s\nstart_shell=%s\n' "${C[start]:-}" "${C[start_shell]:-}" > "$D/start/$1.tmp" &&
+    chown "root:$g" "$D/start/$1.tmp" && chmod 640 "$D/start/$1.tmp" &&
+    mv -f "$D/start/$1.tmp" "$D/start/$1" || { rm -f "$D/start/$1.tmp"; return 1; }
 }
 # shellcheck disable=SC2034  # J is read by sync_jobs through its nameref
 jobs_follow() { # the job units become those of the current release (none without one)

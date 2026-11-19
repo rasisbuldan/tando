@@ -134,6 +134,24 @@ func TestHealthClasses(t *testing.T) {
 	}
 }
 
+// An adopted app sits behind a hand-written Caddy site: it is probed at that site's address,
+// not at <app>.<apps_domain>, which no site answers.
+func TestAdoptedAppIsProbedAtItsOwnSite(t *testing.T) {
+	f := newFakeHost(t)
+	f.app("shop", "check_url=https://example.net", "path=/shop", "health_fails=1")
+	f.settings("liveness=0")
+	f.probe["http://shop.localhost/shop/health"] = probeRes{exit: 35}
+	f.tick()
+	if st := f.st("shop.health.st"); st != "" {
+		t.Errorf("probed the default link: %q %q", st, f.st("shop.health.det"))
+	}
+	f.probe["https://example.net/shop/health"] = probeRes{code: 502}
+	f.tick()
+	if d := f.st("shop.health.det"); !strings.Contains(d, "example.net/shop/health") {
+		t.Errorf("detail %q", d)
+	}
+}
+
 func TestFlapping(t *testing.T) {
 	f := hostWithHog(t)
 	f.settings("hog.health_fails=1", "hog.resolve_after=1", "liveness=0")

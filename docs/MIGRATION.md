@@ -2,7 +2,8 @@
 
 A runbook for the owner's VPS. Rehearsed on a local replica of that server
 (a replica container and an e2e suite, `e2e-adopt`, kept outside this repository because they
-reproduce a private server); nothing here has been run on the real server yet.
+reproduce a private server). bakery was then adopted on the real server on 19 Nov 2026:
+see "On the real server" at the end. magazine, timers and `adopt undo` are replica-only so far.
 
 ## What adopt does, in one paragraph
 
@@ -311,3 +312,55 @@ deploy, with tando or by hand.
 | magazine: `/opt/magazine/{current,releases,incoming}`, user `magazine`, `/etc/magazine.env` with `CRON_SECRET`, releases owned by magazine, `basePath /magazine` | owner's notes; rest guessed | `systemctl cat magazine`, `ls -la /opt/magazine` |
 | Six timers `magazine-<job>.timer`, each a `curl -H "Authorization: Bearer ${CRON_SECRET}" http://127.0.0.1:3200/...` with `EnvironmentFile=/etc/magazine.env`, default AccuracySec | owner's notes; form guessed | `systemctl cat 'magazine*'` |
 | No drop-ins, no other unit or script runs `systemctl restart bakery` except deploy-vps.sh | guessed | `systemctl cat`, `grep -r 'systemctl.*bakery' /usr/local/bin /etc/cron*` |
+
+## On the real server (19 Nov 2026)
+
+bakery, with real orders, on a 1-vCPU x86-64 server (Ubuntu 26.04, Caddy 2.6.2, Node 24). A
+loop on the laptop asked for five pages, a hashed CSS file, a photo and an optimised image about
+twice a second through the public address for 28 minutes: 16,569 requests.
+
+| Step | Time | Failed requests |
+|---|---|---|
+| `adopt apply` | 64 s in all, about 2 s without the app | 16 (HTTP 502), dynamic pages only |
+| first `tando deploy` | 69 s, about 3 s without the app | 20 (HTTP 502) |
+| after `lb_try_duration 15s` in the site block: rollback (4 s), three deploys (58 to 72 s) | | 0; slowest answer 3.8 s |
+| `host setup` three times over the running install | 44 to 54 s | 0 |
+| a release with a wrong start command | refused at pre-flight | 0 |
+| hard kill of the app (after the fix below) | back in 3 s | 0; slowest answer 4.0 s |
+| `ab`, 20 at once, 12,000 requests over four URLs | | 0 |
+
+The order file had the same digest before and after, and tando's pre-deploy backup held the
+same file and every upload. The owner's nightly backup ran unchanged.
+
+Four bugs, found here and not on the replica, all fixed:
+
+1. **A refused release changed how the live one starts.** The deploy with the wrong start
+   command was refused, correctly, but its `start` line stayed in `app.conf`. The live app kept
+   running until it was killed (the next test); then systemd started it with the wrong command,
+   five times, and gave up. The pages answered 502 for about 50 s until the line was put back by
+   hand. Now each release keeps its own start command (`/opt/tando/apps/<app>/start/<id>`), as it
+   already kept its own jobs. Test: e2e 3g, 3h.
+2. **The monitor probed an address that does not exist.** For an adopted app, `tandod` asked
+   `<app>.<apps_domain>` instead of the app's real site, so it reported the app unhealthy
+   (TLS error) while it was serving. It did not restart it: before a restart it asks the app's
+   port directly. The health probe, the certificate check and host care's check after a reboot
+   now use the adopted site's address.
+3. **The plan said there was no backup.** It looked for the owner's backup script in cron only;
+   this server runs it from a systemd timer. Timers are read too now, and such a timer is never
+   turned into a tando job.
+4. **No request log for an adopted app.** `tando requests`, the HTTP part of `tando errors` and
+   the 5xx alert read `/var/log/tando/<app>/access.log`, which only a tando-rendered site writes.
+   The directory is now prepared for adopted apps, and the block to paste into your own site is
+   printed by `sudo /opt/tando/bin/tando-logs caddy-log <app>` on the server. Validate, then
+   `systemctl reload caddy`.
+
+Also seen:
+
+- After adopt and after every deploy the image cache is empty (it is per release here). The old
+  deploy script requested every image once after the switch; tando has no step for that yet.
+- The old script also failed a deploy when the image optimiser did not work (a `sharp` binary
+  for the wrong platform). tando swaps the binary itself but checks only the health page.
+- `tando backup ls` does not list the adopt backup, only later ones.
+- A failed build prints its last lines cut to the box width, which can hide the reason.
+- The false alert of bug 2 stays in the uptime figures: there is no way to drop an incident.
+
