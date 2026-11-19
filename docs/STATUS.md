@@ -30,7 +30,7 @@ kept as they were; "Round of 16-17 Nov" says what changed since and what is not 
 | Empty VM to live, domains (internal CA, fake DNS) | built | dev: e2e-bootstrap 22/22; real server below |
 | CLI argument checking, help, guided setup | built | dev: e2e-cli 263/263, e2e-ease 27/27, ui-test 463/463 |
 | `top` | built | dev: e2e-top 25/25 |
-| `adopt` | built | rehearsed on a private replica of a real server (61/61 on 15 Nov; that suite needs private data and is not in this repository), then run on that server on 19 Nov: one app adopted and deployed. `adopt undo` and timers only on the replica |
+| `adopt` | built | rehearsed on a private replica of a real server (61/61 on 15 Nov; that suite needs private data and is not in this repository), then run on that server on 19 Nov: one app adopted and deployed. `adopt undo` and timers only on the replica. dev: `test/e2e-adopt.sh` (a synthetic app, no timers): plan, site, apply, deploy, rollback, undo |
 | Install, release archive | built | dev: install-test 17/17; lint 0 new errors or warnings |
 | Real-server regressions | built | dev: e2e-trial 11/11 |
 | Limits and load: per-app slice, `max_conns`, `max_requests`, per-client limits | built | load tester (test/load, bench/RESULTS.md); in e2e and e2e-faults |

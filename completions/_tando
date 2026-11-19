@@ -109,7 +109,7 @@ _tando() {
         errors) subs="" flags="--since -n --json -a -H --last" args="apps" ;;
         requests) subs="tail errors summary" flags="--since -a -H --last -n -f --4xx" args="apps" ;;
         audit) subs="" flags="-n -H -a" args="apps" ;;
-        adopt) subs="plan apply undo status site" flags="--health --no-jobs --yes -H --apply" args="apps" ;;
+        adopt) subs="plan apply undo status site" flags="--health --no-jobs --yes --accept-502 -H --apply" args="apps" ;;
         help) subs="" flags="" args="" ;;
         cheat) subs="" flags="" args="" ;;
         go) subs="" flags="--port --key --domain --dns --yes --forget" args="" ;;

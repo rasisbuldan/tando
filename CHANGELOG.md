@@ -6,6 +6,17 @@ first, grouped by area.
 
 ## Unreleased
 
+- Changed: `tando adopt apply` refuses to start when the hand-written Caddy site does not hold
+  requests while the app restarts (no `lb_try_duration`), and `tando adopt plan` says what that
+  costs and which command adds it. On the first real server 36 requests got 502 because the hold
+  could only be added after adoption. `--accept-502` adopts without it.
+- Added: `tando adopt site <unit> --apply` works before adoption and adds the hold only (the
+  request log comes after adoption); the copy of the Caddyfile is then kept in
+  `/opt/tando/adopt/<unit>/`. Several `reverse_proxy` lines to the port that each have the hold
+  count as held.
+- Tests: `test/e2e-adopt.sh` adopts a synthetic hand-deployed app on a test server under a request
+  loop: plan, the refusal, the hold before adoption, apply, deploy, rollback, the request log,
+  undo, and the same adoption without the hold as a control.
 - Tests: tiers (`test/all.sh --tier check|quick|full|nightly|weekly`), `test/check.sh`, suite selection
   by changed files (`test/suites.map`), fault scenarios in shards; the full tier takes about 16 minutes
   on the reference laptop (was about 2 hours). AGENTS.md says what to run when.

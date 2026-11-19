@@ -395,11 +395,11 @@ Who changed what on the server: one row per deploy, env change, restart,
 backup... with the sudo login and its address.
 
 @@ adopt
-flags: -H= --health= --no-jobs --yes --apply
+flags: -H= --health= --no-jobs --yes --apply --accept-502
 subs: plan=1 apply=1 undo=1 status=1 site=1
-usage: tando adopt plan|apply <unit> [--health /path] [--no-jobs] [--yes]
+usage: tando adopt plan|apply <unit> [--health /path] [--no-jobs] [--yes] [--accept-502]
 usage: tando adopt undo|status <app>
-usage: tando adopt site <app> [--apply]
+usage: tando adopt site <app|unit> [--health /path] [--apply]
 Take over an app that was deployed by hand (a systemd unit behind Caddy): plan
 shows what would change, apply does it with a backup, undo goes back.
 site shows what your own Caddy site lacks next to one tando renders: holding
@@ -407,6 +407,10 @@ requests while the app restarts (no 502 during a deploy) and the request log
 tando requests reads. --apply adds them to the Caddyfile: a copy is kept, the
 file is validated and reloaded, and the previous one comes back if the app
 does not answer.
+The order is plan, site --apply, apply. Before adoption, site takes the unit
+and adds the hold only (the log comes after adoption). Without the hold,
+requests fail with 502 while the app restarts: plan says so, and apply
+refuses to start unless you pass --accept-502.
 See docs/MIGRATION.md.
 
 @@ help
