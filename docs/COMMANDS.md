@@ -169,8 +169,11 @@ no next run), never when the release fails, and a rollback brings back the previ
 Example: `tando jobs run nightly`
 
 ### db
-`tando db psql [app]` · `tando db url [app] --show`. Flags: `-a -H --show`. Subcommands: psql, url (0-1: the app).
-The app's PostgreSQL database (`database = postgres`). `url` refuses to print without `--show`.
+`tando db [info] [app]` · `tando db psql [app]` · `tando db url [app] --show`. Flags: `-a -H --show`.
+Subcommands: info (default, 0-1: the app), psql, url (0-1).
+The app's PostgreSQL database (`database = postgres`). Without a subcommand: its size, the
+connections in use and the limits of its role as PostgreSQL holds them. `url` refuses to print
+without `--show`. See "Database limits" and "Upgrading PostgreSQL" below.
 Example: `tando db url --show`
 
 ### backup
@@ -253,7 +256,8 @@ ls (default, 0), setup (1+), rm (1).
 `add` checks the login and shows the host key to trust (`--yes` trusts without asking,
 `--no-check` saves without connecting, `--force` replaces an entry). `setup` installs rsync, curl,
 nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Settings: `apps_domain=`,
-`tls=`, `public_port=`, `node=`, `python=yes`, `podman=yes`, `postgres=yes`, `swap=yes|no`,
+`tls=`, `public_port=`, `node=`, `python=yes`, `podman=yes`, `postgres=yes`, `postgres_version=N`
+(only after moving the databases by hand: "Upgrading PostgreSQL"), `swap=yes|no`,
 `ufw=no`, `domain_tls=internal`; also `app_max_mb=`, `ci_max_mb=`, `ci_max_files=`,
 `ci_max_file_mb=`, `unit_drop=`, `journal_max=` (not in help.txt), and the per-client limits on ports
 80/443: `rate_limit=on|off|auto` (auto: on when tando owns Caddy), `conn_limit=N` (connections at
@@ -376,6 +380,77 @@ the next deploy; per host with `tando host setup <host> key=value`.
 | host `conn_limit=` | 200 | connections at once per client address (IPv6: per /64) on ports 80/443 | further connections are reset |
 | host `conn_rate=` | 100 | new connections a second per client address, burst 3x | further SYNs are dropped: the client retries a second later |
 | host `rate_limit=` | auto | on, off, or auto: on only where tando owns Caddy (it installed it, or the Caddyfile has no other site) | `tando doctor` row "client limits" shows how often they tripped |
+
+### Database limits
+
+Apps with `database = postgres` share one PostgreSQL (20 connections, 10 per app). Each app's role
+gets limits, so one query or one forgotten transaction cannot take the database from the others.
+Per app in tando.conf; `off` turns one off.
+
+| Setting | Default | Limits | When it trips, the app sees |
+|---|---|---|---|
+| `db_statement_timeout =` | 30s | how long one statement may run (waiting for a lock counts) | `canceling statement due to statement timeout`; the connection stays usable |
+| `db_idle_tx_timeout =` | 5m | how long a connection may sit idle inside an open transaction (it holds locks and blocks cleanup) | the connection is closed; the transaction is rolled back |
+| `db_temp_limit =` | 1G | temporary files of one connection (large sorts, hashes, index builds) | `temporary file size exceeds "temp_file_limit"`; the statement fails |
+
+Times are `500ms`, `30s`, `5m`, `2h`; sizes `512M`, `2G`. They are set on the role (`ALTER ROLE ...
+SET`) by a deploy (`tando up`, `tando deploy`) and by `tando host setup`, which also gives them to
+apps deployed by an older tando. A running app gets them with its next connection (a deploy
+restarts it). `tando db` shows what is set. `lock_timeout` is not set.
+
+**What they do not stop.** The two timeouts are ordinary PostgreSQL settings that any session may
+change, and PostgreSQL has no way to forbid that: they catch mistakes, not an app that sets them
+to 0 on every connection. `db_temp_limit` is different: only a superuser can change it, so the app
+cannot raise it; change it in tando.conf.
+
+**A long migration** raises the timeout for itself, in the session or in its transaction:
+
+```sql
+SET statement_timeout = 0;                 -- this session
+BEGIN; SET LOCAL statement_timeout = '10min'; CREATE INDEX ...; COMMIT;   -- this transaction only
+```
+
+An index on a large table sorts through temporary files: when a migration fails with
+`temp_file_limit`, raise `db_temp_limit` in tando.conf and deploy.
+
+**Not under the timeouts:** tando's backups and restores (`pg_dump` and `pg_restore` set both to 0
+themselves; a restore also lifts the temp file limit while it runs, with the app stopped, and sets
+it again after), and `tando db psql`, where a person runs a long query or pauses inside a
+transaction on purpose (the temp file limit applies there too).
+
+**Out of memory.** The kernel's OOM killer takes an app first (score 500), then a single
+PostgreSQL connection's process (0), and the postmaster last (-900): killing the postmaster would
+take every app's database down. The Ubuntu packages set this; tando pins it in
+`/etc/systemd/system/postgresql@.service.d/tando.conf` and `tando doctor` reads the live values
+(row `postgresql memory`). `vm.overcommit_memory` is not changed: strict overcommit, which the
+PostgreSQL manual suggests for a dedicated database server, makes Node and Python apps on the same
+small server fail to start.
+
+### Upgrading PostgreSQL
+
+tando records the major version whose cluster holds the apps' databases (`postgres_version` in
+`/opt/tando/host.conf`) the first time it uses PostgreSQL, and keeps using that one. A distribution
+upgrade can install a newer major beside it, with an empty cluster on another port: tando does not
+switch to it, and `tando doctor` says so (row `postgresql version`). Nothing needs doing until the
+old version stops getting updates.
+
+Moving the databases is manual. **This runbook has not been rehearsed** (the test server's
+distribution has one major version only): try it on a copy of the server first.
+
+1. A backup of every app with a database, and a copy off the server:
+   `tando backup now -a <app>`, `tando backup pull <id> <file> -a <app>`. Note each id.
+2. Stop those apps: `tando stop -a <app>`.
+3. On the server, put the new cluster on port 5432 and the old one aside (here from 18 to 19):
+   `pg_lsclusters`, then `sudo pg_conftool 18 main set port 5433`,
+   `sudo pg_conftool 19 main set port 5432`, `sudo systemctl restart postgresql`.
+4. `tando host setup <host> postgres_version=19`. tando refuses unless 19/main listens on 5432. It
+   writes its settings for the new cluster, records the version, and creates each app's role and
+   empty database there (with a new password in the app's `DATABASE_URL`).
+5. For each app: `tando backup restore <id> --yes -a <app>` puts the data back and starts the app.
+6. `tando doctor`, and look at each app. When all is well, remove the old cluster:
+   `sudo pg_dropcluster --stop 18 main`. Until then, going back is steps 3 and 4 with the versions
+   swapped (the old cluster still has its data and the old passwords; restore after that as well,
+   since step 4 sets new passwords).
 
 Loopback is never limited (tando's probes, an app calling itself through Caddy); ssh is not touched.
 All apps together get half the CPU weight of the system services (Caddy, sshd, the agent), and an

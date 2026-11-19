@@ -321,6 +321,14 @@ conf_chk_extra() {
       [ -n "$st$tx" ] && [ ${#tx} -le 100 ];;
     health_fails|health_recover) CHK_MSG="$1 is a number of checks in a row, 1 to 99"
       ui_int "$2" && [ "$2" -ge 1 ] && [ "$2" -le 99 ];;
+    # limits of the app's PostgreSQL role (docs/COMMANDS.md "Database limits"); n: digits allowed
+    db_statement_timeout|db_idle_tx_timeout) CHK_MSG="$1 is a time like 500ms, 30s, 5m or 2h (up to 99h), or off"
+      case $2 in off) return 0;; *ms) n=${2%ms}; set -- "$n" 9;; *s) set -- "$n" 6;; *m) set -- "$n" 4;;
+        *h) set -- "$n" 2;; *) return 1;; esac
+      ui_int "$1" && [ "${1#0}" = "$1" ] && [ ${#1} -le "$2" ];;
+    db_temp_limit) CHK_MSG="db_temp_limit is a size like 512M or 2G (up to 999G), or off"
+      case $2 in off) return 0;; *M) set -- "$n" 6;; *G) set -- "$n" 3;; *) return 1;; esac
+      ui_int "$1" && [ "${1#0}" = "$1" ] && [ ${#1} -le "$2" ];;
   esac
 }
 conf_load() { # [file]; a file already loaded in this run is not read again
@@ -368,7 +376,8 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       writable) C_writable=$v;;
       backup) C_backup=$v;;
       database) C_database=$v;;
-      log_max|log_keep|log_rate|access_log|request_log_max|health_expect|health_fails|health_recover)
+      log_max|log_keep|log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|\
+      db_statement_timeout|db_idle_tx_timeout|db_temp_limit)
         conf_chk_extra "$k" "$v" || die "$f:$n: $CHK_MSG (got \"$v\")"
         C_logs="$C_logs$k=$v
 ";;

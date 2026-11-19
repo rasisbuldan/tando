@@ -105,7 +105,7 @@ appended.
 ## Server state
 
 ```
-/opt/tando/host.conf                 apps_domain, tls, port range, public_port, postgres
+/opt/tando/host.conf                 apps_domain, tls, port range, public_port, postgres, postgres_version
 /opt/tando/apps/<app>/app.conf       port, recipe, start, health, path, data, writable, backup, database,
                                      job.*, domains (domain|www ...), origin (user@machine:dir)
 /opt/tando/apps/<app>/state          current, last_good, phase, target, kind, prev, fallback, status_<id>,

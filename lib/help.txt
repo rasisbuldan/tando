@@ -191,11 +191,21 @@ the job (curl --retry 5 --retry-connrefused).
 
 @@ db
 flags: -a= -H= --show
-subs: psql=0-1 url=0-1
+subs: info=0-1 psql=0-1 url=0-1 default=info
+usage: tando db [info] [app]
 usage: tando db psql [app]
 usage: tando db url [app] --show
-The app's PostgreSQL database (database = postgres in tando.conf). psql opens a
-shell as the app's role; url prints DATABASE_URL, password included.
+The app's PostgreSQL database (database = postgres in tando.conf). Without a
+subcommand: its size, connections in use and limits. psql opens a shell as the
+app's role; url prints DATABASE_URL, password included.
+Limits of the app's role, per app in tando.conf, applied by a deploy (off: no
+limit): db_statement_timeout = 30s (a statement running longer is cancelled),
+db_idle_tx_timeout = 5m (a connection idle inside a transaction is closed),
+db_temp_limit = 1G (temporary files of one connection). A long migration
+raises the timeout for itself: SET statement_timeout = 0 (or SET LOCAL inside
+its transaction). Backups, restores and tando db psql are not under the
+timeouts. One PostgreSQL major version is used and kept: tando doctor says when
+a newer one appears (docs/COMMANDS.md, "Upgrading PostgreSQL").
 
 @@ backup
 flags: -a= -H= --yes --show --saved --import --rotate

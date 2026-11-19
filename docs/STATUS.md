@@ -22,7 +22,7 @@ kept as they were; "Round of 16-17 Nov" says what changed since and what is not 
 |---|---|---|
 | Deploy pipeline: build on laptop, rsync, pre-flight, switch, verify, soak, rollback, recovery | built | dev: e2e 95/95, e2e-faults 41/41. indep: FAULT-REVIEW (all 27 earlier failures confirmed fixed) |
 | Recipes node, next, static, python, container | built | dev: e2e-recipes 27/27, e2e-next 24/24 |
-| Env, jobs, backups, PostgreSQL, SQLite | built | dev: e2e-data 31/31 |
+| Env, jobs, backups, PostgreSQL, SQLite | built | dev: e2e-data 56/56 (role limits, OOM score, recorded version) |
 | CI deploy keys (tando-gate) | built | dev: e2e-ci 406/406. indep: SECURITY-REVIEW-2 |
 | App shell, sandbox, third security round | built | dev: e2e-sec2 60/60 (20 of them the third round's attacks) |
 | Logs, requests, audit, log retention (`log_keep`, `log_max`) | built | dev: e2e-logs 113/113 |
