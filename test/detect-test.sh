@@ -50,7 +50,7 @@ case_ node-fixedport "node|||node app.js||" "app.js listens on a fixed port (lin
 case_ node-nvmrc "node|||node index.js||" "output: ., Node 22 (.node-version)"
 case_ nest "node|$B||node dist/main||" "detected: NestJS (@nestjs/core in package.json, package-lock.json), build: npm run build, start: node dist/main"
 # Next.js: the standalone server; without output: "standalone" init says the line to add
-case_ next-app "next|$B||node server.js||" "detected: Next.js (next in package.json, package-lock.json), build: npm run build, start: node server.js, output: .next/standalone"
+case_ next-app "next|$B||node server.js||" "detected: Next.js (next in package.json, package-lock.json), build: npm run build, start: node server.js, output: .next"
 case_ next-pages "next|$B||node server.js||" 'Next.js needs  output: "standalone"  in next.config.js'
 case_ next-basepath "next|$B||node server.js||" "detected: Next.js"
 n=$((n + 1)); grep -qx 'path = /shop' "$T/next-basepath/tando.conf" || bad "next-basepath: no path = /shop"

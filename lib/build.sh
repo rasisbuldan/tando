@@ -134,7 +134,7 @@ cmd_init() {
     if [ -n "$cfg" ]; then
       path=$(sed -n "s/.*basePath:[[:space:]]*['\"]\(\/[^'\"]*\)['\"].*/\1/p" "$cfg" | head -1)
     fi
-    out=.next/standalone
+    out=.next   # (shown in the detected line; tando.conf has no out for next)
   elif [ -f package.json ] && node_framework; then
     :   # (a framework with a known build, start and output: node_framework set them)
   elif entry=$(first_file server.js index.js app.js main.js) || [ -f package.json ]; then
@@ -170,7 +170,7 @@ cmd_init() {
   [ -f package.json ] && why="$why, $(node_pm)"
   note "detected: $fw ($why), build: ${build:-none}, start: ${start:-none (Caddy serves the files)}," \
     "output: $out${spa:+, SPA (unknown paths get index.html)}${v:+, Node $(node_major) ($v)}"
-  [ "$out" = .next/standalone ] && out=.
+  [ "$recipe" = next ] && out=.
   [ "$recipe" = static ] || [ ! -f .yarnrc.yml ] || (yarn_pnp) || true   # (says what to add; deploy refuses)
   if [ "$recipe" != static ]; then
     health=$(health_path "$entry")
