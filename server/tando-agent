@@ -552,6 +552,7 @@ lock() {
   # waited for it): finish or revert that first, then this verb's work
   if [[ ${S[phase]:-idle} != idle && ${verb:-} != recover ]]; then
     recover_locked
+    [[ -f $D/app.conf ]] || { exec 9>&-; die "$A was destroyed (a destroy that was cut off is finished now)"; }
     lock_mark "${verb:-?}"
   fi
 }
@@ -2471,6 +2472,7 @@ cmd_doctor() {
       [[ -d $D/releases ]] && [[ -z $(ls -A "$D/releases") && -n $cur ]] && msg="${msg:+$msg, }no releases on disk"
       [[ -n $cur && ${S[status_$cur]:-} != verified ]] && msg="current release $cur is ${S[status_$cur]:-unverified}"
       [[ ${S[phase]:-idle} != idle ]] && msg="activation in phase ${S[phase]}"
+      [[ -n ${S[restore_cut]:-} ]] && row check fail "app $a" "${S[restore_cut]}"
       # (an app stopped with tando stop is meant not to run: ls and status say stopped)
       [[ -n $cur && -z ${S[stopped]:-} ]] && has_unit && ! systemctl -q is-active "tando-$a" && msg="${msg:+$msg, }unit not running"
       if [[ ${C[backup]:-off} == daily ]] && [[ ${S[last_backup]:-0} =~ ^[0-9]{1,12}$ ]] && (( $(now) - 10#${S[last_backup]:-0} > 2 * 86400 )); then
@@ -3466,7 +3468,8 @@ recover_locked() {
       else rm -f "$D/.env.check"; st phase idle env_revert ""; fi;;
     stop) S[stopped]=1; stop_app || unset "S[stopped]"; st phase idle;;
     start|restart) restart_app && workers_follow all; st phase idle;;
-    destroy) return 0;;      # a destroy cut short: tando destroy again finishes it, nothing here
+    restore) rs_end "cut off";;     # (the app runs its release again; a half step is recorded)
+    destroy) destroy_finish; return 0;;   # (the user asked for it: finished, never undone)
     *) st phase idle;;
   esac
   # (still in a phase: going back did not work yet; the next recover tries again)
@@ -3588,6 +3591,9 @@ cmd_recover_all() {
     f=${f%/app.conf}
     ( app "${f##*/}"; recover ) || true
   done
+  # what a destroy cut off after its directory's rename left (destroy_finish)
+  for f in "$R"/apps/.gone-*; do [[ -d $f && ! -L $f && ! -d /proc/${f##*.} ]] && rm -rf "$f"; done
+  return 0
 }
 
 # rollback <app> [id]: to the given release, or the newest verified one older than current.
@@ -3919,21 +3925,31 @@ cmd_backup_cat() { # app id: the backup as an uncompressed tar on stdout (for `b
   exec tar -C "$BK/$A/$2" -cf - .
 }
 
-# restore: stop the app, keep a safety copy of the current data, restore, start, health-check
+# restore: stop the app, keep a safety copy of the current data, restore, start, health-check.
+# A recorded operation (phase restore; restore_step stop, data, db, start): a restore cut off by a
+# kill or a reboot is ended by recover (rs_end): the app runs its release again, and a data
+# directory or database that was cut off half restored is recorded (restore_cut) and reported by
+# tando doctor (until a restore ends), with the backup to restore again and the safety backup.
 cmd_backup_restore() {
   need_root; app "$1"
-  local id=${2:-} dir safety
+  local id=${2:-} dir safety=""
   valid_backup "$id" && offsite_fetch "$id"
   valid_backup "$id" && [[ -d $BK/$A/$id ]] || die "no such backup: $id"
   dir=$BK/$A/$id
   recover; lock 300
   load "$D/state" S
   # on failure: start the app again and say where the data before the restore is
-  rfail() { [[ -n ${S[current]:-} ]] && restart_app && workers_follow all; die "$1 (the previous data is in backup $safety)"; }
+  rfail() { rs_end "$1"; die "$1 (the previous data is in backup $safety)"; }
+  st phase restore restore_id "$id" restore_step stop restore_safety "" restore_cut "" ||
+    die "could not save the state (disk full?); nothing restored"
   # (its workers too: nothing of the app writes while its data is replaced)
+  fp rs.stop
   systemctl stop "tando-$A" "tando-${A}_worker-*"
-  safety=$(backup_take safety) || { restart_app; workers_follow all; die "could not take the safety backup; nothing restored"; }
+  safety=$(backup_take safety) || { rs_end; die "could not take the safety backup; nothing restored"; }
+  load "$D/state" S      # (backup_take wrote it in a subshell)
   echo "safety=$safety"
+  st restore_safety "$safety" restore_step data
+  fp rs.data
   if [[ -f $dir/data.tar.gz ]] && [[ -n ${C[data_dir]:-} ]]; then
     # an adopted app's own data directory: emptied and refilled as its user (its rights only)
     [[ -d $ADATA && ! -L $ADATA ]] || rfail "$ADATA is not a directory"
@@ -3950,7 +3966,7 @@ cmd_backup_restore() {
       as_app rm -rf "$new"; rfail "data restore failed"
     fi
     [[ -d $new && ! -L $new ]] || rfail "the restore directory was replaced"
-    mv -T "$D/shared/data" "$old" && mv -T "$new" "$D/shared/data" || rfail "could not swap the data in"
+    mv -T "$D/shared/data" "$old" && fp rs.swap && mv -T "$new" "$D/shared/data" || rfail "could not swap the data in"
     as_app rm -rf "$old"
   fi
   if [[ -f $dir/db.dump ]]; then
@@ -3958,20 +3974,46 @@ cmd_backup_restore() {
     # A restore builds every index again, and the sort of a large one goes through temporary
     # files: the role's temp_file_limit (only a superuser can change it) is lifted for the restore
     # and set again after it, also when it failed. The app is stopped, so nothing else uses the
-    # lift. Should this agent die in between, the next deploy sets the limits again (applied "").
+    # lift. Should this agent die in between, recover sets the limits again (rs_end).
     # (statement_timeout and the idle timeout: pg_restore's own first statements set them to 0)
-    local was=${S[applied]:-} rrc
-    st applied ""
+    local rrc
+    st restore_step db restore_applied "${S[applied]:-}" applied ""
     pgsql -c "ALTER ROLE $DB_ROLE SET temp_file_limit = -1" || rfail "could not prepare the database role for the restore"
+    fp rs.db
     as_app_pg pg_restore --clean --if-exists --no-owner -h 127.0.0.1 -U "$DB_ROLE" \
       -d "$DB_ROLE" < "$dir/db.dump"; rrc=$?
-    db_limits "$DB_ROLE" && st applied "$was"
+    db_limits "$DB_ROLE" && st applied "${S[restore_applied]:-}"
     ((rrc == 0)) || rfail "database restore failed"
   fi
+  st restore_step start
+  fp rs.start
+  rs_end
   [[ -n ${S[current]:-} ]] || { echo healthy=1; return; }
-  restart_app
-  workers_follow all || echo "tando-agent: $WF_WHY" >&2
   if via_caddy "$(app_unit)"; then echo healthy=1; else echo healthy=0; fi
+}
+# rs_end [why]: a restore ends (done, failed, or cut off: recover): the app and its workers run
+# again, the database role has its limits, and the phase is idle. A step cut off half way (the
+# adopted data directory, the database) is recorded in restore_cut for tando doctor.
+rs_end() {
+  local step=${S[restore_step]:-} what="" why=${1:-} bid=${S[restore_id]:-?} o
+  case $step in
+    data) [[ -n ${C[data_dir]:-} || -f $BK/$A/$bid/db.dump ]] && what="data directory and database";;
+    db) what=database;;
+  esac
+  # a data swap cut between its two renames: the data from before goes back in place
+  if [[ ! -e $D/shared/data && ! -L $D/shared/data ]]; then
+    for o in "$D"/shared/.replaced-*; do [[ -d $o && ! -L $o ]] && mv -T "$o" "$D/shared/data" && break; done
+  fi
+  for o in "$D"/shared/.restore-* "$D"/shared/.replaced-*; do [[ -e $o || -L $o ]] && as_app rm -rf "$o"; done
+  rm -rf "$BK/$A"/.*-safety.tmp 2> /dev/null
+  if [[ $step == db ]] && db_creds && db_limits "$DB_ROLE"; then S[applied]=${S[restore_applied]:-}; fi
+  [[ -n $what ]] && what="the restore of backup $bid stopped while the $what was being replaced (${why:-cut off}), so it may be partly restored: tando backup restore $bid --yes runs it again; the data from before it is in backup ${S[restore_safety]:-(none: it was not taken)}"
+  st phase idle restore_step "" restore_applied "" restore_cut "$what" restore_id "" restore_safety ""
+  if [[ -n ${S[current]:-} ]]; then
+    restart_app
+    workers_follow all || echo "tando-agent: $WF_WHY" >&2
+  fi
+  return 0
 }
 
 sync_backup_timer() {
@@ -4555,15 +4597,32 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
   fi
   lock 300
   load "$D/state" S
-  st phase destroy      # (recover leaves the app alone from here: it is going)
-  # (no user any more: an earlier destroy got that far, after its final backup)
-  if [[ $purge != purge ]] && has_backup_data && id "$AU" &> /dev/null; then
-    systemctl stop "tando-$A" "tando-${A}_worker-*"
-    # (the app runs again when nothing is removed)
-    id=$(backup_take final) || { st phase idle; [[ -z ${S[stopped]:-} && -n ${S[current]:-} ]] && restart_app
-      die "final backup failed; nothing removed (use --purge to skip it)"; }
-    echo "backup=$BK/$A/$id"
+  # a recorded operation: from here a destroy cut off by a kill or a reboot is finished by recover
+  # (the user asked for it), with the final backup taken again when it was cut off too
+  st phase destroy destroy_purge "$purge" destroy_step backup ||
+    die "could not save the state (disk full?); nothing removed"
+  destroy_finish
+}
+# destroy_finish: the rest of a destroy (destroy_step backup: the final backup first, unless
+# purge; then remove: every step may run again after a cut, and the app's directory goes last)
+destroy_finish() {
+  local purge=${S[destroy_purge]:-} id f
+  if [[ ${S[destroy_step]:-backup} == backup ]]; then
+    rm -rf "$BK/$A"/.*-final.tmp 2> /dev/null      # (one cut off)
+    # (no user any more: an earlier destroy got that far, after its final backup)
+    if [[ $purge != purge ]] && has_backup_data && id "$AU" &> /dev/null; then
+      fp ds.stop
+      systemctl stop "tando-$A" "tando-${A}_worker-*"
+      # (the app runs again when nothing is removed)
+      id=$(backup_take final) || { st phase idle destroy_purge "" destroy_step ""
+        [[ -z ${S[stopped]:-} && -n ${S[current]:-} ]] && restart_app && workers_follow all
+        die "final backup failed; nothing removed (use --purge to skip it)"; }
+      load "$D/state" S      # (backup_take wrote it in a subshell)
+      echo "backup=$BK/$A/$id"
+    fi
+    st destroy_step remove
   fi
+  fp ds.units
   # this app's units only: app names may contain "-", so tando-<app>-* would also match hello-2's
   local units=() u
   while IFS= read -r u; do units+=("$u"); done < <(app_units)
@@ -4583,9 +4642,11 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
   rm -f "$STUDIO_CRED/$A".*.cred   # (an open studio's: its unit was stopped above)
   rm -f "/etc/systemd/system/tando-$A.service" "/etc/systemd/system/$(app_slice)"
   systemctl daemon-reload
+  fp ds.site
   rm -f "/etc/caddy/tando/$A.caddy" "/etc/tmpfiles.d/tando-journal-$A.conf"
   rm -rf "/etc/systemd/system/systemd-journald@tando-$A.service.d"
   caddy_lock; systemctl reload caddy || echo "warning=caddy reload failed" >&2; exec 11>&-
+  fp ds.db
   [[ ${C[database]:-} == postgres ]] && { db_drop || echo "warning=could not drop the database" >&2; }
   if [[ ${C[recipe]:-node} == container ]]; then
     podman images --format '{{.Repository}}:{{.Tag}}' | grep "^localhost/tando-$A:" |
@@ -4605,6 +4666,7 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
     find /dev/shm /tmp /var/tmp -xdev -user "$uid" -delete 2> /dev/null
     grep -qx "$uid" "$R/retired-uids" 2> /dev/null || echo "$uid" >> "$R/retired-uids"
   fi
+  fp ds.user
   if getent passwd "tando-$A" > /dev/null && ! userdel "tando-$A"; then
     die "could not remove the user tando-$A (userdel failed); run tando destroy again to finish"
   fi
@@ -4615,12 +4677,17 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
     [[ $gid =~ ^[0-9]+$ ]] && { grep -qx "$gid" "$R/retired-uids" 2> /dev/null || echo "$gid" >> "$R/retired-uids"; }
     groupdel "$g" 2> /dev/null
   done
-  rm -rf "${D:?}"
   systemctl reset-failed "tando-$A.service" ${units[@]+"${units[@]}"} "tando-down@tando-$A.service" 2> /dev/null
-  # its slice last: stopped once nothing of the app runs in it, so systemd unloads it (no file left)
+  # its slice: stopped once nothing of the app runs in it, so systemd unloads it (no file left)
   systemctl stop "$(app_slice)" 2> /dev/null; systemctl reset-failed "$(app_slice)" 2> /dev/null
   [[ $purge == purge ]] && rm -rf "${BK:?}/$A"
+  # (the user is gone: fw_sync leaves the app out although its app.conf is still there)
+  fp ds.fw
   fw_sync || echo "warning=could not reload the loopback rules (tando doctor)" >&2
+  # the app's directory last, in one rename (a cut rm -rf could take app.conf and leave the rest,
+  # which no recover finds): what a cut leaves of the renamed one, recover-all removes
+  fp ds.dir
+  mv -T "$D" "$R/apps/.gone-$A.$$" && rm -rf "${R:?}/apps/.gone-$A.$$"
   echo "destroyed=$A"
 }
 

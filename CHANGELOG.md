@@ -6,6 +6,18 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: `tando backup restore` and `tando destroy` cut off by a kill or a reboot left the app half
+  done. A restore cut after it stopped the app left it down (nothing started it again), a cut
+  between the data directory's two renames left the app without its data directory, and one in
+  the middle of the database left no trace of it. A destroy cut after its units were removed left
+  the Caddy site, the user, the database, the slice or the firewall rules until someone ran
+  destroy again. Both are recorded operations now (`phase restore`, `phase destroy`): recovery
+  finishes a destroy, and ends a restore with the app running its release; a database cut off
+  half restored is reported by `tando doctor` with the backup to restore again and the safety backup.
+- Tests: the fault matrix has the operations `restore` and `destroy` (invariant 13: a restore's
+  data is the backup's or the old, else recorded and reported; 14: nothing of a destroyed app is
+  left), with cells in the quick set.
+
 - Fixed: a deploy that did not go live (refused in the pre-flight, cut off, rolled back) still
   added the new domains of its tando.conf to the live app and set its database limits
   (`db_statement_timeout`, `db_idle_tx_timeout`, `db_temp_limit`) on the live app's role. Both now
