@@ -17,21 +17,23 @@
 #   A2  apply refuses to start without the hold (client and server), nothing changed
 #   A3  site shapes adopt site does not edit (no reverse_proxy to the port, two of them): reported
 #       as manual with the lines to add, nothing edited; the plan and apply say the same
-#   A4  an edit Caddy rejects, and an edit Caddy cannot load: the previous Caddyfile stays
+#   A4  an edit Caddy rejects, a file whose port another program holds (refused before any
+#       reload), and a reload that fails while Caddy starts: the previous Caddyfile stays, and
+#       doctor says Caddy needs a restart (a failed reload leaves part of it serving, unheld)
 #   A5  adopt site --apply before adoption: the hold only, a copy kept, reload not restart
 #   A6  apply under a request loop: zero failed requests; the app is tando's, same data and env
-#   A7  tando deploy of a new version, then rollback: zero failed requests each
+#   A7  tando deploy of a new version, then rollback: zero failed requests each (new connections,
+#       one kept-alive connection, and POSTs: held, each stored once); a Caddy reload by tando
+#       during a restart waits until the app listens (a reload drops the requests Caddy holds)
 #   A8  adopt site --apply after adoption adds the request log; tando requests sees requests
 #   A9  undo: the hand-written unit again, the state as recorded (with the hold), still answering
 #   A10 the control: without the hold, apply --accept-502 adopts, and requests fail with 502
 # Not covered here: timers that become tando jobs (the handoff), a real Next.js build, TLS.
-# Also not covered, on purpose: a request Caddy sends on a kept-alive connection that the stopping
-# app has just closed. lb_try_duration holds a request that cannot connect; Caddy 2.6.2 (the
-# distribution's package, used here with TANDO_TEST_CADDY=ubuntu) answers 502 for one whose
-# connection broke (its tryAgain never retries a non-dial error without lb_retry_match). With
-# keep-alive on, this suite saw that in about 1 run of 9 (2 requests during apply, 1 during
-# rollback), so the stand-in app closes every connection and "zero failed" below is about
-# requests that arrive while the app is not listening.
+# The stand-in app keeps connections alive, as Node does by default: Caddy reuses idle connections
+# to it, and the app closes them when it stops. Caddy retries a GET whose connection broke, and any
+# request that could not connect, within lb_try_duration (2.6 to 2.10 alike); a POST already sent
+# on a connection that then broke is not retried (it may have been processed), and is not
+# provoked here: the window is the moment the app closes an idle connection Caddy just picked.
 # bash 3.2.
 set -u
 . "$(cd "$(dirname "$0")" && pwd -P)/lib.sh"
@@ -62,6 +64,65 @@ loop_ok() { loop_end "$1"; [ "$T_LOOP_N" -ge 5 ] && [ "$T_LOOP_BAD" = 0 ]; }
 flat() { tr '\n' ' ' < "$1" | sed 's/│//g' | tr -s ' '; }
 has() { flat "$1" | grep -q -- "$2"; }
 order() { curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST "$(t_url bakery "/api/order?$1")"; }
+# ka_start name: beside t_loop_start, a client that keeps one connection to Caddy alive and sends a
+# GET every 0.1 s on it, one line each: "<http code> <seconds taken> <connection number>". When a
+# reused connection turns out closed before any answer, it sends again on a new one, as browsers
+# do; any other error is "000". ka_stop name sets KA_N, KA_BAD (not 200) and KA_CONN (connections).
+ka_start() {
+  rm -f "$E/ka.$1.stop"
+  python3 - "http://bakery.localhost:$T_HTTP_PORT/" "$E/ka.$1" "$E/ka.$1.stop" <<'PY' &
+import http.client, os, sys, time, urllib.parse
+u = urllib.parse.urlsplit(sys.argv[1]); out = open(sys.argv[2], "w", buffering=1)
+conn, nconn = None, 0
+while not os.path.exists(sys.argv[3]):
+    t0, code = time.time(), "000"
+    for attempt in (1, 2):
+        fresh = conn is None
+        if fresh:
+            conn = http.client.HTTPConnection("127.0.0.1", u.port, timeout=30); nconn += 1
+        try:
+            conn.request("GET", "/", headers={"Host": u.netloc})
+            r = conn.getresponse(); r.read(); code = str(r.status)
+            if r.getheader("Connection", "").lower() == "close": conn.close(); conn = None
+            break
+        except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError) as e:
+            conn.close(); conn = None
+            if fresh: break
+        except Exception:
+            conn.close(); conn = None; break
+    out.write("%s %.3f %d\n" % (code, time.time() - t0, nconn))
+    time.sleep(0.1)
+PY
+  eval "KA_PID_$1=\$!"
+}
+ka_stop() {
+  local v="KA_PID_$1"
+  touch "$E/ka.$1.stop"; wait "${!v}" 2> /dev/null
+  read -r KA_N KA_BAD KA_CONN < <(awk '{ n++; if ($1 != 200) bad++; c = $3 } END { printf "%d %d %d\n", n, bad, c }' "$E/ka.$1")
+  echo "kept-alive $1: $KA_N requests, $KA_BAD not 200, over $KA_CONN connection(s)" >&2
+  [ "$KA_BAD" = 0 ] || grep -n -v '^200 ' "$E/ka.$1" | head -5 >&2
+}
+# post_start name: a POST of a new order every 0.2 s ("<code> <seconds> <order>"); post_stop name
+# sets PO_N, PO_BAD, PO_MAX (slowest, s) and PO_LOST (orders answered 200 that are not stored
+# exactly once) and PO_TWICE (orders stored more than once, answered or not)
+post_start() {
+  rm -f "$E/po.$1.stop"
+  ( i=0; while [ ! -f "$E/po.$1.stop" ]; do
+      i=$((i + 1))
+      curl -s -m 30 -o /dev/null -w "%{http_code} %{time_total} $1-$i\n" -X POST "$(t_url bakery "/api/order?$1-$i")"
+      sleep 0.2
+    done ) > "$E/po.$1" 2> /dev/null &
+  eval "PO_PID_$1=\$!"
+}
+post_stop() {
+  local v="PO_PID_$1"
+  touch "$E/po.$1.stop"; wait "${!v}" 2> /dev/null
+  root cat /var/lib/bakery/orders.log > "$E/po.$1.stored"
+  read -r PO_N PO_BAD PO_MAX < <(awk '{ n++; if ($1 != 200) bad++; if ($2 > m) m = $2 } END { printf "%d %d %.3f\n", n, bad, m }' "$E/po.$1")
+  PO_LOST=$(awk 'NR == FNR { c[$1]++; next } $1 == 200 && c[$3] != 1 { l++ } END { print l + 0 }' "$E/po.$1.stored" "$E/po.$1")
+  PO_TWICE=$(grep "^$1-" "$E/po.$1.stored" | sort | uniq -d | wc -l | tr -d ' ')
+  echo "posts $1: $PO_N, $PO_BAD not 200, slowest ${PO_MAX}s, $PO_LOST answered but not stored once, $PO_TWICE stored twice" >&2
+}
 
 # ---- the fixture: a hand-deployed app ----------------------------------------------------------
 log "building the hand-deployed app"
@@ -73,9 +134,6 @@ const VERSION = '__VERSION__', data = process.env.BAKERY_DATA_DIR || '/nonexiste
 const page = '<html><head><link rel="stylesheet" href="/_next/static/app.css"></head>' +
   '<body><h1>bakery ' + VERSION + '</h1></body></html>\n';
 const server = http.createServer((req, res) => {
-  // one connection per request: Caddy then has no idle connection to this app that could break as
-  // the app stops. That case is outside what the hold covers on Caddy 2.6 (see the header).
-  res.setHeader('Connection', 'close');
   const say = (code, body) => { res.writeHead(code, { 'Content-Type': 'text/plain' }); res.end(body); };
   const path = req.url.split('?')[0];
   if (path === '/api/version') return say(200, VERSION);
@@ -247,16 +305,46 @@ check "A4a the file is valid as it is (so only the edit can be what Caddy reject
 check "A4b an edit Caddy rejects: refused, the Caddyfile as it was, no temporary file left (rc=$rc)" eval \
   '[ $rc != 0 ] && has "$E/site-bad.out" "Caddy rejects the edited file" && [ "$(cf_sha)" = "$s" ] &&
    [ -z "$(srv "sudo find /etc/caddy -name .Caddyfile.tando.\*")" ]'
-# an edit Caddy accepts but cannot load (a second site wants the port the app listens on)
-{ root cat /root/Caddyfile.hand; printf 'http://clash.test:3100 {\n\tbind 127.0.0.1\n\trespond "clash"\n}\n'; } | cf_put
+# A file Caddy validates but cannot load: a second site wants the port the app listens on. The
+# bakery site of that file has a header the loaded one does not, so a request served by any part of
+# it shows. (A reload that fails while Caddy starts its servers leaves those it started serving the
+# rejected configuration, without the hold, until Caddy restarts: what made A7e and A9e flaky.)
+marked() { awk '{ print } /^\tencode gzip$/ { print "\theader X-Refused-Config 1" }'; }
+served_marked() { local i n=0; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  curl -s -m 5 -D - -o /dev/null "$URL" | grep -qi '^X-Refused-Config' && n=$((n + 1)); done; echo $n; }
+{ root cat /root/Caddyfile.hand | marked; printf 'http://clash.test:3100 {\n\tbind 127.0.0.1\n\trespond "clash"\n}\n'; } | cf_put
 # shellcheck disable=SC2034 # read inside the eval'd checks below
 s=$(cf_sha) p=$(caddy_pid)
 "$R" adopt site bakery -H test --apply > "$E/site-clash.out" 2>&1; rc=$?; cat "$E/site-clash.out" >&2
-check "A4c an edit Caddy cannot load: the previous Caddyfile is put back and said so (rc=$rc)" eval \
-  '[ $rc != 0 ] && has "$E/site-clash.out" "the previous Caddyfile is back" && [ "$(cf_sha)" = "$s" ] &&
+check "A4c a port another program holds: refused before any reload, says which and whose (rc=$rc)" eval \
+  '[ $rc != 0 ] && has "$E/site-clash.out" "listens on 127.0.0.1:3100 (bakery.service), which another program holds" &&
+   has "$E/site-clash.out" "nothing was changed" && [ "$(cf_sha)" = "$s" ] &&
    ! root grep -q lb_try_duration "$CF" && [ "$(caddy_pid)" = "$p" ]'
+m=$(served_marked)
+check "A4e nothing of the refused file serves (requests with its header: $m of 20)" eval '[ "$m" = 0 ]'
+# A start failure that check cannot see: an address that is not on this host. It is in the owner's
+# file, so the previous file does not load either: Caddy is not restarted (it would not start), and
+# the output and doctor say to restart it once the file is fixed.
+{ root cat /root/Caddyfile.hand | marked; printf 'http://odd.test:3101 {\n\tbind 192.0.2.1\n\trespond "odd"\n}\n'; } | cf_put
+# shellcheck disable=SC2034 # read inside the eval'd checks below
+s=$(cf_sha)
+"$R" adopt site bakery -H test --apply > "$E/site-odd.out" 2>&1; rc=$?; cat "$E/site-odd.out" >&2
+check "A4f a reload that fails while Caddy starts: the previous file back, Caddy running, not restarted, and told to restart (rc=$rc)" eval \
+  '[ $rc != 0 ] && has "$E/site-odd.out" "Caddy could not load the edited file" && has "$E/site-odd.out" "the previous Caddyfile is back" &&
+   has "$E/site-odd.out" "cannot load the previous configuration either" && has "$E/site-odd.out" "then sudo systemctl restart caddy" &&
+   [ "$(cf_sha)" = "$s" ] && [ "$(srv "systemctl is-active caddy")" = active ] && [ "$(caddy_pid)" = "$p" ]'
 root cp -p /root/Caddyfile.hand "$CF"
 check "A4d through all of it the site kept answering: no request failed" loop_ok site
+srv 'sudo /opt/tando/bin/tando-agent doctor' > "$E/doctor-odd.out" 2>&1
+check "A4g doctor: the failed reload, that part of it may still serve unheld, and the restart" eval \
+  'grep "caddy reload" "$E/doctor-odd.out" | grep -q "fail" && grep "caddy reload" "$E/doctor-odd.out" | grep -q "may still serve" &&
+   grep "caddy reload" "$E/doctor-odd.out" | grep -q "sudo systemctl restart caddy"'
+# what doctor says to do, with the owner's file fixed (no request loop runs: a restart drops connections)
+root systemctl restart caddy
+t_until 30 eval '[ "$(ver)" = v1 ]'
+srv 'sudo /opt/tando/bin/tando-agent doctor' > "$E/doctor-ok.out" 2>&1
+check "A4h after the restart: doctor finds every reload complete, and nothing of a rejected file serves" eval \
+  'grep "caddy reload" "$E/doctor-ok.out" | grep -q "ok" && [ "$(served_marked)" = 0 ]'
 
 # ---- A5 the hold, before adoption ----------------------------------------------------------------
 "$R" adopt site bakery -H test > "$E/site-pre0.out" 2>&1; rc=$?; cat "$E/site-pre0.out" >&2
@@ -290,12 +378,12 @@ check "A5h plan now: no missing hold, requests are held, next is apply (rc=$rc)"
    tail -1 "$E/plan2.out" | grep -q "tando adopt apply bakery -H test"'
 
 # ---- A6 apply ------------------------------------------------------------------------------------
-t_loop_start adopt "$URL"
+t_loop_start adopt "$URL"; ka_start adopt
 "$R" adopt apply bakery -H test --yes > "$E/apply.out" 2>&1; rc=$?; cat "$E/apply.out" >&2
-loop_end adopt
+loop_end adopt; ka_stop adopt
 check "A6a apply adopts the app (rc=$rc)" eval '[ $rc = 0 ] && grep -q "adopted: tando deploy" "$E/apply.out"'
-check "A6b zero failed requests during the adoption ($T_LOOP_BAD of $T_LOOP_N, longest stall ${T_LOOP_STALL}s)" \
-  eval '[ "$T_LOOP_N" -ge 20 ] && [ "$T_LOOP_BAD" = 0 ]'
+check "A6b zero failed requests during the adoption ($T_LOOP_BAD of $T_LOOP_N, longest stall ${T_LOOP_STALL}s; kept-alive $KA_BAD of $KA_N)" \
+  eval '[ "$T_LOOP_N" -ge 20 ] && [ "$T_LOOP_BAD" = 0 ] && [ "$KA_N" -ge 20 ] && [ "$KA_BAD" = 0 ]'
 # (the restart was in the loop: a request waited for the app's 1.5 s start instead of failing)
 check "A6c the restart happened under the loop: one request was held for it (slowest ${T_LOOP_MAX}s)" \
   awk -v m="$T_LOOP_MAX" 'BEGIN { exit !(m >= 1.0) }'
@@ -320,21 +408,39 @@ ID0=$(srv 'readlink /opt/tando/apps/bakery/current'); ID0=${ID0##*/}
 # ---- A7 deploy and rollback ------------------------------------------------------------------------
 sed 's/^build = .*/build = sh build.sh/' tando.conf > tando.conf.new && mv tando.conf.new tando.conf
 echo v2 > VERSION
-t_loop_start deploy "$URL"
+t_loop_start deploy "$URL"; ka_start deploy
 "$R" deploy > "$E/deploy.out" 2>&1; rc=$?; cat "$E/deploy.out" >&2
-loop_end deploy
+loop_end deploy; ka_stop deploy
 check "A7a tando deploy ships version 2 of the adopted app (rc=$rc)" eval '[ $rc = 0 ] && [ "$(ver)" = v2 ]'
-check "A7b zero failed requests during the deploy ($T_LOOP_BAD of $T_LOOP_N, slowest ${T_LOOP_MAX}s)" \
-  eval '[ "$T_LOOP_N" -ge 20 ] && [ "$T_LOOP_BAD" = 0 ]'
+check "A7b zero failed requests during the deploy ($T_LOOP_BAD of $T_LOOP_N, slowest ${T_LOOP_MAX}s; kept-alive $KA_BAD of $KA_N)" \
+  eval '[ "$T_LOOP_N" -ge 20 ] && [ "$T_LOOP_BAD" = 0 ] && [ "$KA_N" -ge 20 ] && [ "$KA_BAD" = 0 ]'
 check "A7c the new release's static files are served by the hand-written site" eval \
   '[ "$(curl -s -o /dev/null -w "%{http_code}" "$(t_url bakery /_next/static/app.css)")" = 200 ]'
-t_loop_start rollback "$URL"
+t_loop_start rollback "$URL"; ka_start rollback; post_start rb
 "$R" rollback > "$E/rollback.out" 2>&1; rc=$?; cat "$E/rollback.out" >&2
-loop_end rollback
+loop_end rollback; ka_stop rollback; post_stop rb
 check "A7d rollback returns to the adopted release (rc=$rc)" eval \
   '[ $rc = 0 ] && [ "$(ver)" = v1 ] && [ "$(srv "readlink /opt/tando/apps/bakery/current")" = "releases/$ID0" ]'
-check "A7e zero failed requests during the rollback ($T_LOOP_BAD of $T_LOOP_N)" \
-  eval '[ "$T_LOOP_N" -ge 5 ] && [ "$T_LOOP_BAD" = 0 ]'
+check "A7e zero failed requests during the rollback ($T_LOOP_BAD of $T_LOOP_N; kept-alive $KA_BAD of $KA_N)" \
+  eval '[ "$T_LOOP_N" -ge 5 ] && [ "$T_LOOP_BAD" = 0 ] && [ "$KA_N" -ge 5 ] && [ "$KA_BAD" = 0 ]'
+# a POST that could not reach the app is held like any request and sent once; none is sent twice
+check "A7f POSTs during the rollback: all answered, one held for the restart, each stored once ($PO_BAD of $PO_N failed, slowest ${PO_MAX}s, $PO_LOST lost, $PO_TWICE twice)" \
+  eval '[ "$PO_N" -ge 5 ] && [ "$PO_BAD" = 0 ] && [ "$PO_LOST" = 0 ] && [ "$PO_TWICE" = 0 ] &&
+        awk -v m="$PO_MAX" '"'"'BEGIN { exit !(m >= 1.0) }'"'"
+# A Caddy reload ends the requests Caddy holds at that moment with 502. Every site change of tando's
+# takes its Caddy lock (/opt/tando/.caddy.lock); a restart holds it until the app listens again.
+# On the server: once the app stops listening (a poll), wait half its 1.5 s start, so requests are
+# held, then reload Caddy under that lock, as a site change of another app would.
+srv 'sudo bash -c "for i in \$(seq 300); do ss -Hltn sport = :3100 | grep -q . || break; sleep 0.05; done; sleep 0.7;
+  flock -w 60 /opt/tando/.caddy.lock systemctl reload caddy && echo reloaded"' > "$E/reload.out" 2>&1 &
+rl=$!
+t_loop_start reload "$URL"
+"$R" restart > "$E/restart.out" 2>&1; rc=$?; cat "$E/restart.out" >&2
+wait $rl
+loop_end reload
+check "A7g a Caddy reload by tando during a restart waits until the app listens: no held request dropped (rc=$rc; $T_LOOP_BAD of $T_LOOP_N, slowest ${T_LOOP_MAX}s)" \
+  eval '[ $rc = 0 ] && grep -q reloaded "$E/reload.out" && [ "$T_LOOP_N" -ge 5 ] && [ "$T_LOOP_BAD" = 0 ] &&
+        awk -v m="$T_LOOP_MAX" '"'"'BEGIN { exit !(m >= 0.5) }'"'"
 
 # ---- A8 the request log, after adoption -----------------------------------------------------------
 # shellcheck disable=SC2034 # read inside the eval'd checks below
@@ -363,9 +469,9 @@ check "A8c tando requests sees the requests ($(reqs) in the log; rc=$rc)" eval \
 SHA2=$(cf_sha)
 
 # ---- A9 undo ---------------------------------------------------------------------------------------
-t_loop_start undo "$URL"
+t_loop_start undo "$URL"; ka_start undo
 "$R" adopt undo bakery -H test --yes > "$E/undo.out" 2>&1; rc=$?; cat "$E/undo.out" >&2
-loop_end undo
+loop_end undo; ka_stop undo
 srv 'sudo /opt/tando/bin/tando-agent adopt-status bakery' > "$E/undo.status" 2>&1; cat "$E/undo.status" >&2
 check "A9a undo returns to the hand-managed unit and finds the state as recorded (rc=$rc)" eval \
   '[ $rc = 0 ] && grep -q "back to the hand-managed bakery.service" "$E/undo.out" && grep -q "^result=ok" "$E/undo.status" &&
@@ -379,8 +485,8 @@ check "A9c the Caddyfile is the owner's as it was when undo started: the hold st
 check "A9d the app still answers, with every order (before, under and after tando)" eval \
   '[ "$(ver)" = v1 ] && [ "$(order after-undo)" = 200 ] &&
    [ "$(root grep -c -x -e before-tando -e under-tando -e after-undo /var/lib/bakery/orders.log)" = 3 ]'
-check "A9e zero failed requests during the undo, with the hold ($T_LOOP_BAD of $T_LOOP_N)" \
-  eval '[ "$T_LOOP_N" -ge 5 ] && [ "$T_LOOP_BAD" = 0 ]'
+check "A9e zero failed requests during the undo, with the hold ($T_LOOP_BAD of $T_LOOP_N; kept-alive $KA_BAD of $KA_N)" \
+  eval '[ "$T_LOOP_N" -ge 5 ] && [ "$T_LOOP_BAD" = 0 ] && [ "$KA_N" -ge 5 ] && [ "$KA_BAD" = 0 ]'
 
 # ---- A10 the control: the same adoption without the hold --------------------------------------------
 # The owner's Caddyfile without the hold again (as host setup left it). The app needs 1.5 s to
