@@ -372,6 +372,11 @@ check "S6b the structure: 8 columns, id the primary key, an index" \
 api /api/rows '{"schema":"public","name":"items","offset":0,"limit":100}'
 check "S6c the first page: 100 rows, more after, ids 1..100" \
   eval '[ "$(jx "scalar @{%->{result}{rows}}")" = 100 ] && [ "$(jx "%->{has_more}")" = 1 ] && [ "$(jx "%->{result}{rows}[99][0]")" = 100 ]'
+# (wide columns are selected cut, left(c::text, n): the header must still be the table's column;
+# seen in a browser: name, note, doc and n were all headed "left", type text)
+hdr=$(jx 'join ",", map { "$_->{name}:$_->{type}" } @{%->{result}{columns}}')
+check "S6c2 the page's header is the table's columns and types: $hdr" \
+  test "$hdr" = "id:bigint,name:text,note:text,doc:jsonb,blob:bytea,n:numeric,flag:boolean,created:timestamp with time zone"
 api /api/rows '{"schema":"public","name":"items","offset":99900,"limit":100}'
 check "S6d page 1,000 (offset 99,900): the last 100 rows, none after" \
   eval '[ "$(jx "%->{result}{rows}[99][0]")" = 100000 ] && [ "$(jx "%->{has_more}")" = 0 ]'

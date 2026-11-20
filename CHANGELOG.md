@@ -26,6 +26,11 @@ first, grouped by area.
   `tando host setup`, not only when it is created: a database left open by an older setup or by
   hand is closed again.
 - Changed: `tando open` uses the shared `open_url`.
+- Studio, found by opening it in a browser: table browsing headed every wide column "left",
+  type text (now the table's own names and types); a link to the page followed from another
+  site (a web terminal, a chat page) was refused with a line of JSON (a plain top-level link to
+  the page is now served; every data request stays same-origin only); the SQL editor opts out
+  of writing-assistant browser extensions.
 - Tests: `test/e2e-studio.sh` (docs/TESTING.md), Go unit, fuzz and live tests of srv/studio,
   `bench/run-studio.sh`.
 - `tando jobs run` always shows the job's output: a job that ended within milliseconds could be

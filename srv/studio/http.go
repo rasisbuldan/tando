@@ -58,7 +58,13 @@ func (s *Studio) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 403, "origin", "requests from another site are refused")
 		return
 	}
-	if f := r.Header.Get("Sec-Fetch-Site"); f != "" && f != "same-origin" && f != "none" {
+	// (the page itself may be reached by a link on another site, a web terminal or a chat page:
+	// a top-level GET of a static file, which holds no data; the key is in the link's fragment,
+	// never sent, and the page cannot be framed (X-Frame-Options) or reached by its opener (COOP).
+	// Every /api/ request, and anything that is not a plain navigation, stays same-origin only.)
+	nav := r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/api/") &&
+		r.Header.Get("Sec-Fetch-Mode") == "navigate" && r.Header.Get("Sec-Fetch-Dest") == "document"
+	if f := r.Header.Get("Sec-Fetch-Site"); f != "" && f != "same-origin" && f != "none" && !nav {
 		apiErr(w, 403, "origin", "requests from another site are refused")
 		return
 	}

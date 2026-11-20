@@ -287,7 +287,7 @@ func (s *Studio) rows(w http.ResponseWriter, r *http.Request) {
 		j := &jw{w: bw}
 		budget := RespBytes
 		j.obj().k("offset").i(int64(q.Offset)).k("limit").i(int64(q.Limit)).k("result")
-		sink := &resultSink{s: s, j: j, max: q.Limit, budget: &budget, browse: true, bytea: bytea, ncols: len(rel.Cols)}
+		sink := &resultSink{s: s, j: j, max: q.Limit, budget: &budget, browse: true, bytea: bytea, ncols: len(rel.Cols), rel: rel.Cols}
 		if len(rel.Cols) == 0 {
 			sink.ncols = 1
 		}

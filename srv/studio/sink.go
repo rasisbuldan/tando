@@ -31,6 +31,7 @@ type resultSink struct {
 	onStop  func()
 	browse  bool
 	bytea   map[int]int // browse: bytea column -> its hidden octet_length column
+	rel     []column    // browse: the table's own columns (the query's are cut copies: left(c::text, n) is "left", text)
 	unknown map[uint32]bool
 	scratch []byte
 }
@@ -44,6 +45,10 @@ func (r *resultSink) start() {
 	for i, f := range r.cols {
 		if i >= r.ncols {
 			break
+		}
+		if i < len(r.rel) {
+			r.j.obj().k("name").s(r.rel[i].Name).k("oid").i(int64(r.rel[i].OID)).k("type").s(r.rel[i].Type).end()
+			continue
 		}
 		r.j.obj().k("name").s(f.Name).k("oid").i(int64(f.TypeOID))
 		if t := r.s.typeName(f.TypeOID); t != "" {
