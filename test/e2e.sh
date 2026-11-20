@@ -545,6 +545,22 @@ vr=$(srv "sudo cat /opt/tando/apps/hello/releases/$idr/VERSION")
 "$R" rollback "$idr" >&2; rc=$?
 check "14 rollback $idr: current is that release and v$vr serves" \
   test $rc = 0 -a "$(cur_id)" = "$idr" -a "$(ver)" = "$vr"
+# 14b. a rollback of a stopped app (tando stop) does what a deploy to it does: a target that passes
+# its health check goes live and runs; one that fails it leaves the app as it was: its release,
+# stopped (the unit inactive and disabled, the stopped page)
+idt=$("$R" releases | awk '$4 == "verified" && !/current/ {print $2}' | head -1)
+vt=$(srv "sudo cat /opt/tando/apps/hello/releases/$idt/VERSION")
+"$R" stop >&2
+"$R" env set "UNHEALTHY_VERSION=$vt" >&2
+"$R" rollback "$idt" > "$E/rb14b.out" 2>&1; rc=$?; cat "$E/rb14b.out" >&2
+code=$(curl -s -o "$E/rb14b.body" -w '%{http_code}' -m 5 http://hello.localhost:$HP/)
+check "14b a rollback of a stopped app to $idt (v$vt) that fails its check leaves it stopped on $idr (rc=$rc, $code, current $(cur_id), stopped=$(st hello stopped))" \
+  eval '[ $rc != 0 ] && [ "$code" = 503 ] && grep -q "hello is stopped" "$E/rb14b.body" && [ "$(st hello stopped)" = 1 ] &&
+        ! srv "systemctl -q is-active tando-hello" && ! srv "systemctl -q is-enabled tando-hello" && [ "$(cur_id)" = "$idr" ]'
+"$R" env unset UNHEALTHY_VERSION >&2
+"$R" rollback "$idt" > "$E/rb14c.out" 2>&1; rc=$?; cat "$E/rb14c.out" >&2
+check "14c a rollback of a stopped app that passes its check starts it, as a deploy does (rc=$rc, v$(ver))" \
+  eval '[ $rc = 0 ] && [ "$(ver)" = "$vt" ] && [ -z "$(st hello stopped)" ] && srv "systemctl -q is-enabled tando-hello"'
 setv 12; "$R" deploy >&2
 setv 13; "$R" deploy >&2      # so that rollback in 11b has a previous verified release
 

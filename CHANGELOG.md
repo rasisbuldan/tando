@@ -6,6 +6,20 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: `tando backup restore` of an app stopped with `tando stop` started it (its unit, its
+  workers, the state no longer stopped), and so did the recovery of such a restore when it was cut
+  off. A restore now leaves a stopped app stopped: the data restored, the unit inactive and
+  disabled, Caddy's stopped page; the client says so (`tando start` starts it). e2e-data D9g-D9i.
+- Fixed: a rollback of a stopped app whose health check failed ended with the app running on its
+  old release. A rollback of a stopped app now does what a deploy to it does: a target that passes
+  its check goes live and runs; one that fails leaves the app as it was, stopped (docs/COMMANDS.md,
+  rollback). e2e 14b, 14c.
+- Fixed: a backup cut off (a kill, a reboot) left its temporary directory
+  (`/var/backups/tando/<app>/.<id>-<kind>.tmp`) for good; only those of safety and final backups
+  were removed. The next backup of the app and the server's recovery now remove every one whose
+  backup is no longer being written (all backups are taken under the app's lock), and `tando doctor`
+  names one it finds. `tando backup now` runs to its end when its ssh session drops (Ctrl-C), like
+  the other verbs that change an app. e2e-data D9j-D9m.
 - Fixed: an ended `tando db studio` session could stay listed by `systemctl list-units --all` as
   `loaded inactive dead` (about 1 run in 3 of the studio suite), with nothing holding it: systemd
   had not unloaded it and a stop did not help. A destroy left the app's slice listed the same way
