@@ -75,7 +75,7 @@ _tando() {
     top) subs="" flags="$flags --watch --read-only -H" args="hosts";;
     env) subs="ls set unset import" flags="$flags --show -a -H" args="apps";;
     jobs) subs="run ls" flags="$flags -H -a" args="apps";;
-    db) subs="psql url info" flags="$flags -a -H --show" args="apps";;
+    db) subs="psql url studio info" flags="$flags -a -H --show --no-open --idle --stop" args="apps";;
     backup) subs="ls now restore pull offsite" flags="$flags -a -H --yes --show --saved --import --rotate" args="apps";;
     restore) subs="" flags="$flags -a --yes -H --from-host --all" args="";;
     host) subs="add setup ls rm status care update reboot" flags="$flags --port --key --yes --force --insecure-test --no-check --deploy --json --watch --all --now --updates --reboot --window --tz --lead --even-with-other-sites" args=""

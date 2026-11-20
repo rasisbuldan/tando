@@ -25,13 +25,14 @@ calls: work happens in commands, transient units and one per-minute timer.
 | `srv/` (Go): `cmd/tando-logs`, `logs/` | journald namespaces, Caddy request logs, log queries and stats, the per-minute error and request scan, audit file (docs/LOGGING.md, srv/README.md) |
 | `srv/` (Go): `cmd/tando-status`, `status/` | the agent's read-only verbs `status`, `deploy-status`, `releases`, `history`, `busy`, `info`: tando-agent execs it for them (srv/README.md) |
 | `srv/` (Go): `cmd/tando-offsite`, `offsite/` | offsite backups: S3 API by hand (SigV4), streaming AES-256-GCM encryption, upload after each backup (the agent starts `push` in a unit of its own), `tando-offsite.timer` retries and prunes, fetch for restore, disaster recovery verbs (docs/BACKUP.md, srv/README.md) |
+| `srv/` (Go): `cmd/tando-studio`, `studio/` | `tando db studio`: a read-only web UI and SQL editor for an app's database, on a unix socket forwarded by the admin's ssh; its own PostgreSQL wire client (`studio/pgwire`), statement splitter (`studio/sqlsplit`) and page (`studio/ui`); `lib/studio.sh` is its client (docs/COMMANDS.md, srv/README.md) |
 | `lib/offsite.sh`, `lib/cmd-restore.sh` | `tando backup offsite ...` and `tando restore [--from-host]`, their client side |
 | `srv/` (Go): `cmd/tando-host`, `hostcare/` | host care: the server itself (updates, security, health), its summary for the alerts, care mode (unattended-upgrades, the safe reboot); `lib/hostcare.sh` is its client (docs/HOSTCARE.md) |
 | `scripts/build-server.sh` | builds the Go server programs into `dist/server/linux-{amd64,arm64}/` |
 | `test/e2e*.sh`, `test/all.sh` | end-to-end suites, each on its own test server (docs/TESTING.md) |
 
 `tando host setup` takes a fresh Ubuntu 24.04+ (sshd and a sudo login) to a ready server, in
-steps the client shows as they finish: the server programs in `/opt/tando/bin` (root 755: `tando-agent`, `tando-logs`, `tando-metrics`, `tando-watch`, `tandod`, `tando-status`, `tando-offsite`, `tando-host`, `tando-gate`, `tando-install-recover`)
+steps the client shows as they finish: the server programs in `/opt/tando/bin` (root 755: `tando-agent`, `tando-logs`, `tando-metrics`, `tando-watch`, `tandod`, `tando-status`, `tando-offsite`, `tando-host`, `tando-studio`, `tando-gate`, `tando-install-recover`)
 with `/opt/tando/VERSION`; rsync, curl, nftables, openssl and Caddy (the distribution's package)
 from apt; the Caddyfile's `import` and admin socket; the firewall unit (and 80/443 in ufw when ufw
 is active); recover/down units, journals, a swap file under 2 GB of RAM; the alert timer. Every
@@ -85,6 +86,10 @@ the same agent skips the rest), `domain-add <app> <domain> <www>`, `domain-rm`, 
 (token on stdin; the older form with the token as second argument still works), `rollback [id]`,
 `recover`, `env-set/-unset/-ls` (stdin), `start/stop/restart`, `unlock`, `destroy [purge|plan]`,
 `backup-run <kind>`, `backup-ls`, `backup-cat`, `backup-restore`, `db-url`, `db-psql`,
+`db-studio <app> ro <sid> <idle-min> <port> <host>` (the studio, for as long as its ssh session:
+relays only its `ready` and `stopped` lines), `db-studio-ls [app]` (`database=`, `installed=`, then
+`studio <app> <sid12> <started> <mode> <admin>` rows; without an app also `app <name> <database 0|1>
+<bytes> <state>` rows for the client's picker), `db-studio-stop [app]` (`stopped=N`),
 `shell <app> [hex command]` (a shell, or one command, as the app's user in its sandbox: its env,
 cwd its current release, only shared/ writable), `busy <app>` (what holds the app: `busy=<id>`,
 `busy_phase`, `busy_left`, `busy_soak`; the client says what it waits for), `job-run <app> <name>`
@@ -224,6 +229,67 @@ Caddy modes per app: proxy (holding requests up to 15 s while the process restar
   no command text is written into unit files.
 - PostgreSQL: one role per app with CONNECT only on its own database; the password exists only in
   the server's env file and is shown only by `tando db url --show`.
+- db studio (`tando db studio`, srv/studio): a program the admin starts for one ssh session.
+  - **Who it is.** The app's user (`C[user]`, the uid nftables lets reach 5432) with the app's
+    role and password, in a transient unit under tando.slice: no capabilities, no new privileges,
+    ProtectSystem=strict, private /tmp, /dev and IPC, SocketBindDeny=any, IP only to localhost,
+    96 MB, 32 tasks, 12 h at most; the app's env file is not loaded. The password reaches it as a
+    systemd credential (root 600 under /run/tando/studio, removed with the unit), never in an
+    argv, the URL, the page, the API or a log. It starts no program (an AST test).
+  - **Who reaches it.** Its unix socket (0666) is in `/run/tando-studio/<sid>/`, 0770 owned by the
+    admin and the app's group, under a root 0711 directory: the admin's sshd session, the app's
+    uid (which has the password anyway) and root. Nothing listens on a network port. On the laptop
+    `ssh -L 127.0.0.1:<port>:<socket>` on a connection of its own (not the shared master); any
+    local process can connect to that port, so every API call needs a 256-bit bearer token, which
+    the page gets once for a single-use code in the URL (a minute to use it); Host must be
+    127.0.0.1, localhost or [::1] with that port (DNS rebinding), a foreign Origin or
+    Sec-Fetch-Site is refused, POST needs application/json, OPTIONS gets 405 (no CORS). The page:
+    CSP `default-src 'self'` with Trusted Types and no inline script; database content only
+    through textContent. Residual: a malicious browser extension or a process of the admin's own
+    uid on the laptop can read the tab; out of scope.
+  - **What it may do.** Read-only, PostgreSQL enforcing it: each request is one `BEGIN READ ONLY`
+    whose snapshot is taken by the studio (`SELECT 1`) before any user statement, so `SET
+    TRANSACTION READ WRITE` and `set_config('transaction_read_only', ...)` fail; a statement that
+    ends the transaction stops the batch (no second BEGIN); ROLLBACK and DISCARD ALL after. Each
+    statement is its own Parse (one command only). In front of that, an allowlist of first words
+    (SELECT, WITH, VALUES, TABLE, SHOW, EXPLAIN, SET, RESET; not SET TRANSACTION/ROLE/SESSION) stops
+    LOCK, VACUUM, ANALYZE, NOTIFY, COMMIT and the rest before they reach the server, and some
+    functions a read-only transaction still runs are refused by name: `pg_cancel_backend` and
+    `pg_terminate_backend` (the role may signal the app's own sessions), `pg_logical_emit_message`,
+    and the ones that run SQL given as text (`query_to_xml` and kin, `ts_stat`, `ts_rewrite`); so is
+    any `U&"..."` identifier (its escapes could spell those names). The studio's
+    own clock cancels a statement at 30 s and closes the connection 5 s later. One connection, at
+    most 2 studios per host. CI deploy keys cannot start it: the client, the gate's grammar, their
+    sudo rule and sshd's DisableForwarding refuse, and the agent refuses SUDO_USER tando-d-*.
+  - **One app.** The app comes only from the root agent verb's argument; the credential file
+    holds that app's role, and the API has no field for a database, role or connection string
+    (unknown JSON fields are refused). Every app database is closed to PUBLIC (`db_limits`, run by
+    every deploy and host setup, so an older or hand-made grant is undone); no extension that
+    reaches another database (dblink, postgres_fdw) is installed, and the role cannot create one.
+    Residual: PostgreSQL's shared catalogs show any role the names of databases and roles and that
+    other sessions exist; queries and client addresses of other roles stay hidden.
+  - **Resources** (bench/RESULTS.md "db studio"). The bound comes from settings, never from the
+    OOM killer: a backend killed by it makes the postmaster restart every session of every app.
+    The settings bound sorts and hashes only: one value a query builds (`repeat`, `string_agg`)
+    may take up to 1 GB of the backend's memory, and PostgreSQL has no per-session cap (residual:
+    on a server with little free memory a deliberate query can still bring the OOM killer).
+    The studio's backend starts with `work_mem=2MB`, `hash_mem_multiplier=1`, no parallel workers,
+    `temp_buffers=1MB`, `jit=off` (DISCARD ALL after each request puts them back; SET of them and
+    `set_config` are refused; a function of the app's that calls set_config is the residual), the
+    role's `temp_file_limit` (1 GB, superuser-only) for what spills. The root agent checks the pid the
+    studio reports (a postgres process, child of this cluster's postmaster, its title this app's
+    role and database, listed by pg_stat_activity with the studio's application_name), then moves
+    it into a transient scope at the root of the cgroup tree with CPUWeight=1 and IOWeight=1
+    (StartTransientUnit with its PID; no memory limit), at nice 19 and the idle I/O class; the
+    studio itself runs at Nice=10. `lock_timeout=2s`; 30 s per editor statement, 10 s for browsing: an app's DDL
+    waits for a studio query at most that long. Nothing is held between requests (ROLLBACK, no
+    snapshot, `idle_in_transaction_session_timeout=60s` behind it); the connection closes after 60 s
+    unused and is opened only when the role keeps 2 connections free for the app.
+  - **Residual** (documented in docs/COMMANDS.md): what the app's role can read, 30 s of CPU and
+    I/O per statement, an ACCESS SHARE lock for that long, advisory locks for the request,
+    pg_cancel_backend of the app's own sessions. The SQL history is in the browser's
+    localStorage, AES-GCM encrypted with a key derived from the role's password (HMAC), so a later
+    local page on the same port cannot read it.
 
 ### Third review (test/sec3), and what stays open
 - Loopback (fw_sync): an app's uid may reach its own port and pre-flight port; it is refused the

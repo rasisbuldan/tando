@@ -505,8 +505,8 @@ cmd_env_ls() {
 }
 
 # doctor_prog_differs name detail: is this row "a program on the server differs from the client's"
-# (agent, gate, logs, metrics, watch, status, daemon, offsite, host; the agent words it three ways)?
-doctor_prog() { case $1 in agent|gate|logs|metrics|watch|status|daemon|offsite|host) return 0;; esac; return 1; }
+# (agent, gate, logs, metrics, watch, status, daemon, offsite, host, studio; the agent words it three ways)?
+doctor_prog() { case $1 in agent|gate|logs|metrics|watch|status|daemon|offsite|host|studio) return 0;; esac; return 1; }
 doctor_prog_differs() {
   doctor_prog "$1" || return 1
   case $2 in *"differs from this tando"*|*" on the laptop: "*|*"differs from the client"*) return 0;; esac
@@ -522,7 +522,7 @@ cmd_doctor() {
   # (the sums of tando-status and tandod come after the version, named: an older agent ignores them)
   agent_raw sudo doctor $(server_sums) "$(client_version)" "status=$(server_sums tando-status | tr -d ' ')" \
     "tandod=$(server_sums tandod | tr -d ' ')" "offsite=$(server_sums tando-offsite | tr -d ' ')" \
-    "host=$(server_sums tando-host | tr -d ' ')" > "$TMPD/st" || exit 1
+    "host=$(server_sums tando-host | tr -d ' ')" "studio=$(server_sums tando-studio | tr -d ' ')" > "$TMPD/st" || exit 1
   # after a client upgrade every program differs: nine near-identical rows would bury the findings
   # that matter, so they become one row (--verbose lists each)
   while IFS=$TAB read -r r state name detail; do

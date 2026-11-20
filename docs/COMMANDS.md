@@ -174,12 +174,86 @@ no next run), never when the release fails, and a rollback brings back the previ
 Example: `tando jobs run nightly`
 
 ### db
-`tando db [info] [app]` · `tando db psql [app]` · `tando db url [app] --show`. Flags: `-a -H --show`.
-Subcommands: info (default, 0-1: the app), psql, url (0-1).
+`tando db [info] [app]` · `tando db psql [app]` · `tando db url [app] --show` ·
+`tando db studio [app] [--no-open] [--idle M] [--stop]`. Flags: `-a -H --show --no-open --idle --stop`.
+Subcommands: info (default, 0-1: the app), psql, url, studio (0-1).
 The app's PostgreSQL database (`database = postgres`). Without a subcommand: its size, the
 connections in use and the limits of its role as PostgreSQL holds them. `url` refuses to print
 without `--show`. See "Database limits" and "Upgrading PostgreSQL" below.
 Example: `tando db url --show`
+
+#### tando db studio
+A small web page for the app's database, in your browser: the tables and views with their
+estimated rows and sizes (a filter box), a table's rows (pages of 50, 100 or 500, sort by a column,
+NULL and `''` told apart, a long or JSON or bytea value opens in a side panel) and its structure
+(columns, indexes, "Open in SQL"), and a SQL editor (Cmd/Ctrl+Enter runs the selection or the
+statement at the cursor, Shift added runs everything, Cmd/Ctrl+. cancels; one result tab per
+statement, the error's position selected in the editor, notices, CSV download). Light and dark.
+
+- **One app.** A studio shows one app's database and nothing of any other: the app is the one
+  named (`tando db studio shop`, `-a shop`), else the project's (tando.conf), else you pick it:
+  outside a project the command lists the apps of the server that have a database (size, state;
+  the others dimmed as "no database") and asks for a number; with exactly one it opens that one and
+  says which; without a terminal it prints the list with the command for each and exits 2. The page
+  names the app, its database and the server in its top bar and title; there is no switch to
+  another app in it (a studio holds one app's credentials): run `tando db studio <other app>`.
+  The sidebar lists this database's schemas (pg_catalog and information_schema only with "system
+  schemas"). PostgreSQL shows every role the *names* of the databases and roles and that other
+  sessions exist (`pg_database`, `pg_roles`, `pg_stat_activity`), never their queries or client
+  addresses; the studio's own lists show none of them. The app's role can connect to no database
+  but its own (no CONNECT for PUBLIC on any app database, set again at every deploy and host setup).
+
+- **Read-only.** Each run is one read-only transaction, opened with a snapshot before any of your
+  statements (so `SET TRANSACTION READ WRITE` cannot turn it around) and always rolled back, then
+  the session is reset (`DISCARD ALL`). Only statements that start with `SELECT`, `WITH`, `VALUES`,
+  `TABLE`, `SHOW`, `EXPLAIN`, `SET` or `RESET` are sent (not `SET TRANSACTION`, `SET ROLE`,
+  `SET SESSION ...`); anything else is refused before it runs: writes, DDL, `LOCK`, `VACUUM`,
+  `ANALYZE`, `COPY`, `COMMIT`, `CALL`, `DO`, `NOTIFY`. **Writes stay in `tando db psql`.**
+- **Limits.** A statement stops after 30 s (the studio's own clock: `SET statement_timeout = 0`
+  does not lift it); 1,000 rows kept per statement (100 or 10,000 to choose), a cell cut at 64 KB
+  (16 KB when browsing a table), 8 MB of data per answer; at most 100 statements and 256 KB of SQL
+  per run; one request at a time (the page waits for a running query, or Cancel stops it).
+- **It does not crowd out the apps.** The studio's database process is held to 2 MB per sort or
+  hash before it spills to a temporary file (`work_mem`, `hash_mem_multiplier` 1), one process (no
+  parallel workers), no JIT, temporary files within the role's `db_temp_limit` (1 GB); these
+  cannot be changed from the editor (`SET` of them and `set_config` are refused); one value a
+  query builds (`repeat`, `string_agg`) can still take up to 1 GB while the query runs. The agent checks
+  that the process is this app's studio session, then moves it into a cgroup of its own at CPU
+  and I/O weight 1 (the apps and PostgreSQL have 100: on a busy CPU it gets about 1%, on an idle
+  one all of it), at nice 19 and, where the disk's I/O scheduler has classes, the idle I/O class.
+  It never gets a memory limit: the kernel killing a PostgreSQL process makes the server restart
+  every app's sessions; the settings are the bound for sorts and hashes. It waits at most 2 s for a
+  lock; a statement stops at 30 s in the editor and 10 s when browsing (so an app's migration waits
+  for a studio query at most that long); nothing stays open between two requests (no transaction,
+  no snapshot); its connection closes after 60 s unused, and it does not connect when the app would
+  have fewer than 2 of its role's connections left (or the server fewer than 2 of all). Numbers:
+  bench/RESULTS.md "db studio".
+- **What it can still do** as the app's role: read everything the role can read; use CPU and disk
+  for up to 30 s per statement; hold a lock that delays the app's migration for that long; take an
+  advisory lock (released when the run ends); cancel or end the app's own database sessions
+  (`pg_cancel_backend`). None of this is beyond `tando db psql`.
+- **How it is reached.** The server listens on no network port: the studio is a unix socket in
+  `/run/tando-studio/<session>/`, a directory only your login and the app's group can enter, and
+  this command's own ssh connection forwards `127.0.0.1:<port>` on your computer to it (a stable
+  port per app between 47100 and 47409; the next free one when it is taken). The link it prints
+  works once: the page trades its code for a key it keeps for the tab (one tab per session; a
+  reload keeps working). The database password never leaves the server.
+- **When it stops.** Ctrl-C in the terminal, Stop in the page, `--idle` minutes without the page
+  being looked at (30; 5 to 240), the computer asleep or offline for 45 s, or
+  `tando db studio --stop [app]` from another terminal. Then nothing of it is left on the server;
+  the command checks and says so. The page shows "This studio session ended" with the command to
+  run again; your editor text is kept.
+- **History** of your queries (the last 100) and the editor's text stay in the browser, encrypted
+  (AES-GCM with a key the studio derives from the role's password: nothing else on the computer
+  can read them, not even a later page on the same port). They are per app and port, so a second
+  studio of the same app at the same time has its own.
+- **sshd** must allow forwarding to a unix socket for your login (the default:
+  `AllowStreamLocalForwarding yes`). When it does not, the command says so and what to add.
+- At most 2 studios run on a server at once. CI deploy keys cannot open one (the client, the gate,
+  sudo and sshd each refuse). The audit log (`tando audit`) has each session's start and end with
+  the number of statements, never their text.
+
+Example: `tando db studio shop`
 
 ### backup
 `tando backup ls [app]` · `tando backup now [app]` · `tando backup restore <id> [--yes]` ·

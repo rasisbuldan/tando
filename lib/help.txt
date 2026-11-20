@@ -209,14 +209,22 @@ the job (curl --retry 5 --retry-connrefused). A run is stopped after its timeout
 reported as timed out.
 
 @@ db
-flags: -a= -H= --show
-subs: info=0-1 psql=0-1 url=0-1 default=info
+flags: -a= -H= --show --no-open --idle= --stop
+subs: info=0-1 psql=0-1 url=0-1 studio=0-1 default=info
 usage: tando db [info] [app]
 usage: tando db psql [app]
 usage: tando db url [app] --show
+usage: tando db studio [app] [--no-open] [--idle M] [--stop]
 The app's PostgreSQL database (database = postgres in tando.conf). Without a
 subcommand: its size, connections in use and limits. psql opens a shell as the
 app's role; url prints DATABASE_URL, password included.
+studio opens a small web page in your browser: the tables (rows, structure) and
+a SQL editor. It is read-only (writes: tando db psql). The page goes through
+this command's own ssh connection; nothing listens on the server's network. It
+stops with Ctrl-C, Stop in the page, or after --idle minutes unused (30;
+5 to 240). --no-open prints the link only; --stop ends the app's studio. One
+studio shows one app: without an app and outside a project it lists the apps
+with a database and asks which.
 Limits of the app's role, per app in tando.conf, applied by a deploy (off: no
 limit): db_statement_timeout = 30s (a statement running longer is cancelled),
 db_idle_tx_timeout = 5m (a connection idle inside a transaction is closed),

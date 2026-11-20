@@ -6,6 +6,28 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: `tando db studio [app]`: a small web page in your browser for the app's PostgreSQL
+  database: the tables (rows, sort, structure, a value in a side panel) and a SQL editor
+  (Cmd/Ctrl+Enter, cancel, a result tab per statement, the error's position, CSV, an encrypted
+  history in the browser), light and dark. Read-only: each run is one read-only transaction whose
+  snapshot is taken before your statements and which is always rolled back; statements that are
+  not queries are refused before they run. Writes stay in `tando db psql`. One studio shows one
+  app's database; without an app (and outside a project) it lists the apps that have one and asks.
+  The server listens on no network port: the page goes through the command's own ssh connection
+  to a unix socket; the database password never leaves the server; the link works once. It ends
+  with Ctrl-C, Stop, 30 minutes unused or 45 s without the laptop, and leaves nothing running.
+  The studio's database process is held small (2 MB per sort or hash, one process, no JIT) and at
+  the lowest CPU priority, waits at most 2 s for a lock, stops a statement at 30 s (10 s when
+  browsing), and does not connect when the app has fewer than 2 of its connections free. At most
+  2 per server; CI deploy keys cannot open one. A new server program, `tando-studio` (srv/studio,
+  about 7 MB per CPU type), installed by `tando host setup`; `tando doctor` checks it and lists
+  open sessions (docs/COMMANDS.md "tando db studio", docs/ARCHITECTURE.md).
+- Changed: every app's database is closed to PUBLIC (CONNECT, TEMPORARY) at each deploy and
+  `tando host setup`, not only when it is created: a database left open by an older setup or by
+  hand is closed again.
+- Changed: `tando open` uses the shared `open_url`.
+- Tests: `test/e2e-studio.sh` (docs/TESTING.md), Go unit, fuzz and live tests of srv/studio,
+  `bench/run-studio.sh`.
 - `tando jobs run` always shows the job's output: a job that ended within milliseconds could be
   stored by the journal without its run id and came back empty; a run by hand is also no longer
   refused after the job failed several times in a row.
