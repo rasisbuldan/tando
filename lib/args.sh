@@ -21,7 +21,7 @@ help_index() {
   local c f v
   while IFS='	' read -r c f v; do
     if [ "$f" = has ]; then HX_CMDS="$HX_CMDS$c "; continue; fi
-    printf -v "HX_${f}_$(printf '%s' "$c" | tr '-' '_')" '%s' "$v"
+    printf -v "HX_${f}_${c//-/_}" '%s' "$v"
   done < <(awk '/^@@ / { c = $2; if (c != "overview") print c "\thas\t"; next }
     c != "" && c != "overview" && /^(flags|args|subs):/ { f = $0; sub(/:.*/, "", f); v = $0; sub(/^[a-z]+: ?/, "", v)
       print c "\t" f "\t" v }' "$HELPF")
@@ -29,7 +29,7 @@ help_index() {
 help_index
 spec_has() { case $HX_CMDS in *" $1 "*) return 0;; esac; return 1; }
 # spec cmd field: that field of the command's section ("" when absent)
-spec() { local n; n="HX_${2}_$(printf '%s' "$1" | tr '-' '_')"; printf '%s' "${!n:-}"; }
+spec() { local n="HX_${2}_${1//-/_}"; printf '%s' "${!n:-}"; }
 help_usage() { # the usage lines of a command
   awk -v c="$1" '/^@@ / { s = ($2 == c); next }
     s && /^usage: / { sub(/^usage: /, ""); printf "%s%s\n", (n++ ? "       " : "usage: "), $0 }' "$HELPF"

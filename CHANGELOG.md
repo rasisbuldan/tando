@@ -6,6 +6,9 @@ first, grouped by area.
 
 ## Unreleased
 
+- Faster: every tando command starts about 0.3 s sooner (0.36 s to 0.06 s for `tando help`;
+  `tando ls` and `tando status` from about 0.55 s to about 0.25 s): the help index no longer
+  starts two processes per line of the help text.
 - Fixed: a deploy that did not go live (refused in the pre-flight, cut off, rolled back) still
   added the new domains of its tando.conf to the live app and set its database limits
   (`db_statement_timeout`, `db_idle_tx_timeout`, `db_temp_limit`) on the live app's role. Both now

@@ -431,7 +431,7 @@ in=""; case "$*" in *" configure "*|*" begin "*|*" activate "*|*" end "*) in=$(c
 c=${*: -1}; c=${c##*tando-agent }; case $in in *check=1*) c="$c check";; esac
 echo "$c" >> "$DCALLS"
 case "$*" in
-  *" info") printf 'version=0.0.0\narch=aarch64\nlibc=glibc\n';;
+  *" info") printf 'version=0.0.0\nproto=2\narch=aarch64\nlibc=glibc\n';;
   *" configure "*) case $in in *check=1*) printf 'exists=%s\ncurrent=\nneeds=%s\nnode=24.1.0\ndomains=\n' "${STUB_EXISTS:-1}" "${STUB_NEEDS:-}";;
                    *) printf 'port=3100\ncreated=0\nlink=http://hello.localhost\n';; esac;;
   *" begin "*) printf 'token=%s\n' "$STUB_TOKEN";;
