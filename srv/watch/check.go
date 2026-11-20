@@ -56,6 +56,7 @@ func appCheckList() []appCheck {
 		appFunc{"memory", checkMemory},
 		appFunc{"backup", checkBackup},
 		appFunc{"jobs", checkJobs},        // its scheduled jobs: how each last ended (not held with the app)
+		appFunc{"workers", checkWorkers},  // its workers: one that keeps exiting
 		appFunc{"db conns", checkDBConns}, // its database role's connections against the role's limit
 		appFunc{"disk", checkAppDisk},     // and the disk guard
 		appFunc{"uptime class", classify},
@@ -71,6 +72,7 @@ func lastChecks() []hostCheck {
 		hostFunc{"logscan", checkLogscan},
 		hostFunc{"uptime", recordUptime},
 		hostFunc{"jobs gone", dropJobs}, // alerts of jobs that are no longer scheduled
+		hostFunc{"workers gone", dropWorkers},
 		hostFunc{"host disk", checkHostDisk},
 		hostFunc{"firewall", checkFirewall},
 		hostFunc{"host memory", checkHostMemory}, // memory, swap, load

@@ -323,8 +323,9 @@ fi
 # a list kept here: a key added to either without a row in docs/CONFIG.md and a line in
 # lib/help-conf.txt fails; so does a documented key the parser rejects.
 conf_arms() { # file start-regex end-regex: the labels of the 6-space case arms in that range, one key per line
-    sed -n "/$2/,/$3/p" "$1" | perl -0777 -ne 's/\\\n\s*//g; for (/^ {6}([a-z][^\n)]*)\)/mg) { print "$_\n" }' |
-        tr '|' '\n' | sed 's/^job\.\*$/job.<name>/; s/^job\.\*\.timeout$/job.<name>.timeout/' | sort -u
+    sed -n "/$2/,/$3/p" "$1" | perl -0777 -ne 's/\\\n\s*//g; for (/^ {6}([a-z][^\n) "]*)\)/mg) { print "$_\n" }' |
+        tr '|' '\n' | sed 's/^job\.\*$/job.<name>/; s/^job\.\*\.timeout$/job.<name>.timeout/; s/^worker\.\*$/worker.<name>/' |
+        sed 's/^worker\.\*\.\([a-z_]*\)$/worker.<name>.\1/' | sort -u
 }
 conf_client=$(conf_arms "$here/lib/common.sh" '^conf_load() {' '^  done < "\$f"')
 # check, origin and force are words of the client's request to configure, not tando.conf keys

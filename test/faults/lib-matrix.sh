@@ -7,7 +7,8 @@
 # kill (SIGKILL of the agent there), fail (that action fails: a full disk, a command that
 # fails) or reboot (the agent waits there, then the server restarts: docker restart). Then
 # recovery runs as on a server (the activation's ExecStopPost, a recover-all as tando-watch or
-# the boot would run it), and ONE checker (mx_inv) asserts the ten invariants of the matrix.
+# the boot would run it), and ONE checker (mx_inv) asserts the invariants of the matrix (eleven; the 11th, the workers', for
+# the kind worker).
 # The points of an operation come from a trace of the same operation without a fault.
 #
 # The hook fires only with root's /etc/tando-test-server and /run/tando-test/fault on the server
@@ -49,6 +50,9 @@ mx_mem_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo 128
 # and the job's schedule (node and data: the job units are the live release's)
 mx_job_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo '*:0/10'; else echo '*:0/20'; fi; }
 mx_has_job() { case $KIND in node|data) return 0;; esac; return 1; }
+# and the workers (kind worker): odd versions have a and b, even ones a only, so a worker left
+# from the other version (or missing) is seen by the checker (inv11)
+mx_workers_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo "a b"; else echo "a"; fi; }
 mx_mc_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo 64; else echo 96; fi; }
 mx_start_of() {
   local n=$1; [ -n "${MX_SAMECONF:-}" ] && n=1
@@ -82,6 +86,7 @@ mx_version() {
       data) echo "data = data"; echo "database = postgres";;
     esac
     mx_has_job && echo "job.tick = $(mx_job_of "$n") | true"
+    if [ "$KIND" = worker ]; then for w in $(mx_workers_of "$n"); do echo "worker.$w = node worker.js"; done; fi
     [ -n "${MX_RELEASE:-}" ] && echo "release = $MX_RELEASE"
   } > "$d/tando.conf"
   case $KIND in
@@ -105,6 +110,7 @@ mx_version() {
       [ "$beh" = ok ] || rm -f "$d/www/${h#/}"
       printf '%s\n' 'FROM alpine:3.22' 'RUN apk add --no-cache busybox-extras' 'COPY www /www' \
         'CMD ["/bin/sh", "-c", "exec httpd -f -v -p 0.0.0.0:${PORT:-8080} -h /www"]' > "$d/Dockerfile";;
+    worker) cp "$MX_DIR/mx-app/server.js" "$MX_DIR/mx-app/worker.js" "$d/";;
     *) cp "$MX_DIR/mx-app/server.js" "$d/";;
   esac
 }
@@ -120,6 +126,7 @@ mx_settings() {
   [ "$KIND" = container ] && printf 'container_port=8080\n'
   [ "$KIND" = data ] && printf 'data=data\ndatabase=postgres\n'
   mx_has_job && printf 'job.tick=%s | true\n' "$(mx_job_of "$n")"
+  if [ "$KIND" = worker ]; then for w in $(mx_workers_of "$n"); do printf 'worker.%s=node worker.js\n' "$w"; done; fi
   return 0
 }
 # mx_client <out> <args...>: the CLI in the app's work dir; status in MXRC
@@ -168,7 +175,7 @@ mx_loop_stop() {
   MX_REQ=$(grep -c . "$W/loop" 2> /dev/null)
 }
 
-# ---- the checker: the ten invariants ----------------------------------------------------------
+# ---- the checker: the invariants ----------------------------------------------------------
 # Inputs (set by the case): MX_OP, MX_OLD (current before), MX_NEW (the operation's release:
 # the deploy's new one, the rollback's target; may be empty), MX_WANT old|new|any (which of the
 # two must serve), MX_RUN running|stopped|any, MX_ENVW (env value expected, or "any:a b"),
@@ -259,6 +266,27 @@ mx_inv() {
       *) [ "$(fv env_val)" = "$MX_ENVW" ] || mx_bad 2 "agree: env MXVAL=$(fv env_val), it must be $MX_ENVW";;
     esac
     [ -z "$(fv env_bad)" ] || mx_bad 2 "agree: the env that broke the app (MX_BAD) is still in the env file"
+  fi
+  # 11. the workers that run are exactly the serving release's, each running it (none when stopped)
+  if [ "$KIND" = worker ] && [ -n "$want" ] && [ -n "$(mx_ver_of "$want")" ]; then
+    local ww wn wa wr we wl run=""
+    ww=" $(mx_workers_of "$(mx_ver_of "$want")") "
+    for wl in $(sed -n 's/^wk=//p' "$W/facts"); do
+      IFS=: read -r wn wa wr we <<< "$wl"
+      case $wa in active|activating|reloading|deactivating) run="$run $wn";; esac
+      if [ "$stopped" = 1 ]; then
+        case $wa in active|activating|reloading) mx_bad 11 "workers: the app is stopped, worker $wn is $wa";; esac
+        [ "$we" != enabled ] || mx_bad 11 "workers: the app is stopped, worker $wn is enabled (it would start at boot)"
+        continue
+      fi
+      case $ww in *" $wn "*) ;; *) mx_bad 11 "workers: worker $wn (unit $wa) is not one of release $want's:$ww"; continue;; esac
+      [ "$wa" = active ] || mx_bad 11 "workers: worker $wn of release $want is $wa, not active"
+      [ "$wr" = "$want" ] || mx_bad 11 "workers: worker $wn runs release ${wr:-none}, the serving one is $want"
+      [ "$we" = enabled ] || mx_bad 11 "workers: worker $wn is $we, not enabled (a reboot would not start it)"
+    done
+    if [ "$stopped" = 0 ]; then
+      for wn in $ww; do case " $run " in *" $wn "*) ;; *) mx_bad 11 "workers: release $want's worker $wn does not run";; esac; done
+    fi
   fi
   # 3. statuses
   if [ -n "$want" ]; then
