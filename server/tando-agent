@@ -4328,9 +4328,9 @@ cmd_app_down() {
   [[ $(systemctl show -P ActiveState "tando-$A") == failed ]] || return 0
   [[ -z ${S[stopped]:-} ]] || return 0
   S[down]=1
-  save "$D/state" S || return 0
   fp down.caddy
-  write_caddy
+  write_caddy || return 0          # (the page first: the state says down once visitors get it)
+  save "$D/state" S
 }
 
 cmd_logs() { # app [n] [follow]
