@@ -43,6 +43,7 @@ f=/etc/caddy/tando/$A.caddy
 kv u_mem "$(sed -n 's/^MemoryMax=//p' "/etc/systemd/system/$u" 2> /dev/null | head -1)"
 kv job_cal "$(sed -n 's/^OnCalendar=//p' "/etc/systemd/system/tando-${A}_job-tick.timer" 2> /dev/null | head -1)"
 kv c_domains "$(g domains "$D/app.conf")"
+kv c_assets "$(g assets "$D/app.conf")"
 # the names Caddy's site answers for (its first line: "name, name {"), without http://
 kv site_names "$(head -1 "$f" 2> /dev/null | sed 's/ *{$//; s|http://||g; s/,/ /g' | tr -s ' ')"
 kv site_mc "$(awk '$1 == "max_conns_per_host" { print $2; exit }' "$f" 2> /dev/null)"
