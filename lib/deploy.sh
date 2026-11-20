@@ -375,8 +375,10 @@ node_install() {
 yarn_pnp() {
   [ -f .yarnrc.yml ] || return 0
   grep -q '^nodeLinker:[[:space:]]*["'"'"']*\(node-modules\|pnpm\)' .yarnrc.yml && return 0
-  die "Yarn Plug'n'Play: tando ships node_modules, which PnP does not make. Add  nodeLinker: node-modules" \
-    "to .yarnrc.yml, run yarn install, then deploy again"
+  die "Yarn Plug'n'Play: tando ships node_modules, which PnP does not make." \
+    "
+  Add  nodeLinker: node-modules  to .yarnrc.yml, run yarn install,
+  then deploy again"
 }
 
 # next_standalone: Next.js must build with output: "standalone" (tando ships .next/standalone).

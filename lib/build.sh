@@ -168,8 +168,13 @@ cmd_init() {
   fi
   case $recipe in node|next) v=$(first_file .nvmrc .node-version) || { grep -q '"engines"' package.json 2> /dev/null && v="engines in package.json"; };; *) v="";; esac
   [ -f package.json ] && why="$why, $(node_pm)"
-  note "detected: $fw ($why), build: ${build:-none}, start: ${start:-none (Caddy serves the files)}," \
-    "output: $out${spa:+, SPA (unknown paths get index.html)}${v:+, Node $(node_major) ($v)}"
+  # (three short lines, not one: output is read at 80 columns, and a long build or start command
+  # still gets its own line)
+  note "detected: $fw"
+  note "  why: $why"
+  note "  build: ${build:-none}"
+  note "  start: ${start:-none (Caddy serves the files)}"
+  note "  output: $out${spa:+, SPA (unknown paths get index.html)}${v:+, Node $(node_major) ($v)}"
   [ "$recipe" = next ] && out=.
   [ "$recipe" = static ] || [ ! -f .yarnrc.yml ] || (yarn_pnp) || true   # (says what to add; deploy refuses)
   if [ "$recipe" != static ]; then
@@ -234,8 +239,8 @@ init_next() {
   elif [ -n "$YES" ]; then a=y
   else a=no; fi
   if [ "$a" = no ]; then
-    note "Next.js needs  output: \"standalone\"  in ${cfg:-next.config.mjs} before tando deploy" \
-      "(tando init --yes or tando up --yes adds it)"
+    note "Next.js needs  output: \"standalone\"  in ${cfg:-next.config.mjs} before tando deploy"
+    note "  (tando init --yes or tando up --yes adds it)"
     return 0
   fi
   if [ -z "$cfg" ]; then
@@ -295,7 +300,8 @@ node_port_hint() {
   l=$(grep -n -o -E "$re" "$1" | head -1)
   [ -n "$l" ] || return 0
   note "node: $1 listens on a fixed port (line ${l%%:*}: ${l#*:}...)."
-  note "  tando gives the app its port in PORT and blocks the others: use .listen(process.env.PORT || 3000)"
+  note "  tando gives the app its port in PORT and blocks the others:"
+  note "  use .listen(process.env.PORT || 3000)"
 }
 
 # python_start entry: Flask, FastAPI or Django get a production server bound to $PORT
@@ -308,8 +314,9 @@ python_start() {
     v=${v#./}; v=${v%/wsgi.py}
     [ -n "$v" ] || return 0
     start="gunicorn -b 127.0.0.1:\$PORT $v.wsgi" pkg=gunicorn fw=Django why="manage.py, $v/wsgi.py"
-    note "django: ALLOWED_HOSTS must list the app's domain; for its static files set STATIC_ROOT and" \
-      "  release = python manage.py collectstatic --noinput  in tando.conf"
+    note "django: ALLOWED_HOSTS must list the app's domain"
+    note "  static files: set STATIC_ROOT, and in tando.conf"
+    note "  release = python manage.py collectstatic --noinput"
   elif printf '%s' "$reqs" | grepq 'fastapi' || grepq 'FastAPI(' "$1" 2> /dev/null; then
     v=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=[[:space:]]*FastAPI(.*/\1/p' "$1" 2> /dev/null | head -1)
     start="uvicorn $m:${v:-app} --host 127.0.0.1 --port \$PORT" pkg=uvicorn fw=FastAPI why="fastapi, $1"
@@ -322,7 +329,8 @@ python_start() {
     return 0
   fi
   shell=1
-  note "python: start = $start (bound to the PORT tando gives the app)"
+  note "python: start = $start"
+  note "  (bound to the PORT tando gives the app)"
   printf '%s\n' "$reqs" | grepq -E "(^|[\"' ])$pkg" ||
     note "  add $pkg to requirements.txt: the server installs the venv from it"
 }

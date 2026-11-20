@@ -24,7 +24,7 @@ up express-pnpm
 check "F1a pnpm Express: up (rc=$RC) and it answers" t_eq "$(get express-pnpm)" "express pnpm fixture"
 check "F1b installed with pnpm, detected as Express" \
   eval 'grep -q "installed dependencies: \(corepack \)\{0,1\}pnpm install --frozen-lockfile" "$E/express-pnpm.out" &&
-        grep -q "detected: Express (express in package.json, start script, pnpm-lock.yaml)" "$E/express-pnpm.out"'
+        grep -q "^detected: Express$" "$E/express-pnpm.out" && grep -q "^  why: express in package.json, start script, pnpm-lock.yaml$" "$E/express-pnpm.out"'
 
 # F2. NestJS: nest build, then node dist/main
 up nest

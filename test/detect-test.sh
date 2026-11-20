@@ -36,7 +36,13 @@ case_() {
   n=$((n + 1)); init "$1"
   got=$(conf "$1")
   if [ "$got" != "$want" ]; then bad "$1: tando.conf  $got  (want  $want)"; return; fi
-  grep -qF -- "$3" "$T/$1.out" || bad "$1: the output does not say  $3:  $(tr '\n' ' ' < "$T/$1.out" | cut -c1-400)"
+  # (the detected block is five lines, "detected: <framework>", "  why: ...", "  build: ...",
+  # "  start: ...", "  output: ..."; joined back into one line here, as "detected: <framework>
+  # (<why>), build: ..., start: ..., output: ...", so a case states it in reading order)
+  awk 'NR > 1 && /^  why: / { sub(/^  why: /, " ("); printf "%s)", $0; next } NR > 1 && /^  (build|start|output): / { sub(/^  /, ", "); printf "%s", $0; next } NR > 1 { print "" } { printf "%s", $0 } END { print "" }' \
+    "$T/$1.out" > "$T/$1.flat"
+  grep -qF -- "$3" "$T/$1.flat" || bad "$1: the output does not say  $3:  $(cut -c1-400 < "$T/$1.flat" | tr '\n' ' ')"
+  awk 'length > 80 { exit 1 }' "$T/$1.out" || bad "$1: a line of tando init is wider than 80 columns: $(awk 'length > 80' "$T/$1.out" | head -1)"
 }
 
 B="npm run build"
@@ -45,7 +51,7 @@ case_ express-npm "node|||node server.js||" "detected: Express (express in packa
 case_ express-pnpm "node|||node server.js||" "detected: Express (express in package.json, start script, pnpm-lock.yaml)"
 case_ fastify-yarn "node|||node src/app.js||" "detected: Fastify (fastify in package.json, main src/app.js, yarn.lock)"
 case_ express-berry "node|||node index.js||" "(express in package.json, start script, yarn.lock, Yarn 2+)"
-case_ express-pnp "node|||node index.js||" "Add  nodeLinker: node-modules to .yarnrc.yml"
+case_ express-pnp "node|||node index.js||" "Add  nodeLinker: node-modules  to .yarnrc.yml"
 case_ node-fixedport "node|||node app.js||" "app.js listens on a fixed port (line 4: .listen(8000"
 case_ node-nvmrc "node|||node index.js||" "output: ., Node 22 (.node-version)"
 case_ nest "node|$B||node dist/main||" "detected: NestJS (@nestjs/core in package.json, package-lock.json), build: npm run build, start: node dist/main"
