@@ -542,7 +542,7 @@ lock() {
     { : > "$D/lock.wait.$BASHPID"; } 2> /dev/null
     flock -w "${1:-300}" 9; local rc=$?
     rm -f "$D/lock.wait.$BASHPID"
-    ((rc == 0)) || die "$A is busy: $(lock_holder) holds it (tando status shows it)"
+    ((rc == 0)) || { [[ -n ${LOCK_GIVEUP:-} ]] && "$LOCK_GIVEUP"; die "$A is busy: $(lock_holder) holds it (tando status shows it)"; }
   fi
   # what held it may have been a destroy: nothing is written into a directory that is gone
   [[ -f $D/app.conf ]] || { exec 9>&-; die "$A was destroyed while this command waited for it"; }
@@ -683,7 +683,7 @@ write_unit() {
   write_slice   # (jobs of a static site run in it too)
   local f=/etc/systemd/system/tando-$A.service
   if ! has_unit; then   # a static site (also when an app changed recipe): no process
-    if [[ -f $f ]]; then systemctl disable -q --now "tando-$A"; rm -f "$f"; fi
+    if [[ -f $f ]]; then systemctl disable -q --now "tando-$A"; rm -f "$f"; WU_CHANGED=1; fi
     return 0
   fi
   {
@@ -705,7 +705,8 @@ write_unit() {
   sed -i "1a OnFailure=tando-down@tando-$A.service\nStartLimitIntervalSec=60\nStartLimitBurst=5" "$f.tmp" &&
     [[ $(tail -1 "$f.tmp") == WantedBy=multi-user.target ]] ||
     { rm -f "$f.tmp"; echo "tando-agent: could not write $f (disk full?)" >&2; return 1; }
-  if cmp -s "$f.tmp" "$f"; then rm -f "$f.tmp"; else sync "$f.tmp" && mv -f "$f.tmp" "$f"; fi   # unchanged: untouched
+  if cmp -s "$f.tmp" "$f"; then rm -f "$f.tmp"   # unchanged: untouched
+  else sync "$f.tmp" && mv -f "$f.tmp" "$f" && WU_CHANGED=1; fi
 }
 
 # Caddy site for the app; validated before reload, the previous file restored on failure.
@@ -856,7 +857,12 @@ write_caddy() {
     rm -f "$f.tmp" "$f.old"; exec 11>&-
     WC_WHY="could not keep a copy of the site file of $A (disk full?)"; echo "tando-agent: $WC_WHY" >&2; return 1
   fi
-  sync "$f.tmp" 2> /dev/null; mv -f "$f.tmp" "$f"
+  sync "$f.tmp" 2> /dev/null
+  # (a rename that failed would have Caddy validate and reload the old file: reported as done)
+  if ! { fp caddy.mv && mv -f "$f.tmp" "$f"; }; then
+    rm -f "$f.tmp" "$f.old"; exec 11>&-
+    WC_WHY="could not replace the site file of $A"; echo "tando-agent: $WC_WHY" >&2; return 1
+  fi
   local verr="" busy
   wc_back() { if [[ -f $f.old ]]; then mv -f "$f.old" "$f"; else rm -f "$f"; fi; }
   wc_fail() { WC_WHY=$1; echo "tando-agent: $WC_WHY" >&2; return 1; }
@@ -1167,7 +1173,8 @@ op_trailer() {
     pg phase done result "$res" message "${P[message]:-${S[outcome_note]:-}}"
   fi
   hist_has "$id" "$kind" "$since" || { fp "$kind.hist" && hist "$id" "$kind" "$res" "${S[outcome_note]:-}"; } || return 1
-  fp "$kind.jobs" && jobs_follow
+  # (job units that could not be written: not done; recovery syncs them again, tando-watch asks)
+  { fp "$kind.jobs" && jobs_follow; } || { echo "tando-agent: the job units of $A could not be updated yet: recovery retries" >&2; return 1; }
   [[ $kind == deploy && $res != ok ]] && fp "$kind.drop" && drop_release "$id"
   st outcome_done "$o"      # (recover need not look at it again)
 }
@@ -1194,6 +1201,8 @@ prune() {
       [[ ${C[recipe]:-node} == container ]] && podman rmi -f "localhost/tando-$A:$i" > /dev/null 2>&1
     fi
   done
+  # settings staged by a configure a day ago or more (a deploy whose upload never came)
+  [[ -d $D/confs ]] && find "$D/confs" -maxdepth 1 -type f -mmin +1440 ! -name "${S[staged]:-none}" -delete 2> /dev/null
   save "$D/state" S
 }
 
@@ -1260,17 +1269,19 @@ revert() { # kind why [note] [soaked 0|1] [result: rolledback, or failed when it
   fb=$(fallback_of "${S[fallback]:-}" "$id")
   st phase rollback reverting 1
   pg phase rollback
-  if [[ -n $fb ]]; then
+  # the fallback's settings first (app.conf, the unit file), so it restarts as it was deployed
+  if [[ -n $fb && $id != "$fb" ]]; then { fp bad.start_back && start_back "$fb" && conf_put; } || back=0; fi
+  if ((!back)); then :
+  elif [[ -n $fb ]]; then
     if [[ -n ${S[pre_stopped]:-} ]]; then
       S[stopped]=1
       { fp bad.switch && switch_link "$fb" && stop_app; } || back=0
     elif [[ $(cur_link) != "$fb" ]]; then { fp bad.switch && switch_to "$fb"; } || back=0
     elif ! runs_release "$fb"; then { fp bad.switch && restart_app; } || back=0
+    else write_caddy || back=0          # (its site as its settings say)
     fi
   elif [[ -z ${S[prev]:-} ]]; then switch_to ""      # a first deploy: nothing to go back to
   fi
-  # app.conf describes the live release again
-  if ((back)) && [[ -n $fb && $id != "$fb" ]]; then { fp bad.start_back && start_back "$fb"; } || back=0; fi
   if ((!back)); then
     # going back did not work this time (a full disk, a unit that would not start): nothing is
     # committed; the phase stays (rollback, reverting) and recover tries again (this activation's
@@ -1305,7 +1316,7 @@ watch_notice() {
 # soak, rollback or other>, busy_left=<seconds of soak left or ->, busy_soak=<the soak>. Nothing
 # when the app is free. The client says it while it waits (lib/deploy.sh: busy_text)
 busy_info() {
-  [[ -f $D/lock ]] && ! flock -n "$D/lock" true 2> /dev/null || return 0
+  lock_busy "$D/lock" || return 0
   local bid=- bph=other bleft=-
   local -A P=()
   if [[ ${S[phase]:-idle} != idle ]]; then
@@ -1328,6 +1339,12 @@ busy_info() {
   echo "busy_by=$(lock_holder)"
 }
 cmd_busy() { need_root; app "$1"; busy_info; }
+# lock_busy file: a process holds a flock on it. Read from /proc/locks (by inode: see lock.Held in
+# srv/internal/lock): the probe takes no lock, so it never delays a verb or makes recover skip
+lock_busy() {
+  local i; i=$(stat -c %i "$1" 2> /dev/null) || return 1
+  grepq -E "^[0-9]+: FLOCK +[A-Z]+ +[A-Z]+ +[0-9]+ +[0-9a-f]+:[0-9a-f]+:$i " /proc/locks
+}
 
 # ---- upload lease: one upload into incoming/ at a time ----------------------------------
 
@@ -2249,9 +2266,11 @@ cmd_configure() {
     load "$D/state" S
     # the live release's jobs are those it was deployed with: keep them before app.conf changes
     [[ -n ${S[current]:-} && ! -f $D/jobs/${S[current]} ]] && valid_id "${S[current]}" && jobs_snap "${S[current]}"
-    # and so is its start command: a release that fails pre-flight must not change how the live
-    # one starts at its next restart
-    [[ -n ${S[current]:-} && ! -f $D/start/${S[current]} ]] && valid_id "${S[current]}" && start_snap "${S[current]}"
+    # and so are its settings (start, health, memory, path...): a deploy that does not go live must
+    # not change how the live one starts, is checked or runs (a file from before has only four)
+    if valid_id "${S[current]:-}" && ! grepq -x conf=1 "$D/start/${S[current]}" 2> /dev/null; then
+      start_snap "${S[current]}" || die "could not record the live release's settings (disk full?)"
+    fi
   else
     # a user of that name is only taken over when an earlier configure of this app made it and was
     # interrupted before app.conf existed (its marker .creating is in the app's directory)
@@ -2417,30 +2436,38 @@ cmd_configure() {
   done
   [[ ${C[database]:-} == sqlite && -z ${C[data]:-} ]] && C[data]=data   # the file lives in data/
   if [[ -z ${C[backup]:-} && ( -n ${C[data]:-} || -n ${C[database]:-} ) ]]; then C[backup]=daily; fi
-  # how the new release starts and is checked (start, start_shell, health, health_expect) waits
-  # in pending.conf until its activation takes it: until then app.conf describes the live
-  # release, so a deploy cut off before its activation (an upload that failed, a client killed)
-  # changes neither the live app's restarts nor its checks
-  if ((!new)) && valid_id "${S[current]:-}" && [[ -f $D/start/${S[current]} ]]; then
-    local -A RS=()
-    load "$D/start/${S[current]}" RS
-    for k in start start_shell health health_expect; do printf '%s=%s\n' "$k" "${C[$k]:-}"; done > "$D/pending.conf.tmp" &&
-      mv -f "$D/pending.conf.tmp" "$D/pending.conf" || die "could not write $D/pending.conf (disk full?)"
-    for k in start start_shell health health_expect; do
-      [[ -n ${RS[$k]+x} ]] || continue
-      if [[ -n ${RS[$k]} ]]; then C[$k]=${RS[$k]}; else unset "C[$k]"; fi
-    done
-  else
-    rm -f "$D/pending.conf"
+  # this deploy's settings wait in confs/<id> (id: their checksum, printed as conf=; the client
+  # hands it to activate) until its activation applies them at the switch. Until then app.conf,
+  # the unit file and Caddy's site stay the live release's: a deploy that does not go live (refused,
+  # cut off, an upload that failed) changes none of them, and a second client's configure in
+  # between never hands its settings to this one's activation. (Not for a new app or one with no
+  # live release: there is nothing live to keep, app.conf takes them at once.) The server's own
+  # keys (domains of tando.conf, origin) are app.conf's at once.
+  local -A NC=() LC=()
+  conf_copy C NC
+  local conf; conf=$(conf_stage) || die "could not write the settings of this deploy (disk full?)"
+  if ((!new)) && valid_id "${S[current]:-}"; then
+    load "$D/app.conf" LC
+    for k in "${!C[@]}"; do conf_key "$k" && unset "C[$k]"; done
+    for k in "${!LC[@]}"; do conf_key "$k" && C[$k]=${LC[$k]}; done
   fi
+  rm -f "$D/pending.conf"      # (an agent before staged settings)
   save "$D/app.conf" C
+  [[ ${S[staged]:-} == "$conf" ]] || st staged "$conf"
   # nothing changed since the last configure by this agent (every deploy calls it): done
-  local applied; applied=$(cat "$D/app.conf" "$AGENT" | cksum | cut -d' ' -f1)
+  # (app.conf's own keys, the staged settings and this agent: the same before and after the
+  # switch that applies them, so the next deploy with these settings changes nothing here)
+  local applied
+  applied=$( { for k in "${!C[@]}"; do conf_key "$k" || printf '%s=%s\n' "$k" "${C[$k]}"; done | sort
+               cat "$D/confs/$conf" "$AGENT"; } | cksum | cut -d' ' -f1)
   if ((!new)) && [[ ${S[applied]:-} == "$applied" ]] && [[ -f /etc/caddy/tando/$A.caddy || ${C[caddy]:-} == external ]]; then
-    echo "port=${C[port]}"; echo "link=$(link)"; echo "created=0"; echo "changed=0"
+    echo "port=${C[port]}"; echo "link=$(link)"; echo "created=0"; echo "changed=0"; echo "conf=$conf"
     AUDIT_VERB=""   # nothing changed (every deploy asks): nothing to record
     return 0
   fi
+  # what the new release needs before its pre-flight (its database, its shared directories) is
+  # made from its own settings; the live app's unit, site and jobs from the live ones
+  conf_copy C LC; conf_copy NC C; app_vars
   [[ ${C[database]:-} == postgres ]] && db_ensure
   [[ -x $LOGS ]] && { "$LOGS" app-setup "$A" > /dev/null || die "log setup failed"; }
   app_perms
@@ -2449,9 +2476,11 @@ cmd_configure() {
   [[ -n ${C[data]:-} ]] && ensure_shared data
   [[ ${C[recipe]:-} == next && ${C[next_cache]:-} != release ]] && ensure_shared next-cache
   [[ ${C[recipe]:-} == python ]] && ensure_shared .cache
+  conf_copy LC C; app_vars
   write_unit || die "could not write the unit of $A (disk full?)"
   write_caddy || die "$WC_WHY"
-  jobs_follow; sync_backup_timer
+  jobs_follow || die "could not write the job units of $A (disk full?)"
+  sync_backup_timer
   journal_dir
   [[ -f $D/.reserve ]] || { head -c 1048576 /dev/zero > "$D/.reserve" 2> /dev/null && chmod 600 "$D/.reserve"; }
   # (not marked applied on failure: the next deploy tries again)
@@ -2459,7 +2488,7 @@ cmd_configure() {
   systemctl daemon-reload
   has_unit && [[ -z ${S[stopped]:-} ]] && systemctl enable -q "tando-$A"
   st applied "$applied"
-  echo "port=${C[port]}"; echo "link=$(link)"; echo "created=$new"; echo "changed=1"
+  echo "port=${C[port]}"; echo "link=$(link)"; echo "created=$new"; echo "changed=1"; echo "conf=$conf"
 }
 
 # activate <app> <token> <build s> <upload s>: start a detached activation, print its id
@@ -2468,8 +2497,13 @@ cmd_configure() {
 cmd_activate() {
   need_root; app "$1"; shift
   local token b u id base n=1
-  if (($# == 3)); then token=$1; shift; else IFS= read -r token || token=""; fi
+  local conf=""
+  if (($# == 3)); then token=$1; shift; else IFS= read -r token || token=""; IFS= read -r conf || true; fi
   b=${1:-0} u=${2:-0}
+  # conf: the id of this deploy's settings (configure printed it); none from an older client or a
+  # deploy key: the activation takes the last configure's
+  [[ -z $conf || $conf =~ ^[0-9]{1,10}$ ]] || die "bad settings id"
+  [[ -z $conf || -f $D/confs/$conf ]] || die "the settings of this deploy are no longer on the server: run the deploy again"
   recover
   [[ $b =~ ^[0-9]+(\.[0-9])?$ && $u =~ ^[0-9]+(\.[0-9])?$ ]] || die "bad timings"
   lease_lock
@@ -2492,7 +2526,7 @@ cmd_activate() {
   if [[ -n $cur && ${S[inc_id]:-} == "$cur" && ${S[status_$cur]:-} == verified && ${S[phase]:-idle} == idle &&
         -z ${S[stopped]:-}${S[down]:-} && ${C[recipe]:-node} != container && -n ${S[applied]:-} &&
         -z ${C[release]:-} &&
-        ${S[inc_applied]:-} == "${S[applied]}" && $(cur_link) == "$cur" && $(inc_sum) == "${S[inc_sum]:-}" ]] &&
+        ${S[inc_applied]:-} == "${conf:-${S[staged]:-}} ${S[applied]}" && $(cur_link) == "$cur" && $(inc_sum) == "${S[inc_sum]:-}" ]] &&
      { ! has_unit || systemctl -q is-active "tando-$A"; }; then
     rm -f "$D/upload"
     AUDIT_NOTE="unchanged: release $cur stays live"
@@ -2532,7 +2566,7 @@ cmd_activate() {
   if ! fp act.spawn || ! systemd-run --quiet --collect --unit="tando-$A-act-$id" "${who[@]}" \
       -p Description="tando activation $A $id" -p "ExecStopPost=$AGENT recover $A" \
       -p "RuntimeMaxSec=$((3600 + 3600 + rt + 3 * ht + sk + 600))" -p "TimeoutStopSec=$((3 * ht + sk + 180))" \
-      "$AGENT" run-activation "$A" "$id" "$b" "$u"; then
+      "$AGENT" run-activation "$A" "$id" "$b" "$u" ${conf:+"$conf"}; then
     rmdir "$D/releases/$id"; rm -f "$D/upload"
     die "systemd-run failed"
   fi
@@ -2659,7 +2693,17 @@ cmd_run_activation() {
   need_root; app "$1"
   local id=$2 rel=$D/releases/$2 t l bad x
   valid_id "$id" || die "bad id"
-  lock 3600
+  # queued for an hour: the reason goes with the reservation (its lease), so the deploy ends
+  # "failed: waited an hour for ..." (rec_reap), not as if the server had restarted
+  ra_giveup() {
+    local why; why="it waited an hour for $(lock_holder) on $A and gave up; nothing was changed: run the deploy again"
+    lease_lock; load "$D/upload" L
+    [[ ${L[id]:-} == "$id" ]] && { L[why]=$why; save "$D/upload" L; }
+    flock -u 7
+  }
+  # (test fault point: fail = the hour of waiting ran out)
+  fp run.queue || { ra_giveup; die "$A is busy (test fault)"; }
+  LOCK_GIVEUP=ra_giveup lock 3600
   fp run.locked
   AUDIT_NOTE="release $id"
   load "$D/state" S
@@ -2683,25 +2727,39 @@ cmd_run_activation() {
   [[ -n $fb && -d $D/releases/$fb ]] || fb=$prev
   # (pre_stopped: a deploy to a stopped app that does not go live leaves it stopped)
   st phase copy target "$id" kind deploy prev "$prev" fallback "$fb" pre_stopped "${S[stopped]:-}"
+  # this deploy's settings (configure staged them; activate passes their id; without one, an older
+  # client's or a deploy key's, the last configure's): in memory now, for the copy and pre-flight;
+  # app.conf, the unit file and the site take them at the switch. LC: the live release's
+  local cf=${5:-${S[staged]:-}} k CONF_PUT=0
+  local -A LC=(); conf_copy C LC
   fail() {
     AUDIT_NOTE="release $id: $1"
     S[status_$id]=bad
-    fp fail.start_back && start_back "$prev"
+    # the live release's settings: never this release's (applied at the switch: put back)
+    conf_copy LC C
+    { fp fail.start_back && start_back "$prev" && { ((!CONF_PUT)) || conf_put; }; } ||
+      echo "tando-agent: could not put back the live release's settings (disk full?)" >&2
     end_op "$id" deploy failed "$1"
     free_lease 2> /dev/null   # (a failure before the copy ended: the upload's lease goes with it)
     exit 1
   }
-  # how this release starts and what it is checked with (configure left it in pending.conf), and its
-  # jobs: app.conf as configured for it
-  if [[ -f $D/pending.conf ]]; then
+  if [[ -n $cf ]]; then
+    [[ $cf =~ ^[0-9]{1,10}$ && -f $D/confs/$cf ]] ||
+      fail "the settings of this deploy are no longer on the server (staged over a day ago?): run the deploy again"
+    local -A NC=(); load "$D/confs/$cf" NC
+    for k in "${!C[@]}"; do conf_key "$k" && unset "C[$k]"; done
+    for k in "${!NC[@]}"; do conf_key "$k" && C[$k]=${NC[$k]}; done
+    app_vars
+  elif [[ -f $D/pending.conf ]]; then   # (staged by an agent before conf ids: start and health only)
     local -A PD=(); load "$D/pending.conf" PD
-    for x in start start_shell health health_expect; do
-      [[ -n ${PD[$x]+x} ]] || continue
-      if [[ -n ${PD[$x]} ]]; then C[$x]=${PD[$x]}; else unset "C[$x]"; fi
+    for k in start start_shell health health_expect; do
+      [[ -n ${PD[$k]+x} ]] || continue
+      if [[ -n ${PD[$k]} ]]; then C[$k]=${PD[$k]}; else unset "C[$k]"; fi
     done
-    save "$D/app.conf" C || fail "could not write app.conf (disk full?)"
-    rm -f "$D/pending.conf"
   fi
+  rm -f "$D/pending.conf"
+  CONF_ID="$cf ${S[applied]:-}"      # (for an unchanged next deploy: import_release records it)
+  # how this release starts, is checked and runs, and its jobs: as configured for it
   { fp run.jobs_snap && jobs_snap "$id" && start_snap "$id"; } || fail "could not record the release's jobs (disk full?)"
 
   # one limit for the upload and the releases kept, in real bytes (du counts a hardlink once)
@@ -2765,6 +2823,11 @@ cmd_run_activation() {
     run_release "$bk"
     pg t_release "$(el "$t")" phase switch
     t=$(( $(ds) - sw )); st phase switch
+  fi
+  # its settings: app.conf and the unit file now (the site with the restart in switch_to)
+  if [[ $(conf_text C) != "$(conf_text LC)" ]]; then
+    CONF_PUT=1
+    { fp sw.conf && conf_put; } || fail "could not apply this release's settings (disk full?)"
   fi
   local rc=0
   if ! switch_to "$id"; then
@@ -2899,7 +2962,7 @@ import_release() {
   after=$(upload_sum)
   [[ $before == "$after" ]] || { rm -rf "$rel"; fail "the upload changed during the copy"; }
   chmod go-rwx "$D/incoming"   # rsync -p copies the client's mode; other users never read it
-  st inc_id "$id" inc_sum "$after_inc" inc_applied "${S[applied]:-}"   # (for an unchanged next deploy)
+  st inc_id "$id" inc_sum "$after_inc" inc_applied "${CONF_ID:-}"   # (for an unchanged next deploy)
   fp imp.free_lease
   free_lease
   chown -RhP "root:$group" "$rel" && chmod -R a-st,u=rwX,g=rX,o= "$rel" || fail "chown failed"
@@ -3105,10 +3168,12 @@ rec_reap() {
       active|activating|deactivating|reloading) flock -u 7; continue;;
     esac
     load "$D/upload" L
+    local why="interrupted before it started (activate was cut off, or its server restarted while it was queued)"
+    [[ ${L[id]:-} == "$i" && -n ${L[why]:-} ]] && why=${L[why]}
     [[ ${L[id]:-} == "$i" ]] && rm -f "$D/upload"
     flock -u 7
     S[status_$i]=bad
-    EO_SINCE=$(now) end_op "$i" deploy failed "interrupted before it started (activate was cut off, or its server restarted while it was queued)"
+    EO_SINCE=$(now) end_op "$i" deploy failed "$why"
   done
 }
 # rec_service: the app runs, is stopped or shows its down page as the state says
@@ -3187,7 +3252,7 @@ cmd_rollback() {
   [[ -n $cur && ! -f $D/start/$cur ]] && valid_id "$cur" && start_snap "$cur"
   st phase rollback target "$to" kind rollback prev "$cur" fallback "$cur" pre_stopped "" reverting ""
   AUDIT_NOTE="from ${cur:--} to $to"
-  start_back "$to"
+  start_back "$to" && conf_put || { start_back "$cur"; conf_put; end_op "$to" rollback failed "could not apply the settings of $to"; die "could not apply the settings of $to (disk full?)"; }
   t=$(ds)
   if ! { fp rb.switch && switch_to "$to"; }; then
     if ((SW_MOVED)); then
@@ -3196,7 +3261,7 @@ cmd_rollback() {
       revert rollback "$PROBE_WHY" || die "could not switch to $to ($PROBE_WHY); going back to $cur did not work yet: recovery retries it (tando status)"
       die "could not switch to $to ($PROBE_WHY); back on $cur"
     fi
-    start_back "$cur"
+    start_back "$cur"; conf_put
     end_op "$to" rollback failed "could not switch to $to"
     die "could not switch to $to"
   fi
@@ -3359,7 +3424,9 @@ backup_take() { # kind -> prints the backup id (and sets BK_ID)
       rm -rf "$tmp"; echo "pg_dump failed" >&2; return 1
     fi
   fi
-  { printf 'kind=%s\ncreated=%s\n' "$kind" "$(now)" && { [[ -z ${BK_WARN:-} ]] || printf 'warning=%s\n' "$BK_WARN"; }; } > "$tmp/meta" &&
+  # seq: its place in the order backups were taken (backup_prune goes by it: a name is the wall
+  # clock's, and a clock set back gives a new backup an older name)
+  { printf 'kind=%s\ncreated=%s\nseq=%s\n' "$kind" "$(now)" "$(bk_seq)" && { [[ -z ${BK_WARN:-} ]] || printf 'warning=%s\n' "$BK_WARN"; }; } > "$tmp/meta" &&
     sync -f "$tmp/meta" && mv "$tmp" "$dir" || { rm -rf "$tmp"; echo "could not write the backup (disk full?)" >&2; return 1; }
   st last_backup "$(now)"
   backup_prune "$id"
@@ -3388,7 +3455,8 @@ offsite_fetch() {
 backup_prune() { # [id just taken: never pruned, whatever its name says after a clock set back]
   local i kind week weeks=" " nweeks=0 ndaily=0 keep
   declare -A count
-  for i in $(ls -1 "$BK/$A" | sort -r); do
+  # newest first by seq (meta), then by name (a backup from before seq: older than any with one)
+  for i in $(bk_order); do
     valid_backup "$i" || continue
     # (a backup fetched from offsite storage stays a day: it is fetched to be restored)
     [[ -f $BK/$A/$i/fetched && -n $(find "$BK/$A/$i/fetched" -mmin -1440 2> /dev/null) ]] && continue
@@ -3409,6 +3477,24 @@ backup_prune() { # [id just taken: never pruned, whatever its name says after a 
   done
 }
 
+# bk_seq: the next backup's seq (one more than the highest of the app's backups)
+bk_seq() {
+  local f v m=0
+  for f in "$BK/$A"/*/meta; do
+    v=$(sed -n 's/^seq=//p' "$f" 2> /dev/null | head -1)
+    [[ $v =~ ^[0-9]{1,9}$ ]] && ((10#$v > m)) && m=$((10#$v))
+  done
+  echo $((m + 1))
+}
+# bk_order: the app's backup ids, newest first (by seq, then by name)
+bk_order() {
+  local d i v
+  for d in "$BK/$A"/*; do
+    i=${d##*/}; v=$(sed -n 's/^seq=//p' "$d/meta" 2> /dev/null | head -1)
+    [[ $v =~ ^[0-9]{1,9}$ ]] || v=0
+    printf '%s %s\n' "$((10#$v))" "$i"
+  done | sort -k1,1nr -k2,2r | cut -d' ' -f2
+}
 cmd_backup_run() { # app kind: the timer (daily), `tando backup now` (manual)
   need_root; app "$1"
   local kind=${2:-manual} id
@@ -4637,30 +4723,91 @@ jobs_snap() { # id: record the jobs of app.conf (C) as release id's
   for k in "${!C[@]}"; do ! job_key "$k" || printf '%s=%s\n' "$k" "${C[$k]}"; done | sort > "$D/jobs/$1.tmp" &&
     mv -f "$D/jobs/$1.tmp" "$D/jobs/$1" || { rm -f "$D/jobs/$1.tmp"; return 1; }
 }
-# The start command belongs to a release too ($D/start/<id>, readable by the app: exec-app runs as
-# its user). A release without such a file starts with app.conf's: it is the newest one.
-# start_back: after a release was refused before the switch, app.conf says again how the live
-# release starts and what its health check is (the refused release's lines would otherwise stay
-# until the next deploy: a monitor asking the old code for the new health path, say)
+# A release's settings belong to it, like its code: every tando.conf setting it was deployed with
+# ($D/start/<id>: start, health... and memory, path, jobs; readable by the app: exec-app runs as its
+# user and takes the start command from it). A release without such a file starts with app.conf's:
+# it is the newest one. A file written before this rule has only start, start_shell, health and
+# health_expect (no conf=1): only those come back from it.
+# start_back: app.conf says again how the live release (or the one going live: a rollback, a
+# revert) starts, is checked and runs (conf_put then makes the unit file follow)
 start_back() { # live id
   local k
   local -A RS=()
   valid_id "${1:-}" && [[ -f $D/start/$1 ]] || return 0
   load "$D/start/$1" RS
-  for k in start start_shell health health_expect; do
-    [[ -n ${RS[$k]+x} ]] || continue                    # (a file from before a key was recorded)
-    if [[ -n ${RS[$k]} ]]; then C[$k]=${RS[$k]}; else unset "C[$k]"; fi
-  done
+  if [[ ${RS[conf]:-} == 1 ]]; then
+    for k in "${!C[@]}"; do conf_key "$k" && unset "C[$k]"; done
+    for k in "${!RS[@]}"; do conf_key "$k" && C[$k]=${RS[$k]}; done
+  else
+    for k in start start_shell health health_expect; do
+      [[ -n ${RS[$k]+x} ]] || continue                    # (a file from before a key was recorded)
+      if [[ -n ${RS[$k]} ]]; then C[$k]=${RS[$k]}; else unset "C[$k]"; fi
+    done
+  fi
   save "$D/app.conf" C
 }
-start_snap() { # id: record how release id starts (app.conf as it is now)
+start_snap() { # id: record release id's settings (app.conf, C, as it is now)
   local g=root
   getent group "tando-m-$A" > /dev/null && meta_group_ok && g=tando-m-$A
   [[ -d $D/start ]] || { mkdir -m 750 "$D/start" && chown "root:$g" "$D/start"; } || return 1
-  printf 'start=%s\nstart_shell=%s\nhealth=%s\nhealth_expect=%s\n' "${C[start]:-}" "${C[start_shell]:-}" \
-    "${C[health]:-}" "${C[health_expect]:-}" > "$D/start/$1.tmp" &&
+  # (start, start_shell, health, health_expect always: empty is a value too)
+  { printf 'conf=1\nstart=%s\nstart_shell=%s\nhealth=%s\nhealth_expect=%s\n' "${C[start]:-}" "${C[start_shell]:-}" \
+      "${C[health]:-}" "${C[health_expect]:-}"
+    conf_text C | grep -Ev '^(start|start_shell|health|health_expect)='; true; } > "$D/start/$1.tmp" &&
+    [[ $(head -1 "$D/start/$1.tmp") == conf=1 ]] &&
     chown "root:$g" "$D/start/$1.tmp" && chmod 640 "$D/start/$1.tmp" &&
     mv -f "$D/start/$1.tmp" "$D/start/$1" || { rm -f "$D/start/$1.tmp"; return 1; }
+}
+# conf_key key: a setting of tando.conf (what configure takes from the client): it belongs to a
+# release. The rest of app.conf is the server's own (port, created, domains, origin, adopt's)
+conf_key() {
+  case $1 in
+    recipe|image|container_port|build_memory|start|start_shell|release|release_shell|release_timeout|\
+    health|path|data|writable|backup|database|db_statement_timeout|db_idle_tx_timeout|db_temp_limit|\
+    memory|health_timeout|soak|cpu|tasks|max_conns|max_requests|stop_timeout|hold|log_max|log_keep|\
+    log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|job.*) return 0;;
+  esac
+  return 1
+}
+# conf_text array: its tando.conf settings, sorted key=value lines
+conf_text() {
+  local -n _ct=$1
+  local k
+  for k in "${!_ct[@]}"; do if conf_key "$k"; then printf '%s=%s\n' "$k" "${_ct[$k]}"; fi; done | sort
+}
+# conf_copy from to: one associative array into another (the whole of it)
+conf_copy() {
+  local -n _cf=$1 _cto=$2
+  local k
+  _cto=(); for k in "${!_cf[@]}"; do _cto[$k]=${_cf[$k]}; done
+}
+# conf_stage: C's tando.conf settings into $D/confs/<checksum>; prints the checksum (the conf id).
+# Kept a day after its last configure (prune)
+conf_stage() {
+  local t h
+  [[ -d $D/confs ]] || { mkdir -m 700 "$D/confs" && chown root:root "$D/confs"; } || return 1
+  t=$(conf_text C) || return 1
+  h=$(printf '%s\n' "$t" | cksum | cut -d' ' -f1)
+  [[ $h =~ ^[0-9]+$ ]] || return 1
+  if [[ -f $D/confs/$h ]] && cmp -s "$D/confs/$h" <(printf '%s\n' "$t"); then touch "$D/confs/$h"
+  else printf '%s\n' "$t" > "$D/confs/$h.tmp" && [[ -s $D/confs/$h.tmp ]] && mv -f "$D/confs/$h.tmp" "$D/confs/$h" ||
+         { rm -f "$D/confs/$h.tmp"; return 1; }
+  fi
+  echo "$h"
+}
+# conf_put: app.conf, the unit file and the backup timer as C says (Caddy's site follows at the
+# app's next restart_app or write_caddy). Only what differs is written; systemd is reloaded only
+# when the unit file changed
+conf_put() {
+  local bk
+  bk=$(sed -n 's/^backup=//p' "$D/app.conf" 2> /dev/null)
+  save "$D/app.conf" C || return 1
+  WU_CHANGED=0
+  write_unit || return 1
+  ((WU_CHANGED)) && systemctl daemon-reload
+  [[ $bk == "${C[backup]:-}" ]] || sync_backup_timer
+  [[ -x $LOGS ]] && "$LOGS" app-setup "$A" > /dev/null
+  return 0
 }
 # shellcheck disable=SC2034  # J is read by sync_jobs through its nameref
 jobs_follow() { # the job units become those of the current release (none without one)
@@ -4701,10 +4848,11 @@ old_job_owner() {
 # written, systemd is reloaded once and only then, a timer is enabled only when it is not yet.
 # A job runs at most its timeout (job.<name>.timeout, else job_timeout, else JOB_TIMEOUT seconds):
 # TimeoutStartSec of its oneshot unit, so systemd ends it and records the result "timeout" (tando
-# jobs, tando jobs run and the job alert say so)
+# jobs, tando jobs run and the job alert say so). Returns 1 when a unit could not be written or
+# enabled (a full disk): the caller does not count it done (op_trailer: recovery syncs them again)
 sync_jobs() {
   local -n _jobs=${1:-C}
-  local k n f x cal to b st want=" " changed=0 new=()
+  local k n f x cal to b st want=" " changed=0 new=() rc=0
   for n in $(job_names "${1:-C}"); do
     k=job.$n
     cal=$(trim "${_jobs[$k]%%|*}")
@@ -4716,14 +4864,22 @@ sync_jobs() {
     want+="$n "
     b=$(job_unit "$n"); f=/etc/systemd/system/$b
     [[ -f $f.service && -f $f.timer ]] || changed=1
-    { printf '[Unit]\nDescription=tando job %s %s\n\n[Service]\nType=oneshot\n' "$A" "$n"
-      printf 'ExecStart=%s run-job %s %s\nWorkingDirectory=%s\nTimeoutStartSec=%s\n' "$AGENT" "$A" "$n" "$(job_dir)" "$to"
-      props - job
-    } > "$f.service.new"
-    printf '[Unit]\nDescription=tando job timer %s %s\n\n[Timer]\nOnCalendar=%s\nAccuracySec=1s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' \
-      "$A" "$n" "$cal" > "$f.timer.new"
+    # (a file cut short by a full disk is never installed: each must end with its last line)
+    if ! { fp jobs.write &&
+           { printf '[Unit]\nDescription=tando job %s %s\n\n[Service]\nType=oneshot\n' "$A" "$n"
+             printf 'ExecStart=%s run-job %s %s\nWorkingDirectory=%s\nTimeoutStartSec=%s\n' "$AGENT" "$A" "$n" "$(job_dir)" "$to"
+             props - job
+             echo "# end"
+           } > "$f.service.new" && [[ $(tail -1 "$f.service.new") == "# end" ]] &&
+           printf '[Unit]\nDescription=tando job timer %s %s\n\n[Timer]\nOnCalendar=%s\nAccuracySec=1s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' \
+             "$A" "$n" "$cal" > "$f.timer.new" && [[ $(tail -1 "$f.timer.new") == WantedBy=timers.target ]]; }; then
+      rm -f "$f.service.new" "$f.timer.new"
+      echo "tando-agent: could not write the units of job $n (disk full?)" >&2; rc=1; continue
+    fi
     for x in service timer; do
-      if cmp -s "$f.$x.new" "$f.$x"; then rm -f "$f.$x.new"; else mv -f "$f.$x.new" "$f.$x"; changed=1; fi
+      if cmp -s "$f.$x.new" "$f.$x"; then rm -f "$f.$x.new"
+      elif mv -f "$f.$x.new" "$f.$x"; then changed=1
+      else rm -f "$f.$x.new"; echo "tando-agent: could not install the $x of job $n" >&2; rc=1; fi
     done
     new+=("$b.timer")
   done
@@ -4756,8 +4912,8 @@ sync_jobs() {
     systemctl -q is-enabled "$k" 2> /dev/null && systemctl -q is-active "$k" && continue
     todo+=("$k")
   done
-  ((${#todo[@]})) && systemctl enable -q --now "${todo[@]}"
-  return 0
+  ((${#todo[@]})) && { systemctl enable -q --now "${todo[@]}" || rc=1; }
+  return $rc
 }
 
 # where jobs run: the current release, or shared/ when the app user cannot read the release

@@ -6,6 +6,42 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: a deploy's tando.conf settings changed the live app before its release existed:
+  `configure` wrote the new memory, path, limits, hold and the like into the unit file and Caddy's
+  site at once, and a deploy refused in pre-flight (or cut off, or whose upload failed) left them
+  there, under the old release. They now wait on the server (`/opt/tando/apps/<app>/confs/<id>`,
+  the id printed by configure and handed to `activate` by the client) and are applied at the
+  switch; a deploy that does not go live leaves app.conf, the unit file, the site and the job units
+  exactly as they were. Every setting now belongs to its release (`start/<id>` holds all of them,
+  not only start and health): a rollback, and the automatic one after a failed check, bring back
+  the older release's memory, path, limits and jobs with its code. Domains in tando.conf and the
+  database's role settings still apply at configure.
+- Fixed: two clients deploying the same app with different tando.conf files: the second one's
+  configure, landing while the first was uploading, gave the first one's activation its start
+  command and health check (pre-flight then failed, or the wrong settings went live). Each
+  activation now runs with the settings its own configure staged, against what the one before it
+  left. An activation without a settings id (an older client, a deploy key) takes the last
+  configure's, as before.
+- Fixed: job units that could not be written (a full disk) were reported as done: the unit files
+  could be installed cut short, and a deploy's end was recorded with half its jobs old. Each file
+  must be complete before it is installed; a failure leaves the operation's end unfinished, and
+  recovery (tando-watch's minute, the next command) writes the jobs again.
+- Fixed: tando-watch and `tando status` tested an app's lock by taking it for an instant: a
+  command's own try at that moment waited, and two probes at once saw each other as "busy" (a
+  recovery skipped for a minute). They now read /proc/locks and take no lock (also the agent's
+  `busy` check).
+- Fixed: after the clock was set back, pre-deploy (and other) backups were pruned by name: backups
+  named from the future kept their place and each new one was deleted at the next backup. Backups
+  now carry their order (`seq` in meta) and are pruned by it.
+- Fixed: a deploy queued behind another operation for the server's hour gave up as "interrupted
+  before it started (activate was cut off, or its server restarted...)"; it now says it waited an
+  hour for what, and that nothing was changed. The client waits as long as the server reports the
+  release queued (its deadline counts from the end of the queue), instead of giving up after
+  about 17 minutes while the release could still go live later.
+- Tests: the fault matrix's versions alternate their memory, max_conns and a job's schedule too
+  (the checker compares the unit file, the site and the job timer with the serving release); a
+  `race` action (a second client's configure at the point); new cells g-j in `--cells`.
+
 - Fixed: between an app's site being set up and its first release going live (a first `tando up`
   still running, or one that failed and left nothing live), a request to its address waited 15 s
   and got an empty 502 (and scanners that find a new certificate in the public logs filled the

@@ -3,14 +3,13 @@ package watch
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"tando/srv/internal/cgroup"
+	"tando/srv/internal/lock"
 )
 
 func errf(format string, a ...any) error { return fmt.Errorf(format, a...) }
@@ -153,20 +152,10 @@ func evcount(file, key string) int64 {
 func (w Watch) appCgroup(a string) string { return cgroup.AppDir(w.Env.Cgroup, a) }
 
 // lockHeld: something holds the flock of path (an activation, a rollback or a backup holds the
-// app's lock). A missing file is held by nothing. Unlike `flock -n path true` it does not create
-// the file: it is the agent's.
-func lockHeld(path string) bool {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ELOOP)
-	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return errors.Is(err, syscall.EWOULDBLOCK)
-	}
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	return false
-}
+// app's lock). A missing file is held by nothing. It takes no lock and creates nothing (lock.Held
+// reads /proc/locks): tando-watch's minute never delays a verb, nor makes another probe or the
+// agent's recover see the lock held.
+func lockHeld(path string) bool { return lock.Held(path) }
 
 // which finds a program in cmdEnv's PATH (`command -v`).
 func which(name string) string {
