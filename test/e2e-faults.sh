@@ -62,7 +62,10 @@ esac
 DUR_DEFAULT=90
 DUR=" s00=60 a1=40 a2=65 a3=230 a4=50 a5=70 a21=45 b2=35 b3=75 d1=30 d2=75 d3=60 d4=70 e4=105 e5=105
  e10=170 f3=70 g1=45 g3=70 g5=20 g6=25 g7=50 g8=55 g9=65 g10=120 h2=30 h5=55 j1=55 l1=105 m1=145
- m2=195 m3=70 m4=6 m5=130 m6=2 n1=105 n2=75 n3=90 n4=190 n5=320 n6=85 n7=75 "
+ m2=195 m3=70 m4=6 m5=130 m6=2 n1=105 n2=75 n3=90 n4=190 n5=320 n6=85 n7=75
+ b1=41 b4=66 b5=64 c1=50 c2=179 c3=58 c4=125 c5=100 c6=62 e1=133 e2=101 e3=87 e6=282 e7=311 e8=130 e9=98 e11=164 e12=201 f1=54 f2=34 g2=57 g4=81 g11=60
+ h1=29 h3=49 h4=43 i1=35 i2=40 i3=60 j2=50 j3=638 k1=45 k2=192 a6=54 a7=37 a8=253 a9=84 a10=56 a11=60 a12=38 a13=304 a14=51 a15=48 a16=207 a17=97
+ a18=192 a19=51 a20=58 a22=51 "
 dur_of() {
   local d
   case $DUR in
@@ -131,7 +134,7 @@ chunks() {
 }
 chunk_n() { chunks "$SK" $2 | sed -n "$1p"; }       # chunk_n <i> "<ids>"
 
-list="s00 a1 a2 a3 a4 a5 a21 b2 b3 d1 d2 d3 d4 e4 e5 e10 f3 g1 g3 g5 g6 g7 g8 g9 g10 h2 h5 j1 l1 m1 m2 m3 m4 m5 m6 n1 n2 n3 n4 n5 n6 n7"
+list="s00 a1 a2 a3 a4 a5 a21 b1 b2 b3 d1 d2 d3 d4 e4 e5 e10 f3 g1 g3 g5 g6 g7 g8 g9 g10 h2 h5 j1 l1 m1 m2 m3 m4 m5 m6 n1 n2 n3 n4 n5 n6 n7"
 [ -n "$only" ] && list=$only
 if [ $all = 1 ]; then
   list=$(cd "$FD" && ls [a-z]*[0-9]-*.sh | sed 's/-.*//' | sort -t. -k1,1 | tr '\n' ' ')

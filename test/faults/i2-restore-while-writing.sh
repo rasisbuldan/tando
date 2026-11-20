@@ -6,11 +6,12 @@ f_init i2 "restore while the app is writing" "backup restore"
 A=fi2; f_fresh $A "data = data"
 deploy $A 3 writer || exit 1   # a failed setup deploy is a FAIL, not a skip
 sleep 2
-(cd "$W/$A" && "$R" backup now > "$W/bk.out" 2>&1); id=$(sed -n 's/.*backup \([0-9-]*-manual\).*/\1/p' "$W/bk.out")
+(cd "$W/$A" && "$R" backup now > "$W/bk.out" 2>&1); id=$(sed -n 's/.*[^0-9]\([0-9]\{8\}-[0-9]\{6\}-manual\).*/\1/p' "$W/bk.out")
+[ -n "$id" ] || { echo "i2: no backup id in: $(cat "$W/bk.out")" >&2; exit 2; }   # (setup failed: a FAIL, not a pass)
 n0=$(srv "sudo tar -xzOf /var/backups/tando/$A/$id/data.tar.gz ./log.txt | wc -l")
 sleep 3
 loop_start $A
-(cd "$W/$A" && "$R" backup restore "$id" > "$W/rs.out" 2>&1); rrc=$?
+(cd "$W/$A" && "$R" backup restore "$id" --yes > "$W/rs.out" 2>&1); rrc=$?
 loop_stop
 log "restore rc=$rrc: $(tail -1 "$W/rs.out"); backup had $n0 lines"
 ok "restore succeeds" test $rrc = 0

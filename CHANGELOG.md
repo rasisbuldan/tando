@@ -6,6 +6,13 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: a command that failed on the server with "Connection refused" in its own message (a
+  `pg_dump` with PostgreSQL stopped, say) was reported as "cannot reach <host>: connection
+  refused", as if ssh had failed. Only ssh's own "connect to host ... Connection refused" says
+  that now.
+- Fixed: tando-watch's minute now recovers a rollback that died after it wrote its progress file
+  and before its first state write: the progress said "running" for ever and the rollback had no
+  history line until the next command that changes the app.
 - Fixed: between an app's site being set up and its first release going live (a first `tando up`
   still running, or one that failed and left nothing live), a request to its address waited 15 s
   and got an empty 502 (and scanners that find a new certificate in the public logs filled the

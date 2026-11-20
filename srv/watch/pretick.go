@@ -64,6 +64,10 @@ func (w Watch) recoverNeeded() bool {
 			return true
 		case w.reservationOrphaned(d, a, s):
 			return true
+		case w.rollbackCut(d):
+			// a rollback that died after it wrote its progress file and before its first state
+			// write: the state is idle, nothing holds the lock, and the file says running for ever
+			return true
 		case s["outcome"] != "" && s["outcome"] != s["outcome_done"]:
 			// an operation ended (its result committed) but what follows it was cut off: its
 			// history line, its progress file, the job units, a refused release's directory
@@ -71,6 +75,13 @@ func (w Watch) recoverNeeded() bool {
 		}
 	}
 	return false
+}
+
+// rollbackCut: the activation file says a rollback is running (cmd_rollback writes it with the
+// app's lock held) and nobody holds the lock.
+func (w Watch) rollbackCut(d string) bool {
+	p, _ := w.Cache.load(filepath.Join(d, "activation"))
+	return p["kind"] == "rollback" && p["result"] == "running" && !lockHeld(filepath.Join(d, "lock"))
 }
 
 // reservationOrphaned: a release directory with no status (activate reserves one before it

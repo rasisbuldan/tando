@@ -743,7 +743,7 @@ ssh_explain() {
     *"kex_exchange_identification"*|*"MaxStartups"*)
       explain "$HOST closed the connection during login: too many logins at once (sshd MaxStartups), or sshd is overloaded" \
         "run fewer tando commands at once; if it keeps happening: tando doctor $HOST";;
-    *"Connection refused"*)
+    *"connect to host "*"Connection refused"*)   # (ssh's own line: a command's "Connection refused" is its own)
       explain "cannot reach $HOST ($TARGET, port $port): connection refused" \
         "is sshd listening on that port? check with: ssh -p $port $TARGET" \
         "another port: tando host add $HOST $TARGET --port N --force";;

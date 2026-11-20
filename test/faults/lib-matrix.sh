@@ -78,7 +78,9 @@ mx_version() {
   case $KIND in
     static)
       rm -f "$d"/hc-*; echo "v$n env=-" > "$d/index.html"; echo ok > "$d/${h#/}"
-      [ "$beh" = ok ] || echo "x" > "$d/${h#/}";;    # (static cannot be unhealthy after the switch)
+      # (static cannot be unhealthy after the switch; its pre-flight checks that the health file
+      # exists in the release: exit@pre leaves it out, so the release is refused there)
+      case $beh in ok) ;; exit@pre) rm -f "$d/${h#/}";; *) echo "x" > "$d/${h#/}";; esac;;
     python) cp "$MX_DIR/mx-app/app.py" "$d/"; : > "$d/requirements.txt";;
     next)
       cp "$MX_DIR/mx-app/server.js" "$d/mx.js"
@@ -247,6 +249,8 @@ mx_inv() {
       local kind=deploy; [ "$MX_OP" = rollback ] && kind=rollback
       if [ -z "$MX_NEW" ]; then
         [ "$nh" = 0 ] || mx_bad 4 "history: $nh lines, but the operation never got a release: $(grep '^hist=' "$W/facts" | tr '\n' ' ')"
+      elif [ "$MX_OP" = rollback ] && [ "$nh" = 0 ] && [ "$want" = "$MX_OLD" ] && [ "$(fv p_id)" != "$MX_NEW" ]; then
+        :   # (a rollback cut before it wrote anything, its progress file included: it never began)
       else
         n=$(grep -c "^hist=$MX_NEW $kind " "$W/facts")
         [ "$nh" = 1 ] && [ "$n" = 1 ] || mx_bad 4 "history: $nh new lines, $n for $MX_NEW $kind (exactly one): $(grep '^hist=' "$W/facts" | tr '\n' ' ')"
@@ -313,7 +317,8 @@ mx_settled() {
 mx_wait_settled() { T_UNTIL_STEP=0.5 t_until "${1:-240}" mx_settled; }
 # what tando-watch's minute does (srv/watch/pretick.go recoverNeeded): recover-all when an app is
 # in a phase other than idle with its lock free, its link and state disagree, it is down, a
-# release is reserved by an activation whose unit has no process, or an operation's end was not
+# release is reserved by an activation whose unit has no process, a rollback cut before its first
+# state write (activation says kind=rollback result=running, lock free) or an operation's end was not
 # written out (outcome)
 mx_watcher() {
   dxs "D=/opt/tando/apps/$A; g() { sed -n \"s/^\$1=//p\" \$D/state | head -1; }
@@ -323,6 +328,7 @@ mx_watcher() {
     elif [ -n \"\$cur\" ] && [ \"\$l\" != \"\$cur\" ] && [ -d \$D/releases/\$cur ]; then need=1
     elif [ -z \"\$cur\" ] && [ -n \"\$l\" ] && [ -d \$D/releases/\$l ]; then need=1
     elif [ -n \"\$(g down)\" ] && [ -z \"\$(g stopped)\" ] && [ -n \"\$cur\" ]; then need=1
+    elif grep -qx kind=rollback \$D/activation 2>/dev/null && grep -qx result=running \$D/activation && flock -n \$D/lock true; then need=1
     elif [ -n \"\$(g outcome)\" ] && [ \"\$(g outcome)\" != \"\$(g outcome_done)\" ]; then need=1
     else
       for r in \$D/releases/*; do i=\${r##*/}; [ -d \"\$r\" ] && [ -z \"\$(g status_\$i)\" ] && [ \"\$i\" != \"\$cur\" ] || continue

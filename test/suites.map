@@ -106,8 +106,8 @@ test/ui-demo.sh          lint
 test/alerts-lib.sh       @alerts lint
 test/e2e-alerts*         @alerts lint
 test/e2e-faults*         @faults lint
-test/e2e-matrix*         e2e-matrix-quick lint
-test/faults/*            @faults e2e-matrix-quick lint
+test/e2e-matrix*         e2e-matrix-quick e2e-matrix-weekly lint
+test/faults/*            @faults e2e-matrix-quick e2e-matrix-weekly lint
 test/sec2/*              e2e-sec2 lint
 test/sec3/*              e2e-sec2 lint
 test/load/*              lint

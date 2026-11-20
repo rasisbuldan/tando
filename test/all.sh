@@ -164,8 +164,10 @@ in_tier() {
     e2e-faults) [ "$tier" = weekly ];;
     e2e-faults-h[0-9]*) [ "$tier" = nightly ];;
     e2e-faults-q[0-9]*) [ "$tier" = full ] || [ "$tier" = quick ];;
-    # the fault matrix: the cells of the fixed defects in full and quick; all of it only by name
+    # the fault matrix: the cells of the fixed defects in full and quick, the weekly cells of the
+    # other kinds of app in nightly and weekly; the driver itself (every option) only by name
     e2e-matrix-quick) [ "$tier" = full ] || [ "$tier" = quick ];;
+    e2e-matrix-weekly) [ "$tier" = nightly ] || [ "$tier" = weekly ];;
     e2e-matrix) return 1;;
     *) return 0;;
   esac
