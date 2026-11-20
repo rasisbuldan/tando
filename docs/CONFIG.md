@@ -27,7 +27,7 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 
 | Key | Type | Default | Unit | Meaning | Example |
 |---|---|---|---|---|---|
-| `app` | name | the directory name (`tando init`) | | The app's name on the server: starts with a lower case letter, then lower case letters, digits and `-`. | `app = shop` |
+| `app` | name | the directory name (`tando init`) | | The app's name on the server: starts with a lower case letter, then lower case letters, digits and `-`; 2 to 24 characters (the server makes a group `tando-m-<app>`, and a group name stops at 32). | `app = shop` |
 | `host` | text | the only registered server | | The server (`tando host ls`) this project deploys to; `-H` overrides it. | `host = vps` |
 | `recipe` | choice | detected by `tando init` | | How the app is built and run: `node`, `next`, `static`, `python` or `container`. | `recipe = next` |
 | `node` | number | `.nvmrc`, then `engines.node`, then the current LTS | major version | The Node.js major the server installs and runs the app with. | `node = 24` |

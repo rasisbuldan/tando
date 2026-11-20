@@ -38,7 +38,8 @@ command is not installed. Yarn Plug'n'Play has no node_modules: add `nodeLinker:
 Node version: `node =` in tando.conf, else `.nvmrc`, `.node-version` or `engines.node` in
 package.json (the major); a server that runs another Node gets a note on every deploy.
 
-Not supported yet: deploying one package of a monorepo from the workspace root (refused: run
-`tando init` in the package, with its dependencies installed there); Next.js without standalone
+Not supported yet: deploying one package of a monorepo, from the workspace root or from inside the
+package (refused at once: its dependencies are linked into the root's `node_modules`; make a
+standalone copy with `pnpm deploy --filter <package> <dir>` and deploy that directory); Next.js without standalone
 output (refused before anything is installed: the standalone release of a small app is 56 MB and
 1,900 files, `next start` with all of node_modules 360 MB and 9,000 files).

@@ -351,6 +351,7 @@ node_install() {
   # "dependencies" or "devDependencies": { } with at least one entry
   tr -d '\n' < package.json | grepq -E '"(dependencies|devDependencies)"[[:space:]]*:[[:space:]]*\{[[:space:]]*"' || return 0
   yarn_pnp
+  ws_member_check
   [ -d node_modules ] && return 0
   if [ -f pnpm-lock.yaml ]; then NODE_INSTALL="pnpm install --frozen-lockfile"
   elif [ -f yarn.lock ] && [ -f .yarnrc.yml ]; then NODE_INSTALL="yarn install --immutable"   # (Yarn 2+)

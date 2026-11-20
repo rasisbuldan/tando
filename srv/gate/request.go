@@ -80,6 +80,25 @@ func Words(cmd string) ([]string, error) {
 	return w, nil
 }
 
+const refusedMsg = "not allowed with a deploy key: %s (a deploy key uploads, activates and reads the status of its own app; everything else is the admin's)"
+
+// helperVerb names "<verb>" in a request that mentions "/tando-<program> <verb>" and is not one of
+// the verbs a key may use ("" when there is none): the words that the character and length
+// rules would otherwise turn into "unexpected characters" or "bad request".
+func helperVerb(cmd string) string {
+	m := helperVerbRe.FindStringSubmatch(cmd)
+	if m == nil {
+		return ""
+	}
+	switch m[1] {
+	case "info", "begin", "end", "activate", "deploy-status", "releases", "history", "status":
+		return ""
+	}
+	return m[1]
+}
+
+var helperVerbRe = regexp.MustCompile(`/tando-[a-z]+ +([a-z][a-z0-9-]*)`)
+
 // Want is what a request is compared with: the caller's app and the fixed paths.
 type Want struct {
 	App      string // from the caller's uid
@@ -91,6 +110,11 @@ type Want struct {
 func ParseRequest(cmd string, want Want) (Request, error) {
 	w, err := Words(cmd)
 	if err != nil {
+		// a command of the admin's that is also malformed for a key (tando health wraps its call in
+		// a shell test, tando doctor sends five checksums): say what is refused, like any other verb
+		if v := helperVerb(cmd); v != "" {
+			return Request{}, die(refusedMsg, clean(v))
+		}
 		return Request{}, err
 	}
 	if w[0] == "rsync" {
@@ -134,7 +158,7 @@ func ParseRequest(cmd string, want Want) (Request, error) {
 	case "status":
 		v = VStatus
 	default:
-		return Request{}, die("not allowed with a deploy key: %s (a deploy key uploads, activates and reads the status of its own app; everything else is the admin's)", clean(verb))
+		return Request{}, die(refusedMsg, clean(verb))
 	}
 	if len(w) < 3 || w[2] != want.App {
 		return Request{}, die("this key deploys %s only", want.App)

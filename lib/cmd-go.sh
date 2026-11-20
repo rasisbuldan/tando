@@ -405,7 +405,7 @@ q_app() {
           go_ask || break
           case $f in
             name) valid_app "$GO_ANS" && { A_name=$GO_ANS; break; }
-                  GO_ERR="2-26 of a-z, 0-9 and -, starting with a letter";;
+                  GO_ERR="2-24 of a-z, 0-9 and -, starting with a letter";;
             start) [ -n "$GO_ANS" ] && { A_start=$GO_ANS; break; }; GO_ERR="the app needs a start command";;
             health) case $GO_ANS in /*) A_health=$GO_ANS; break;; esac; GO_ERR="a path, starting with /";;
           esac

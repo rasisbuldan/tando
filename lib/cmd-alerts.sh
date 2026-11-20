@@ -360,7 +360,7 @@ cmd_alerts() {
     silence)
       local who=${ARGS[2]:-} d=${ARGS[3]:-}
       [ -n "$who" ] && [ -n "$d" ] || die "usage: tando alerts silence <app|all> <30m|2h|1d|off>"
-      [ "$who" = all ] || valid_app "$who" || die "bad app name: $who"
+      [ "$who" = all ] || valid_app "$who" || die "bad app name: $who (a-z, 0-9, -; 2-24 characters)"
       if [ "$d" = off ]; then SECS=0; else parse_dur "$d" || die "bad duration: $d (like 30m, 2h, 1d; at most 30d)"; fi
       watch_do sudo silence "$who" "$SECS" > "$TMPD/o"
       kv_read "$TMPD/o" until

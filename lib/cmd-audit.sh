@@ -7,7 +7,7 @@
 
 cmd_audit() {
   local want=${ARGS[1]:-$APP} n=$NLINES r ts who from verb app res note
-  [ -z "$want" ] || valid_app "$want" || die "bad app name: $want"
+  [ -z "$want" ] || valid_app "$want" || die "bad app name: $want (a-z, 0-9, -; 2-24 characters)"
   APP=$want
   resolve 0
   [ "$n" = 100 ] && n=40             # -n not given
