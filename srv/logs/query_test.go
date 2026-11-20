@@ -166,11 +166,11 @@ func TestRelease(t *testing.T) {
 		t.Fatal(o, err, h.argvs("journalctl"))
 	}
 	o, err = h.query("release=20261108-000004\n")
-	if err != nil || !strings.HasPrefix(o, "# release 20261108-000004 was never live: its deploy log (activation, build, pre-flight)\n"+
+	if err != nil || !strings.HasPrefix(o, "# release 20261108-000004 was never live: its deploy log (activation, build, pre-flight, release command)\n"+
 		"# deploy 20261108-000004: failed (9s: copy 1, pre-flight 2, switch 0, verify -) - pre-flight  failed\n") {
 		t.Fatalf("%q %v", o, err)
 	}
-	if j := h.argvs("journalctl"); !strings.Contains(j[len(j)-1], "-u tando-filt-act-20261108-000004.service -u tando-filt-venv-20261108-000004.service -u tando-filt-pre-20261108-000004.service") {
+	if j := h.argvs("journalctl"); !strings.Contains(j[len(j)-1], "-u tando-filt-act-20261108-000004.service -u tando-filt-venv-20261108-000004.service -u tando-filt-pre-20261108-000004.service -u tando-filt-rel-20261108-000004.service") {
 		t.Fatal(h.argvs("journalctl"))
 	}
 	_, err = h.query("release=20200101-000000\n")

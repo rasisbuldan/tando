@@ -6,6 +6,13 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: a release command. `release = <command>` in tando.conf runs on the server once per deploy
+  (database migrations), in the new release, as the app's user with its environment and sandbox,
+  after pre-flight and the pre-deploy backup, before the switch. A failure or a timeout
+  (`release_timeout`, 300 s) fails the deploy with nothing switched; the message names the
+  pre-deploy backup. Its own phase in the deploy box and in `tando history` (`RELCMD`); its output
+  in `tando logs --deploy <id>`. tando never restores the database, and `tando rollback` does not
+  undo a migration (docs/COMMANDS.md, "The release command"). Not for static sites and containers.
 - Tests: tiers (`test/all.sh --tier check|quick|full|nightly|weekly`), `test/check.sh`, suite selection
   by changed files (`test/suites.map`), fault scenarios in shards; the full tier takes about 16 minutes
   on the reference laptop (was about 2 hours). AGENTS.md says what to run when.

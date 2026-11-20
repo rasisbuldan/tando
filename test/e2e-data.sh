@@ -186,6 +186,51 @@ srv "sudo -u tando-notes sh -c 'cd /opt/tando/apps/notes/shared && rm data && mv
 (cd "$W/notes" && "$R" deploy > /dev/null 2>&1); rc=$?
 check "S4c after the link is gone, deploys work again (rc=$rc, $(page))" test $rc = 0
 
+# R. the release command (release = in tando.conf) with database = postgres: DATABASE_URL is set
+# for it and a migration that creates a table works; a failing one fails the deploy and names the
+# pre-deploy backup, which the owner can restore (tando itself restores nothing)
+cat > "$W/notes/migrate.js" <<'EOF'
+// creates the table "migrated" and records the version and who ran it; with the shipped file
+// MIGRATE it creates the table "half", deletes every note and then fails
+const fs = require('fs');
+const { Client } = require('pg');
+if (!process.env.DATABASE_URL) { console.error('DATABASE_URL is not set'); process.exit(2); }
+(async () => {
+  const c = new Client({ connectionString: process.env.DATABASE_URL });
+  await c.connect();
+  if (fs.existsSync('MIGRATE')) {
+    await c.query('CREATE TABLE IF NOT EXISTS half (x int)');
+    await c.query('DELETE FROM notes');
+    throw new Error('migration 0002 failed on purpose');
+  }
+  await c.query('CREATE TABLE IF NOT EXISTS migrated (v text, uid int)');
+  await c.query('INSERT INTO migrated VALUES ($1, $2)', [fs.readFileSync('VERSION', 'utf8').trim(), process.getuid()]);
+  await c.end();
+  console.log('migrated');
+})().catch((e) => { console.error(e.message); process.exit(1); });
+EOF
+cd "$W/notes" || exit 2
+echo "release = node migrate.js" >> tando.conf
+echo 4 > VERSION
+"$R" deploy > "$E/rel1.out" 2>&1; rc=$?; cat "$E/rel1.out" >&2
+uidn=$(srv "id -u tando-notes"); : "$uidn"   # (read inside the check's eval string)
+got=$(psql_as tando_notes "$pw" tando_notes 'SELECT v, uid FROM migrated')
+check "R1 release command with database = postgres (rc=$rc): DATABASE_URL was set, the migration created its table as the app's user ($got)" \
+  eval '[ $rc = 0 ] && [ -n "$uidn" ] && [ "$uidn" != 0 ] && [ "$got" = "4|$uidn" ] && [ "$(page)" = "notes v4 db=3 file=3" ]'
+half() { psql_as tando_notes "$pw" tando_notes "SELECT count(*) FROM pg_tables WHERE tablename = 'half'"; }
+echo fail > MIGRATE; echo 5 > VERSION
+"$R" deploy > "$E/rel2.out" 2>&1; rc=$?; cat "$E/rel2.out" >&2
+bk=$(tr -d '│\n' < "$E/rel2.out" | tr -s ' ' | grep -oE 'backup [0-9]{8}-[0-9]{6}-predeploy' | head -1 | cut -d' ' -f2)
+check "R2 a failing migration fails the deploy (rc=$rc), v4 keeps serving ($(page)); what it did to the database stays: tando restores nothing (half=$(half))" \
+  eval '[ $rc != 0 ] && [ "$(page)" = "notes v4 db=0 file=3" ] && [ "$(half)" = 1 ]'
+check "R3 the failure names the pre-deploy backup (${bk:-none}), which holds the database" \
+  eval '[ -n "$bk" ] && srv "sudo test -s $BK/notes/$bk/db.dump"'
+"$R" backup restore "$bk" --yes > "$E/rel-restore.out" 2>&1; rc=$?; cat "$E/rel-restore.out" >&2
+# (a restore brings back what the backup holds; a table created after it, "half", is not dropped)
+check "R4 the owner restores it by hand (rc=$rc): the rows the command deleted are back ($(page))" \
+  eval '[ $rc = 0 ] && [ "$(page)" = "notes v4 db=3 file=3" ] &&
+        [ "$(psql_as tando_notes "$pw" tando_notes "SELECT count(*) FROM migrated")" = 1 ]'
+
 # D15. destroy keeps a final backup and drops the database
 echo notes2 | (cd "$W/notes2" && "$R" destroy) > "$E/destroy.out" 2>&1; rc=$?; cat "$E/destroy.out" >&2
 gone=$(srv "sudo -u postgres psql -At -c \"SELECT count(*) FROM pg_database WHERE datname = 'tando_notes2'\"")

@@ -193,10 +193,11 @@ func (a *app) planQuery(q map[string]string, now int64) (*queryPlan, error) {
 			return nil, fmt.Errorf("no such release: %s", deploy)
 		}
 		units = [][2]string{{"tando-" + a.name + "-act-" + deploy + ".service", "act"},
-			{"tando-" + a.name + "-venv-" + deploy + ".service", "venv"}, {"tando-" + a.name + "-pre-" + deploy + ".service", "pre"}}
+			{"tando-" + a.name + "-venv-" + deploy + ".service", "venv"}, {"tando-" + a.name + "-pre-" + deploy + ".service", "pre"},
+			{"tando-" + a.name + "-rel-" + deploy + ".service", "release"}}
 		if text {
 			if neverLive {
-				p.header = append(p.header, "# release "+deploy+" was never live: its deploy log (activation, build, pre-flight)")
+				p.header = append(p.header, "# release "+deploy+" was never live: its deploy log (activation, build, pre-flight, release command)")
 			}
 			p.header = append(p.header, a.deployHeader(deploy)...)
 		}

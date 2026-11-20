@@ -117,11 +117,11 @@ tando logs pull <file> [--since T] [--until T] [filters] [--json]
   `"level":50`), a `FATAL/ERROR/WARN/WARNING/...` word, a line starting with `[error]`/`error:`, or
   `TypeError: ...`-style exception lines. Text output tags such lines `ERR` / `WARN`.
 - Output: `2026-11-13 23:23:47 [src] message`, where `src` is empty for the app itself, or
-  `job:<name>`, `pre`, `act`, `systemd` (systemd's own lines about the unit: start, stop, exit
-  status), `journald` (rate-limit notices). `--json` prints one object per line:
+  `job:<name>`, `pre`, `act`, `release` (the release command of a deploy), `systemd` (systemd's
+  own lines about the unit: start, stop, exit status), `journald` (rate-limit notices). `--json` prints one object per line:
   `{"time":"2026-11-13T16:23:47.047+00:00","usec":...,"src":"app","unit":"tando-x.service","priority":4,"level":"warning","msg":"..."}`.
 - `--release <id>` of a release that never went live (failed pre-flight, failed build): its
-  deploy log instead, the same as `--deploy <id>` (activation, build and pre-flight units), headed
+  deploy log instead, the same as `--deploy <id>` (activation, build, pre-flight and release command units), headed
   `# release <id> was never live`. This is what the deploy failure box points to.
 - `--release <id>`: the periods come from `history.tsv` (a deploy or rollback that verified makes
   the id current from `time - verify`; a deploy that was rolled back was current only during its

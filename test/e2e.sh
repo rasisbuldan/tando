@@ -484,6 +484,166 @@ check "16e deploy of the unchanged tree: already live, nothing activated (rc=$rc
 check "16d deploy without --wait returns once live; the server watches the soak (rc=$rc)" \
   eval '[ $rc = 0 ] && grep -q "the server watches it" "$E/dnowait.out"'
 
+# 22. the release command (release = in tando.conf; docs/COMMANDS.md "The release command"): once
+# per deploy on the server, as the app's user, after pre-flight and the pre-deploy backup, before
+# the switch. The app relc serves the "schema" its release command wrote into the data directory.
+# >>> release-command
+mkdir -p "$W/relc"; cd "$W/relc" || exit 2
+cat > server.js <<'EOF'
+// relc: "relc v<VERSION> schema=<what the release command wrote>"; /health is 500 when
+// UNHEALTHY_VERSION is <version>@<port> (healthy in pre-flight, failing once live)
+const http = require('http');
+const fs = require('fs');
+const v = fs.readFileSync(__dirname + '/VERSION', 'utf8').trim();
+const port = Number(process.env.PORT);
+const [uv, up] = (process.env.UNHEALTHY_VERSION || '').split('@');
+const bad = uv === v && Number(up) === port;
+const schema = () => { try { return fs.readFileSync(process.env.TANDO_DATA_DIR + '/schema', 'utf8').trim(); } catch (e) { return 'none'; } };
+const s = http.createServer((q, r) => {
+  if (q.url === '/health') { r.writeHead(bad ? 500 : 200); return r.end(bad ? 'unhealthy\n' : 'ok\n'); }
+  r.end(`relc v${v} schema=${schema()}\n`);
+});
+s.listen(port, '127.0.0.1');
+process.on('SIGTERM', () => { s.close(() => process.exit(0)); s.closeIdleConnections(); setInterval(() => s.closeIdleConnections(), 100).unref(); });
+EOF
+cat > release.sh <<'EOF'
+#!/bin/sh
+# the "migration": what it does comes from the shipped file MIGRATE
+v=$(cat VERSION)
+echo "migrating to $v as uid $(id -u)"
+case $(cat MIGRATE) in
+  ok) echo "$v" > "$TANDO_DATA_DIR/schema" &&
+        echo "$v $(id -u) $(id -un) $GREETING $(pwd -P) $TANDO_RELEASE" >> "$TANDO_DATA_DIR/runs";;
+  fail) echo half > "$TANDO_DATA_DIR/partial"; echo "migration 0007 failed: column exists" >&2; exit 3;;
+  slow) echo "a slow migration"; sleep 600;;
+esac
+EOF
+printf 'app = relc\nrecipe = node\nstart = node server.js\nhealth = /health\nmemory = 128M\nhealth_timeout = 15\ndata = data\n' > tando.conf
+RD=/opt/tando/apps/relc
+rpage() { get relc; }
+flat() { tr -d '│\n' < "$1" | tr -s ' '; }                 # a box's text without its wrapping
+runs() { srv "sudo cat $RD/shared/data/runs" 2> /dev/null; }
+nruns() { runs | grep -c .; }
+rdeploy() { echo "$1" > VERSION; echo "$2" > MIGRATE; "$R" "${4:-deploy}" > "$E/$3.out" 2>&1; rc=$?; cat "$E/$3.out" >&2; return $rc; }
+: "${out:=}" "${out2:=}" "${idr1:=}" "${hrow:=}"   # (set below, read inside the checks' eval strings)
+agent_check() { # recipe line [line]: what the server's configure says to these settings (check only)
+  printf 'check=1\nrecipe=%s\nstart=node server.js\nhealth=/health\nmemory=128M\n%s\n%s\n' "$1" "$2" "${3:-}" |
+    srv "sudo $AGENT configure relc" 2>&1
+}
+
+# 22a. what cannot be run safely is refused, by the client before anything is built and by the server
+conf_set tando.conf release 'sh release.sh && echo done'
+rdeploy 1 ok r0 up
+check "22a release with shell syntax but no release_shell: refused by the client (rc=$rc), nothing created" \
+  eval '[ $rc != 0 ] && flat "$E/r0.out" | grep -q "release_shell = true" && ! srv "sudo test -e $RD"'
+out=$(agent_check node 'release=sh release.sh | tee log')
+check "22a2 ... and by the server" eval 'echo "$out" | grep -q "release has shell syntax"'
+out=$(agent_check static 'release=sh release.sh'); out2=$(agent_check container 'release=sh release.sh')
+check "22a3 the server refuses a release command for a static site and for a container, saying why" \
+  eval 'echo "$out" | grep -q "not supported for a static site" && echo "$out2" | grep -q "not supported for recipe = container"'
+out=$(agent_check node 'release=sh release.sh' 'release_timeout=0'); out2=$(agent_check node 'release_timeout=30')
+check "22a4 release_timeout is validated (0 refused; without release refused)" \
+  eval 'echo "$out" | grep -q "bad release_timeout" && echo "$out2" | grep -q "need release"'
+mkdir -p "$E/relst" && printf 'app = relst\nrecipe = static\nrelease = sh x.sh\n' > "$E/relst/tando.conf"
+out=$(cd "$E/relst" && "$R" deploy 2>&1); rc=$?
+check "22a5 the client refuses it for a static site too (rc=$rc)" eval '[ $rc != 0 ] && echo "$out" | grep -q "not supported for a static site"'
+
+# 22b-e. success: its own phase, its effect served by the new release, as the app's user with the
+# app's env, in the new release's directory
+conf_set tando.conf release 'sh release.sh'
+"$R" env set GREETING=hola > "$E/r-env.out" 2>&1          # (staged: the app does not exist yet)
+rdeploy 1 ok r1 up
+idr1=$(rid "$E/r1.out"); uidr=$(srv "id -u tando-relc")
+check "22b up with a release command (rc=$rc): the new release serves what the command wrote ($(rpage))" \
+  test "$rc" = 0 -a "$(rpage)" = "relc v1 schema=1"
+check "22c the deploy box shows release as its own phase with a time, between pre-flight and switch" \
+  awk '/5\/8 +preflight +[0-9]/ { p = NR } /6\/8 +release +[0-9.]+s/ { r = NR } /7\/8 +switch +[0-9]/ { s = NR }
+       END { exit !(p && r > p && s > r) }' "$E/r1.out"
+last=$(runs | tail -1)
+check "22d it ran as the app's user (uid ${uidr:-?}, not root) with the app's env, in the new release ($last)" \
+  eval '[ -n "$uidr" ] && [ "$uidr" != 0 ] && [ "$last" = "1 $uidr tando-relc hola $RD/releases/$idr1 $idr1" ]'
+COLUMNS=160 "$R" history -a relc > "$E/rh1.out" 2>&1; cat "$E/rh1.out" >&2
+hrow=$(srv "sudo tail -1 $RD/history.tsv")
+check "22e history: a RELCMD column; the deploy's line has the command's seconds as a 13th field; release_s in --json" \
+  eval 'grep -qE "PRE +RELCMD +SWITCH" "$E/rh1.out" && echo "$hrow" | awk -F "\t" "{ exit !(NF == 13 && \$13 ~ /^[0-9]+[.][0-9]\$/) }" &&
+        "$R" history -a relc --json | grep -qE "\"release_s\":[0-9]"'
+check "22e2 an app without a release command keeps the 7-step box and a history without RELCMD" \
+  eval 'grep -qE "7/7 +verify" "$E/dwait.out" && ! COLUMNS=160 "$R" history -a hello | grep -q RELCMD'
+
+# 22f-m. a failing release command, under a request loop: the deploy fails, nothing is switched, no
+# request fails, the box and the history say why with the command's last lines and the backup's id
+rm -f "$E/rloop.stop"
+( while [ ! -f "$E/rloop.stop" ]; do
+    curl -s -o /dev/null -m 30 -w '%{http_code}\n' "http://relc.localhost:$HP/"; sleep 0.1
+  done ) > "$E/rloop" &
+RLOOP=$!
+rdeploy 2 fail r2
+touch "$E/rloop.stop"; wait $RLOOP
+idr2=$(rid "$E/r2.out")
+n=$(grep -c . "$E/rloop"); bad=$(grep -cv '^200$' "$E/rloop")
+check "22f a failing release command fails the deploy (rc=$rc)" test "$rc" != 0
+check "22g ... under load: $n requests, $bad failed; the old release still serves ($(rpage))" \
+  test "$bad" = 0 -a "$n" -gt 5 -a "$(rpage)" = "relc v1 schema=1"
+check "22h the box says the release command failed, its exit status and its last output" \
+  eval 'flat "$E/r2.out" | grep -q "release command failed (exit status 3), so nothing was switched" &&
+        flat "$E/r2.out" | grep -q "migration 0007 failed: column exists"'
+bkid=$(flat "$E/r2.out" | grep -oE 'backup [0-9]{8}-[0-9]{6}-predeploy' | head -1 | cut -d' ' -f2)
+check "22i the message names the pre-deploy backup (${bkid:-none}): it exists and holds the data as it was before the command" \
+  eval '[ -n "$bkid" ] && srv "sudo tar -tzf /var/backups/tando/relc/$bkid/data.tar.gz" > "$E/r2.tar" &&
+        grep -q "schema" "$E/r2.tar" && ! grep -q partial "$E/r2.tar"'
+check "22j the release phase is the failed one, nothing after it ran; the release is gone, v1's stays current" \
+  eval 'grep -qE "6/8 +release" "$E/r2.out" && ! grep -qE "7/8 +switch +[0-9]" "$E/r2.out" &&
+        ! srv "sudo test -e $RD/releases/$idr2" && [ "$(st relc current)" = "$idr1" ] && [ "$(st relc phase)" = idle ]'
+"$R" history -a relc > "$E/rh2.out" 2>&1; cat "$E/rh2.out" >&2
+check "22k history shows the failed deploy and why, with the output's last line" \
+  eval 'grep -q "$idr2.*failed" "$E/rh2.out" && flat "$E/rh2.out" | grep -q "release command failed (exit status 3)" &&
+        flat "$E/rh2.out" | grep -q "migration 0007 failed"'
+check "22l tando restored nothing: what the command wrote before it failed is still in the data" \
+  srv "sudo test -f $RD/shared/data/partial"
+"$R" logs -a relc --deploy "$idr2" > "$E/r2.log" 2>&1; "$R" logs -a relc --release "$idr2" > "$E/r2b.log" 2>&1
+check "22m the command's whole output: tando logs --deploy <id> (and --release <id>, as the box says)" \
+  eval 'grep -q "migrating to 2 as uid $uidr" "$E/r2.log" && grep -q "migration 0007 failed" "$E/r2.log" &&
+        grep -q "migrating to 2 as uid $uidr" "$E/r2b.log"'
+
+# 22n. a release command that does not end is stopped at release_timeout
+conf_set tando.conf release_timeout 3
+t0=$SECONDS; rdeploy 3 slow r3; secs=$((SECONDS - t0))
+check "22n timeout: the deploy fails (rc=$rc) in ${secs}s saying release_timeout; v1 serves ($(rpage))" \
+  eval '[ $rc != 0 ] && [ $secs -lt 120 ] && flat "$E/r3.out" | grep -q "did not finish within 3 s (release_timeout)" &&
+        [ "$(rpage)" = "relc v1 schema=1" ]'
+# (units that run, are starting or stopping, or failed: one that ended and is not unloaded yet is no trace)
+relunits() { srv "systemctl list-units --plain --no-legend 'tando-relc-rel-*'"; }
+check "22n2 the stopped command left no running or failed unit and no process of the app's user sleeping ($(relunits | tr -s ' \n' ' '))" \
+  eval '[ -z "$(relunits)" ] && ! srv "pgrep -u tando-relc sleep"'
+conf_set tando.conf release_timeout ''
+
+# 22o. it does not run on rollback, restart or env set; a rollback does not undo what it did
+rdeploy 4 ok r4; n4=$(nruns)
+check "22o0 the next deploy works and runs it (rc=$rc, $(rpage), $n4 runs)" test "$rc" = 0 -a "$(rpage)" = "relc v4 schema=4" -a "$n4" = 2
+"$R" rollback >&2; "$R" restart >&2; "$R" env set RELC_X=1 >&2
+check "22o rollback, restart and env set do not run it ($n4 -> $(nruns) runs); the rollback did not undo it ($(rpage))" \
+  test "$(nruns)" = "$n4" -a "$(rpage)" = "relc v1 schema=4"
+# 22p. a release that fails after the switch: the command ran for the deploy, not for the automatic rollback
+rport=$(srv "sudo sed -n 's/^port=//p' $RD/app.conf")
+"$R" env set "UNHEALTHY_VERSION=5@$rport" >&2
+rdeploy 5 ok r5; n5=$(nruns)
+check "22p rolled back after the switch (rc=$rc): the command ran once, not again for the automatic rollback ($n4 -> $n5, $(rpage))" \
+  eval '[ $rc != 0 ] && grep -q "rolled back" "$E/r5.out" && [ "$n5" = $((n4 + 1)) ] && [ "$(rpage)" = "relc v1 schema=5" ]'
+# 22q. the same code again: it runs again (a deploy with a release command is never "already live")
+"$R" env unset UNHEALTHY_VERSION >&2
+rdeploy 5 ok r6; rc6=$rc n6=$(nruns)
+rdeploy 5 ok r7; n7=$(nruns)
+check "22q a deploy of unchanged code runs it again (rc=$rc6 $rc, $n6 -> $n7 runs, not \"already live\")" \
+  eval '[ $rc6 = 0 ] && [ $rc = 0 ] && [ "$n7" = $((n6 + 1)) ] && ! grep -q "already live" "$E/r7.out"'
+# 22r. release_shell = true: through sh -c, with the app's env
+conf_set tando.conf release 'echo "shell $GREETING" > "$TANDO_DATA_DIR/shellran" && sh release.sh'
+conf_set tando.conf release_shell true
+rdeploy 6 ok r8
+check "22r release_shell = true runs it with sh -c (rc=$rc, $(rpage), $(srv "sudo cat $RD/shared/data/shellran"))" \
+  eval '[ $rc = 0 ] && [ "$(rpage)" = "relc v6 schema=6" ] && [ "$(srv "sudo cat $RD/shared/data/shellran")" = "shell hola" ]'
+echo relc | "$R" destroy --purge > "$E/relc-destroy.out" 2>&1
+# <<< release-command
+
 # 9. second app: own user, port, link; cannot read hello's env
 cd "$W/site"
 echo "job.tick = *:*:0/5 | mkdir -p \"\$TANDO_DATA_DIR\" && date +%s > \"\$TANDO_DATA_DIR/tick\"; echo ticked" >> tando.conf

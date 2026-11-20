@@ -843,8 +843,10 @@ hist() { # id kind result note; phase seconds come from P
   local total="$((d / 10)).$((d % 10))"
   # a line cut off by a crash or a full disk must not swallow this one
   [[ -s $D/history.tsv && $(tail -c1 "$D/history.tsv" | od -An -c | tr -d ' ') != '\n' ]] && echo >> "$D/history.tsv"
+  # (a 13th field, the release command's seconds, only for a deploy that ran one)
   row "$(now)" "$1" "$2" "$3" "$total" "${P[t_build]:-0}" "${P[t_upload]:-0}" \
-    "${P[t_copy]:-}" "${P[t_preflight]:-}" "${P[t_switch]:-}" "${P[t_verify]:-}" "$4" >> "$D/history.tsv"
+    "${P[t_copy]:-}" "${P[t_preflight]:-}" "${P[t_switch]:-}" "${P[t_verify]:-}" "$4" \
+    ${P[t_release]:+"${P[t_release]}"} >> "$D/history.tsv"
 }
 
 # releases_by_seq: release ids, oldest first, in the order they were deployed (S[seq_<id>], given at
@@ -1830,7 +1832,8 @@ cmd_configure() {
   unset "C[path]" "C[data]" "C[start_shell]" "C[writable]" "C[backup]" "C[database]" "C[image]" "C[soak]" \
     "C[container_port]" "C[build_memory]" "C[log_max]" "C[log_keep]" "C[log_rate]" "C[access_log]" \
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
-    "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]"
+    "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" \
+    "C[release]" "C[release_shell]" "C[release_timeout]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -1842,6 +1845,10 @@ cmd_configure() {
       build_memory) [[ $v =~ ^[0-9]+[KMG]$ ]] || die "bad build_memory: $v";;
       start) [[ -n $v ]] || die "empty start command";;
       start_shell) [[ $v =~ ^(true|false)$ ]] || die "start_shell must be true or false";;
+      # the release command (run_release): once per deploy, before the switch
+      release) [[ -n $v && ${#v} -le 1000 ]] || die "bad release command (empty, or longer than 1000 characters)";;
+      release_shell) [[ $v =~ ^(true|false)$ ]] || die "release_shell must be true or false";;
+      release_timeout) [[ $v =~ ^[1-9][0-9]{0,3}$ ]] && ((v <= 3600)) || die "bad release_timeout: $v (seconds, 1 to 3600)";;
       health) [[ $v =~ ^/[A-Za-z0-9._~/?=\&%-]*$ ]] || die "bad health path: $v";;
       path) [[ $v =~ ^(/[A-Za-z0-9._~-]+)+$ ]] || die "bad path: $v (like /shop)";;
       data) if [[ ${C[recipe]:-} == container ]]; then   # the volume's path inside the container
@@ -1888,6 +1895,7 @@ cmd_configure() {
     v=$(int_norm "$v")
     C[$k]=$v
   done <<< "$input"
+  release_ok
   if [[ -n $origin && -n ${C[origin]:-} && ${C[origin]} != "$origin" ]] && ((!force)); then
     die "$A on <host> was last deployed from ${C[origin]}, not from here ($origin). Deploy from here anyway: tando deploy --force (or tando up --force)"
   fi
@@ -2013,10 +2021,12 @@ cmd_activate() {
   upload_writing && die "another upload into $A's incoming/ is still running, so this upload may be mixed with it; nothing was activated: run the deploy again"
   # the same upload as the live, verified release, with the same settings: nothing to do (no new
   # release, no restart). Exact: incoming/ is compared by its entries' change times and inodes,
-  # which any write by rsync changes. Not for containers (image = may name a newer image)
+  # which any write by rsync changes. Not for containers (image = may name a newer image), and not
+  # with a release command: that runs on every deploy, of unchanged code too
   local cur=${S[current]:-}
   if [[ -n $cur && ${S[inc_id]:-} == "$cur" && ${S[status_$cur]:-} == verified && ${S[phase]:-idle} == idle &&
         -z ${S[stopped]:-}${S[down]:-} && ${C[recipe]:-node} != container && -n ${S[applied]:-} &&
+        -z ${C[release]:-} &&
         ${S[inc_applied]:-} == "${S[applied]}" && $(cur_link) == "$cur" && $(inc_sum) == "${S[inc_sum]:-}" ]] &&
      { ! has_unit || systemctl -q is-active "tando-$A"; }; then
     rm -f "$D/upload"
@@ -2208,9 +2218,21 @@ cmd_run_activation() {
   if has_unit && ! own_listener "${C[port]}" "tando-$A.service" && [[ $PROBE_WHY == *"outside"* ]]; then
     fail "port ${C[port]} is held by another process, not by tando-$A: nothing was switched ($PROBE_WHY)"
   fi
+  local bk=""
   if has_backup_data; then
+    # (in this shell, not $(...): backup_take records last_backup in the state)
     backup_take predeploy > /dev/null 2> "$D/backup.err" ||
       fail "the pre-deploy backup failed, so the release was not switched in: $(tail -c 300 "$D/backup.err" | tr '\n' ' ')"
+    bk=$BK_ID
+  fi
+  # the release command (migrations): after the pre-flight passed and the backup was taken, before
+  # the switch. Its time is its own phase; the switch phase is what came before it plus the switch
+  if [[ -n ${C[release]:-} ]]; then
+    local sw=$(( $(ds) - t ))
+    t=$(ds); st phase release; pg phase release
+    run_release "$bk"
+    pg t_release "$(el "$t")" phase switch
+    t=$(( $(ds) - sw )); st phase switch
   fi
   switch_to "$id" || fail "could not switch to the new release (disk full?)"
   st phase verify; pg t_switch "$(el "$t")"
@@ -2222,6 +2244,85 @@ cmd_run_activation() {
   fi
   prune
   exit $rc
+}
+
+# ---- the release command ---------------------------------------------------------------------
+#
+# release = <command> in tando.conf: run once per deploy (database migrations, mostly), in the new
+# release's directory, as the app's user in the app's sandbox, slice and environment (props - job:
+# what a scheduled job gets; no listening socket), after the pre-flight passed and the pre-deploy
+# backup was taken, before the switch. A failure or a timeout fails the deploy: nothing is switched.
+# tando restores nothing: the live release is still writing to the same database.
+# Not for static sites (no process, no sandbox user that reads the release) nor containers (the
+# release is an image: its entrypoint is the place).
+
+# shell syntax in a command that runs without a shell would reach the program as literal words
+release_ok() {
+  [[ -n ${C[release]:-} ]] || {
+    [[ -z ${C[release_shell]:-}${C[release_timeout]:-} ]] || die "release_shell and release_timeout need release = <command>"
+    return 0; }
+  case ${C[recipe]:-node} in
+    static) die "release is not supported for a static site: it has no process to run a command as (a build step belongs in build =)";;
+    container) die "release is not supported for recipe = container: run the migration in the image's entrypoint, before the server starts";;
+  esac
+  [[ ${C[release_shell]:-} == true || ${C[release]} != *[\|\&\;\<\>\$\`\"\'\\\(\)\*\?\~\{\}\#]* ]] ||
+    die "release has shell syntax (quotes, &&, |, \$VAR ...) but runs without a shell: set release_shell = true to run it with sh -c, or put it in a script"
+  return 0
+}
+
+# exec-release <app> <dir>: runs as the app user inside the release unit. The command comes from
+# app.conf, never from an argument. Without release_shell it is split on spaces, with no shell.
+cmd_exec_release() {
+  app "$1"
+  local dir=${2:-} argv
+  [[ $dir == "$D"/releases/* && $dir != *..* ]] || die "bad dir"
+  [[ -n ${C[release]:-} ]] || die "no release command"
+  cd "$dir" || die "no release"
+  [[ ${C[recipe]:-} == python && -d $dir/.venv ]] && export VIRTUAL_ENV=$dir/.venv PATH="$dir/.venv/bin:$PATH"
+  if [[ ${C[release_shell]:-} == true ]]; then exec /bin/sh -c "${C[release]}"; fi
+  read -ra argv <<< "${C[release]}"
+  exec "${argv[@]}"
+}
+
+# run_release [backup id]: inside run-activation (uses id, rel, t and fail from there). Returns
+# when the command exited 0; otherwise the deploy fails here. The command's output is in the app's
+# journal under its unit (tando logs --deploy <id>); its last lines go to activation.log (the
+# deploy box) and into the failure message (tando history).
+run_release() {
+  local bk=${1:-} unit="tando-$A-rel-$id" args=() x out res code why last i to=${C[release_timeout]:-300}
+  while IFS= read -r x; do args+=(-p "$x"); done < <(props - job)
+  # PORT: the app's own (as in tando ssh), though nothing can listen here; RuntimeMaxSec: the
+  # timeout, by systemd (TERM, then KILL after 10 s), so it holds when this agent is killed too
+  out=$(systemd-run --wait --collect --unit="$unit" "${args[@]}" -p "Description=tando release command $A $id" \
+    -p "WorkingDirectory=$rel" -p "RuntimeMaxSec=$to" -p TimeoutStopSec=10 \
+    -E "PORT=${C[port]}" -E "TANDO_RELEASE=$id" "$AGENT" exec-release "$A" "$rel" 2>&1 < /dev/null)
+  res=$(sed -n 's/.*Finished with result: //p' <<< "$out" | head -1)
+  [[ $res == success ]] && return 0
+  systemctl reset-failed "$unit" 2> /dev/null     # (a failed unit can outlive --collect: seen after a timeout)
+  # ("code=exited, status=3/NOTIMPLEMENTED", "code=killed, status=9/KILL"; older systemd: "code=exited/status=3")
+  code=$(sed -n 's/.*Main processes terminated with: .*status=//p' <<< "$out" | head -1 | tr -cd 'A-Za-z0-9/')
+  case $res in
+    exit-code) code=${code%%/*}; why="the release command failed (exit status ${code:-?})";;
+    timeout) why="the release command did not finish within $to s (release_timeout) and was stopped";;
+    oom-kill) why="the release command was killed: out of memory (memory = ${C[memory]:-256M})";;
+    signal|core-dump) code=${code##*/}; why="the release command died from signal ${code:-?}";;
+    *) why="the release command could not be started ($(tail -1 <<< "$out" | cut -c1-160))";;
+  esac
+  # its own last lines (journald may still be writing them: wait up to 3 s)
+  for i in 1 2 3 4 5 6; do
+    journalctl --sync 2> /dev/null; [[ -n $(jns) ]] && journalctl "$(jns)" --sync 2> /dev/null
+    last=$(journalctl --namespace='*' "_SYSTEMD_UNIT=$unit.service" _TRANSPORT=stdout -o cat --no-pager -n 60 2> /dev/null)
+    [[ -n $last ]] && break
+    sleep 0.5
+  done
+  printf '%s\n' "$last" > "$D/activation.log"
+  last=$(grep . <<< "$last" | tail -2 | tr '\n' '|' | tr -s '[:space:]' ' ' | sed 's/|$//; s/|/ | /g' | cut -c1-240)
+  why+=", so nothing was switched and the old release keeps serving"
+  [[ -n $last ]] && why+=". Its last output: $last"
+  # what the command changed stays changed: the live release is writing to the same data
+  [[ -n $bk ]] && why+=". Data and database were not put back; as they were before the command: backup $bk (tando backup restore $bk)"
+  P[t_release]=$(el "$t")       # written with the failure itself, in one pg (as a failed pre-flight)
+  fail "$why"
 }
 
 # ---- importing a release: incoming/ -> releases/<id> -----------------------------------------
@@ -2377,8 +2478,10 @@ recover() {
          ! ss -Hltn "sport = :${C[port]}" | grepq .; then
         restart_app || true
       fi;;
-    copy|preflight)
-      systemctl stop "tando-$A-pre-$id" 2> /dev/null
+    copy|preflight|release)
+      # (release: the command is stopped where it was; what it had changed in the data stays)
+      systemctl stop "tando-$A-pre-$id" "tando-$A-rel-$id" 2> /dev/null
+      systemctl reset-failed "tando-$A-rel-$id" 2> /dev/null
       S[status_$id]=bad; st phase idle
       pg phase done result failed message "interrupted during $ph"
       hist "$id" deploy failed "interrupted during $ph"
@@ -2546,9 +2649,9 @@ as_app_unit() {
     -p WorkingDirectory=/ -p MemoryMax=512M "$@"
 }
 
-backup_take() { # kind -> prints the backup id
+backup_take() { # kind -> prints the backup id (and sets BK_ID)
   local kind=$1 id dir tmp n=0 snap=() live=$ADATA/app.sqlite
-  BK_WARN=""
+  BK_WARN="" BK_ID=""
   install -d -m 700 -o root -g root "$BK" "$BK/$A"
   id="$(date -u +%Y%m%d-%H%M%S)-$kind"
   while [[ -e $BK/$A/$id ]]; do sleep 1; id="$(date -u +%Y%m%d-%H%M%S)-$kind"; n=$((n + 1)); ((n < 5)) || return 1; done
@@ -2594,6 +2697,7 @@ backup_take() { # kind -> prints the backup id
   st last_backup "$(now)"
   backup_prune
   offsite_kick "$id"
+  BK_ID=$id
   echo "$id"
 }
 
@@ -3186,7 +3290,7 @@ cmd_history() { # [app] [n]
   for f; do
     [[ -r $f ]] || continue
     f=${f%/history.tsv}
-    tail -n "$n" "$f/history.tsv" | awk -F '\t' 'NF == 12' | sed "s/^/hist\t${f##*/}\t/"
+    tail -n "$n" "$f/history.tsv" | awk -F '\t' 'NF == 12 || NF == 13' | sed "s/^/hist\t${f##*/}\t/"
   done
 }
 
@@ -3678,6 +3782,7 @@ case $verb in
     fi
     exec "$LOGS" "$verb" "$@";;
   exec-app) cmd_exec_app "$@";;
+  exec-release) cmd_exec_release "$@";;
   run-job) cmd_run_job "$@";;
   jobs) cmd_jobs "$@";;
   unlock) cmd_unlock "$@";;

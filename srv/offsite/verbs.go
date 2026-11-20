@@ -583,7 +583,7 @@ func ago(now, t int64) string {
 // port, created, origin, user, data_dir ...)
 var confKeys = map[string]bool{
 	"recipe": true, "image": true, "container_port": true, "build_memory": true, "start": true,
-	"start_shell": true, "health": true, "path": true, "data": true, "writable": true, "backup": true,
+	"start_shell": true, "release": true, "release_shell": true, "release_timeout": true, "health": true, "path": true, "data": true, "writable": true, "backup": true,
 	"database": true, "memory": true, "health_timeout": true, "soak": true, "cpu": true, "tasks": true,
 	"max_conns": true, "max_requests": true, "stop_timeout": true, "hold": true, "log_max": true,
 	"log_keep": true, "log_rate": true, "access_log": true, "request_log_max": true,

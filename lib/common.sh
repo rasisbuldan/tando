@@ -294,6 +294,7 @@ C_memory="" C_timeout="" C_path="" C_data="" C_jobs="" C_writable="" C_backup=""
 C_soak=""
 C_logs=""   # log_max, log_keep, log_rate, access_log as key=value lines (checked by the server)
 C_image="" C_container_port="" C_build_memory="" C_dockerfile="" C_node="" C_domain="" C_www=""
+C_release="" C_release_shell="" C_release_timeout=""   # the release command (lib/deploy.sh; checked by the server too)
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
 
 # trim_v text -> TRIM: without leading and trailing white space (no fork; conf_load runs it per line)
@@ -346,6 +347,12 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         case /$v/ in //*|*/../*) die "$f:$n: out must be a directory inside the project (got \"$v\")";; esac;;
       start) C_start=$v;;
       start_shell) C_start_shell=$v;;
+      release) C_release=$v
+        [ -n "$v" ] || die "$f:$n: release is a command, like node scripts/migrate.js";;
+      release_shell) C_release_shell=$v
+        case $v in true|false) ;; *) die "$f:$n: release_shell must be true or false (got \"$v\")";; esac;;
+      release_timeout) C_release_timeout=$v
+        ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 3600 ] || die "$f:$n: release_timeout is 1 to 3600 seconds (got \"$v\")";;
       health) C_health=$v;;
       memory) C_memory=$v;;
       cpu) C_cpu=$v
@@ -386,6 +393,20 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       *) die "$f:$n: unknown key: $k";;
     esac
   done < "$f"
+  # the release command: where it can run, and no shell syntax without a shell (it would reach
+  # the program as literal words: a migration run with the wrong arguments)
+  if [ -n "$C_release" ]; then
+    case $C_recipe in
+      static) die "$f: release is not supported for a static site: it has no process to run a command as (a build step belongs in build =)";;
+      container) die "$f: release is not supported for recipe = container: run the migration in the image's entrypoint, before the server starts";;
+    esac
+    [ "$C_release_shell" = true ] || case $C_release in
+      *['|&;<>$`"()*?~{}#'\'\\]*) die "$f: release has shell syntax (quotes, &&, |, \$VAR ...) but runs without a shell:" \
+        "set release_shell = true to run it with sh -c, or put it in a script";;
+    esac
+  elif [ -n "$C_release_shell$C_release_timeout" ]; then
+    die "$f: release_shell and release_timeout need release = <command>"
+  fi
   CONF_LOADED=$f
   return 0
 }

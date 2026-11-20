@@ -253,6 +253,11 @@ func TestHistory(t *testing.T) {
 	eq(t, two, rows("hist\tweb\t"+line("20261101-000002"), "hist\tweb\t"+line("20261101-000003")))
 	none, _ := h.out(func(c *Collector, b *bytes.Buffer) error { return c.History(context.Background(), b, "web", "0") })
 	eq(t, none, "")
+	// a deploy that ran a release command has a 13th field, its seconds; 11 or 14 fields: no record
+	rel := line("20261101-000004") + "\t0.3"
+	h.write("root/apps/web/history.tsv", rel+"\n"+rel+"\textra\n"+strings.TrimSuffix(line("20261101-000005"), "\tnote")+"\n")
+	thirteen, _ := h.out(func(c *Collector, b *bytes.Buffer) error { return c.History(context.Background(), b, "web", "") })
+	eq(t, thirteen, rows("hist\tweb\t"+rel))
 	big, _ := h.out(func(c *Collector, b *bytes.Buffer) error {
 		return c.History(context.Background(), b, "nosuch", "99999999999999999999999")
 	})
