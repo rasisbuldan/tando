@@ -356,7 +356,7 @@ check "D9l the next backup removes it too (rc=$rc, removed: ${gone:-no})" test "
 # it half way, with the backup never finished and its temp directory left
 srv "sudo -u tando-notes sh -c 'echo x > /opt/tando/apps/notes/shared/data/locked && chmod 000 /opt/tando/apps/notes/shared/data/locked'"
 srv "sudo bash -c '$AGENT backup-run notes manual 2>&1 | true'"
-done_bk=$(srv "sudo grep -l '^warning=.*locked' $BK/notes/*/meta 2> /dev/null | wc -l")
+done_bk=$(srv "sudo sh -c 'grep -l ^warning=.*locked $BK/notes/*/meta' 2> /dev/null | wc -l | tr -d ' '")   # (root's glob: the directory is 700)
 left=$(srv "sudo ls -A $BK/notes | grep -c '^\..*\.tmp\$'")
 check "D9m a backup whose ssh session dropped finishes (backups with the warning: $done_bk, temp dirs left: $left)" \
   test "$done_bk/$left" = 1/0
