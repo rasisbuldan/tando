@@ -378,6 +378,7 @@ function wire() {
   $('b-theme').onclick = () => theme(1);
   $('b-keys').onclick = () => $('keys').hidden = false;
   $('keys').onclick = () => $('keys').hidden = true;
+  $('ed').dataset.gramm = 'false';   // (writing-assistant extensions stay out of the SQL)
   $('b-stop').onclick = async () => { saveDraft(); try { await api('/api/end', {}); } catch { } ended('You stopped it. Nothing of it is left running on the server.'); };
   const e = $('ed');
   let esc = false;
