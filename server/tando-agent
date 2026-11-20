@@ -50,6 +50,48 @@ audit_done() {
   AUDIT_VERB=""
 }
 need_root() { [[ $EUID -eq 0 ]] || die "this needs root (sudo)"; }
+
+# fp <point>: a fault point for the test matrix (test/e2e-matrix.sh, docs/TESTING.md "Fault
+# matrix"). On a production server it is one builtin test: /run/tando-test does not exist. On a
+# test server both markers must be root's regular files: /etc/tando-test-server (made by the test
+# driver, never by tando) and the one-shot spec /run/tando-test/fault (point=, action=kill|fail|
+# hang, app=, verb=, nth=). The point is matched with its context (FPC: rec/ inside recover). A
+# spec fires once (renamed first, so recovery runs clean; next becomes the following spec):
+# kill = SIGKILL of this agent, fail = the point's action fails (the caller's failure branch),
+# hang = wait for /run/tando-test/release (a reboot is a hang, then a docker restart).
+# With /run/tando-test/trace, every point passed is appended to it (the driver's list of points).
+fp() {
+  [[ -d /run/tando-test ]] || return 0
+  fp_hit "${FPC:+$FPC/}$1"
+}
+fp_hit() {
+  local T=/run/tando-test p=$1 s
+  [[ $EUID == 0 && -f /etc/tando-test-server && ! -L /etc/tando-test-server && -O /etc/tando-test-server &&
+     -O $T && ! -L $T ]] || return 0
+  [[ -f $T/trace && -O $T/trace && ! -L $T/trace ]] && printf '%s %s %s\n' "${verb:-?}" "${A:--}" "$p" >> "$T/trace"
+  [[ -f $T/fault && -O $T/fault && ! -L $T/fault ]] || return 0
+  local -A F=(); load "$T/fault" F
+  [[ ${F[point]:-} == "$p" && ( -z ${F[app]:-} || ${F[app]} == "${A:-}" ) &&
+     ( -z ${F[verb]:-} || ${F[verb]} == "${verb:-}" ) ]] || return 0
+  s=$T/taking.$BASHPID
+  mv "$T/fault" "$s" 2> /dev/null || return 0          # (another process took it first)
+  if [[ ${F[nth]:-1} =~ ^[0-9]+$ ]] && ((F[nth] > 1)); then
+    F[nth]=$((F[nth] - 1))
+    for p in "${!F[@]}"; do printf '%s=%s\n' "$p" "${F[$p]}"; done > "$s" && mv -f "$s" "$T/fault"
+    return 0
+  fi
+  printf 'point=%s\naction=%s\nverb=%s\npid=%s\n' "${F[point]}" "${F[action]:-}" "${verb:-}" "$BASHPID" > "$s"
+  mv -f "$s" "$T/fired"
+  [[ -f $T/next ]] && mv -f "$T/next" "$T/fault"
+  case ${F[action]:-} in
+    kill) kill -KILL $$ "$BASHPID";;
+    fail) return 1;;
+    hang) : > "$T/reached"; local i
+          for ((i = 0; i < 6000; i++)); do [[ -e $T/release ]] && break; sleep 0.1; done
+          rm -f "$T/release" "$T/reached";;
+  esac
+  return 0
+}
 # mono: MONO = whole seconds of the monotonic clock (uptime), for timeouts and the soak: a wall
 # clock set back or forward (NTP after a long stop, a hand fix) neither stretches nor skips them
 mono() { local u; read -r u _ < /proc/uptime; MONO=${u%.*}; }
@@ -142,6 +184,8 @@ load() {
 save() {
   local -n _m=$2
   local k tmp="$1.tmp.$$" i
+  # (test fault points: before and after every write of a state file; fail = a disk too full)
+  fp "pre:${1##*/}" || { echo "tando-agent: could not write $1: the disk is full (test fault)" >&2; return 1; }
   for i in 1 2; do
     if ( umask 077; for k in "${!_m[@]}"; do printf '%s=%s\n' "$k" "${_m[$k]}"; done | sort > "$tmp" ); then
       # unchanged: nothing written (a re-run touches nothing)
@@ -149,6 +193,10 @@ save() {
       # flushed before the rename, so a power cut leaves the old file or the new one, never an
       # empty one (the activation's progress file is only a display: not flushed)
       if meta_mode "$tmp" "${1##*/}" && { [[ ${1##*/} == activation ]] || sync "$tmp"; } && mv -f "$tmp" "$1"; then
+        # the rename itself reaches the disk too (the directory's entry): a power cut after this
+        # never brings back the old file under a later write that was synced
+        [[ ${1##*/} == activation ]] || sync "${1%/*}" 2> /dev/null
+        fp "post:${1##*/}"
         return 0
       fi
     fi
@@ -216,7 +264,8 @@ app_perms() { # the metadata group, its members, the modes of the app's files
   install -d -m 755 -o root -g root "$D/home"
   return 0
 }
-st() { while (($#)); do S[$1]=$2; shift 2; done; save "$D/state" S; }       # update state
+# st key value...: update the state (an empty value removes the key)
+st() { while (($#)); do if [[ -n $2 ]]; then S[$1]=$2; else unset "S[$1]"; fi; shift 2; done; save "$D/state" S; }
 pg() { local SAN; while (($#)); do san_v "$2"; P[$1]=$SAN; shift 2; done; save "$D/activation" P; }  # progress
 
 # select an app: sets A (name), D (directory), loads its config, state and the host config
@@ -434,26 +483,45 @@ hold_secs() {
 }
 # (Re)start the app and make Caddy proxy to it again (it may show the stopped or down page).
 # Caddy holds requests while the process restarts, so none fail.
+# Returns 1 when Caddy refused the site (WC_WHY; the state is as it was) or the start failed.
+# A stopped or down app: the process first, then Caddy proxies to it, so a start that fails keeps
+# the stopped (or down) page instead of a 502.
 restart_app() {
   if [[ -n ${S[stopped]:-}${S[down]:-} ]]; then
+    if has_unit; then
+      systemctl reset-failed "tando-$A" 2> /dev/null
+      fp ra.restart && systemctl restart "tando-$A" || return 1
+    fi
+    local was_s=${S[stopped]:-} was_d=${S[down]:-}
     unset "S[stopped]" "S[down]"
-    write_caddy                     # proxy again (dies, the state unchanged, when Caddy refuses)
+    if ! write_caddy; then          # proxy again; when Caddy refuses, nothing changed
+      [[ -n $was_s ]] && S[stopped]=$was_s; [[ -n $was_d ]] && S[down]=$was_d
+      return 1
+    fi
     save "$D/state" S
-    has_unit && systemctl enable -q "tando-$A"
+    has_unit && fp ra.enable && systemctl enable -q "tando-$A"
+    return 0
   fi
-  write_caddy
+  write_caddy || return 1
   has_unit || return 0
   systemctl reset-failed "tando-$A" 2> /dev/null
   # no Caddy reload while requests wait for the app (hold_window_start says why)
   local rc=0
   hold_window_start
-  systemctl restart "tando-$A" || rc=$?
+  { fp ra.restart && systemctl restart "tando-$A"; } || rc=1
   # the wait runs beside the caller, which goes on (its health check) without waiting for it; it
   # keeps only the Caddy lock (not the app's lock or any other the caller holds)
   ( exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- 10>&-
     hold_window_end "${C[port]:-0}" "tando-$A.service" "$(hold_secs)" ) < /dev/null > /dev/null 2>&1 &
   exec 11>&-
   return $rc
+}
+# stop_app: the stopped page at once, then the process stops; the unit is disabled, so a reboot
+# keeps it stopped. S[stopped] must be set (and saved) by the caller first
+stop_app() {
+  write_caddy || return 1
+  has_unit || return 0
+  fp svc.disable && systemctl disable -q --now "tando-$A"
 }
 # lock [secs]: the app's lock (fd 9). While it waits, $D/lock.wait.<pid> says so; once it holds
 # it, $D/lock.holder names the verb. busy_info reports both, so a client tells "my call is
@@ -471,6 +539,12 @@ lock() {
   # what held it may have been a destroy: nothing is written into a directory that is gone
   [[ -f $D/app.conf ]] || { exec 9>&-; die "$A was destroyed while this command waited for it"; }
   lock_mark "${verb:-?}"
+  # what held it died in the middle of an operation (its own recovery got no lock: this verb
+  # waited for it): finish or revert that first, then this verb's work
+  if [[ ${S[phase]:-idle} != idle && ${verb:-} != recover ]]; then
+    recover_locked
+    lock_mark "${verb:-?}"
+  fi
 }
 lock_mark() {
   { printf '%s %s\n' "$1" "$BASHPID" > "$D/lock.holder"; } 2> /dev/null
@@ -616,18 +690,27 @@ write_unit() {
     printf 'SyslogIdentifier=tando-%s\nTimeoutStopSec=%s\n' "$A" "${C[stop_timeout]:-$stop}"
     props "${C[port]}"
     printf '\n[Install]\nWantedBy=multi-user.target\n'
-  } > "$f.tmp"
+  } > "$f.tmp" || { rm -f "$f.tmp"; echo "tando-agent: could not write $f (disk full?)" >&2; return 1; }
   # when the unit gives up (start limit), tando-down@ shows a 503 page instead of holding requests
   # (gives up = 5 starts within 60 s, so a crash loop ends in "failed" after about 10 s)
-  sed -i "1a OnFailure=tando-down@tando-$A.service\nStartLimitIntervalSec=60\nStartLimitBurst=5" "$f.tmp"
-  if cmp -s "$f.tmp" "$f"; then rm -f "$f.tmp"; else mv -f "$f.tmp" "$f"; fi   # unchanged: untouched
+  # (a file cut short by a full disk is never installed: it must end with its [Install] line)
+  sed -i "1a OnFailure=tando-down@tando-$A.service\nStartLimitIntervalSec=60\nStartLimitBurst=5" "$f.tmp" &&
+    [[ $(tail -1 "$f.tmp") == WantedBy=multi-user.target ]] ||
+    { rm -f "$f.tmp"; echo "tando-agent: could not write $f (disk full?)" >&2; return 1; }
+  if cmp -s "$f.tmp" "$f"; then rm -f "$f.tmp"; else sync "$f.tmp" && mv -f "$f.tmp" "$f"; fi   # unchanged: untouched
 }
 
-# Caddy site for the app; validated before reload, the previous file restored on failure
+# Caddy site for the app; validated before reload, the previous file restored on failure.
+# Returns 1 (WC_WHY says why, on stderr too) when it could not be written or Caddy refused it:
+# the previous site is then what Caddy runs, and the caller decides (a deploy rolls back).
 write_caddy() {
   probe_header
   local f=/etc/caddy/tando/$A.caddy name
+  WC_WHY=""
   [[ ${C[caddy]:-} == external ]] && return 0      # adopted: its hand-written site block serves it
+  # an earlier change cut off between its rename and Caddy's reload: the file Caddy last
+  # accepted comes back first, so the one below is validated and reloaded, never taken as done
+  [[ -f $f.old ]] && mv -f "$f.old" "$f"
   name=$(site)
   [[ ${H[tls]:-off} == off ]] && name="http://$name"
   # the app's own domains (tando domain add): in the same site block, with HTTPS (Let's Encrypt,
@@ -728,38 +811,47 @@ write_caddy() {
       if [[ $dt == off ]]; then echo "	redir http://${d#*>}{uri} permanent"; else echo "	redir https://${d#*>}{uri} permanent"; fi
       echo "}"
     done
-  } > "$f.tmp"
+    echo "# end"
+  } > "$f.tmp" && [[ $(tail -1 "$f.tmp") == "# end" ]] ||
+    { rm -f "$f.tmp"; WC_WHY="could not write the site file of $A (disk full?)"; echo "tando-agent: $WC_WHY" >&2; return 1; }
   # root:caddy 640: the probe header's secret is in it, and apps can read /etc
   chgrp caddy "$f.tmp" 2> /dev/null; chmod 640 "$f.tmp"
   if cmp -s "$f.tmp" "$f" && [[ $(stat -c %a "$f") == 640 ]]; then rm -f "$f.tmp"; return 0; fi
   # one site change at a time on the host (fd 11): Caddy validates and reloads the whole config,
   # so another app's file in between would be judged (and rolled back) with this one
-  caddy_lock
-  [[ -f $f ]] && cp -p "$f" "$f.old"
-  mv -f "$f.tmp" "$f"
+  caddy_try_lock || { rm -f "$f.tmp"; echo "tando-agent: $WC_WHY" >&2; return 1; }
+  if [[ -f $f ]] && ! cp -p "$f" "$f.old"; then
+    rm -f "$f.tmp" "$f.old"; exec 11>&-
+    WC_WHY="could not keep a copy of the site file of $A (disk full?)"; echo "tando-agent: $WC_WHY" >&2; return 1
+  fi
+  sync "$f.tmp" 2> /dev/null; mv -f "$f.tmp" "$f"
   local verr="" busy
   wc_back() { if [[ -f $f.old ]]; then mv -f "$f.old" "$f"; else rm -f "$f"; fi; }
-  if ! verr=$(caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1); then
+  wc_fail() { WC_WHY=$1; echo "tando-agent: $WC_WHY" >&2; return 1; }
+  if ! fp caddy.reload || ! verr=$(caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1); then
     wc_back; exec 11>&-
     verr=$(printf '%s\n' "$verr" | grep -i 'error\|fail' | tail -1 | cut -c1-300)
-    die "caddy rejected the site config for $A${verr:+: $verr}"
+    wc_fail "caddy rejected the site config for $A${verr:+: $verr}"; return 1
   fi
   busy=$(caddy_binds /etc/caddy/Caddyfile)
   if [[ -n $busy ]]; then
     wc_back; exec 11>&-
-    die "caddy rejected the site config for $A: the Caddyfile listens on $busy, which another program holds (nothing was reloaded)"
+    wc_fail "caddy rejected the site config for $A: the Caddyfile listens on $busy, which another program holds (nothing was reloaded)"; return 1
   fi
   if ! caddy_reload; then
     wc_back; verr=$CADDY_ERR
     busy=$(caddy_unload); exec 11>&-
-    die "caddy rejected the site config for $A${verr:+: $verr}; $busy"
+    wc_fail "caddy rejected the site config for $A${verr:+: $verr}; $busy"; return 1
   fi
   rm -f "$f.old"
   exec 11>&-
 }
-caddy_lock() {
+caddy_lock() { caddy_try_lock || die "$WC_WHY"; }
+caddy_try_lock() {
   exec 11>"$R/.caddy.lock"; chmod 600 "$R/.caddy.lock"
-  flock -w 120 11 || die "another change of Caddy's sites takes over 2 minutes; try again"
+  flock -w 120 11 && return 0
+  WC_WHY="another change of Caddy's sites takes over 2 minutes; try again"
+  return 1
 }
 
 # A failed reload is not harmless. Caddy (2.6 to 2.10 at least) loads a configuration by starting
@@ -954,15 +1046,34 @@ static_ok() { # base curl-options...
 
 # ---- releases ------------------------------------------------------------------------------
 
-switch_to() { # <id> or "" (no release left: stop the app)
+# switch_to <id>: current -> releases/<id>, the state says so, the app restarts on it. On failure
+# SW_MOVED tells whether the link had moved (then the caller must go back: the new release may be
+# what runs); "" (no release left) stops the app.
+switch_to() {
+  SW_MOVED=0
   if [[ -z $1 ]]; then
     systemctl stop "tando-$A"; rm -f "$D/current"; st current ""
     return
   fi
-  [[ -d $D/releases/$1 ]] || { echo "tando-agent: release $1 is not on disk" >&2; return 1; }
-  ln -sfn "releases/$1" "$D/current.tmp" && mv -Tf "$D/current.tmp" "$D/current" || return 1
-  st current "$1" || return 1
+  switch_link "$1" || return 1
   restart_app
+}
+switch_link() { # id: the link and the state only
+  [[ -d $D/releases/$1 ]] || { echo "tando-agent: release $1 is not on disk" >&2; return 1; }
+  fp link.mv && ln -sfn "releases/$1" "$D/current.tmp" && mv -Tf "$D/current.tmp" "$D/current" || return 1
+  SW_MOVED=1
+  sync "$D" 2> /dev/null      # the new link reaches the disk before anything depends on it
+  fp link.moved
+  st current "$1"
+}
+# runs_release id: the app's process runs that release now (its working directory)
+runs_release() {
+  has_unit || return 0
+  systemctl -q is-active "tando-$A" || return 1
+  local pid c; pid=$(systemctl show -P MainPID "tando-$A" 2> /dev/null)
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+  c=$(readlink "/proc/$pid/cwd" 2> /dev/null)
+  [[ ${c##*/} == "$1" ]]
 }
 
 # fallback_of id: the release to go back to: id itself when its directory exists, else the newest
@@ -992,7 +1103,41 @@ hist() { # id kind result note; phase seconds come from P
   # (a 13th field, the release command's seconds, only for a deploy that ran one)
   row "$(now)" "$1" "$2" "$3" "$total" "${P[t_build]:-0}" "${P[t_upload]:-0}" \
     "${P[t_copy]:-}" "${P[t_preflight]:-}" "${P[t_switch]:-}" "${P[t_verify]:-}" "$4" \
-    ${P[t_release]:+"${P[t_release]}"} >> "$D/history.tsv"
+    ${P[t_release]:+"${P[t_release]}"} >> "$D/history.tsv" ||
+    { echo "tando-agent: could not write the history line of $1 (disk full?)" >&2; return 1; }
+}
+# hist_has id kind since: history has a line for that operation (written at or after since)
+hist_has() {
+  awk -F '\t' -v id="$1" -v k="$2" -v s="${3:-0}" '$2 == id && $3 == k && $1 >= s { f = 1 } END { exit !f }' \
+    "$D/history.tsv" 2> /dev/null
+}
+
+# end_op id kind result message [history note] [state key value...]: a deploy or a rollback
+# ends. ONE state write commits it: phase idle, and the outcome (id, kind, result, the
+# operation's start, its note). The progress file and the history line come after it; when a
+# crash loses them, recover writes them from the outcome (op_trailer), so the result is never
+# "running" for an operation that is over, and the history line is written once.
+end_op() {
+  local id=$1 kind=$2 res=$3 msg=$4 note=${5-$4} SAN
+  shift 4; (($#)) && shift
+  san_v "$note"
+  st "$@" phase idle reverting "" pre_stopped "" outcome "$id $kind $res ${EO_SINCE:-${P[started]:-0}}" outcome_note "$SAN"
+  if [[ ${P[id]:-} == "$id" ]]; then pg phase done result "$res" message "$msg"; fi
+  op_trailer
+}
+# op_trailer: what follows an operation's commit (end_op): its result in the progress file and
+# its history line (once), the job units of the live release, a refused release's directory
+op_trailer() {
+  local o=${S[outcome]:-} id kind res since
+  [[ -n $o ]] || return 0
+  read -r id kind res since <<< "$o"
+  if [[ ${P[id]:-} == "$id" && ${P[result]:-} == running && ${P[started]:-0} == "$since" ]]; then
+    pg phase done result "$res" message "${P[message]:-${S[outcome_note]:-}}"
+  fi
+  hist_has "$id" "$kind" "$since" || { fp "$kind.hist" && hist "$id" "$kind" "$res" "${S[outcome_note]:-}"; } || return 1
+  fp "$kind.jobs" && jobs_follow
+  [[ $kind == deploy && $res != ok ]] && fp "$kind.drop" && drop_release "$id"
+  st outcome_done "$o"      # (recover need not look at it again)
 }
 
 # releases_by_seq: release ids, oldest first, in the order they were deployed (S[seq_<id>], given at
@@ -1037,10 +1182,11 @@ soak_why() {
 
 # Verify the live target of a deploy or rollback through Caddy, or go back to the fallback.
 finish() { # kind [note]
-  local id=${S[target]} fb=${S[fallback]:-} kind=$1 t ok=0 n0 soak soaked=0
+  local id=${S[target]} kind=$1 t ok=0 n0 n soak soaked=0
   t=$(ds); pg phase verify
   caddy_up || { PROBE_WHY="Caddy is not running and did not start (sudo journalctl -u caddy)"; }
-  if via_caddy "$(app_unit)"; then ok=1
+  if ! fp fin.verify; then PROBE_WHY="health check failed (test fault)"
+  elif via_caddy "$(app_unit)"; then ok=1
   elif ! systemctl -q is-active caddy && caddy_up && via_caddy "$(app_unit)"; then ok=1; fi
   # soak: the release must stay up for a while; a crash or an OOM kill in the window rolls back
   soak=${C[soak]:-${H[soak]:-$SOAK}}
@@ -1051,7 +1197,11 @@ finish() { # kind [note]
     local end; mono; end=$((MONO + soak))
     while mono; ((MONO < end)); do
       sleep 1
-      if [[ $(systemctl show -P NRestarts "tando-$A") != "$n0" ]] || ! systemctl -q is-active "tando-$A"; then
+      # (an empty answer is systemd not answering in time, not a restart: asked again next second)
+      n=$(systemctl show -P NRestarts "tando-$A")
+      [[ $n =~ ^[0-9]+$ && ! $n0 =~ ^[0-9]+$ ]] && n0=$n
+      if ! fp fin.soak || [[ $n =~ ^[0-9]+$ && $n != "$n0" ]] ||
+         { ! systemctl -q is-active "tando-$A" && [[ $(systemctl show -P ActiveState "tando-$A") =~ ^(failed|inactive|activating|deactivating)$ ]]; }; then
         mono; ok=0 soaked=1; PROBE_WHY="$(soak_why), $((soak - end + MONO)) s after going live"; break
       fi
     done
@@ -1059,27 +1209,49 @@ finish() { # kind [note]
   if ((ok)); then
     S[status_$id]=verified
     [[ $kind == rollback && -n ${S[prev]:-} ]] && S[status_${S[prev]}]=rolledback   # left, not failed
-    st last_good "$id" phase idle
-    jobs_follow
-    pg t_verify "$(el "$t")" phase done result ok
-    hist "$id" "$kind" ok "${2:-}"
+    P[t_verify]=$(el "$t")
+    end_op "$id" "$kind" ok "" "${2:-}" last_good "$id" current "$id"
     return 0
   fi
-  pg t_verify "$(el "$t")" phase rollback
-  [[ $kind == deploy ]] && S[status_$id]=bad
-  fb=$(fallback_of "$fb" "$id")
-  st phase rollback
-  if [[ -n $fb ]]; then switch_to "$fb" || true
-  elif [[ -z ${S[prev]:-} ]]; then switch_to ""; fi      # a first deploy: nothing to go back to
-  st phase idle
-  jobs_follow
-  [[ $kind == deploy && $id != "$fb" ]] && start_back "$fb"   # app.conf describes the live release again
-  pg phase done result rolledback message "after the switch: $PROBE_WHY; back on ${fb:-nothing}"
-  hist "$id" "$kind" rolledback "${2:-$PROBE_WHY}"
-  [[ $kind == deploy && $id != "$fb" ]] && drop_release "$id"
-  # the client has usually returned ("live") before the soak ends: the alert channels are told
-  ((soaked)) && watch_notice rollback "$id" "release $id rolled back to ${fb:-nothing}: $PROBE_WHY"
+  P[t_verify]=$(el "$t")
+  revert "$kind" "$PROBE_WHY" "${2:-$PROBE_WHY}" "$soaked"
   return 1
+}
+
+# revert kind why [note] [soaked]: the target of a deploy or rollback failed after the switch (or
+# could not be started): back to the fallback. The decision is recorded first (reverting=1):
+# a crash from here on is finished by recover the same way, never by verifying the target again.
+# A deploy to a stopped app goes back to the stopped app.
+revert() { # kind why [note] [soaked 0|1] [result: rolledback, or failed when it never went live]
+  local kind=$1 why=$2 note=${3:-$2} res=${5:-rolledback} id=${S[target]} fb back=1
+  [[ $kind == deploy ]] && S[status_$id]=bad
+  fb=$(fallback_of "${S[fallback]:-}" "$id")
+  st phase rollback reverting 1
+  pg phase rollback
+  if [[ -n $fb ]]; then
+    if [[ -n ${S[pre_stopped]:-} ]]; then
+      S[stopped]=1
+      { fp bad.switch && switch_link "$fb" && stop_app; } || back=0
+    elif [[ $(cur_link) != "$fb" ]]; then { fp bad.switch && switch_to "$fb"; } || back=0
+    elif ! runs_release "$fb"; then { fp bad.switch && restart_app; } || back=0
+    fi
+  elif [[ -z ${S[prev]:-} ]]; then switch_to ""      # a first deploy: nothing to go back to
+  fi
+  # app.conf describes the live release again
+  if ((back)) && [[ -n $fb && $id != "$fb" ]]; then { fp bad.start_back && start_back "$fb"; } || back=0; fi
+  if ((!back)); then
+    # going back did not work this time (a full disk, a unit that would not start): nothing is
+    # committed; the phase stays (rollback, reverting) and recover tries again (this activation's
+    # ExecStopPost, tando-watch every minute, the next command)
+    pg message "$why; going back to ${fb:-nothing} did not work yet (${WC_WHY:-it did not start}): retried by recovery"
+    return 1
+  fi
+  local msg="after the switch: $why; back on ${fb:-nothing}"
+  [[ $res == failed ]] && msg="$why; ${fb:-nothing} stays live"
+  end_op "$id" "$kind" "$res" "$msg" "$note" current "$(cur_link)"
+  # the client has usually returned ("live") before the soak ends: the alert channels are told
+  [[ ${4:-0} == 1 ]] && watch_notice rollback "$id" "release $id rolled back to ${fb:-nothing}: $why"
+  return 0
 }
 
 # watch_notice kind id text: a one-time notice for tando-watch, which sends it through the alert
@@ -1717,7 +1889,7 @@ EOF
     [[ -f $a ]] || continue
     a=${a%/app.conf}; n=$((n + 1))
     # (under the app's lock: a deploy or domain change of it writes the same files)
-    ( app "${a##*/}"; lock 300; app_perms; write_unit; jobs_follow; write_caddy; journal_dir ) ||
+    ( app "${a##*/}"; lock 300; app_perms; write_unit || exit 1; jobs_follow; write_caddy || exit 1; journal_dir ) ||
       die "could not update the units and Caddy site of ${a##*/}"
   done
   ((n)) && systemctl daemon-reload
@@ -2203,6 +2375,22 @@ cmd_configure() {
   done
   [[ ${C[database]:-} == sqlite && -z ${C[data]:-} ]] && C[data]=data   # the file lives in data/
   if [[ -z ${C[backup]:-} && ( -n ${C[data]:-} || -n ${C[database]:-} ) ]]; then C[backup]=daily; fi
+  # how the new release starts and is checked (start, start_shell, health, health_expect) waits
+  # in pending.conf until its activation takes it: until then app.conf describes the live
+  # release, so a deploy cut off before its activation (an upload that failed, a client killed)
+  # changes neither the live app's restarts nor its checks
+  if ((!new)) && valid_id "${S[current]:-}" && [[ -f $D/start/${S[current]} ]]; then
+    local -A RS=()
+    load "$D/start/${S[current]}" RS
+    for k in start start_shell health health_expect; do printf '%s=%s\n' "$k" "${C[$k]:-}"; done > "$D/pending.conf.tmp" &&
+      mv -f "$D/pending.conf.tmp" "$D/pending.conf" || die "could not write $D/pending.conf (disk full?)"
+    for k in start start_shell health health_expect; do
+      [[ -n ${RS[$k]+x} ]] || continue
+      if [[ -n ${RS[$k]} ]]; then C[$k]=${RS[$k]}; else unset "C[$k]"; fi
+    done
+  else
+    rm -f "$D/pending.conf"
+  fi
   save "$D/app.conf" C
   # nothing changed since the last configure by this agent (every deploy calls it): done
   local applied; applied=$(cat "$D/app.conf" "$AGENT" | cksum | cut -d' ' -f1)
@@ -2219,7 +2407,9 @@ cmd_configure() {
   [[ -n ${C[data]:-} ]] && ensure_shared data
   [[ ${C[recipe]:-} == next && ${C[next_cache]:-} != release ]] && ensure_shared next-cache
   [[ ${C[recipe]:-} == python ]] && ensure_shared .cache
-  write_unit; write_caddy; jobs_follow; sync_backup_timer
+  write_unit || die "could not write the unit of $A (disk full?)"
+  write_caddy || die "$WC_WHY"
+  jobs_follow; sync_backup_timer
   journal_dir
   [[ -f $D/.reserve ]] || { head -c 1048576 /dev/zero > "$D/.reserve" 2> /dev/null && chmod 600 "$D/.reserve"; }
   # (not marked applied on failure: the next deploy tries again)
@@ -2269,17 +2459,18 @@ cmd_activate() {
   fi
   # the copy needs room: the upload's size plus a margin, or nothing starts
   local need free
-  need=$(du -sk "$D/incoming" 2> /dev/null | cut -f1); need=$(( ${need:-0} + 8192 ))
-  free=$(df -Pk "$D/releases" | awk 'NR == 2 { print $4 }')
+  need=$(du -sk "$D/incoming" 2> /dev/null | cut -f1); [[ $need =~ ^[0-9]+$ ]] || need=0; need=$((need + 8192))
+  free=$(df -Pk "$D/releases" | awk 'NR == 2 { print $4 }'); [[ $free =~ ^[0-9]+$ ]] || free=0
   # (a refusal from here on gives the lease back, so the next deploy need not wait for it to age)
   ((free >= need)) || { rm -f "$D/upload"; die "not enough disk space on <host> for this release: it needs $((need / 1024)) MB, $((free / 1024)) MB are free (tando doctor)"; }
   # and as many free inodes as the upload has entries (a release of many small files)
   local nf ifree
   # (a file system without a fixed inode count, btrfs, reports 0 of 0: no limit)
-  nf=$(find "$D/incoming" -xdev 2> /dev/null | wc -l); ifree=$(df -Pi "$D/releases" | awk 'NR == 2 { print ($2 > 0 ? $4 : "") }')
+  nf=$(find "$D/incoming" -xdev 2> /dev/null | wc -l); [[ $nf =~ ^[0-9]+$ ]] || nf=0; ifree=$(df -Pi "$D/releases" | awk 'NR == 2 { print ($2 > 0 ? $4 : "") }')
   [[ $ifree =~ ^[0-9]+$ ]] && ((ifree < nf + 1000)) && rm -f "$D/upload" &&
     die "not enough free inodes on <host> for this release: it has $nf files, $ifree inodes are free (tando doctor; old releases: tando releases)"
   base=$(date -u +%Y%m%d-%H%M%S); id=$base
+  fp act.mkdir || { rm -f "$D/upload"; die "could not reserve a release id (test fault)"; }
   until mkdir "$D/releases/$id" 2> /dev/null; do
     n=$((n + 1)); id="$base-$n"; ((n < 100)) || { rm -f "$D/upload"; die "could not reserve a release id"; }
   done
@@ -2289,9 +2480,16 @@ cmd_activate() {
   local who=() w f
   [[ -x $LOGS ]] && read -r w f < <("$LOGS" audit-origin) && who=(-E "TANDO_AUDIT_WHO=$w" -E "TANDO_AUDIT_FROM=$f")
   # ExecStopPost: whatever ends the activation (an OOM kill, SIGKILL, a full disk), recover runs
-  # at once and finishes or reverts it, so no release stays half-activated
-  if ! systemd-run --quiet --collect --unit="tando-$A-act-$id" "${who[@]}" \
+  # at once and finishes or reverts it, so no release stays half-activated. Bounds: the whole
+  # activation (an hour of waiting for the app's lock, the copy, build or image pull, the release
+  # command, two health checks, the soak: RuntimeMaxSec, then ExecStopPost reverts it), and that
+  # recovery itself, which may verify and soak the release again (TimeoutStopSec)
+  local ht=${C[health_timeout]:-60} sk=${C[soak]:-${H[soak]:-$SOAK}} rt=0
+  [[ -n ${C[release]:-} ]] && rt=${C[release_timeout]:-300}
+  [[ $ht =~ ^[0-9]+$ ]] || ht=60; [[ $sk =~ ^[0-9]+$ ]] || sk=$SOAK; [[ $rt =~ ^[0-9]+$ ]] || rt=300
+  if ! fp act.spawn || ! systemd-run --quiet --collect --unit="tando-$A-act-$id" "${who[@]}" \
       -p Description="tando activation $A $id" -p "ExecStopPost=$AGENT recover $A" \
+      -p "RuntimeMaxSec=$((3600 + 3600 + rt + 3 * ht + sk + 600))" -p "TimeoutStopSec=$((3 * ht + sk + 180))" \
       "$AGENT" run-activation "$A" "$id" "$b" "$u"; then
     rmdir "$D/releases/$id"; rm -f "$D/upload"
     die "systemd-run failed"
@@ -2417,9 +2615,10 @@ inc_sum() { find "$D/incoming" -mindepth 1 -printf '%P\t%y\t%s\t%C@\t%i\t%n\t%m\
 # run-activation <app> <id> <build> <upload>: runs inside its own transient unit
 cmd_run_activation() {
   need_root; app "$1"
-  local id=$2 rel=$D/releases/$2 t l bad
+  local id=$2 rel=$D/releases/$2 t l bad x
   valid_id "$id" || die "bad id"
   lock 3600
+  fp run.locked
   AUDIT_NOTE="release $id"
   load "$D/state" S
   # its number in deploy order (rollback and prune go by it, not by the clock); a damaged value
@@ -2429,7 +2628,9 @@ cmd_run_activation() {
     S[seq]=$m
   fi
   S[seq]=$(( 10#${S[seq]:-0} + 1 )); S[seq_$id]=${S[seq]}
-  P=([id]=$id [phase]=copy [result]=running [started]=$(now) [started_ds]=$(ds) [t_build]=$3 [t_upload]=$4); pg
+  # the reservation was given up meanwhile (recover found its unit gone: a stale one)
+  [[ -d $rel && -z ${S[status_$id]:-} ]] || die "release $id was given up while it waited"
+  P=([id]=$id [kind]=deploy [phase]=copy [result]=running [started]=$(now) [started_ds]=$(ds) [t_build]=$3 [t_upload]=$4); pg
   # what to go back to: the last good release; with a lost or emptied state, whatever current points
   # at now (a failed deploy must never stop an app that was serving)
   local l0; l0=$(cur_link)
@@ -2438,22 +2639,32 @@ cmd_run_activation() {
   fi
   local prev=${S[current]:-$l0} fb=${S[last_good]:-}
   [[ -n $fb && -d $D/releases/$fb ]] || fb=$prev
-  st phase copy target "$id" kind deploy prev "$prev" fallback "$fb"
+  # (pre_stopped: a deploy to a stopped app that does not go live leaves it stopped)
+  st phase copy target "$id" kind deploy prev "$prev" fallback "$fb" pre_stopped "${S[stopped]:-}"
   fail() {
     AUDIT_NOTE="release $id: $1"
-    S[status_$id]=bad; st phase idle
-    pg phase done result failed message "$1"
-    hist "$id" deploy failed "$1"
-    drop_release "$id"
-    start_back "$prev"
+    S[status_$id]=bad
+    fp fail.start_back && start_back "$prev"
+    end_op "$id" deploy failed "$1"
     free_lease 2> /dev/null   # (a failure before the copy ended: the upload's lease goes with it)
     exit 1
   }
-  jobs_snap "$id" || fail "could not record the release's jobs (disk full?)"
+  # how this release starts and what it is checked with (configure left it in pending.conf), and its
+  # jobs: app.conf as configured for it
+  if [[ -f $D/pending.conf ]]; then
+    local -A PD=(); load "$D/pending.conf" PD
+    for x in start start_shell health health_expect; do
+      [[ -n ${PD[$x]+x} ]] || continue
+      if [[ -n ${PD[$x]} ]]; then C[$x]=${PD[$x]}; else unset "C[$x]"; fi
+    done
+    save "$D/app.conf" C || fail "could not write app.conf (disk full?)"
+    rm -f "$D/pending.conf"
+  fi
+  { fp run.jobs_snap && jobs_snap "$id" && start_snap "$id"; } || fail "could not record the release's jobs (disk full?)"
 
   # one limit for the upload and the releases kept, in real bytes (du counts a hardlink once)
   local used max=$(( ${H[app_max_mb]:-8192} * 1048576 ))
-  used=$(du -sbc "$D/incoming" "$D/releases" 2> /dev/null | awk 'END { print $1 }')
+  used=$(du -sbc "$D/incoming" "$D/releases" 2> /dev/null | awk 'END { print $1 }'); [[ $used =~ ^[0-9]+$ ]] || used=0
   # (refused for its size: the upload is cleared, so incoming/ does not keep holding it)
   ((used <= max)) || { find "$D/incoming" -mindepth 1 -delete 2> /dev/null; fail "the upload and the releases kept use $((used / 1048576)) MB, over this server's limit of $((max / 1048576)) MB per app (host setup app_max_mb=N); the upload was cleared"; }
 
@@ -2468,7 +2679,7 @@ cmd_run_activation() {
   # another process answering on the spare port could pass the pre-flight in the new release's place
   has_unit && ss -Hltn "sport = :$spare" | grepq . && fail "pre-flight port $spare is in use by another process"
   while IFS= read -r x; do args+=(-p "$x"); done < <(props "$spare" preflight)
-  has_unit && { systemd-run --quiet --collect --unit="$unit" "${args[@]}" -p "WorkingDirectory=$rel" \
+  has_unit && { fp pre.spawn && systemd-run --quiet --collect --unit="$unit" "${args[@]}" -p "WorkingDirectory=$rel" \
     "$AGENT" exec-app "$A" "$rel" || fail "could not start the pre-flight unit"; }
   if has_unit && ! { probe "${C[health_timeout]:-60}" "$unit" "http://127.0.0.1:$spare$(health_path)" &&
                      own_listener "$spare" "$unit.service"; }; then
@@ -2486,20 +2697,20 @@ cmd_run_activation() {
     P[t_preflight]=$(el "$t")
     fail "pre-flight: $PROBE_WHY"
   fi
-  has_unit && systemctl stop "$unit"
+  has_unit && fp pre.stop && systemctl stop "$unit"
   : > "$D/activation.log"
   pg t_preflight "$(el "$t")" phase switch
 
   # back up the app's data, switch, then verify through Caddy (finish goes back to last_good)
   t=$(ds); st phase switch
-  caddy_up || fail "Caddy is not running on <host> and did not start, so nothing was switched (sudo journalctl -u caddy -n 20)"
+  { fp sw.caddy_up && caddy_up; } || fail "Caddy is not running on <host> and did not start, so nothing was switched (sudo journalctl -u caddy -n 20)"
   if has_unit && ! own_listener "${C[port]}" "tando-$A.service" && [[ $PROBE_WHY == *"outside"* ]]; then
     fail "port ${C[port]} is held by another process, not by tando-$A: nothing was switched ($PROBE_WHY)"
   fi
   local bk=""
   if has_backup_data; then
     # (in this shell, not $(...): backup_take records last_backup in the state)
-    backup_take predeploy > /dev/null 2> "$D/backup.err" ||
+    { fp sw.backup && backup_take predeploy > /dev/null 2> "$D/backup.err"; } ||
       fail "the pre-deploy backup failed, so the release was not switched in: $(tail -c 300 "$D/backup.err" | tr '\n' ' ')"
     bk=$BK_ID
   fi
@@ -2508,19 +2719,27 @@ cmd_run_activation() {
   if [[ -n ${C[release]:-} ]]; then
     local sw=$(( $(ds) - t ))
     t=$(ds); st phase release; pg phase release
+    fp rel.run
     run_release "$bk"
     pg t_release "$(el "$t")" phase switch
     t=$(( $(ds) - sw )); st phase switch
   fi
-  switch_to "$id" || fail "could not switch to the new release (disk full?)"
-  st phase verify; pg t_switch "$(el "$t")"
   local rc=0
-  finish deploy || rc=1
+  if ! switch_to "$id"; then
+    ((SW_MOVED)) || fail "could not switch to the new release (disk full?)"
+    # the link moved: the new release may be what runs now. Back to the last good one
+    PROBE_WHY="the new release could not be started (${WC_WHY:-systemctl restart failed}: tando logs --release $id)"
+    pg t_switch "$(el "$t")"
+    revert deploy "$PROBE_WHY"; rc=1
+  else
+    st phase verify; pg t_switch "$(el "$t")"
+    finish deploy || rc=1
+  fi
   if ((rc)); then
     AUDIT_RESULT=rolledback AUDIT_NOTE="release $id: ${P[message]:-rolled back}"
     app_journal -u "tando-$A" -n 60 --no-pager -o cat > "$D/activation.log" 2>&1
   fi
-  prune
+  fp run.prune && prune
   exit $rc
 }
 
@@ -2622,7 +2841,7 @@ import_release() {
   local before after
   before=$(upload_sum)
   local after_inc; after_inc=$(inc_sum)
-  if ! cp -a --no-dereference "$D/incoming" "$rel" 2> "$D/copy.err"; then
+  if ! { fp imp.cp && timeout 3600 cp -a --no-dereference "$D/incoming" "$rel" 2> "$D/copy.err"; }; then
     # the cause in words: cp's own error, and what is left on the file system
     local why fb ifree
     why=$(grep -v '^$' "$D/copy.err" | tail -1 | cut -c1-200)
@@ -2639,6 +2858,7 @@ import_release() {
   [[ $before == "$after" ]] || { rm -rf "$rel"; fail "the upload changed during the copy"; }
   chmod go-rwx "$D/incoming"   # rsync -p copies the client's mode; other users never read it
   st inc_id "$id" inc_sum "$after_inc" inc_applied "${S[applied]:-}"   # (for an unchanged next deploy)
+  fp imp.free_lease
   free_lease
   chown -RhP "root:$group" "$rel" && chmod -R a-st,u=rwX,g=rX,o= "$rel" || fail "chown failed"
   open_public "$rel"
@@ -2673,12 +2893,12 @@ import_image() {
     free_lease
     [[ $ref =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]] || fail "bad image reference in image-ref"
     # the reference came from the upload: it is never echoed back in a message
-    podman pull -q "$ref" > /dev/null 2> "$D/activation.log" || fail "podman pull of the image in image-ref failed"
+    timeout 1800 podman pull -q "$ref" > /dev/null 2> "$D/activation.log" || fail "podman pull of the image in image-ref failed (or took over 30 minutes)"
     img=$ref
   else
     local before
     before=$(upload_sum)
-    img=$(tar -C "$D/incoming" -cf - . | podman load 2> "$D/activation.log" | sed -n 's/^Loaded image: //p' | tail -1)
+    img=$(tar -C "$D/incoming" -cf - . | timeout 1800 podman load 2> "$D/activation.log" | sed -n 's/^Loaded image: //p' | tail -1)
     [[ $before == "$(upload_sum)" ]] || fail "the upload changed while it was loaded"
     chmod go-rwx "$D/incoming"
     free_lease
@@ -2711,7 +2931,7 @@ build_venv() {
     args+=(-p "$x")
   done < <(props - build)
   out=$(systemd-run --wait --collect --unit="$unit" "${args[@]}" -p "MemoryMax=${C[build_memory]:-512M}" \
-    -p CPUQuota=100% -p "ReadWritePaths=$rel/.venv $D/shared" \
+    -p CPUQuota=100% -p "ReadWritePaths=$rel/.venv $D/shared" -p RuntimeMaxSec=1800 \
     -p "WorkingDirectory=$rel" -E "HOME=$D/home" -E "XDG_CACHE_HOME=$tc" -E PYTHONNOUSERSITE=1 \
     -E NPM_CONFIG_USERCONFIG=/dev/null -E GIT_CONFIG_GLOBAL=/dev/null \
     /bin/sh -c "$cmd" 2>&1)
@@ -2734,57 +2954,150 @@ preflight_static() {
   [[ -f $f ]] || fail "pre-flight: ${C[health]:-/} is not a file in the release"
 }
 
-# Finish or revert an interrupted activation. Skipped while an activation holds the lock.
+# recover: finish or revert an interrupted operation (a deploy, a rollback, an env change, a
+# stop or start), finish what a crash cut short after an operation's end, give up reservations no
+# activation will run, and bring what serves in line with the state. Run by every mutating verb
+# first, by an activation's ExecStopPost, at boot (recover-all) and by tando-watch. When another
+# verb holds the app's lock it is skipped (after a short wait): that verb runs recover_locked
+# itself once it has the lock (lock), so an interrupted phase is never inherited unfinished.
 recover() {
-  lockfile "$D/lock"; exec 9>"$D/lock"; flock -n 9 || return 0
+  lockfile "$D/lock"; exec 9>"$D/lock"; flock -w 3 9 || return 0
+  recover_locked
+  flock -u 9
+}
+recover_locked() {
+  local FPC=rec
   lock_mark recover
+  fp enter
   load "$D/state" S; load "$D/activation" P
-  local ph=${S[phase]:-idle} id=${S[target]:-} fb=${S[fallback]:-}
+  local ph=${S[phase]:-idle} id=${S[target]:-} l
   case $ph in
-    idle)
-      # current link and state agree; a lost one is rebuilt from the other
-      local l; l=$(cur_link)
-      if [[ -n ${S[current]:-} && -d $D/releases/${S[current]} && $l != "${S[current]}" ]]; then
-        switch_to "${S[current]}"
-      elif [[ -z ${S[current]:-} && -n $l && -d $D/releases/$l ]]; then
-        st current "$l" "status_$l" verified      # it was serving: the state says so again
-        [[ -n ${S[last_good]:-} ]] || st last_good "$l"
-      fi
-      # an app systemd gave up on (down) gets another start once its port is free (tando-watch
-      # runs recover-all every minute): a stray process that held it may be gone
-      if [[ -n ${S[down]:-} && -z ${S[stopped]:-} && -n ${S[current]:-} ]] && has_unit &&
-         ! ss -Hltn "sport = :${C[port]}" | grepq .; then
-        restart_app || true
-      fi;;
+    idle) ;;
     copy|preflight|release)
       # (release: the command is stopped where it was; what it had changed in the data stays)
-      systemctl stop "tando-$A-pre-$id" "tando-$A-rel-$id" 2> /dev/null
-      systemctl reset-failed "tando-$A-rel-$id" 2> /dev/null
-      S[status_$id]=bad; st phase idle
-      pg phase done result failed message "interrupted during $ph"
-      hist "$id" deploy failed "interrupted during $ph"
-      drop_release "$id"
-      if ! systemctl -q is-active "tando-$A" && [[ -n ${S[current]:-} ]]; then
-        restart_app
-      fi
-      ;;
+      fp pre_stop && systemctl stop "tando-$A-pre-$id" "tando-$A-rel-$id" "tando-$A-venv-$id" 2> /dev/null
+      systemctl reset-failed "tando-$A-rel-$id" "tando-$A-venv-$id" 2> /dev/null
+      S[status_$id]=bad
+      start_back "${S[current]:-}"
+      rec_lease "$id"
+      end_op "$id" deploy failed "interrupted during $ph";;
     switch|verify|soak|rollback)
-      if [[ $(cur_link) == "$id" ]]; then
-        restart_app
+      # once a switch began, the link is the truth: the state's current may be one write behind
+      l=$(cur_link)
+      [[ -n $l && -d $D/releases/$l ]] && S[current]=$l
+      if [[ $l == "$id" && -z ${S[reverting]:-} ]]; then
+        st current "$l"
+        runs_release "$id" || { fp finish && restart_app; } || true
         finish "${S[kind]:-deploy}" "recovered after interruption"
+      elif [[ -z ${S[reverting]:-} ]]; then   # the link never moved: the target never went live
+        revert "${S[kind]:-deploy}" "interrupted before the switch" "interrupted before the switch" 0 failed
       else
-        [[ ${S[kind]:-deploy} == deploy ]] && S[status_$id]=bad
-        fb=$(fallback_of "$fb" "$id")
-        if [[ -n $fb && $(cur_link) != "$fb" ]]; then switch_to "$fb"
-        elif [[ -n $fb ]]; then restart_app; fi
-        st phase idle
-        jobs_follow
-        pg phase done result rolledback message "interrupted before the switch"
-        hist "$id" "${S[kind]:-deploy}" rolledback "interrupted"
-      fi
-      ;;
+        revert "${S[kind]:-deploy}" "interrupted" "interrupted"
+      fi;;
+    env)  # (no env.prev: it ended before the new env was written; nothing changed)
+      if [[ -f $D/env.next || -f $D/env.prev ]]; then env_finish > /dev/null
+      else rm -f "$D/.env.check"; st phase idle env_revert ""; fi;;
+    stop) S[stopped]=1; stop_app || unset "S[stopped]"; st phase idle;;
+    start|restart) restart_app; st phase idle;;
+    destroy) return 0;;      # a destroy cut short: tando destroy again finishes it, nothing here
+    *) st phase idle;;
   esac
-  flock -u 9
+  # (still in a phase: going back did not work yet; the next recover tries again)
+  [[ ${S[phase]:-idle} == idle ]] || return 0
+  rec_idle
+}
+# rec_lease id: the upload lease of that release goes with it
+rec_lease() {
+  lockfile "$D/lease.lock"; exec 7>"$D/lease.lock"; flock -w 30 7 || return 0
+  load "$D/upload" L
+  [[ -n $1 && ${L[id]:-} == "$1" ]] && rm -f "$D/upload"
+  flock -u 7
+}
+# rec_idle: no operation runs (this holds the lock): everything agrees with the state
+rec_idle() {
+  local l cur=${S[current]:-} f i
+  l=$(cur_link)
+  if [[ -n $cur && -d $D/releases/$cur && $l != "$cur" ]]; then
+    fp switch && switch_to "$cur"
+  elif [[ -z $cur && -n $l && -d $D/releases/$l ]]; then
+    st current "$l" "status_$l" verified      # it was serving: the state says so again
+    [[ -n ${S[last_good]:-} ]] || st last_good "$l"
+  fi
+  # an operation that ended (or died) without its result written
+  if [[ ${P[result]:-} == running ]] && valid_id "${P[id]:-}"; then
+    local oid osince
+    read -r oid _ _ osince <<< "${S[outcome]:-}"
+    if [[ $oid == "${P[id]}" && $osince == "${P[started]:-0}" ]]; then op_trailer
+    elif [[ ${P[kind]:-deploy} == rollback || -n ${S[status_${P[id]}]:-} ]]; then
+      # (a rollback cut before its first state write; or an activation from before outcomes)
+      local r=failed; [[ ${S[status_${P[id]}]:-} == verified && $cur == "${P[id]}" ]] && r=ok
+      end_op "${P[id]}" "${P[kind]:-deploy}" "$r" "interrupted"
+    fi
+  fi
+  [[ -n ${S[outcome]:-} && ${S[outcome]} != "${S[outcome_done]:-}" ]] && op_trailer
+  rec_reap
+  # what an operation that died leaves: its helper units (none of this app runs while this holds
+  # the lock), half-written files
+  local units=()
+  while IFS= read -r i; do [[ -n $i ]] && units+=("$i"); done < <(systemctl list-units --all --plain --no-legend \
+    "tando-$A-pre-*" "tando-$A-rel-*" "tando-$A-venv-*" "tando-$A-envcheck-*" 2> /dev/null | awk '{ print $1 }' |
+    grep -E "^tando-$A-(pre|rel|venv|envcheck)-[0-9]")
+  if ((${#units[@]})); then systemctl stop "${units[@]}" 2> /dev/null; systemctl reset-failed "${units[@]}" 2> /dev/null; fi
+  rm -f "$D/.env.check" "$D/env.prev" "$D/env.next" "$D/current.tmp" "$D/copy.err" "$D"/.env.?????? "$D"/jobs/*.tmp "$D"/start/*.tmp
+  for f in "$D"/state.tmp.* "$D"/app.conf.tmp.* "$D"/activation.tmp.*; do
+    [[ -e $f && ! -d /proc/${f##*.} ]] && rm -f "$f"
+  done
+  rec_service
+}
+# rec_reap: a reserved release (a directory with no status) whose activation unit is gone was
+# never activated (activate cut off, the unit killed or the server restarted while it was queued):
+# it is given up, so it is never reported queued, kept, or offered for a rollback
+rec_reap() {
+  local r i
+  for r in "$D"/releases/*; do
+    i=${r##*/}
+    valid_id "$i" && [[ -d $r && -z ${S[status_$i]:-} && $i != "${S[current]:-}" ]] || continue
+    # activate holds the lease lock from the reservation until its unit started
+    lockfile "$D/lease.lock"; exec 7>"$D/lease.lock"; flock -w 30 7 || continue
+    case $(systemctl show -P ActiveState "tando-$A-act-$i" 2> /dev/null) in
+      active|activating|deactivating|reloading) flock -u 7; continue;;
+    esac
+    load "$D/upload" L
+    [[ ${L[id]:-} == "$i" ]] && rm -f "$D/upload"
+    flock -u 7
+    S[status_$i]=bad
+    EO_SINCE=$(now) end_op "$i" deploy failed "interrupted before it started (activate was cut off, or its server restarted while it was queued)"
+  done
+}
+# rec_service: the app runs, is stopped or shows its down page as the state says
+rec_service() {
+  [[ -n ${S[current]:-} ]] || return 0
+  if ! has_unit; then write_caddy; return 0; fi
+  # an adopted app whose unit is not enabled: adopt undo is giving it back (it disables tando's
+  # unit first, under adopt's own lock) or did; nothing here may start it again
+  [[ -n ${C[adopted_from]:-} ]] && ! systemctl -q is-enabled "tando-$A" 2> /dev/null && return 0
+  local as; as=$(systemctl show -P ActiveState "tando-$A" 2> /dev/null)
+  if [[ -n ${S[stopped]:-} ]]; then
+    if [[ $as =~ ^(active|activating|reloading)$ ]] || systemctl -q is-enabled "tando-$A" 2> /dev/null; then stop_app
+    else write_caddy; fi
+  elif [[ -n ${S[down]:-} ]]; then
+    if [[ $as == active ]] && own_listener "${C[port]}" "tando-$A.service"; then
+      # it runs on its port again (it was started at boot, say): the down page goes
+      unset "S[down]"; save "$D/state" S && write_caddy
+    elif ! ss -Hltn "sport = :${C[port]}" | grepq .; then
+      # an app systemd gave up on (down) gets another start once its port is free (tando-watch
+      # runs recover-all every minute): a stray process that held it may be gone
+      restart_app || true
+    fi
+  else
+    case $as in
+      failed) S[down]=1; save "$D/state" S; write_caddy;;    # systemd gave up; app-down did not get to it
+      inactive) restart_app || true;;                        # a start or restart cut short
+      *) write_caddy
+         systemctl -q is-enabled "tando-$A" 2> /dev/null || systemctl enable -q "tando-$A";;
+    esac
+  fi
+  return 0
 }
 # journalctl option for the app's namespace (plus the main journal), once it has one
 jns() { [[ -f /etc/systemd/journald@tando-$A.conf ]] && echo "--namespace=+tando-$A"; }
@@ -2815,6 +3128,8 @@ cmd_rollback() {
   local cur=${S[current]:-} to=${2:-} i t
   if [[ -n $to ]]; then
     valid_id "$to" && [[ -d $D/releases/$to ]] || die "no such release: $to"
+    # (a reservation, or a release whose deploy never ended, was never live: not a way back)
+    [[ -n ${S[status_$to]:-} ]] || die "release $to never finished its deploy: it cannot be rolled back to"
   else
     local seen=0
     for i in $(releases_by_seq | tac); do
@@ -2824,13 +3139,31 @@ cmd_rollback() {
     [[ -n $to ]] || die "no earlier verified release to roll back to"
   fi
   [[ $to != "$cur" ]] || die "$to is already current"
-  P=([id]=$to [phase]=switch [result]=running [started]=$(now) [started_ds]=$(ds)); pg
-  st phase rollback target "$to" kind rollback prev "$cur" fallback "$cur"
+  P=([id]=$to [kind]=rollback [phase]=switch [result]=running [started]=$(now) [started_ds]=$(ds)); pg
+  # how each of the two starts and is checked: app.conf describes the current release now; the
+  # target's own lines come back from its snapshot (a newer health path would fail the older code)
+  [[ -n $cur && ! -f $D/start/$cur ]] && valid_id "$cur" && start_snap "$cur"
+  st phase rollback target "$to" kind rollback prev "$cur" fallback "$cur" pre_stopped "" reverting ""
   AUDIT_NOTE="from ${cur:--} to $to"
-  t=$(ds); switch_to "$to" || { st phase idle; die "could not switch to $to"; }
+  start_back "$to"
+  t=$(ds)
+  if ! { fp rb.switch && switch_to "$to"; }; then
+    if ((SW_MOVED)); then
+      PROBE_WHY="$to could not be started (${WC_WHY:-systemctl restart failed})"
+      pg t_switch "$(el "$t")"
+      revert rollback "$PROBE_WHY" || die "could not switch to $to ($PROBE_WHY); going back to $cur did not work yet: recovery retries it (tando status)"
+      die "could not switch to $to ($PROBE_WHY); back on $cur"
+    fi
+    start_back "$cur"
+    end_op "$to" rollback failed "could not switch to $to"
+    die "could not switch to $to"
+  fi
   pg t_switch "$(el "$t")"
   st phase verify
-  finish rollback "from $cur" || die "rollback health check failed ($PROBE_WHY); back on $cur"
+  if ! finish rollback "from $cur"; then
+    [[ ${S[phase]:-idle} == idle ]] || die "rollback health check failed ($PROBE_WHY); going back to $cur did not work yet: recovery retries it (tando status)"
+    die "rollback health check failed ($PROBE_WHY); back on $cur"
+  fi
   echo "current=$to"; echo "from=$cur"; echo "link=$(link)"
 }
 
@@ -2840,6 +3173,11 @@ cmd_deploy_status() { # app id
   load "$D/activation" P
   # the activation unit died without finishing (killed, out of memory): recover it now
   if [[ ${P[id]:-} == "$2" && ${P[result]:-} == running && $EUID == 0 ]] &&
+     [[ ! $(systemctl show -P ActiveState "tando-$A-act-$2") =~ ^(active|activating|deactivating)$ ]]; then
+    recover; load "$D/state" S; load "$D/activation" P
+  fi
+  # reserved but its activation unit is gone: recover gives it up (never "queued" for ever)
+  if [[ ${P[id]:-} != "$2" && -z ${S[status_$2]:-} && -d $D/releases/$2 && $EUID == 0 ]] &&
      [[ ! $(systemctl show -P ActiveState "tando-$A-act-$2") =~ ^(active|activating|deactivating)$ ]]; then
     recover; load "$D/state" S; load "$D/activation" P
   fi
@@ -2965,15 +3303,14 @@ backup_take() { # kind -> prints the backup id (and sets BK_ID)
   fi
   if [[ ${C[database]:-} == postgres ]]; then
     db_creds
-    if ! PGPASSWORD=$DB_PW as_app pg_dump -Fc -h 127.0.0.1 -U "$DB_ROLE" -d "$DB_ROLE" > "$tmp/db.dump"; then
+    if ! PGPASSWORD=$DB_PW as_app timeout 3600 pg_dump -Fc -h 127.0.0.1 -U "$DB_ROLE" -d "$DB_ROLE" > "$tmp/db.dump"; then
       rm -rf "$tmp"; echo "pg_dump failed" >&2; return 1
     fi
   fi
-  printf 'kind=%s\ncreated=%s\n' "$kind" "$(now)" > "$tmp/meta"
-  [[ -n ${BK_WARN:-} ]] && printf 'warning=%s\n' "$BK_WARN" >> "$tmp/meta"
-  mv "$tmp" "$dir"
+  { printf 'kind=%s\ncreated=%s\n' "$kind" "$(now)" && { [[ -z ${BK_WARN:-} ]] || printf 'warning=%s\n' "$BK_WARN"; }; } > "$tmp/meta" &&
+    sync -f "$tmp/meta" && mv "$tmp" "$dir" || { rm -rf "$tmp"; echo "could not write the backup (disk full?)" >&2; return 1; }
   st last_backup "$(now)"
-  backup_prune
+  backup_prune "$id"
   offsite_kick "$id"
   BK_ID=$id
   echo "$id"
@@ -2996,7 +3333,7 @@ offsite_fetch() {
 
 # keep the newest 7 daily backups plus the newest of each of the 4 weeks before them,
 # the newest 5 of each other kind, and every final backup
-backup_prune() {
+backup_prune() { # [id just taken: never pruned, whatever its name says after a clock set back]
   local i kind week weeks=" " nweeks=0 ndaily=0 keep
   declare -A count
   for i in $(ls -1 "$BK/$A" | sort -r); do
@@ -3015,6 +3352,7 @@ backup_prune() {
         fi;;
       *) count[$kind]=$(( ${count[$kind]:-0} + 1 )); (( count[$kind] <= 5 )) && keep=1;;
     esac
+    [[ $i == "${1:-}" ]] && keep=1
     ((keep)) || rm -rf "${BK:?}/$A/$i"
   done
 }
@@ -3546,10 +3884,13 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
   fi
   lock 300
   load "$D/state" S
+  st phase destroy      # (recover leaves the app alone from here: it is going)
   # (no user any more: an earlier destroy got that far, after its final backup)
   if [[ $purge != purge ]] && has_backup_data && id "$AU" &> /dev/null; then
     systemctl stop "tando-$A"
-    id=$(backup_take final) || die "final backup failed; nothing removed (use --purge to skip it)"
+    # (the app runs again when nothing is removed)
+    id=$(backup_take final) || { st phase idle; [[ -z ${S[stopped]:-} && -n ${S[current]:-} ]] && restart_app
+      die "final backup failed; nothing removed (use --purge to skip it)"; }
     echo "backup=$BK/$A/$id"
   fi
   # this app's units only: app names may contain "-", so tando-<app>-* would also match hello-2's
@@ -3825,43 +4166,71 @@ cmd_env() {
     for k in "${!E[@]}"; do [[ -n ${OLD[$k]+x} && ${OLD[$k]} == "${E[$k]}" ]] || { same=0; break; }; done
     ((same)) && { echo changed=0; echo healthy=1; return 0; }
   fi
-  # a running app is first started with the new env beside the live one (on the pre-flight port,
-  # like a deploy): an env it does not start with is refused before anything restarts
-  if has_unit && [[ -n ${S[current]:-} && -z ${S[stopped]:-} && ${C[recipe]:-node} != container ]] &&
-     systemctl -q is-active "tando-$A"; then
-    env_save E "$D/.env.check" || die "could not write the env file (disk full?); nothing changed"
-    if ! env_preflight "$D/.env.check"; then
-      rm -f "$D/.env.check"
-      local out SAN; out=$(grep -v 'systemd\[\|tando-.*\.service: ' "$D/activation.log" 2> /dev/null | grep . | tail -2 | tr '\n' ' ' | cut -c1-300)
-      san_v "$out"
-      die "$A does not start with the new env (pre-flight: $PROBE_WHY${SAN:+; it said: $SAN}), so nothing was changed and it was not restarted"
-    fi
-    rm -f "$D/.env.check"
+  # nothing runs on the env now (static, nothing deployed, stopped): it is only saved
+  if ! has_unit || [[ -z ${S[current]:-} || -n ${S[stopped]:-} ]]; then
+    { fp env.save && env_save E; } || die "could not write the env file (disk full?); nothing changed"
+    echo changed=1; echo restarted=0
+    if ! has_unit; then echo why=static; elif [[ -z ${S[current]:-} ]]; then echo why=nothing-deployed; else echo why=stopped; fi
+    echo healthy=1; return
   fi
-  env_save E || die "could not write the env file (disk full?); nothing changed"
-  echo changed=1
-  if ! has_unit; then echo restarted=0; echo why=static; echo healthy=1; return; fi
-  if [[ -z ${S[current]:-} ]]; then echo restarted=0; echo why=nothing-deployed; echo healthy=1; return; fi
-  if [[ -n ${S[stopped]:-} ]]; then echo restarted=0; echo why=stopped; echo healthy=1; return; fi
   # was it serving before? Then a change that breaks it is undone, as a failed deploy is
   local was_up=0
   [[ -z ${S[down]:-} ]] && systemctl -q is-active "tando-$A" && was_up=1
-  restart_app
-  echo restarted=1
-  if via_caddy "$(app_unit)"; then echo healthy=1; return 0; fi
-  local why=$PROBE_WHY
-  if ((was_up)); then
-    E=(); for k in "${!OLD[@]}"; do E[$k]=${OLD[$k]}; done
-    env_save E || die "the app fails its health check with the new env ($why), and the previous env could not be written back (disk full?): fix the value with tando env set, or tando env unset it"
-    restart_app
-    if via_caddy "$(app_unit)"; then
-      AUDIT_RESULT=reverted
-      die "the app failed its health check with the new env ($why), so the previous env was put back and $A runs on it again: nothing changed (tando logs shows the app's output)"
+  # the change is recorded first (phase env): a crash from here on ends in recover, which cleans
+  # up a pre-flight cut short, or finishes the change once the new env is written (env.next)
+  st phase env env_revert "$was_up" || die "could not save the state (disk full?); nothing changed"
+  env_gone() { rm -f "$D/.env.check" "$D/env.prev" "$D/env.next"; st phase idle env_revert ""; die "$1"; }
+  # a running app is first started with the new env beside the live one (on the pre-flight port,
+  # like a deploy): an env it does not start with is refused before anything restarts
+  if [[ ${C[recipe]:-node} != container ]] && systemctl -q is-active "tando-$A"; then
+    env_save E "$D/.env.check" || env_gone "could not write the env file (disk full?); nothing changed"
+    if ! { fp env.check && env_preflight "$D/.env.check"; }; then
+      rm -f "$D/.env.check"
+      local out SAN; out=$(grep -v 'systemd\[\|tando-.*\.service: ' "$D/activation.log" 2> /dev/null | grep . | tail -2 | tr '\n' ' ' | cut -c1-300)
+      san_v "$out"
+      env_gone "$A does not start with the new env (pre-flight: $PROBE_WHY${SAN:+; it said: $SAN}), so nothing was changed and it was not restarted"
     fi
-    die "the app fails its health check with the new env ($why); the previous env was put back, but $A does not answer with it either: tando logs, tando doctor"
+    rm -f "$D/.env.check"
   fi
-  echo healthy=0
-  echo "tando-agent: $A was not healthy before this change either, so the new env was kept; undo it with tando env set or tando env unset (tando env ls shows the values)" >&2
+  # the old env (env.prev) and the new one (env.next), each whole: from here on recover finishes
+  # the change (the new env in place, restart, check, the old one back if it breaks the app)
+  { fp env.save && env_save OLD "$D/env.prev" && env_save E "$D/env.next"; } ||
+    env_gone "could not write the env file (disk full?); nothing changed"
+  fp env.saved
+  echo changed=1
+  echo restarted=1
+  env_finish
+  case $ENV_RES in
+    ok) echo healthy=1;;
+    kept) echo healthy=0
+      echo "tando-agent: $A was not healthy before this change either, so the new env was kept; undo it with tando env set or tando env unset (tando env ls shows the values)" >&2;;
+    reverted) AUDIT_RESULT=reverted
+      die "the app failed its health check with the new env ($ENV_WHY), so the previous env was put back and $A runs on it again: nothing changed (tando logs shows the app's output)";;
+    norevert) die "the app fails its health check with the new env ($ENV_WHY), and the previous env could not be written back (disk full?): fix the value with tando env set, or tando env unset it";;
+    *) die "the app fails its health check with the new env ($ENV_WHY); the previous env was put back, but $A does not answer with it either: tando logs, tando doctor";;
+  esac
+}
+
+# env_finish: phase env (cmd_env, or recover after a crash): the new env in place, the app
+# restarted on it and checked; a failure puts the previous env back when the app was serving
+# before. ENV_RES: ok, kept (not healthy before either), reverted, broken (not healthy on the
+# previous env either), norevert (the previous env could not be written back). ENV_WHY: the check.
+env_finish() {
+  ENV_RES=ok ENV_WHY=""
+  [[ -f $D/env.next ]] && mv -f "$D/env.next" "$D/env"
+  # (a restart that failed leaves the old process answering: its answer says nothing of the env)
+  if restart_app && fp env.verify && via_caddy "$(app_unit)"; then
+    rm -f "$D/env.prev"; st phase idle env_revert ""; return 0
+  fi
+  ENV_WHY=${PROBE_WHY:-the app could not be restarted (${WC_WHY:-systemctl restart failed})}
+  if [[ ${S[env_revert]:-} == 1 && -f $D/env.prev ]]; then
+    if fp env.revert && mv -f "$D/env.prev" "$D/env"; then
+      restart_app
+      if via_caddy "$(app_unit)"; then ENV_RES=reverted; else ENV_RES=broken; fi
+    else ENV_RES=norevert; fi
+  else ENV_RES=kept; fi
+  rm -f "$D/env.prev"
+  st phase idle env_revert ""
 }
 
 # env_preflight file: the current release with this env file on the pre-flight port, health-checked
@@ -3939,13 +4308,17 @@ cmd_svc() { # start|stop|restart app
   need_root; app "$2"; recover
   [[ -n ${S[current]:-} ]] || die "nothing deployed yet"
   lock 120; load "$D/state" S
+  # each is a phase of its own: a crash in the middle leaves it recorded, and recover finishes it
+  # (stop: stopped; start, restart: running)
   if [[ $1 == stop ]]; then
     [[ -n ${S[stopped]:-} ]] && { echo already=1; echo healthy=1; return; }
-    # the state says stopped only once Caddy answers 503 (write_caddy dies before the save)
     S[stopped]=1; unset "S[down]"
-    write_caddy
-    save "$D/state" S || die "could not save the state"
-    has_unit && { systemctl disable -q --now "tando-$A" || die "systemctl stop failed"; }
+    st phase stop || die "could not save the state"
+    if ! { fp svc.caddy && stop_app; }; then
+      unset "S[stopped]"; st phase idle; restart_app
+      die "${WC_WHY:-systemctl stop failed}; $A was not stopped"
+    fi
+    st phase idle
     echo healthy=1
     return
   fi
@@ -3955,12 +4328,16 @@ cmd_svc() { # start|stop|restart app
   if [[ $1 == start && -z ${S[stopped]:-}${S[down]:-} ]] && { ! has_unit || systemctl is-active -q "tando-$A"; }; then
     echo already=1; echo healthy=1; return
   fi
-  restart_app || die "systemctl $1 failed"
+  st phase "$1" || die "could not save the state"
+  if ! restart_app; then st phase idle; die "${WC_WHY:-systemctl $1 failed}"; fi
+  st phase idle
+  fp svc.check
   if via_caddy "$(app_unit)"; then echo healthy=1; else echo healthy=0; fi
 }
 
 # app-down <unit>: run by tando-down@ when an app's unit has failed for good (start limit):
-# Caddy answers 503 at once instead of holding requests for a process that is not coming back
+# Caddy answers 503 at once instead of holding requests for a process that is not coming back.
+# (When the lock stays busy longer than its wait, recover sets down itself: rec_service)
 cmd_app_down() {
   need_root; app "${1#tando-}"
   # wait for a command that holds the app (it may be what failed), then look again
@@ -3968,8 +4345,10 @@ cmd_app_down() {
   lock_mark app-down
   load "$D/state" S
   [[ $(systemctl show -P ActiveState "tando-$A") == failed ]] || return 0
+  [[ -z ${S[stopped]:-} ]] || return 0
   S[down]=1
-  write_caddy
+  fp down.caddy
+  write_caddy || return 0          # (the page first: the state says down once visitors get it)
   save "$D/state" S
 }
 
@@ -4067,7 +4446,6 @@ start_back() { # live id
   local -A RS=()
   valid_id "${1:-}" && [[ -f $D/start/$1 ]] || return 0
   load "$D/start/$1" RS
-  [[ -n ${RS[start]:-} ]] || return 0
   for k in start start_shell health health_expect; do
     [[ -n ${RS[$k]+x} ]] || continue                    # (a file from before a key was recorded)
     if [[ -n ${RS[$k]} ]]; then C[$k]=${RS[$k]}; else unset "C[$k]"; fi
@@ -4257,6 +4635,14 @@ case $verb in
   configure|rollback|env-set|env-unset|env-ls|start|stop|restart|unlock|destroy|backup-run|\
   backup-restore|backup-cat|db-url|db-psql|shell|job-run) audit "$verb" "${1:-}";;
 esac
+# Verbs that change an app run to their end when the ssh session that started them drops: the
+# next write to the closed connection would otherwise kill the agent half-way (an app stopped
+# for a restore and never started again, a new env never checked). Their output then goes
+# nowhere. (A handler, not an ignored signal: the commands they run keep the default.)
+case $verb in
+  configure|rollback|env-set|env-unset|start|stop|restart|destroy|backup-restore|domain-add|domain-rm)
+    trap 'exec > /dev/null 2>&1' PIPE HUP;;
+esac
 case $verb in
   info) cmd_info;;
   setup) cmd_setup "$@";;
@@ -4323,5 +4709,7 @@ case $verb in
     . "$R/bin/tando-adopt"
     "cmd_${verb//-/_}" "$@";;
   *) die "unknown verb: $verb";;
-esac
+esac; DISPATCHED=1
+# (an error inside $(( )) ends the whole case above, not the script: never report that as done)
+[[ -n ${DISPATCHED:-} ]] || { AUDIT_NOTE="aborted by an internal error"; exit 1; }
 exit 0

@@ -18,7 +18,7 @@ What to run when. [AGENTS.md](../AGENTS.md) has the short version and the rules.
 |---|---|---|---|
 | check | `test/check.sh` | after every edit | on the changed files only: `bash -n` (3.2, and the server's bash for `server/`), lint, gofmt/vet/test of the changed Go packages, the secret scan, and that `test/suites.map` knows the change. No server. |
 | quick | `test/all.sh --tier quick` | before saying a change works | the suites `test/select.sh` maps the changed files to (`test/suites.map`), plus `e2e-trial` as a smoke deploy. Go without the race detector; lint and Go may reuse cached results. A core file, or a file no rule knows, selects every suite. |
-| full | `test/all.sh` | before a push to main and before a tag | every suite, nothing cached, the fault scenarios as four parallel shards (`e2e-faults-q1` to `q4`). The map is not read. |
+| full | `test/all.sh` | before a push to main and before a tag | every suite, nothing cached, the fault scenarios as four parallel shards (`e2e-faults-q1` to `q4`) and the fault matrix's cells (`e2e-matrix-quick`). The map is not read. |
 | nightly | `test/all.sh --tier nightly` | by hand, when the machine is free for half an hour (not in CI) | full, with the fault scenarios as two chains (`e2e-faults-h1`, `h2`) whose split moves every day, so over a week every scenario runs right after every neighbour. |
 | weekly | `test/all.sh --tier weekly` | by hand, about once a week and before a release that touched deploys (not in CI) | full, with the fault scenarios as one chain (`e2e-faults`) and the 25 s soak on every deploy (`FAULT_SETUP_SOAK=25`): the suite as it was before it was made faster. |
 
@@ -179,6 +179,30 @@ Measured on 19 Nov 2026 with the four quarters at once, on a machine that was al
 suites: 824 to 1081 s per quarter, 41 of 41 scenarios passed. One chain with the long soak took
 5749 s on 17 Nov. One chain with the short setup soak was not measured (about 3100 s by the sum of
 its scenarios).
+
+### The fault matrix
+
+`test/e2e-matrix.sh` puts one fault at one point of an operation and checks the result with one
+checker. The points are in the agent: `fp <name>` before external actions of the deploy state
+machine and, inside `save`, before and after every write of a state file (`pre:state`,
+`post:activation`...). The hook fires only when both markers are root's: `/etc/tando-test-server`
+(made by the driver through `docker exec`, never by tando) and the one-shot spec
+`/run/tando-test/fault`; on a real server it costs one builtin test. Actions: kill (SIGKILL of the
+agent there), fail (that action fails, as on a full disk), reboot (the agent waits there, then
+`docker restart`). A trace of the operation without a fault lists its points. After the fault,
+recovery runs as on a server (ExecStopPost, then what tando-watch's minute does) and `mx_inv`
+checks ten invariants and names the one that broke: one intended release serves; link, state and
+app.conf's start and health agree with it; its status; one history line with the right result and
+nothing "running"; idle and the lock free; no leftover unit, lease, temp file or reservation; a
+rollback target exists; stopped stays stopped; data and database untouched; no failed visitor
+request. `--selftest` breaks each invariant on purpose and expects it named.
+
+`test/e2e-matrix-quick.sh` (full and quick tiers, about 5 minutes) runs `--cells`: one cell for
+each defect fixed in milestone 1 (the list `CELLS` in the driver), node and the container
+recipe's switch failure. The rest only by name: `test/e2e-matrix.sh --ops deploy,rollback
+--actions kill --points '(^|/)(pre|post):'` (a kill at every state write of a deploy and a
+rollback), or any `--ops`, `--actions`, `--kind`, `--quick`. Not covered: a real power cut (a
+container keeps the page cache) and a real reboot.
 
 ### The alerts suites
 

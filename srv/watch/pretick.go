@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"tando/srv/internal/decimal"
 	"tando/srv/internal/fsinfo"
 	"tando/srv/internal/run"
+	"tando/srv/internal/valid"
 )
 
 // Before the checks of a tick (the shell's ExecStartPre lines of tando-watch.service): the
@@ -34,9 +36,10 @@ func (w Watch) ExecSample(ctx context.Context) {
 	}
 }
 
-// recoverNeeded: an app has something for the agent's recover (see its recover()): an activation
+// recoverNeeded: an app has something for the agent's recover (see its recover()): an operation
 // in a phase other than idle whose lock nobody holds (it died), a current link that disagrees
-// with the state, or an app systemd gave up on (down) that is not stopped.
+// with the state, an app systemd gave up on (down) that is not stopped, a release reserved by
+// an activation that will never run, or an operation whose end was not written out.
 func (w Watch) recoverNeeded() bool {
 	names, _ := apps.Names(w.Env.Root)
 	for _, a := range names {
@@ -59,7 +62,36 @@ func (w Watch) recoverNeeded() bool {
 			return true
 		case s["down"] != "" && s["stopped"] == "" && cur != "" && !w.isStatic(a):
 			return true
+		case w.reservationOrphaned(d, a, s):
+			return true
+		case s["outcome"] != "" && s["outcome"] != s["outcome_done"]:
+			// an operation ended (its result committed) but what follows it was cut off: its
+			// history line, its progress file, the job units, a refused release's directory
+			return true
 		}
+	}
+	return false
+}
+
+// reservationOrphaned: a release directory with no status (activate reserves one before it
+// starts the activation's unit) whose activation unit has no process: activate was cut off before
+// it started the unit, or the unit ended before it began (killed, the server restarted while it
+// was queued). The agent's recover gives it up (rec_reap).
+func (w Watch) reservationOrphaned(d, app string, s map[string]string) bool {
+	ents, err := os.ReadDir(filepath.Join(d, "releases"))
+	if err != nil {
+		return false
+	}
+	for _, e := range ents {
+		id := e.Name()
+		if !e.IsDir() || !valid.ID(id) || s["status_"+id] != "" || id == s["current"] {
+			continue
+		}
+		ev := filepath.Join(w.Env.Cgroup, "system.slice", "tando-"+app+"-act-"+id+".service", "cgroup.events")
+		if b, err := os.ReadFile(ev); err == nil && bytes.Contains(b, []byte("populated 1")) {
+			continue
+		}
+		return true
 	}
 	return false
 }

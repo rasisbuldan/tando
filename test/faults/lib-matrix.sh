@@ -1,0 +1,341 @@
+# shellcheck shell=bash
+# lib-matrix.sh: the fault matrix (test/e2e-matrix.sh; docs/TESTING.md "Fault matrix").
+#
+# An operation (a deploy, a rollback, stop, start, restart, env set...) runs with ONE fault at
+# ONE point of the agent: a point is a named place before an external action (fp <name> in
+# server/tando-agent) or a write of a state file (pre:/post:<file>, inside save). The fault is
+# kill (SIGKILL of the agent there), fail (that action fails: a full disk, a command that
+# fails) or reboot (the agent waits there, then the server restarts: docker restart). Then
+# recovery runs as on a server (the activation's ExecStopPost, a recover-all as tando-watch or
+# the boot would run it), and ONE checker (mx_inv) asserts the ten invariants of the matrix.
+# The points of an operation come from a trace of the same operation without a fault.
+#
+# The hook fires only with root's /etc/tando-test-server and /run/tando-test/fault on the server
+# (made here, through docker exec): never on a real server. Real power loss (a write the disk
+# never got) cannot be simulated in a container: docker kill keeps the page cache.
+# bash 3.2 (laptop side).
+
+MX_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+MX_T=/run/tando-test
+MX_LOG=${MX_LOG:-/dev/stderr}
+
+dx() { docker exec -i "$TANDO_TEST_NAME" "$@"; }                     # root on the server
+dxs() { docker exec -i "$TANDO_TEST_NAME" bash -c "$1"; }
+
+# ---- markers, fault specs, traces --------------------------------------------------------------
+mx_markers() {
+  dxs "install -m 644 -o root -g root /dev/null /etc/tando-test-server && install -d -m 700 -o root -g root $MX_T"
+}
+mx_spec_clear() { dxs "rm -f $MX_T/fault $MX_T/next $MX_T/fired $MX_T/taking.* $MX_T/reached $MX_T/release"; }
+# mx_spec <file: fault|next> <point> <action> <nth> <verb>: one fault spec, for this app only
+mx_spec() {
+  printf 'point=%s\naction=%s\nnth=%s\nverb=%s\napp=%s\n' "$2" "$3" "$4" "$5" "$A" |
+    dxs "cat > $MX_T/.spec && mv -f $MX_T/.spec $MX_T/$1"
+}
+mx_fired() { dxs "test -f $MX_T/fired"; }
+mx_trace_on() { dxs ": > $MX_T/trace"; }
+mx_trace_off() { dxs "cat $MX_T/trace 2> /dev/null; rm -f $MX_T/trace"; }
+
+# ---- the app, one version at a time -------------------------------------------------------------
+# Odd versions: health /hc-odd, start "node server.js"; even ones: /hc-even, "node ./server.js".
+# A rollback or a recovery that leaves app.conf with the other version's lines is seen by the
+# checker (the live release would answer 404 at that health path; its start command differs).
+# (MX_SAMECONF=1: every version has the odd one's: to look past those two checks)
+mx_health_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo /hc-odd; else echo /hc-even; fi; }
+mx_start_of() {
+  local n=$1; [ -n "${MX_SAMECONF:-}" ] && n=1
+  set -- "$n"
+  case $KIND in
+    python) if [ $(($1 % 2)) = 1 ]; then echo "python3 app.py"; else echo "python3 ./app.py"; fi;;
+    static|container) echo "";;
+    *) if [ $(($1 % 2)) = 1 ]; then echo "node server.js"; else echo "node ./server.js"; fi;;
+  esac
+}
+# mx_version <n> [behaviour]: the work dir holds version n
+mx_version() {
+  local n=$1 beh=${2:-ok} d=$W/$A h s
+  h=$(mx_health_of "$n") s=$(mx_start_of "$n")
+  mkdir -p "$d"
+  echo "$n" > "$d/VERSION"; echo "$h" > "$d/HEALTH"; echo "$beh" > "$d/BEHAVIOR"
+  {
+    echo "app = $A"
+    case $KIND in
+      static) echo "recipe = static";;
+      python) echo "recipe = python"; echo "start = $s";;
+      next) echo "recipe = next"; echo "build = sh build.sh"; echo "start = $s";;
+      container) echo "recipe = container"; echo "container_port = 8080";;
+      *) echo "recipe = node"; echo "start = $s";;
+    esac
+    echo "health = $h"
+    echo "health_timeout = 10"
+    echo "soak = ${MX_SOAK:-2}"
+    [ "$KIND" = static ] || echo "memory = 128M"
+    case $KIND in
+      data) echo "data = data"; echo "database = postgres"; echo "job.tick = *:0/10 | true";;
+    esac
+    [ -n "${MX_RELEASE:-}" ] && echo "release = $MX_RELEASE"
+  } > "$d/tando.conf"
+  case $KIND in
+    static)
+      rm -f "$d"/hc-*; echo "v$n env=-" > "$d/index.html"; echo ok > "$d/${h#/}"
+      [ "$beh" = ok ] || echo "x" > "$d/${h#/}";;    # (static cannot be unhealthy after the switch)
+    python) cp "$MX_DIR/mx-app/app.py" "$d/"; : > "$d/requirements.txt";;
+    next)
+      cp "$MX_DIR/mx-app/server.js" "$d/mx.js"
+      printf '{ "name": "mx", "dependencies": { "next": "16.0.0" } }\n' > "$d/package.json"
+      printf 'export default { output: "standalone" };\n' > "$d/next.config.mjs"
+      # a stand-in for `next build`: the standalone server and a static file, as Next lays them out
+      printf '%s\n' 'rm -rf .next && mkdir -p .next/standalone .next/static/mx' \
+        'cp mx.js .next/standalone/server.js && cp VERSION HEALTH BEHAVIOR .next/standalone/' \
+        'echo x > .next/static/mx/a.js' > "$d/build.sh";;
+    container)
+      mkdir -p "$d/www"; rm -f "$d"/www/hc-*
+      echo ok > "$d/www/${h#/}"; echo "v$n env=-" > "$d/www/index.html"
+      [ "$beh" = ok ] || rm -f "$d/www/${h#/}"
+      printf '%s\n' 'FROM alpine:3.22' 'RUN apk add --no-cache busybox-extras' 'COPY www /www' \
+        'CMD ["/bin/sh", "-c", "exec httpd -f -v -p 0.0.0.0:${PORT:-8080} -h /www"]' > "$d/Dockerfile";;
+    *) cp "$MX_DIR/mx-app/server.js" "$d/";;
+  esac
+}
+# mx_client <out> <args...>: the CLI in the app's work dir; status in MXRC
+mx_client() { local o=$1; shift; (cd "$W/$A" && "$R" "$@" > "$o" 2>&1); MXRC=$?; return $MXRC; }
+# the release id a deploy printed ("release <id>"), recorded with its version
+mx_rid() { sed -n 's/.*release \([0-9][0-9-]*\).*/\1/p' "$1" | head -1; }
+mx_note_id() { [ -n "$1" ] && echo "$1 $2" >> "$W/ids"; }
+mx_ver_of() { awk -v i="$1" '$1 == i { v = $2 } END { print v }' "$W/ids" 2> /dev/null; }
+# mx_deploy [behaviour]: a deploy of the next version, no fault (a step around the cases)
+mx_deploy() {
+  local cur; cur=$(dxs "readlink /opt/tando/apps/$A/current" 2> /dev/null); cur=${cur##*/}
+  MXV=$((MXV + 1))
+  [ -n "$cur" ] && [ -n "$(mx_ver_of "$cur")" ] && [ $(( (MXV - $(mx_ver_of "$cur")) % 2 )) = 0 ] && MXV=$((MXV + 1))
+  mx_version "$MXV" "${1:-ok}"
+  mx_client "$W/d$MXV.out" deploy; local rc=$MXRC
+  mx_note_id "$(mx_rid "$W/d$MXV.out")" "$MXV"
+  return $rc
+}
+
+# ---- facts and the request loop -----------------------------------------------------------------
+# mx_facts [new id]: the server's side (mx-facts.sh) into $W/facts, plus what a visitor gets
+mx_facts() {
+  dx bash -s "$A" "${MX_H0:-0}" "${1:-}" < "$MX_DIR/mx-facts.sh" > "$W/facts" 2> "$W/facts.err"
+  rm -f "$W/body"
+  MX_CODE=$(curl -s -m 10 -o "$W/body" -w '%{http_code}' "http://$A.localhost:$TANDO_TEST_HTTP_PORT/")
+  MX_BODY=$(head -c 200 "$W/body" | tr -d '\r\n')
+}
+fv() { sed -n "s/^$1=//p" "$W/facts" | head -1; }
+mx_served_ver() { printf '%s' "$MX_BODY" | sed -n 's/^v\([0-9]*\) env=.*/\1/p'; }
+mx_served_env() { printf '%s' "$MX_BODY" | sed -n 's/^v[0-9]* env=//p'; }
+mx_releases() { sed -n 's/^rel_\([^=]*\)=.*/\1/p' "$W/facts" | tr '\n' ' '; }
+
+mx_loop_start() {
+  rm -f "$W/loop.stop" "$W/loop"
+  (
+    while [ ! -f "$W/loop.stop" ]; do
+      curl -s -o /dev/null -m 30 -w '%{http_code} %{time_total}' "http://$A.localhost:$TANDO_TEST_HTTP_PORT/"
+      echo " $(date +%s)"
+      sleep 0.2
+    done
+  ) > "$W/loop" 2> /dev/null &
+  MX_LOOP=$!
+}
+mx_loop_stop() {
+  touch "$W/loop.stop"; wait "$MX_LOOP" 2> /dev/null
+  MX_REQ=$(grep -c . "$W/loop" 2> /dev/null)
+}
+
+# ---- the checker: the ten invariants ----------------------------------------------------------
+# Inputs (set by the case): MX_OP, MX_OLD (current before), MX_NEW (the operation's release:
+# the deploy's new one, the rollback's target; may be empty), MX_WANT old|new|any (which of the
+# two must serve), MX_RUN running|stopped|any, MX_ENVW (env value expected, or "any:a b"),
+# MX_H0 (history lines before), MX_DATA0/MX_DB0 (data sentinel, row count before),
+# MX_LOOPOK 1 when no request may fail (MX_LOOP503 1: a 503 page is allowed: stop, start).
+# Prints "inv<N> <name>: <what>" for each broken invariant; MX_BROKEN lists their numbers.
+mx_bad() { MX_BROKEN="$MX_BROKEN $1"; echo "    inv$1 $2" >&2; echo "inv$1 $2" >> "$W/inv.out"; }
+mx_inv() {
+  MX_BROKEN="" ; : > "$W/inv.out"
+  mx_facts "$MX_NEW"
+  local sid="" sv cur link st lg n h nh ok rel s
+  sv=$(mx_served_ver)
+  cur=$(fv s_current) link=$(fv link)
+  # which release serves: the one whose version answered
+  if [ -n "$sv" ]; then
+    for rel in $(mx_releases); do [ "$(mx_ver_of "$rel")" = "$sv" ] && sid=$rel; done
+  fi
+  local stopped=0; [ -n "$(fv s_stopped)" ] && stopped=1
+  # 1. exactly one release serves, the intended one (or the stopped page)
+  if [ "$stopped" = 1 ]; then
+    [ "$MX_RUN" != running ] || mx_bad 1 "serving: the app is stopped, but this operation must leave it running"
+    { [ "$MX_CODE" = 503 ] && printf '%s' "$MX_BODY" | grep -q "is stopped"; } ||
+      mx_bad 1 "serving: the state says stopped, a visitor gets $MX_CODE \"$MX_BODY\""
+  else
+    [ "$MX_RUN" != stopped ] || mx_bad 1 "serving: the app must be stopped (state stopped=), it is not; visitor: $MX_CODE"
+    if [ "$MX_CODE" != 200 ] || [ -z "$sid" ]; then
+      mx_bad 1 "serving: a visitor gets $MX_CODE \"$MX_BODY\" (no known release)"
+    else
+      case $MX_WANT in
+        old) [ "$sid" = "$MX_OLD" ] || mx_bad 1 "serving: $sid (v$sv) serves, the old release $MX_OLD must";;
+        new) [ "$sid" = "$MX_NEW" ] || mx_bad 1 "serving: $sid (v$sv) serves, the new release ${MX_NEW:-?} must";;
+        any) [ "$sid" = "$MX_OLD" ] || [ "$sid" = "$MX_NEW" ] || mx_bad 1 "serving: $sid serves, neither old $MX_OLD nor new $MX_NEW";;
+      esac
+      if [ "$KIND" != static ]; then
+        [ "$(fv listen_own)" -ge 1 ] 2> /dev/null && [ "$(fv listen_foreign)" = 0 ] ||
+          mx_bad 1 "serving: listeners on the app port: own $(fv listen_own), foreign $(fv listen_foreign)"
+        [ "$(fv listen_pre)" = 0 ] || mx_bad 1 "serving: something still listens on the pre-flight port"
+        [ "$KIND" = container ] || [ "$(fv u_cwd)" = "$sid" ] || mx_bad 1 "serving: the unit's process runs in release $(fv u_cwd), not $sid"
+      fi
+    fi
+  fi
+  # 2. link, state and app.conf agree with what serves
+  local want=${sid:-$cur}
+  [ -n "$want" ] && [ "$link" = "$want" ] && [ "$cur" = "$want" ] ||
+    mx_bad 2 "agree: current -> ${link:-none}, state current=${cur:-none}, serving ${sid:-none}"
+  if [ -n "$want" ] && [ -n "$(mx_ver_of "$want")" ]; then
+    local v; v=$(mx_ver_of "$want")
+    [ "$(fv c_health)" = "$(mx_health_of "$v")" ] ||
+      mx_bad 2 "agree: app.conf health=$(fv c_health), release $want (v$v) answers on $(mx_health_of "$v")"
+    s=$(mx_start_of "$v")
+    if [ -n "$s" ]; then
+      [ "$(fv c_start)" = "$s" ] || [ "$(fv snap_start)" = "$s" ] ||
+        mx_bad 2 "agree: release $want starts with \"$s\"; app.conf has \"$(fv c_start)\", its snapshot \"$(fv snap_start)\""
+      if [ "$stopped" = 0 ] && [ -n "$(fv u_cmd)" ]; then
+        case "$(fv u_cmd) " in *"$s "*) ;; *) mx_bad 2 "agree: the process runs \"$(fv u_cmd)\", release $want's start is \"$s\"";; esac
+      fi
+    fi
+  fi
+  case $stopped:$(fv site) in
+    1:stopped|0:proxy|0:static) ;;
+    *) mx_bad 2 "agree: state stopped=$(fv s_stopped) down=$(fv s_down), Caddy's site is $(fv site)";;
+  esac
+  [ -z "$(fv s_down)" ] || mx_bad 2 "agree: the state says down after recovery"
+  if [ "$KIND" != static ]; then
+    case $stopped:$(fv u_active):$(fv u_enabled) in
+      1:inactive:disabled|1:failed:disabled|0:active:enabled) ;;
+      *) mx_bad 2 "agree: state stopped=$(fv s_stopped), unit $(fv u_active) and $(fv u_enabled)";;
+    esac
+  fi
+  # the env the process runs with is the env file's, and the expected one
+  if [ "$stopped" = 0 ] && [ "$MX_CODE" = 200 ] && [ "$KIND" != static ] && [ "$KIND" != container ]; then
+    local ev; ev=$(mx_served_env)
+    if [ "$ev" != "$(fv env_val)" ] && ! { [ "$ev" = - ] && [ -z "$(fv env_val)" ]; }; then
+      mx_bad 2 "agree: the app runs with MXVAL=$ev, the env file says $(fv env_val)"
+    fi
+    case $MX_ENVW in
+      any:*) case " ${MX_ENVW#any:} " in *" $(fv env_val) "*) ;; *) mx_bad 2 "agree: env MXVAL=$(fv env_val), not one of ${MX_ENVW#any:}";; esac;;
+      "") ;;
+      *) [ "$(fv env_val)" = "$MX_ENVW" ] || mx_bad 2 "agree: env MXVAL=$(fv env_val), it must be $MX_ENVW";;
+    esac
+    [ -z "$(fv env_bad)" ] || mx_bad 2 "agree: the env that broke the app (MX_BAD) is still in the env file"
+  fi
+  # 3. statuses
+  if [ -n "$want" ]; then
+    st=$(fv "rel_$want") lg=$(fv s_last_good)
+    [ "$st" = verified ] || mx_bad 3 "status: the live release $want is \"$st\", not verified"
+    [ "$lg" = "$want" ] || mx_bad 3 "status: last_good=$lg, the live release is $want"
+  fi
+  if [ -n "$MX_NEW" ] && [ "$want" != "$MX_NEW" ] && [ "$MX_OP" != rollback ]; then
+    st=$(sed -n "s/^rel_$MX_NEW=//p" "$W/facts")
+    if grep -q "^rel_$MX_NEW=" "$W/facts"; then
+      [ "$st" = bad ] || mx_bad 3 "status: the refused release $MX_NEW is on disk as \"$st\", not bad"
+    fi
+  fi
+  [ "$MX_OP" != rollback ] || [ "$want" != "$MX_NEW" ] || [ "$(fv "rel_$MX_OLD")" = rolledback ] ||
+    mx_bad 3 "status: the release rolled back from ($MX_OLD) is \"$(fv "rel_$MX_OLD")\", not rolledback"
+  # 4. history: one line for the operation, its result; nothing left running
+  nh=$(grep -c '^hist=' "$W/facts")
+  case $MX_OP in
+    deploy*|rollback|recover)
+      local kind=deploy; [ "$MX_OP" = rollback ] && kind=rollback
+      if [ -z "$MX_NEW" ]; then
+        [ "$nh" = 0 ] || mx_bad 4 "history: $nh lines, but the operation never got a release: $(grep '^hist=' "$W/facts" | tr '\n' ' ')"
+      else
+        n=$(grep -c "^hist=$MX_NEW $kind " "$W/facts")
+        [ "$nh" = 1 ] && [ "$n" = 1 ] || mx_bad 4 "history: $nh new lines, $n for $MX_NEW $kind (exactly one): $(grep '^hist=' "$W/facts" | tr '\n' ' ')"
+        h=$(sed -n "s/^hist=$MX_NEW $kind //p" "$W/facts" | tail -1)
+        if [ "$want" = "$MX_NEW" ]; then [ "$h" = ok ] || mx_bad 4 "history: $MX_NEW serves, its line says \"$h\""
+        elif [ -n "$h" ]; then case $h in failed|rolledback) ;; *) mx_bad 4 "history: $MX_NEW does not serve, its line says \"$h\"";; esac; fi
+        case $(fv ds_result) in running|"") mx_bad 4 "history: deploy-status says phase=$(fv ds_phase) result=$(fv ds_result) for $MX_NEW";; esac
+      fi;;
+    *) [ "$nh" = 0 ] || mx_bad 4 "history: $nh new lines for a $MX_OP: $(grep '^hist=' "$W/facts" | tr '\n' ' ')";;
+  esac
+  [ "$(fv p_result)" != running ] || mx_bad 4 "history: activation $(fv p_id) still says result=running"
+  [ -z "$(fv hist_torn)" ] || mx_bad 4 "history: history.tsv does not end with a newline"
+  # 5. idle, lock free
+  case $(fv s_phase) in idle|"") ;; *) mx_bad 5 "idle: phase=$(fv s_phase)";; esac
+  [ "$(fv lock)" = free ] || mx_bad 5 "idle: the app's lock is held"
+  [ "$(fv lock_waiters)" = 0 ] || mx_bad 5 "idle: $(fv lock_waiters) waiting for the lock"
+  # 6. leftovers
+  [ "$(fv lease)" = free ] || mx_bad 6 "leftovers: the upload lease is still held"
+  [ -z "$(fv units | tr -d ' ')" ] || mx_bad 6 "leftovers: units $(fv units)"
+  [ -z "$(fv tmp | tr -d ' ')" ] || mx_bad 6 "leftovers: files $(fv tmp)"
+  [ -z "$(fv env_prev)" ] || mx_bad 6 "leftovers: env.prev"
+  for rel in $(mx_releases); do
+    [ -n "$(fv "rel_$rel")" ] || mx_bad 6 "leftovers: release $rel is on disk with no status (a reservation)"
+  done
+  # 7. a release to roll back to is still there
+  ok=0
+  for rel in $(mx_releases); do
+    [ "$rel" != "$want" ] && case $(fv "rel_$rel") in verified|rolledback) ok=1;; esac
+  done
+  [ "$ok" = 1 ] || mx_bad 7 "rollback target: no other verified release on disk ($(mx_releases))"
+  # 8. stopped stays stopped: in MX_RUN (1) and the unit (2); here: a stopped app has no process,
+  # and a deploy to a stopped app that did not go live leaves it stopped
+  if [ "$MX_OP" = deploy-stopped ] && [ "$want" != "$MX_NEW" ] && [ "$stopped" = 0 ]; then
+    mx_bad 8 "stopped: a deploy to the stopped app did not go live, and the app runs"
+  fi
+  if [ "$stopped" = 1 ] && [ "$KIND" != static ]; then
+    [ "$(fv u_active)" != active ] || mx_bad 8 "stopped: the state says stopped, the unit runs"
+  fi
+  # 9. data and database untouched
+  [ "$(fv data_sum)" = "${MX_DATA0:-}" ] || mx_bad 9 "data: the sentinel changed (${MX_DATA0:-none} -> $(fv data_sum))"
+  [ -z "${MX_DB0:-}" ] || [ "$(fv db_rows)" = "$MX_DB0" ] || mx_bad 9 "data: database rows $MX_DB0 -> $(fv db_rows)"
+  # 10. visitors
+  if [ "${MX_LOOPOK:-0}" = 1 ] && [ -s "$W/loop" ]; then
+    # (a reboot: requests fail while the server is down; from the first 200 after it, none may)
+    local badn
+    # (the server is down from MX_REBOOT_T until it answers ssh again, MX_UP_T; Caddy may still
+    # answer while it shuts down: the first 200 that counts is one after MX_UP_T)
+    badn=$(awk -v t="${MX_REBOOT_T:-0}" -v u="${MX_UP_T:-0}" -v a="${MX_LOOP503:-0}" '
+      { if (t > 0 && s == 0 && $3 >= t) s = 1
+        if (s == 1) { if ($1 == 200 && $3 > u) s = 2; else next }
+        if ($1 != 200 && !(a == 1 && $1 == 503)) n++ }
+      END { print n + 0 }' "$W/loop")
+    [ "$badn" = 0 ] || mx_bad 10 "requests: $badn of $MX_REQ failed ($(awk '{ print $1 }' "$W/loop" | sort | uniq -c | tr -s ' \n' ' '))"
+  fi
+  [ -z "$MX_BROKEN" ]
+}
+
+# ---- recovery as a server does it ----------------------------------------------------------------
+# settled: no activation unit of the app, the lock free (an ExecStopPost recover holds it)
+mx_settled() {
+  dxs "! systemctl list-units --plain --no-legend 'tando-$A-act-*' | grep -q . &&
+       { [ ! -f /opt/tando/apps/$A/lock ] || flock -n /opt/tando/apps/$A/lock true; }"
+}
+mx_wait_settled() { T_UNTIL_STEP=0.5 t_until "${1:-240}" mx_settled; }
+# what tando-watch's minute does (srv/watch/pretick.go recoverNeeded): recover-all when an app is
+# in a phase other than idle with its lock free, its link and state disagree, it is down, a
+# release is reserved by an activation whose unit has no process, or an operation's end was not
+# written out (outcome)
+mx_watcher() {
+  dxs "D=/opt/tando/apps/$A; g() { sed -n \"s/^\$1=//p\" \$D/state | head -1; }
+    ph=\$(g phase); cur=\$(g current); l=\$(readlink \$D/current); l=\${l##*/}
+    need=0
+    if [ \"\${ph:-idle}\" != idle ]; then flock -n \$D/lock true && need=1
+    elif [ -n \"\$cur\" ] && [ \"\$l\" != \"\$cur\" ] && [ -d \$D/releases/\$cur ]; then need=1
+    elif [ -z \"\$cur\" ] && [ -n \"\$l\" ] && [ -d \$D/releases/\$l ]; then need=1
+    elif [ -n \"\$(g down)\" ] && [ -z \"\$(g stopped)\" ] && [ -n \"\$cur\" ]; then need=1
+    elif [ -n \"\$(g outcome)\" ] && [ \"\$(g outcome)\" != \"\$(g outcome_done)\" ]; then need=1
+    else
+      for r in \$D/releases/*; do i=\${r##*/}; [ -d \"\$r\" ] && [ -z \"\$(g status_\$i)\" ] && [ \"\$i\" != \"\$cur\" ] || continue
+        grep -qs 'populated 1' /sys/fs/cgroup/system.slice/tando-$A-act-\$i.service/cgroup.events || need=1; done
+    fi
+    [ \$need = 1 ] && /opt/tando/bin/tando-agent recover-all; exit 0" >> "$W/case.log" 2>&1
+}
+# the server restarts (clean: systemd stops everything, the boot runs recover-all)
+mx_reboot() {
+  docker restart -t 10 "$TANDO_TEST_NAME" > /dev/null
+  T_UNTIL_STEP=1 t_until 120 "$SSH" -o ConnectTimeout=2 true 2> /dev/null || return 1
+  T_UNTIL_STEP=1 t_until 90 mx_booted || return 1
+  rm -f "$TANDO_CONFIG_DIR"/cm-* 2> /dev/null
+  mx_markers
+}
+mx_booted() { case $(dx systemctl is-system-running 2> /dev/null) in running|degraded) return 0;; esac; return 1; }

@@ -1,0 +1,54 @@
+package watch
+
+import (
+	"os"
+	"testing"
+)
+
+// recoverNeeded sees a reserved release whose activation unit is gone, and leaves one whose unit
+// runs (a queued activation) alone.
+func TestRecoverNeededReservation(t *testing.T) {
+	f := newFakeHost(t)
+	f.app("shop")
+	os.MkdirAll(f.path("opt/apps/shop/releases/20261114-170102"), 0o700)
+	f.write("opt/apps/shop/state", "current=20261114-170102\nphase=idle\nstatus_20261114-170102=verified\n")
+	os.Symlink("releases/20261114-170102", f.path("opt/apps/shop/current"))
+	if f.watch().recoverNeeded() {
+		t.Fatal("a sound app needs no recover")
+	}
+	os.MkdirAll(f.path("opt/apps/shop/releases/20261114-180000"), 0o700)
+	f.write("cgroup/system.slice/tando-shop-act-20261114-180000.service/cgroup.events", "populated 1\nfrozen 0\n")
+	if f.watch().recoverNeeded() {
+		t.Fatal("a reservation whose activation runs (queued) needs no recover")
+	}
+	f.write("cgroup/system.slice/tando-shop-act-20261114-180000.service/cgroup.events", "populated 0\nfrozen 0\n")
+	if !f.watch().recoverNeeded() {
+		t.Fatal("a reservation whose activation has no process must be recovered")
+	}
+	os.RemoveAll(f.path("cgroup/system.slice"))
+	if !f.watch().recoverNeeded() {
+		t.Fatal("a reservation with no activation unit at all must be recovered")
+	}
+	f.write("opt/apps/shop/state", "current=20261114-170102\nphase=idle\nstatus_20261114-170102=verified\nstatus_20261114-180000=bad\n")
+	if f.watch().recoverNeeded() {
+		t.Fatal("a release with a status is no reservation")
+	}
+}
+
+// recoverNeeded sees an operation whose result was committed but whose history line (and the
+// rest after it) was not written: outcome differs from outcome_done.
+func TestRecoverNeededOutcome(t *testing.T) {
+	f := newFakeHost(t)
+	f.app("shop")
+	os.MkdirAll(f.path("opt/apps/shop/releases/20261114-170102"), 0o700)
+	os.Symlink("releases/20261114-170102", f.path("opt/apps/shop/current"))
+	base := "current=20261114-170102\nphase=idle\nstatus_20261114-170102=verified\noutcome=20261114-170102 rollback ok 1800000000\n"
+	f.write("opt/apps/shop/state", base+"outcome_done=20261114-170102 rollback ok 1800000000\n")
+	if f.watch().recoverNeeded() {
+		t.Fatal("an operation written out needs no recover")
+	}
+	f.write("opt/apps/shop/state", base)
+	if !f.watch().recoverNeeded() {
+		t.Fatal("an operation whose end was not written out must be recovered")
+	}
+}

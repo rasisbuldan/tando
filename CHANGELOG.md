@@ -22,6 +22,30 @@ first, grouped by area.
   `tando status` shows the lines of the last 24 hours first and the journal's size after them (a new
   app's pre-allocated journal read as "8 MB of logs").
 
+- Fixed: deploys, rollbacks, env changes, stop and start end right after a crash, a failed command
+  or a restart at any point (found by the fault matrix below; docs/TESTING.md, "Fault matrix"):
+  a crash between the switch of `current` and the state write no longer brings the previous
+  release back later (or puts a refused one live); a new release that cannot be started after the
+  switch (a container that does not come up, a site Caddy refuses) is rolled back instead of being
+  left live as "failed"; a rollback, and every recovery, puts back the start command and health
+  path of the release that serves (a rollback across a changed `health =` no longer fails, and
+  `tando.conf` changes of a deploy that never got activated no longer reach the live app); a
+  recovery never starts an app that was stopped, and a deploy to a stopped app that does not go
+  live leaves it stopped; a release reserved by an activation that never ran is given up (no more
+  "queued" for ever, not offered for a rollback); a result is never left "running" and history
+  has its line exactly once; `tando env set`, `stop`, `start` and `restart` cut off half-way are
+  finished by recovery (a new env is checked and reverted if it breaks the app); a dropped ssh
+  session no longer stops `backup restore`, `destroy`, `env set` or a rollback half-way; an
+  activation and each long step in it (image pull or load, venv build, database dump, copy) have
+  an upper bound, and so has the recovery after it; a down app that runs again after a reboot gets
+  its link back; unit and Caddy site files are never installed empty or cut short by a full disk;
+  an internal arithmetic error no longer ends a verb with success; a backup just taken is never
+  pruned for its name after the clock was set back.
+- Tests: `test/e2e-matrix.sh`, the fault matrix: a test-only fault hook in the agent (inert
+  without root's test markers) puts one kill, failure or reboot at every point an operation passes
+  (deploy, rollback, stop, start, restart, env set, recovery itself), and one checker asserts ten
+  invariants after recovery. `e2e-matrix-quick` in the full tier, `e2e-matrix-n1` to `n4` (all of
+  it, every app kind) nightly.
 - Fixed: requests could get 502 at once while an app restarted, despite the request hold, after a
   Caddy reload had failed: Caddy keeps the servers it had started of a configuration it could not
   load, serving it without the hold, until it restarts (seen as A7e and A9e failing in
