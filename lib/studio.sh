@@ -89,7 +89,7 @@ studio_pick() {
   [ -n "$tty" ] || exit 2
   pick_num "$n" app
   i=0; for a in $cands; do i=$((i + 1)); [ "$i" = "$PICK" ] && APP=$a; done
-  valid_app "$APP" || die "bad app name"
+  valid_app "$APP" || die "bad app name (a-z, 0-9, -; 2-24 characters)"
 }
 
 cmd_db_studio() {

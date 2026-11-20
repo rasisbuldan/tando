@@ -54,15 +54,15 @@ lx_clean() {
 }
 
 lx_ssh() { # spec file
-  valid_app "$APP" || die "bad app name: $APP"   # it goes into the remote command line
+  valid_app "$APP" || die "bad app name: $APP (a-z, 0-9, -; 2-24 characters)"   # it goes into the remote command line
   # shellcheck disable=SC2029
   # lint: allow RL04 AGENT_BIN is a constant and APP was checked just above
   ssh "${SSHO[@]}" "$TARGET" "sudo -n $AGENT_BIN logs $APP spec" < "$1" 2> "$TMPD/lx.err"
 }
 lx_refused() { # the server refused the query (as opposed to a lost connection)
-  grep -Eq '^tando-(logs|agent):' "$TMPD/lx.err" 2> /dev/null   # -E: BSD grep has no \| in BREs
+  grep -Eq '^tando-(logs|agent|gate):' "$TMPD/lx.err" 2> /dev/null   # -E: BSD grep has no \| in BREs
 }
-lx_err() { strip < "$TMPD/lx.err" | sed -En 's/^tando-(logs|agent): //p' | tail -3; }   # -E: BSD sed
+lx_err() { strip < "$TMPD/lx.err" | sed -En 's/^tando-(logs|agent|gate): //p' | tail -3; }   # -E: BSD sed
 
 logx_logs() {
   resolve 1

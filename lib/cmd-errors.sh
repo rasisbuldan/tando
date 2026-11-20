@@ -18,7 +18,7 @@ cmd_errors() {
       *) die "errors: unknown argument: $a (tando errors [app] [--since 24h] [-n N] [--json])";;
     esac
   done
-  [ -z "$APP" ] || valid_app "$APP" || die "bad app name: $APP"
+  [ -z "$APP" ] || valid_app "$APP" || die "bad app name: $APP (a-z, 0-9, -; 2-24 characters)"
   resolve 1
   w=$(er_window "$since") || die "bad --since: $since (like 30m, 6h, 24h, 7d)"
   [ "$w" -ge 60 ] && [ "$w" -le 604800 ] || die "--since must be between 1m and 7d"

@@ -427,7 +427,7 @@ status_json() {
 cmd_status() {
   resolve 0
   if [ -z "$APP" ]; then cmd_ls; return; fi
-  valid_app "$APP" || die "bad app name"
+  valid_app "$APP" || die "bad app name (a-z, 0-9, -; 2-24 characters)"
   SPC="" SPM=""
   watch_loop render_status fetch_status "$APP"
 }

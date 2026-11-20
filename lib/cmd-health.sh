@@ -18,7 +18,7 @@ cmd_health() {
       *) die "health: unknown argument: $a (tando health [app] [--json])";;
     esac
   done
-  [ -z "$APP" ] || valid_app "$APP" || die "bad app name: $APP"
+  [ -z "$APP" ] || valid_app "$APP" || die "bad app name: $APP (a-z, 0-9, -; 2-24 characters)"
   resolve 0
   [ -n "$(type -t watch_raw)" ] || . "$TANDO_HOME/lib/cmd-alerts.sh"
   watch_raw sudo health ${APP:+"$APP"} > "$TMPD/hl" || bail 1

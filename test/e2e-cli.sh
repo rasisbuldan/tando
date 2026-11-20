@@ -223,7 +223,9 @@ cat > "$E/agentbin/ssh" <<'STUB'
 #!/bin/bash
 [ -n "${STUB_CALLS:-}" ] && echo "$*" >> "$STUB_CALLS"
 case "$*" in
+  *" info") printf 'version=0.0.0\n%barch=aarch64\nlibc=glibc\n' "${STUB_PROTO-proto=2\n}";;
   *" env-set "*|*" env-unset "*) cat > /dev/null; printf '%b' "$STUB_ENV";;
+  *" logs "*) [ -n "${STUB_GATE:-}" ] && { cat > /dev/null; echo "tando-gate: not allowed with a deploy key: logs (a deploy key uploads)" >&2; exit 1; };;
   *" env-log "*) printf '%b' "$STUB_ELOG";;
   *" job-run "*) [ "$STUB_JOB" = pgdown ] && { echo 'pg_dump: error: connection to server at "127.0.0.1", port 5432 failed: Connection refused' >&2; exit 1; }
                  printf 'log=hello from tick\nresult=%s\nstatus=%s\nsecs=2\n' "$STUB_JOB" "$STUB_RC";;
@@ -308,6 +310,33 @@ out=$(STUB_CALLS=$E/acalls sa env unset A --note "$(printf 'x%.0s' $(seq 1 201))
 check "L10 a note of 201 characters is refused (rc=$rc)" eval '[ $rc != 0 ] && printf "%s" "$out" | grep -q "at most 200" && [ ! -s "$E/acalls" ]'
 out=$(STUB_CALLS=$E/acalls STUB_ENV='changed=1\nrestarted=0\nwhy=stopped\n' sa env set A=1 --note "$(printf 'x%.0s' $(seq 1 200))"); rc=$?
 check "L11 a note of exactly 200 characters is accepted (rc=$rc)" test $rc = 0
+# an agent without notes (proto 1, 0.1.1: info prints no proto): --note is refused before anything
+# changes; the same call without --note still goes through
+: > "$E/acalls"
+out=$(STUB_PROTO='' STUB_CALLS=$E/acalls STUB_ENV='changed=1\nrestarted=0\nwhy=stopped\n' sa env set A=1 --note "old server"); rc=$?
+check "L14 env set --note against a server without notes: refused, nothing changed (rc=$rc)" \
+  eval '[ $rc != 0 ] && printf "%s" "$out" | grep -q "the server.s tando is older than this client: run tando host setup" && ! grep -q "env-set" "$E/acalls"'
+: > "$E/acalls"
+out=$(STUB_PROTO='' STUB_CALLS=$E/acalls STUB_ENV='changed=1\nrestarted=0\nwhy=stopped\n' sa env set A=1); rc=$?
+check "L15 ... without --note the old server is still served (rc=$rc)" eval '[ $rc = 0 ] && grep -q "env-set" "$E/acalls"'
+# tando logs with a deploy key: the gate's refusal is shown (it used to print "tando: logs: " and nothing)
+out=$(STUB_GATE=1 sa logs); rc=$?
+check "L16 logs with a deploy key says what the gate refused (rc=$rc)" \
+  eval '[ $rc != 0 ] && printf "%s" "$out" | grep -q "logs: not allowed with a deploy key: logs"'
+# app names: 24 characters at most (the server's group tando-m-<app> stops at 32); the agent's
+# valid_app and the client's agree, and tando init cuts a long directory name to 24
+n24=aaaaaaaaaaaaaaaaaaaaaaaa
+m N1 "a 25-character app name is refused, naming the limit" '2-24 characters' -- status -a "${n24}a"
+# shellcheck disable=SC2034 # (read inside the eval string of the check)
+agent_re=$(sed -n 's/^valid_app() { \[\[ \$1 =~ \(.*\) \]\]; }.*/\1/p' "$ROOT/server/tando-agent")
+check "N2 the agent's valid_app: 24 characters pass, 25 and 26 do not" \
+  eval '[[ $n24 =~ $agent_re ]] && ! [[ ${n24}a =~ $agent_re ]] && ! [[ ${n24}ab =~ $agent_re ]] && [[ ab =~ $agent_re ]] && ! [[ a =~ $agent_re ]]'
+check "N3 the client's valid_app agrees (24 pass, 25 do not)" \
+  eval '(. "$ROOT/lib/common.sh"; valid_app "$n24" && ! valid_app "${n24}a")'
+d="$E/w/$(printf 'b%.0s' $(seq 1 30))"; mkdir -p "$d"; echo '{}' > "$d/package.json"
+out=$(cd "$d" && "$R" init 2>&1); rc=$?
+check "N4 tando init cuts a 30-character directory name to 24 (rc=$rc)" \
+  eval 'grep -qx "app = $(printf "b%.0s" $(seq 1 24))" "$d/tando.conf"'
 m L12 "--note on env ls is a usage error" '--note goes with env set' -- env ls --note x
 : > "$E/acalls"
 printf 'A=1\n' > "$E/imp.env"

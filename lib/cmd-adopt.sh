@@ -262,7 +262,7 @@ cmd_adopt() {
       esac;;
     undo)
       ad_opts; resolve 0; APP=$AD_UNIT
-      valid_app "$APP" || die "bad app name: $APP"
+      valid_app "$APP" || die "bad app name: $APP (a-z, 0-9, -; 2-24 characters)"
       ad_install
       if [ -z "$AD_YES" ]; then
         note "This stops tando-$APP and starts the hand-written unit again, as recorded at adoption."
@@ -277,7 +277,7 @@ cmd_adopt() {
       else ad_wrap "${UI_RED}" "$K_message${UI_NC}"; ui_box_close "$K_result"; exit 1; fi;;
     site)
       ad_opts; resolve 0; APP=$AD_UNIT
-      valid_app "$APP" || die "bad app name: $APP"
+      valid_app "$APP" || die "bad app name: $APP (a-z, 0-9, -; 2-24 characters)"
       ad_install
       # an adopted app, or the unit before adoption (then --health says what to check: the hold only)
       agent sudo adopt-site "$APP" $AD_APPLY ${AD_HEALTH_SET:+"health=$AD_HEALTH"} > "$TMPD/site"
@@ -295,7 +295,7 @@ cmd_adopt() {
       else ui_box_close "nothing to add automatically"; fi;;
     status)
       ad_opts; resolve 0; APP=$AD_UNIT
-      valid_app "$APP" || die "bad app name: $APP"
+      valid_app "$APP" || die "bad app name: $APP (a-z, 0-9, -; 2-24 characters)"
       ad_install
       ui_box_open "adopt status $APP" "$HOST"
       ad_follow "status $APP" 6

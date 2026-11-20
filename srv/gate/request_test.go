@@ -84,6 +84,11 @@ func TestParseRequestRefuses(t *testing.T) {
 		{"sudo -n " + tAgent + " status alpha>x", "unexpected characters"},
 		{"rsync --server -ltprz --usermap=*:root . " + inc, "unexpected characters"},
 		{"rsync --server -ltprz . ~/", "unexpected characters"},
+		// tando health and tando doctor with a deploy key (they are the admin's; a key's gate named
+		// "unexpected characters" and "bad request" for them)
+		{"if [ ! -x /opt/tando/bin/tando-watch ]; then echo 'x' >&2; exit 3; fi; sudo -n /opt/tando/bin/tando-watch health alpha", "not allowed with a deploy key: health"},
+		{"sudo -n " + tAgent + " doctor " + strings.Repeat("0123456789abcdef", 4) + " 0.1.2 status=" + strings.Repeat("a", 64) + " tandod=" + strings.Repeat("b", 64) + " offsite=" + strings.Repeat("c", 64) + " host=" + strings.Repeat("d", 64), "not allowed with a deploy key: doctor"},
+		{"sudo -n " + tAgent + " doctor a b c d e f g h i j k l m", "not allowed with a deploy key: doctor"},
 		// shells and other programs
 		{"bash -c id", "not allowed with a deploy key"},
 		{"sh -c id", "not allowed with a deploy key"},

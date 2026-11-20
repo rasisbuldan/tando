@@ -59,18 +59,41 @@ node_pm() {
   else echo "no lockfile: npm"; fi
 }
 
+# ws_member_check: this directory is a package of a workspace (pnpm-workspace.yaml or "workspaces"
+# in package.json, with the lockfile, in a parent directory) and has no lockfile of its own: its
+# node_modules point into the root's (pnpm links them), so uploading it alone cannot work. Stops
+# with what to do instead. (Real support for deploying one package is a later feature.)
+ws_member_check() {
+  local d=$PWD p root="" name
+  [ -f package.json ] || return 0
+  [ ! -f pnpm-lock.yaml ] && [ ! -f yarn.lock ] && [ ! -f package-lock.json ] && [ ! -f bun.lock ] && [ ! -f bun.lockb ] || return 0
+  while [ "$d" != / ] && [ -n "$d" ]; do
+    d=$(dirname "$d")
+    [ -f "$d/pnpm-lock.yaml" ] || [ -f "$d/yarn.lock" ] || [ -f "$d/package-lock.json" ] || [ -f "$d/bun.lock" ] || [ -f "$d/bun.lockb" ] || continue
+    if [ -f "$d/pnpm-workspace.yaml" ]; then root=$d; break; fi
+    [ -f "$d/package.json" ] && [ -n "$(tr -d '\n\r' < "$d/package.json" | sed -n 's/.*"workspaces"[[:space:]]*:[[:space:]]*\([[{]\).*/\1/p')" ] && { root=$d; break; }
+  done
+  [ -n "$root" ] || return 0
+  name=$(pkg_str name); p=${PWD#"$root"/}
+  die "this directory ($p) is a package of the workspace in $root: its dependencies are linked into the" \
+    "workspace's node_modules, so deploying it alone is not supported yet. Make a standalone copy" \
+    "(from $root: pnpm deploy --filter ${name:-<package>} <dir>, a directory outside the workspace) and run tando there"
+}
+
 # node_framework: a Node framework whose build, start and output tando knows (the first that
 # matches, by its dependency in package.json); sets recipe, build, start, out, fw, why, spa.
 # A workspace root (a monorepo) stops here: which package to deploy cannot be guessed.
 node_framework() {
   local b=npm\ run\ build v
+  ws_member_check
   pkg_script build > /dev/null || b=""
   if [ -f pnpm-workspace.yaml ] || [ -n "$(tr -d '\n\r' < package.json | sed -n 's/.*"workspaces"[[:space:]]*:[[:space:]]*\([[{]\).*/\1/p')" ]; then
     v=$(for d in */*/package.json; do [ -f "$d" ] && printf '%s ' "${d%/package.json}"; done)
     d=${v%% *}
     die "this is a monorepo (a workspace root${v:+ with ${v% }}): tando deploys one app from its own" \
       "directory, with its dependencies installed there. Run tando init in that directory" \
-      "(cd ${d:-apps/web}); deploying a workspace package from the root is not supported yet"
+      "(cd ${d:-apps/web}) once its dependencies are installed there as a standalone project (a workspace package" \
+      "that links into the root's node_modules is not supported yet: pnpm deploy --filter <package> <dir> makes a standalone copy)"
   fi
   if pkg_dep nuxt; then
     recipe=node fw=Nuxt why="nuxt in package.json" build=${b:-npx nuxt build} out=.output start="node server/index.mjs"
@@ -117,9 +140,9 @@ cmd_init() {
   local name recipe="" out=. start="" health=/ build="" path="" cfg entry="" dir host=$HOST shell="" cport="" db=""
   dir=$(basename "$PWD")
   name=$(printf '%s' "$dir" | tr '[:upper:]' '[:lower:]' | tr '_ .' '---' | tr -cd 'a-z0-9-' |
-    sed 's/^[^a-z]*//; s/-\{2,\}/-/g' | cut -c1-26 | sed 's/-$//')
+    sed 's/^[^a-z]*//; s/-\{2,\}/-/g' | cut -c1-24 | sed 's/-$//')
   valid_app "$name" ||
-    die "cannot make an app name from the directory \"$dir\" (2-26 of a-z, 0-9, -, starting with a letter):" \
+    die "cannot make an app name from the directory \"$dir\" (2-24 of a-z, 0-9, -, starting with a letter):" \
       "write tando.conf with  app = <name>  yourself, or rename the directory"
   [ "$name" = "$dir" ] || note "app name: $name (from the directory $dir)"
   # one registered server: it goes into tando.conf, so adding a second one later breaks nothing
