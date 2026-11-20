@@ -343,6 +343,7 @@ app_units() {
 drop_release() {
   valid_id "$1" && [[ -d $D/releases/$1 && $(cur_link) != "$1" ]] || return 0
   rm -rf --one-file-system "${D:?}/releases/$1"; rm -f "$D/jobs/$1" "$D/start/$1"
+  [[ -f $D/assetlog/$1 || -f $D/assetlog/$1.tmp ]] && assets_gc
   [[ ${C[recipe]:-} == container ]] && podman rmi -f "localhost/tando-$A:$1" > /dev/null 2>&1
   return 0
 }
@@ -748,6 +749,16 @@ write_caddy() {
   # internal, the other a public certificate), the site is a snippet imported by two blocks
   [[ -n ${C[domains]:-} && ( ${H[tls]:-off} == internal && $dt == auto || ${H[tls]:-off} == auto && $dt == internal ) ]] &&
     split=1
+  # the fingerprinted files of this and the kept releases (assets_link): their URL prefixes are
+  # answered from $D/assets, a miss by the app. Not while the stopped or down page answers.
+  local mounts="" acc="" m
+  if [[ -z ${S[stopped]:-}${S[down]:-} ]]; then
+    for m in $(assets_mounts); do mounts+=" $m*"; done
+    acc="public, max-age=31536000, immutable"
+    if [[ -n $mounts && -f $D/assetlog/${S[current]:-x}.cc ]]; then   # (the app's own, when it sent one)
+      read -r acc < "$D/assetlog/${S[current]}.cc"; [[ $acc == none ]] && acc=""
+    fi
+  fi
   {
     if [[ -n $split ]]; then echo "(tando-site-$A) {"; else echo "$name {"; fi
     [[ -z $split && ( ${H[tls]:-off} == internal || ( -n ${C[domains]:-} && $dt == internal ) ) ]] && echo "	tls internal"
@@ -759,7 +770,9 @@ write_caddy() {
     echo "		header_regexp Host :[0-9]+\$"
     [[ -n ${H[public_port]:-} ]] && echo "		not header Host *:${H[public_port]}"
     echo "	}"
-    echo "	respond @tandoport 400"
+    # (handle, not respond, when the assets are answered below: handle comes before it in Caddy's
+    # order, and a request with a port in its Host is answered 400 before anything else)
+    if [[ -n $mounts ]]; then echo "	handle @tandoport {"; echo "		respond 400"; echo "	}"; else echo "	respond @tandoport 400"; fi
     # Caddy before 2.7 serves a Host in other letters (ALPHA.localhost) but does not log it: the
     # Host must be one of the site's names exactly (the header matcher is case-sensitive)
     # (one `header Host` line per name: Caddy 2.6 takes one value per line, they are OR'ed)
@@ -772,7 +785,24 @@ write_caddy() {
     done
     echo "		}"
     echo "	}"
-    echo "	respond @tandohost 400"
+    if [[ -n $mounts ]]; then echo "	handle @tandohost {"; echo "		respond 400"; echo "	}"; else echo "	respond @tandohost 400"; fi
+    if [[ -n $mounts ]]; then
+      # a hit (a plain file under the prefix, for GET and HEAD) is Caddy's alone, with a header that
+      # says the name is the content; anything else goes on to the app (or the static file_server)
+      echo "	@tandoassets {"
+      echo "		method GET HEAD"
+      echo "		path$mounts"
+      echo "		file {"
+      echo "			root $D/assets"
+      echo "			try_files {path}"
+      echo "		}"
+      echo "	}"
+      echo "	handle @tandoassets {"
+      [[ -n $acc ]] && echo "		header Cache-Control \"$acc\""
+      echo "		root * $D/assets"
+      echo "		file_server"
+      echo "	}"
+    fi
     # Before the first release is live ($D/current is made when it switches) a visitor gets a 503
     # "being deployed" page, not a 502 after the hold or a 404. Caddy looks for the link on each
     # request (the file matcher), so the page goes away by itself when the release switches in,
@@ -1109,6 +1139,7 @@ switch_to() {
     workers_follow
     return
   fi
+  assets_link "$1" || echo "tando-agent: the fingerprinted files of release $1 could not all be shared; the app answers them" >&2
   switch_link "$1" || return 1
   restart_app
 }
@@ -1205,6 +1236,161 @@ releases_by_seq() {
     valid_id "$i" && printf '%s %s\n' "${S[seq_$i]:-0}" "$i"
   done | sort -k1,1n -k2,2 | cut -d' ' -f2
 }
+# ---- fingerprinted assets ----------------------------------------------------------------------
+#
+# A browser (or a CDN, or a slow client) that holds a page of release N asks for release N's hashed
+# files (/_next/static/<build>/..., /assets/index-<hash>.js) after N+1 went live, and the new
+# release has not got them: a 404 that breaks the page until it is reloaded. So the fingerprinted
+# files of every release tando keeps are hard-linked (the same disk blocks) into one directory,
+# $D/assets, laid out like their URLs; Caddy answers a request for such a URL from it first
+# (write_caddy) and hands a miss to the app. Their names carry their content, so the same URL is
+# the same bytes in every release, and Caddy may say so (Cache-Control: immutable).
+#   $D/assetlog/<id>        what release <id> put there (paths below $D/assets), made after the links
+#   $D/assetlog/<id>.spec   "<dir in the release><TAB><URL prefix>" lines, made after every file is in
+#                           place: Caddy serves a prefix only from then on (and while the release is kept)
+#   $D/assetlog/<id>.cc     the Cache-Control the app itself sent for one of them, when it sent one
+# Nothing in $D/assets is removed while a kept release lists it: assets_gc (prune) removes what no
+# kept release lists. A kill at any point leaves files nobody lists (gc takes them), never a
+# release without its files: they are linked before the switch, and the app answers what is missing.
+
+# assets_hashed dir: every file under dir has a content hash in its name (Vite and Rollup
+# index-DiwrgTda.js, webpack main.3f2a1c0b.js, Astro index.BkJmRqZs.js): the last dash, dot or
+# underscore before the extension is followed by 8 to 32 characters of [A-Za-z0-9_-] with a digit
+# or a capital after the first character. One file without it and the directory is not taken.
+assets_hashed() {
+  local f n=0
+  while IFS= read -r f; do
+    f=${f##*/}; f=${f%.map}; f=${f%.gz}; f=${f%.br}
+    [[ $f == *.chunk.* ]] && f=${f%.chunk.*}.${f##*.}
+    [[ $f =~ [-._]([A-Za-z0-9_-]{8,32})\.[A-Za-z0-9]+$ ]] || return 1
+    [[ ${BASH_REMATCH[1]} =~ [0-9]|.[A-Z] ]] || return 1
+    n=$((n + 1)); ((n <= 20000)) || return 1
+  done < <(find "$1" -type f)
+  ((n))
+}
+# assets_spec release-dir: the fingerprinted trees of a release as "<dir>\t<URL prefix>" lines. The
+# Next.js recipe's .next/static (Next itself calls the whole tree immutable), the tree `assets =`
+# names, and for a static site the first of assets, _astro, static, _next/static whose files are all
+# hashed. A container's files are in its image: not here.
+assets_spec() {
+  local rel=$1 d u v=${C[assets]:-} base=${C[path]:-} c
+  [[ $v == off || ${C[recipe]:-node} == container ]] && return 0
+  if [[ ${C[recipe]:-node} == next && -d $rel/.next/static && ! -L $rel/.next/static ]]; then
+    printf '.next/static\t%s/_next/static/\n' "$base"
+  fi
+  if [[ -n $v ]]; then
+    d=$(trim "${v%%,*}"); u=""; [[ $v == *,* ]] && u=$(trim "${v#*,}")
+    [[ -n $u ]] || u=$base/${d%/}
+    [[ $u == */ ]] || u+=/
+    [[ -d $rel/$d && ! -L $rel/$d ]] && printf '%s\t%s\n' "${d%/}" "$u"
+  elif [[ ${C[recipe]:-node} == static ]]; then
+    for c in assets _astro static _next/static; do
+      [[ -d $rel/$c && ! -L $rel/$c ]] && assets_hashed "$rel/$c" && { printf '%s\t/%s/\n' "$c" "$c"; break; }
+    done
+  fi
+  return 0
+}
+# assets_list dir: "<path below dir><TAB><inode><TAB><size>" of its plain files that root owns (a
+# file the app may write is not shared) and whose names are plain
+assets_list() {
+  find "$1" -type f -user root ! -path $'*\n*' ! -path $'*\t*' ! -path '*\\*' -printf '%P\t%i\t%s\n'
+}
+# assets_link id: hard-link release id's fingerprinted files into $D/assets (see above). 1 when
+# something could not be done: the release then keeps its files for the app to answer.
+assets_link() {
+  local id=$1 rel=$D/releases/$1 L=$D/assetlog dir url src root f k
+  valid_id "$id" && [[ -d $rel && ${C[caddy]:-} != external ]] || return 0
+  [[ ${ASSETS_DONE:-} == "$id" ]] && return 0
+  local spec; if [[ -f $L/$id.spec ]]; then spec=$(< "$L/$id.spec"); else spec=$(assets_spec "$rel"); fi
+  [[ -n $spec ]] || return 0
+  [[ -d $L ]] || install -d -m 700 -o root -g root "$L" || return 1
+  [[ -d $D/assets ]] || install -d -m 755 -o root -g root "$D/assets" || return 1
+  local man=$L/$id.tmp; : > "$man" || return 1
+  local -a add=() chg=() cmp=()
+  while IFS=$'\t' read -r dir url; do
+    [[ -n $dir ]] || continue
+    src=$rel/$dir root=$D/assets$url
+    [[ $(readlink -f "$src") == "$src" ]] || continue
+    # the files Caddy serves are the app's (group tando-<app>, mode 640) or Caddy's: a hard link
+    # is one file with one mode, so the app's are made readable (they are public files)
+    [[ $(stat -c %G "$rel") == caddy ]] || find "$src" -type f -user root ! -perm -o=r -exec chmod o+r {} +
+    add=() chg=() cmp=()
+    install -d -m 755 "$root" || return 1
+    (cd "$root" && find "$src" -mindepth 1 -type d -printf '%P\0' | xargs -0 -r mkdir -p --) || return 1
+    while IFS=$'\t' read -r k f; do
+      case $k in L) add+=("$f");; R) chg+=("$f");; C) cmp+=("$f");; esac
+    done < <(awk -F'\t' 'NR == FNR { i[$1] = $2; s[$1] = $3; next }
+                         { n++; nm[n] = $1; si[$1] = $2; ss[$1] = $3 }
+                         END { for (k = 1; k <= n; k++) { f = nm[k]
+                                 if (!(f in i)) print "L\t" f
+                                 else if (i[f] != si[f]) print (s[f] != ss[f] ? "R" : "C") "\t" f
+                                 } }' \
+               <(printf '\t\t\n'; assets_list "$root") <(assets_list "$src"))   # (the first line: awk's NR == FNR must not hold for an empty listing)
+    # a name in both with other bytes is not a fingerprint: the newer release's file replaces it
+    if ((${#cmp[@]})); then
+      while IFS= read -r f; do chg+=("$f"); done < <(
+        awk -F'  ' 'NR == FNR { h[substr($0, 35)] = $1; next } h[substr($0, 35)] != $1 { print substr($0, 35) }' \
+          <(cd "$root" && printf '%s\0' "${cmp[@]}" | xargs -0 md5sum --) \
+          <(cd "$src" && printf '%s\0' "${cmp[@]}" | xargs -0 md5sum --))
+    fi
+    assets_list "$src" | cut -f1 | sed "s|^|${url#/}|" >> "$man"
+    fp imp.assets
+    ((${#add[@]})) && { (cd "$src" && printf '%s\0' "${add[@]}" | xargs -0 cp -l --parents -t "$root" --) || return 1; }
+    fp imp.assets2
+    for f in "${chg[@]}"; do   # (a link beside it, then a rename: the name never goes missing)
+      ln "$src/$f" "$root/$f.new" && mv -f "$root/$f.new" "$root/$f" || return 1
+    done
+  done <<< "$spec"
+  # (a kill before this line leaves files nobody lists: assets_gc takes them)
+  sort -u -o "$man" "$man"; sync "$man"
+  mv -f "$man" "$L/$id" || return 1
+  # every listed file is there: only then does Caddy serve the prefix
+  local miss; miss=$(cd "$D/assets" && while IFS= read -r f; do [[ -f $f ]] || echo "$f"; done < "$L/$id" | head -1)
+  [[ -z $miss ]] || { echo "tando-agent: asset $miss of release $id could not be linked" >&2; return 1; }
+  [[ -f $L/$id.spec ]] || { printf '%s\n' "$spec" > "$L/$id.spec.tmp" && mv -f "$L/$id.spec.tmp" "$L/$id.spec"; } || return 1
+  ASSETS_DONE=$id
+  return 0
+}
+# assets_gc: after a prune: the records of releases that are gone, then every file of $D/assets
+# that no kept release lists (and the directories that are empty then)
+assets_gc() {
+  local L=$D/assetlog f i keep
+  [[ -d $L ]] || return 0
+  rm -f "$L"/*.tmp
+  for f in "$L"/*; do
+    [[ -e $f ]] || continue
+    i=${f##*/}; i=${i%%.*}
+    valid_id "$i" && [[ -d $D/releases/$i ]] || rm -f "$f"
+  done
+  [[ -d $D/assets ]] || return 0
+  keep=$(mktemp "$L/.keep.XXXXXX") || return 0
+  # (a list that cannot be read makes the list of what to keep short: then nothing is removed)
+  if find "$L" -maxdepth 1 -type f ! -name '*.*' -exec cat {} + 2> /dev/null | sort -u > "$keep"; then
+    (cd "$D/assets" && find . -type f -printf '%P\n' | sort | comm -23 - "$keep" | xargs -d '\n' -r rm -f --)
+    find "$D/assets" -mindepth 1 -type d -empty -delete 2> /dev/null
+  fi
+  rm -f "$keep"
+}
+# assets_mounts: the URL prefixes Caddy serves from $D/assets (those of every kept release)
+assets_mounts() {
+  local f
+  for f in "$D"/assetlog/*.spec; do [[ -f $f ]] && cut -f2 "$f"; done | sort -u
+}
+# assets_sample port id: the Cache-Control the app itself sends for one fingerprinted file of the
+# release (asked on its spare port), when it sends one: Caddy then sends the same, never its own
+assets_sample() {
+  local port=$1 id=$2 rel=$D/releases/$2 dir url f cc
+  IFS=$'\t' read -r dir url < <(assets_spec "$rel")
+  [[ -n ${dir:-} ]] || return 0
+  f=$(find "$rel/$dir" -type f ! -path $'*\n*' ! -path '*[%?# ]*' -printf '%P\n' -quit)
+  [[ -n $f ]] || return 0
+  cc=$(curl -s -m 5 -A "$PROBE_UA" -H "@$PROBE_HDR" -D - -o /dev/null "http://127.0.0.1:$port$url$f" 2> /dev/null |
+    tr -d '\r' | awk -F': ' 'tolower($1) == "cache-control" { sub(/^[^:]*: */, ""); print; exit }')
+  [[ -n $cc ]] || return 0
+  [[ $cc =~ ^[A-Za-z0-9=,._\ -]{1,200}$ ]] || cc=none
+  install -d -m 700 -o root -g root "$D/assetlog" &&
+    printf '%s\n' "$cc" > "$D/assetlog/$id.cc" || true
+}
 prune() {
   local i n=0 keep
   for i in $(releases_by_seq | tac); do
@@ -1221,6 +1407,7 @@ prune() {
   # settings staged by a configure a day ago or more (a deploy whose upload never came)
   [[ -d $D/confs ]] && find "$D/confs" -maxdepth 1 -type f -mmin +1440 ! -name "${S[staged]:-none}" -delete 2> /dev/null
   save "$D/state" S
+  assets_gc
 }
 
 # soak_why: how the app fell over in the soak, for the history note, the client and the alert:
@@ -2325,7 +2512,7 @@ cmd_configure() {
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" \
-    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]"
+    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -2366,6 +2553,10 @@ cmd_configure() {
       tasks) [[ $v =~ ^[1-9][0-9]{1,5}$ ]] || die "bad tasks: $v (processes and threads, like 512)";;
       max_conns|max_requests) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] || die "bad $k: $v";;
       stop_timeout) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || die "bad stop_timeout: $v (seconds)";;
+      # the fingerprinted files of the release (assets_spec): off, a directory in the release and
+      # optionally the URL prefix they are served under
+      assets) [[ $v == off || $v =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*(\ *,\ *(/[A-Za-z0-9_.~-]+)+/?)?$ && /$v/ != */../* && /$v/ != */./* ]] ||
+                die "bad assets: $v (off, or a directory in the release like assets, and optionally a URL prefix: assets, /static/)";;
       hold) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || die "bad hold: $v (seconds)";;
       log_max|log_keep|log_rate|access_log|request_log_max) "$LOGS" valid "$k" "$v" 2> /dev/null || die "bad $k: $v";;
       # health check of tando-watch: expected status and/or text, failures to fire, successes to resolve
@@ -2411,6 +2602,8 @@ cmd_configure() {
     C[$k]=$v
   done <<< "$input"
   release_ok
+  [[ -n ${C[assets]:-} && ${C[assets]} != off && ${C[recipe]:-} == container ]] &&
+    die "assets is not supported for a container app (its files are inside the image)"
   for k in "${jobs[@]}"; do   # a timeout is for a job of this tando.conf
     [[ $k != *.timeout || " ${jobs[*]} " == *" ${k%.timeout} "* ]] || die "$k is set but there is no ${k%.timeout}"
   done
@@ -2866,6 +3059,7 @@ cmd_run_activation() {
     P[t_preflight]=$(el "$t")
     fail "pre-flight: $PROBE_WHY"
   fi
+  has_unit && assets_sample "$spare" "$id"
   has_unit && fp pre.stop && systemctl stop "$unit"
   : > "$D/activation.log"
   pg t_preflight "$(el "$t")" phase switch
@@ -4954,7 +5148,7 @@ conf_key() {
     recipe|image|container_port|build_memory|start|start_shell|release|release_shell|release_timeout|\
     health|path|data|writable|backup|database|db_statement_timeout|db_idle_tx_timeout|db_temp_limit|\
     memory|health_timeout|soak|cpu|tasks|max_conns|max_requests|stop_timeout|hold|log_max|log_keep|\
-    log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|job.*|worker.*) return 0;;
+    log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|assets|job.*|worker.*) return 0;;
   esac
   return 1
 }

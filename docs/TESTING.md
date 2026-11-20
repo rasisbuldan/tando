@@ -195,11 +195,15 @@ agent there), fail (that action fails, as on a full disk), reboot (the agent wai
 the next version's tando.conf, then goes on). A trace of the operation without a fault lists its
 points. After the fault,
 recovery runs as on a server (ExecStopPost, then what tando-watch's minute does) and `mx_inv`
-checks ten invariants and names the one that broke: one intended release serves; link, state and
+checks the invariants and names the one that broke: one intended release serves; link, state and
 app.conf's start and health agree with it; its status; one history line with the right result and
 nothing "running"; idle and the lock free; no leftover unit, lease, temp file or reservation; a
 rollback target exists; stopped stays stopped; data and database untouched; no failed visitor
-request. `--selftest` breaks each invariant on purpose and expects it named.
+request. The node and static apps ship a fingerprinted file per version
+(`assets = assets`; docs/ARCHITECTURE.md "Assets"): invariant 12 is that the serving
+release's file answers through Caddy with its bytes and the immutable header, and that no half-made
+link or list is left in the shared directory (the cells `k` kill the activation just before and just
+after the files are linked). `--selftest` breaks each invariant on purpose and expects it named.
 
 Versions alternate their health path, start command, memory, `max_conns` and a job's schedule
 (odd and even), so a unit file, Caddy site, job timer or app.conf left with the other version's
