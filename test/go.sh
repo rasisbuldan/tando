@@ -5,7 +5,7 @@
 #   g2 go vet ./...                     programs (srv/tools/srvlint on the syntax trees, after the
 #   g3 go test ./...                    regex rules RL15, RL16 of test/lint.pl as a cheap first line)
 #   g8 go test -race ./...           g5 the layering (srvlint: cmd -> daemon -> domain -> internal)
-#   g7 srv/gate's Linux-only tests   g6 static Linux binaries for amd64 and arm64
+#   g7 srv/gate's and internal/lock's Linux-only tests g6 static Linux binaries for amd64 and arm64
 #      in a throwaway container (Docker; SKIP without it)
 #
 # Flags (default: everything, with Go's test cache and g3/g8/g7 overlapped):
@@ -56,11 +56,13 @@ g7_run() { # writes $E/g7.* ; the check itself is made in g7 below, in order
   garch=$(uname -m); case $garch in arm64|aarch64) garch=arm64;; *) garch=amd64;; esac
   echo "$garch" > "$E/g7.arch"
   if ! docker image inspect ubuntu:24.04 > /dev/null 2>&1; then echo skip > "$E/g7.state"
-  elif ! GOOS=linux GOARCH=$garch CGO_ENABLED=0 go test -c -o "$E/gate.test" ./gate > "$E/gate-test-build.out" 2>&1; then
+  elif ! GOOS=linux GOARCH=$garch CGO_ENABLED=0 go test -c -o "$E/gate.test" ./gate > "$E/gate-test-build.out" 2>&1 ||
+       ! GOOS=linux GOARCH=$garch CGO_ENABLED=0 go test -c -o "$E/lock.test" ./internal/lock >> "$E/gate-test-build.out" 2>&1; then
     echo build > "$E/g7.state"
   else
-    docker run --rm --name "tando-go-unit-$$" -v "$E/gate.test:/gate.test:ro" ubuntu:24.04 sh -c \
-      'useradd -m u && su u -c "cd /tmp && /gate.test -test.count=1" && cd /tmp && /gate.test -test.count=1' > "$E/gate-linux.out" 2>&1
+    # (internal/lock too: its probe reads /proc/locks, which only Linux has)
+    docker run --rm --name "tando-go-unit-$$" -v "$E/gate.test:/gate.test:ro" -v "$E/lock.test:/lock.test:ro" ubuntu:24.04 sh -c \
+      'useradd -m u && su u -c "cd /tmp && /gate.test -test.count=1" && cd /tmp && /gate.test -test.count=1 && /lock.test -test.count=1' > "$E/gate-linux.out" 2>&1
     echo "run $?" > "$E/g7.state"
   fi
 }
@@ -137,6 +139,6 @@ case $st in
   build) cat "$E/gate-test-build.out" >&2
     fail "g7 srv/gate Linux tests: the test binary does not build for linux/$garch";;
   *) cat "$E/gate-linux.out" >&2
-    check "g7 srv/gate Linux tests in a linux/$garch container, as a user and as root (rc=$rc)" test "$rc" = 0;;
+    check "g7 srv/gate (as a user and as root) and internal/lock Linux tests in a linux/$garch container (rc=$rc)" test "$rc" = 0;;
 esac
 t_done

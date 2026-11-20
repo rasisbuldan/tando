@@ -9,7 +9,8 @@
 #   test/e2e-matrix.sh --kind python           another kind of app: node next python static
 #                                              container data (node + data dir, postgres, a job)
 #   test/e2e-matrix.sh --ops deploy,rollback   these operations only (default: all of the kind)
-#   test/e2e-matrix.sh --actions kill,fail     these actions only (default kill fail reboot)
+#   test/e2e-matrix.sh --actions kill,fail     these actions only (default kill fail reboot; race:
+#                                              a second client's configure, with other settings, at the point)
 #   test/e2e-matrix.sh --quick                 the points most likely to hide a defect only
 #   test/e2e-matrix.sh --points 'link|ra\.'    points matching this extended regex only
 #   test/e2e-matrix.sh --shard 2/4             every 4th cell from the 2nd (after the traces)
@@ -180,7 +181,7 @@ mx_cell() {
   mx_facts > /dev/null 2>&1
   MX_OLD=$(fv s_current) MX_H0=$(fv hist_n) MX_DATA0=$(fv data_sum) MX_DB0=$(fv db_rows) MX_ENV0=$(fv env_val)
   [ -n "$MX_ENV0" ] || MX_ENV0=""
-  before=$(mx_releases) MX_NEW="" MX_OP=$op MX_REBOOT_T=0 MX_UP_T=0
+  before=$(mx_releases) MX_NEW="" MX_OP=$op MX_REBOOT_T=0 MX_UP_T=0 MX_RACED=""
   if [ "$op" = rollback ]; then   # the newest verified release older than the current one
     MX_NEW=$(sed -n 's/^rel_\([^=]*\)=verified$/\1/p' "$W/facts" | grep -vx "$MX_OLD" | sort | tail -1)
   fi
@@ -190,7 +191,7 @@ mx_cell() {
   [ -n "$ov" ] && [ $(( (MXN - ov) % 2 )) = 0 ] && MXN=$((MXN + 1))
   mx_expect "$op" "$ph" "$act"
   if [ "$pt" != - ]; then
-    local a=$act; [ "$act" = reboot ] && a=hang
+    local a=$act; case $act in reboot|race) a=hang;; esac
     mx_spec fault "$pt" "$a" "$nth" "$verb"
     [ -n "$p2" ] && mx_spec next "${p2#* }" "${MX_ACT2:-kill}" 1 "${p2%% *}"
   fi
@@ -206,6 +207,17 @@ mx_cell() {
       MX_UP_T=$(date +%s)
     fi
   fi
+  if [ "$act" = race ]; then
+    # a second client: its configure, with the next version's tando.conf (the other parity), runs
+    # while this deploy waits at the point; then the deploy goes on
+    while [ $i -lt 600 ] && ! dxs "test -e $MX_T/reached" 2> /dev/null && kill -0 $cl 2> /dev/null; do sleep 0.2; i=$((i + 1)); done
+    if dxs "test -e $MX_T/reached" 2> /dev/null; then
+      # (a configure that fails proves nothing: the cell then counts as not reached)
+      mx_settings $((MXN + 1)) | dx /opt/tando/bin/tando-agent configure "$A" >> "$W/case.log" 2>&1 && MX_RACED=1 ||
+        echo "  (the second client's configure failed)" >> "$W/case.log"
+      dxs "touch $MX_T/release"
+    fi
+  fi
   i=0; while kill -0 $cl 2> /dev/null && [ $i -lt 1200 ]; do sleep 0.5; i=$((i + 1)); done
   mx_killtree $cl; wait $cl 2> /dev/null
   [ "$op" = env ] && MXE=$((MXE + 1))
@@ -218,6 +230,7 @@ mx_cell() {
   local fired=1
   # (a reboot clears /run: there, reaching the point is what counts)
   if [ "$act" = reboot ]; then [ "$MX_REBOOT_T" != 0 ] || fired=0
+  elif [ "$act" = race ]; then [ "${MX_RACED:-}" = 1 ] || fired=0
   elif [ "$pt" != - ]; then mx_fired || fired=0; fi
   mx_spec_clear
   # the operation's release: what the client printed, else one that appeared on disk or in history
@@ -297,7 +310,11 @@ fi
 # ---- the cells of milestone 1's defects (one each; docs/TESTING.md "The fault matrix") ------------
 # defect op verb point nth action phase. a: a failure after the link moved goes back; b: a crash
 # between the link swap and the state write; c: start and health of the serving release; d: a
-# stopped app stays stopped; e: a reservation that never ran; f: an operation's end cut short
+# stopped app stays stopped; e: a reservation that never ran; f: an operation's end cut short.
+# Milestone 2a: g: two clients with different settings (the other's configure lands between this
+# deploy's configure and its activation); h: a deploy refused or cut off before the switch leaves
+# the live app's unit file and Caddy site as they were (configure no longer changes them); i: job
+# units that could not be written are not counted done (recovery writes them)
 CELLS="
 a deploy run-activation ra.restart 1 fail after
 a rollback rollback ra.restart 1 fail after
@@ -311,7 +328,14 @@ d deploy-stopped run-activation imp.cp 1 kill before
 e deploy activate act.spawn 1 kill before
 e deploy run-activation run.locked 1 kill before
 f deploy run-activation deploy.jobs 1 kill after
-f rollback rollback rollback.hist 1 fail after"
+f rollback rollback rollback.hist 1 fail after
+g deploy activate act.mkdir 1 race after
+h deploy-pre - - 0 none after
+h deploy run-activation pre.stop 1 kill before
+i deploy run-activation deploy.jobs 1 fail after
+i deploy run-activation jobs.write 1 fail after
+e deploy run-activation run.queue 1 fail before
+j stop stop caddy.mv 1 fail after"
 [ "$KIND" = container ] && CELLS="a deploy run-activation ra.restart 1 fail after"
 CELLS=${MX_CELLS:-$CELLS}     # (another list: MX_CELLS, same columns)
 if [ "$CELLSONLY" = 1 ]; then
