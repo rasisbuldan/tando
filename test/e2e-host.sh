@@ -66,6 +66,21 @@ check "H1e every alert check has a row" alert_rows
 "$R" doctor test > "$E/doctor.out" 2>&1
 check "H1f tando doctor has a host care row naming tando host status" grep -q "host care.*tando host status" "$E/doctor.out"
 check "H1g tando doctor checks tando-host's version" grep -q "^│ host  *.*same as the client\|host .*same as the client" "$E/doctor.out"
+# programs that differ from the client's (as after a client upgrade) are ONE row; --verbose lists each
+for p in tando-gate tando-logs tando-watch; do srv "printf x | sudo tee -a /opt/tando/bin/$p > /dev/null"; done
+"$R" doctor test > "$E/doctor-diff.out" 2>&1
+"$R" doctor test --verbose > "$E/doctor-diffv.out" 2>&1
+flat=$(tr -d '│\n' < "$E/doctor-diff.out" | tr -s ' ')
+one_row() { case $flat in *"programs "*"3 of "*" programs differ from the client"*"tando host setup test"*) return 0;; esac; return 1; }
+check "H1j three programs differ: one row \"3 of N programs differ ... tando host setup test\"" \
+  one_row
+check "H1k ... and no row of their own for gate, logs or watch" eval '! grep -Eq "^│ (gate|logs|watch) " "$E/doctor-diff.out"'
+check "H1l ... with --verbose each is listed, with its warning, and there is no collapsed row" \
+  eval 'grep -Eq "^│ gate .*warn" "$E/doctor-diffv.out" && grep -Eq "^│ logs .*warn" "$E/doctor-diffv.out" &&
+        grep -Eq "^│ watch .*warn" "$E/doctor-diffv.out" && ! grep -Eq "^│ programs " "$E/doctor-diffv.out"'
+for p in tando-gate tando-logs tando-watch; do srv "sudo truncate -s -1 /opt/tando/bin/$p"; done
+"$R" doctor test > "$E/doctor-same.out" 2>&1
+check "H1m restored: no differing programs, no collapsed row" eval '! grep -Eq "^│ programs " "$E/doctor-same.out"'
 COLUMNS=100 "$R" ls -H test > "$E/ls.out" 2>&1
 check "H1h tando ls shows the server's to-do as one line" grep -q "server: [0-9]* to do" "$E/ls.out"
 COLUMNS=100 "$R" host ls > "$E/hls.out" 2>&1
@@ -154,6 +169,14 @@ check "H5b the apt log is root's" srv 'test "$(sudo stat -c %U /var/log/tando-ap
 cp -R "$ROOT/examples/site" "$ROOT/examples/hello" "$W/"
 (cd "$W/site" && "$R" up -H test) > "$E/site.out" 2>&1 || cat "$E/site.out" >&2
 (cd "$W/hello" && "$R" up -H test) > "$E/hello.out" 2>&1 || cat "$E/hello.out" >&2
+# a new app says where its alerts go: nowhere, when no notifier is set (tando up, lib/deploy.sh)
+check "H6p a new app with a notifier registered: up does not say there is none" eval '! grep -q "no notifier set" "$E/hello.out"'
+"$R" alerts notifier rm hook > /dev/null 2>&1
+cp -R "$W/hello" "$W/third"; sed 's/^app = .*/app = third/' "$W/hello/tando.conf" > "$W/third/tando.conf"
+(cd "$W/third" && "$R" up -H test) > "$E/third.out" 2>&1 || cat "$E/third.out" >&2
+check "H6q ... with none, up says so and names tando alerts notifier add" \
+  grep -q "no notifier set: tando alerts notifier add" "$E/third.out"
+printf 'http://127.0.0.1:9999/hook/x\n' | "$R" alerts notifier add hook webhook > /dev/null 2>&1
 srv 'sudo sed -i "s/^phase=.*/phase=verify/; t; \$a phase=verify" /opt/tando/apps/site/state'
 "$R" host reboot test --now --yes > "$E/blocked.out" 2>&1; rc=$?; cat "$E/blocked.out" >&2
 check "H6a a reboot is refused while a deploy runs, saying which (rc=$rc)" eval '[ $rc != 0 ] && grep -q "deploy of site" "$E/blocked.out"'

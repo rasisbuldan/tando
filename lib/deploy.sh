@@ -682,6 +682,11 @@ after_live() {
   # once, for a new app: the checks already watch it; only where to send alerts may be missing
   if [ "${K_created:-0}" = 1 ]; then
     note "alerts on for $APP: down, unhealthy, 5xx, new errors"
+    # one more call, for a new app only: with no notifier the alerts go nowhere but tando alerts
+    [ -n "$(type -t watch_raw)" ] || . "$TANDO_HOME/lib/cmd-alerts.sh"
+    if watch_raw sudo show 8 > "$TMPD/al.n" 2> /dev/null && ! grep -q "^notifier$TAB" "$TMPD/al.n"; then
+      note "  (no notifier set: tando alerts notifier add phone ntfy sends them to your phone)"
+    fi
     note "  see them: tando health; where they go: tando alerts"
   fi
   [ -n "$C_jobs" ] && [ "${K_changed:-0}" = 1 ] || return 0   # (jobs are rescheduled only on a change)

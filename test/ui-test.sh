@@ -318,5 +318,110 @@ else
     echo "native: ${nt_n% *} checks, ${nt_n#* } failed"
 fi
 
+# ---- tando.conf: the client's parser, the server's configure, docs/CONFIG.md and `tando help conf`
+# list the same keys. The keys are read from the code (the arms of the two `case $k in`), not from
+# a list kept here: a key added to either without a row in docs/CONFIG.md and a line in
+# lib/help-conf.txt fails; so does a documented key the parser rejects.
+conf_arms() { # file start-regex end-regex: the labels of the 6-space case arms in that range, one key per line
+    sed -n "/$2/,/$3/p" "$1" | perl -0777 -ne 's/\\\n\s*//g; for (/^ {6}([a-z][^\n)]*)\)/mg) { print "$_\n" }' |
+        tr '|' '\n' | sed 's/^job\.\*$/job.<name>/' | sort -u
+}
+conf_client=$(conf_arms "$here/lib/common.sh" '^conf_load() {' '^  done < "\$f"')
+# check, origin and force are words of the client's request to configure, not tando.conf keys
+conf_server=$(conf_arms "$here/server/tando-agent" '^cmd_configure() {' '^  done <<< "\$input"' | grep -vx -e check -e origin -e force)
+conf_doc=$(grep -o '^| `[^`]*`' "$here/docs/CONFIG.md" | sed 's/^| `//; s/`$//' | sort -u)
+conf_code=$(printf '%s\n%s\n' "$conf_client" "$conf_server" | sort -u)
+if [[ $(printf '%s\n' "$conf_code" | wc -l) -lt 40 ]]; then bad "tando.conf keys: read only $(printf '%s\n' "$conf_code" | wc -l) from the code"; else ok; fi
+d=$(comm -13 <(echo "$conf_client") <(echo "$conf_server"))
+if [[ -z $d ]]; then ok; else bad "tando.conf: configure accepts keys the client parser rejects: $(echo $d)"; fi
+d=$(comm -23 <(echo "$conf_code") <(echo "$conf_doc"))
+if [[ -z $d ]]; then ok; else bad "docs/CONFIG.md lacks keys the code accepts: $(echo $d)"; fi
+d=$(comm -13 <(echo "$conf_code") <(echo "$conf_doc"))
+if [[ -z $d ]]; then ok; else bad "docs/CONFIG.md lists keys the code rejects: $(echo $d)"; fi
+d=""
+while IFS= read -r k; do grep -q "^  $k " "$here/lib/help-conf.txt" || d="$d $k"; done <<< "$conf_code"
+if [[ -z $d ]]; then ok; else bad "lib/help-conf.txt (tando help conf) lacks keys:$d"; fi
+d=""
+while IFS= read -r k; do   # the parser itself, on each documented key: none may be "unknown key"
+    printf '%s = x\n' "${k/<name>/x}" > "$tmp/conf.t"
+    r=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; conf_load "$2"' _ "$here" "$tmp/conf.t" 2>&1)
+    [[ $r != *"unknown key"* ]] || d="$d $k"
+done <<< "$conf_doc"
+if [[ -z $d ]]; then ok; else bad "the client parser rejects keys docs/CONFIG.md lists:$d"; fi
+printf 'nokey = x\n' > "$tmp/conf.t"
+r=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; conf_load "$2"' _ "$here" "$tmp/conf.t" 2>&1)
+if [[ $r == *"unknown key"* ]]; then ok; else bad "the parser check above cannot fail: an unknown key was not refused ($r)"; fi
+out=$(TANDO_CONFIG_DIR=$tmp/cfg "$BASH_BIN" "$here/bin/tando" help conf 2>&1)
+if [[ $out == *"docs/CONFIG.md"* && $out == *"release_timeout"* ]]; then ok; else bad "tando help conf: $out"; fi
+mkdir -p "$tmp/proj" && printf '{"name":"x","scripts":{"start":"node a.js"}}\n' > "$tmp/proj/package.json"
+(cd "$tmp/proj" && TANDO_CONFIG_DIR=$tmp/cfg "$BASH_BIN" "$here/bin/tando" init --yes > /dev/null 2>&1)
+if grep -q 'tando help conf' "$tmp/proj/tando.conf" && ! grep -q 'README.md lists' "$tmp/proj/tando.conf"; then ok
+else bad "tando init: its tando.conf does not point at tando help conf: $(cat "$tmp/proj/tando.conf" 2>&1)"; fi
+d=$(grep -rn 'Docs vs code mismatches' "$here/docs/COMMANDS.md" "$here/README.md" "$here/docs/README.md" | head -2)
+if [[ -z $d && -f $here/docs/DEV-NOTES.md ]]; then ok; else bad "docs/COMMANDS.md still has the developer notes: $d"; fi
+
+# ---- www handling of a domain: the client's default_www (lib/cmd-domain.sh) and the server's
+# (tando-agent) over one table, with a two-level public suffix (example.co.uk) like a plain apex
+www_table="example.com:apex app.example.com:sub a.b.example.com:sub www.example.com:www
+example.io:apex shop.example.io:sub example.co.uk:apex www.example.co.uk:www shop.example.co.uk:sub
+example.org.uk:apex example.com.au:apex app.example.com.au:sub www.example.com.au:www
+example.co.id:apex blog.example.co.id:sub example.web.id:apex example.my.id:apex
+example.co.nz:apex example.co.jp:apex example.com.br:apex example.co.za:apex x.y.example.co.za:sub"
+www_cli=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/cmd-domain.sh"
+    for e in $2; do printf "%s:%s:%s\n" "${e%%:*}" "$(www_kind "${e%%:*}")" "$(default_www "${e%%:*}")"; done' _ "$here" "$www_table")
+www_sed='/^WWW_SFX2=/,/^"$/p; /^www_kind() {$/,/^}$/p; /^default_www() {/,/^}$/p'
+www_srv=$("$BASH_BIN" -c 'eval "$(sed -n "$3" "$1/server/tando-agent")"
+    for e in $2; do printf "%s:%s:%s\n" "${e%%:*}" "$(www_kind "${e%%:*}")" "$(default_www "${e%%:*}")"; done' _ "$here" "$www_table" "$www_sed")
+www_want=""
+for e in $www_table; do
+    case ${e#*:} in sub) m=off;; *) m=redirect;; esac
+    www_want="$www_want${e%%:*}:${e#*:}:$m
+"
+done
+www_want=${www_want%$'\n'}
+if [[ $www_cli == "$www_want" ]]; then ok; else bad "default_www (client) over the table: $(diff <(echo "$www_want") <(echo "$www_cli") | head -6)"; fi
+if [[ $www_srv == "$www_want" ]]; then ok; else bad "default_www (server) over the table: $(diff <(echo "$www_want") <(echo "$www_srv") | head -6)"; fi
+if [[ $www_cli == "$www_srv" ]]; then ok; else bad "client and server default_www disagree"; fi
+if diff <(sed -n '/^WWW_SFX2=/,/^"$/p' "$here/lib/cmd-domain.sh") <(sed -n '/^WWW_SFX2=/,/^"$/p' "$here/server/tando-agent") > /dev/null &&
+   [[ $(sed -n '/^WWW_SFX2=/,/^"$/p' "$here/lib/cmd-domain.sh") == *" co.uk "* ]]; then ok
+else bad "the two-level suffix lists of lib/cmd-domain.sh and server/tando-agent differ"; fi
+why=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/cmd-domain.sh"; www_why example.co.uk; www_why app.example.co.uk; www_why www.example.com' _ "$here")
+if [[ $why == *"example.co.uk is a registered name"*"app.example.co.uk is a sub-domain"*"www.example.com starts with www."* ]]; then ok
+else bad "www_why: $why"; fi
+
+# ---- tando doctor: programs that differ from the client's are one row (--verbose: each), the rest
+# are untouched. The agent is a stub that answers with check rows.
+doctor_run() { # verbose-or-empty differing-programs...: the rendered box
+    local v=$1; shift
+    "$BASH_BIN" -c '
+        . "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/deploy.sh"; . "$1/lib/views.sh"
+        TMPD=$(mktemp -d); TAB=$(printf "\t"); HOST=vps; ARGS=(doctor); VERBOSE=$2; shift 2; ui_init 100
+        resolve() { :; }; server_sums() { echo 1; }; client_version() { echo 1.2.3; }
+        D=" $* "
+        agent_raw() {
+            printf "check\tok\tconnection\tssh ok\n"
+            for p in agent gate logs metrics watch status daemon offsite host; do
+                case $D in *" $p "*) printf "check\twarn\t%s\t1.0.0 here, 1.2.3 on the laptop: tando host setup <host>\n" "$p";;
+                    *) printf "check\tok\t%s\t1.2.3, same as the client\n" "$p";; esac
+            done
+            printf "check\twarn\tdns\t*.example.co.uk does not resolve\n"
+        }
+        cmd_doctor; rm -rf "$TMPD"' _ "$here" "$v" "$@" 2>&1
+}
+out=$(doctor_run "" agent gate logs status)
+flat=$(printf '%s' "$out" | tr -d '│\n' | tr -s ' ')
+if [[ $flat == *"programs"*"4 of 9 programs differ from the client's 1.2.3: tando host setup vps"* ]] &&
+   ! grep -Eq '^│ (agent|gate|logs|status) ' <<< "$out" && grep -Eq '^│ dns +.*warn' <<< "$out" &&
+   grep -Eq '^│ metrics +.*ok' <<< "$out" && [[ $out == *"2 warnings"* ]]; then ok
+else bad "doctor with 4 of 9 programs differing: not one row ($out)"; fi
+out=$(doctor_run 1 agent gate logs status)
+n=$(grep -Ec '^│ (agent|gate|logs|status) +.*warn' <<< "$out")
+if [[ $n = 4 ]] && ! grep -Eq '^│ programs ' <<< "$out" && [[ $out == *"5 warnings"* ]]; then ok
+else bad "doctor --verbose: want the 4 programs on their own rows ($n) and no collapsed row ($out)"; fi
+out=$(doctor_run "")
+if ! grep -Eq '^│ programs ' <<< "$out" && [[ $out == *"1 warning"* ]]; then ok; else bad "doctor with nothing differing shows a programs row ($out)"; fi
+out=$(doctor_run "" agent)
+if grep -Eq '^│ programs +.*warn' <<< "$out" && [[ $out == *"1 of 9 programs differ"* ]]; then ok; else bad "doctor with one program differing ($out)"; fi
+
 echo "$checks checks, $fails failed"
 [[ $fails == 0 ]]

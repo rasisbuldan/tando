@@ -311,11 +311,13 @@ render_status() {
     done < "$TMPD/st"
     if [ -n "$lkh" ]; then
       if [ $((lkh % 24)) = 0 ]; then lw="$((lkh / 24)) d"; else lw="$lkh h"; fi
-      ui_kv logs "$(mb "$lb") of $(mb "${lcap:-}"), keeps $lw  $(ui_spark "$(printf '%s' "${hourly:-}" |
-        tr ',' ' ')" 24)  ${lines:-0}/24h"
+      # the lines first: a new app's journal is pre-allocated (8 MB), which says nothing about use
+      # (the sparkline last: it is what a narrow terminal cuts)
+      ui_kv logs "${lines:-0} lines/24h  ${UI_DIM}journal $(mb "$lb") of $(mb "${lcap:-}"), keeps $lw${UI_NC}  $(ui_spark "$(printf '%s' "${hourly:-}" |
+        tr ',' ' ')" 24)"
     else
-      ui_kv logs "$(mb "$lb") (cap $(mb "${lcap:-}"))  $(ui_spark "$(printf '%s' "${hourly:-}" |
-        tr ',' ' ')" 24)  ${lines:-0} lines/24h"
+      ui_kv logs "${lines:-0} lines/24h  ${UI_DIM}journal $(mb "$lb") (cap $(mb "${lcap:-}"))${UI_NC}  $(ui_spark "$(printf '%s' "${hourly:-}" |
+        tr ',' ' ')" 24)"
     fi
   fi
   if [ "$bk" = daily ]; then
@@ -497,21 +499,42 @@ cmd_env_ls() {
   else ui_box_close "values hidden: tando env ls --show prints them"; fi
 }
 
+# doctor_prog_differs name detail: is this row "a program on the server differs from the client's"
+# (agent, gate, logs, metrics, watch, status, daemon, offsite, host; the agent words it three ways)?
+doctor_prog() { case $1 in agent|gate|logs|metrics|watch|status|daemon|offsite|host) return 0;; esac; return 1; }
+doctor_prog_differs() {
+  doctor_prog "$1" || return 1
+  case $2 in *"differs from this tando"*|*" on the laptop: "*|*"differs from the client"*) return 0;; esac
+  return 1
+}
+
 cmd_doctor() {
   [ -n "${ARGS[1]:-}" ] && HOST=${ARGS[1]}
   resolve 0
-  local r state name detail warn=0 fail=0 avail=$(( ${UI_IN:-76} - 26 ))
+  local r state name detail warn=0 fail=0 avail=$(( ${UI_IN:-76} - 26 )) nprog=0 ndiff=0 shown=""
   : > "$TMPD/dnotes"
   # shellcheck disable=SC2046  # four checksums, one word each
   # (the sums of tando-status and tandod come after the version, named: an older agent ignores them)
   agent_raw sudo doctor $(server_sums) "$(client_version)" "status=$(server_sums tando-status | tr -d ' ')" \
     "tandod=$(server_sums tandod | tr -d ' ')" "offsite=$(server_sums tando-offsite | tr -d ' ')" \
     "host=$(server_sums tando-host | tr -d ' ')" > "$TMPD/st" || exit 1
+  # after a client upgrade every program differs: nine near-identical rows would bury the findings
+  # that matter, so they become one row (--verbose lists each)
+  while IFS=$TAB read -r r state name detail; do
+    [ "$r" = check ] || continue
+    doctor_prog "$name" && nprog=$((nprog + 1))
+    ! doctor_prog_differs "$name" "$detail" || ndiff=$((ndiff + 1))
+  done < "$TMPD/st"
   {
     printf 'CHECK\tSTATE\tDETAIL\n'
     while IFS=$TAB read -r r state name detail; do
       [ "$r" = check ] || continue
       detail=${detail//<host>/$HOST}
+      if [ -z "$VERBOSE" ] && doctor_prog_differs "$name" "$detail"; then
+        [ -n "$shown" ] && continue
+        shown=1; name=programs
+        detail="$ndiff of $nprog programs differ from the client's $(client_version): tando host setup $HOST"
+      fi
       case $name:$detail in metrics:sampled*|metrics:"no sample"*) name="metrics sample";; esac
       case $state in
         ok) printf '%s\t%s\t%s\n' "$name" "$(ui_badge ok)" "$detail";;
@@ -537,7 +560,7 @@ cmd_doctor() {
       ui_box_wrap "$r"
     done < "$TMPD/dnotes"
   fi
-  ui_box_close "$fail failed, $(plural "$warn" warning)"
+  ui_box_close "$fail failed, $(plural "$warn" warning)${shown:+; --verbose lists each program that differs}"
   [ $fail -eq 0 ]
 }
 

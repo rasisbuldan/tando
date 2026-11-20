@@ -1,0 +1,138 @@
+# tando.conf reference
+
+`tando.conf` sits in the project directory. One setting per line, `key = value`; spaces around the
+`=` and at the ends are ignored, lines starting with `#` and empty lines are skipped. An unknown key
+or a bad value stops the command with the file, the line and what was expected. `tando init` writes
+a first file; `tando deploy` (or `tando up`) applies it. A setting you remove is cleared at the next
+deploy. `tando help conf` prints a short version of this page.
+
+```
+app = shop
+host = vps
+recipe = node
+start = node server.js
+health = /api/health
+memory = 256M
+data = data
+job.nightly = daily | node scripts/nightly.js
+```
+
+Types: **text** is taken as written; **number** is whole digits; **size** is digits and `K`, `M` or
+`G`; **time** is digits and a unit; **bool** is `true` or `false`; **path** is relative to the
+project (or to the release on the server). Every key below is accepted by the client
+(`lib/common.sh`, `conf_load`); the server checks them again (`tando-agent configure`).
+test/ui-test.sh fails when this page and the code disagree: one table row per key, the key first.
+
+## App
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `app` | name | the directory name (`tando init`) | | The app's name on the server: starts with a lower case letter, then lower case letters, digits and `-`. | `app = shop` |
+| `host` | text | the only registered server | | The server (`tando host ls`) this project deploys to; `-H` overrides it. | `host = vps` |
+| `recipe` | choice | detected by `tando init` | | How the app is built and run: `node`, `next`, `static`, `python` or `container`. | `recipe = next` |
+| `node` | number | `.nvmrc`, then `engines.node`, then the current LTS | major version | The Node.js major the server installs and runs the app with. | `node = 24` |
+
+## Build
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `build` | text | none | | A command run on your machine before the upload (`sh -c`). For a container without `image`, the image build is added after it. | `build = npm run build` |
+| `out` | path | `.` | | The directory that is uploaded (static sites: the built files). It must be inside the project. | `out = dist` |
+| `dockerfile` | path | `Dockerfile` | | The Dockerfile `recipe = container` builds when `image` is not set. | `dockerfile = docker/Dockerfile` |
+| `image` | text | none | | A ready image the server pulls instead of one built here (`recipe = container`). | `image = registry.example.com/shop:1.4` |
+| `container_port` | number | none | port | The port the container listens on (`recipe = container`). | `container_port = 3000` |
+| `build_memory` | size | `512M` | bytes | Memory limit of the server-side build of a Python app's virtualenv. | `build_memory = 1G` |
+
+## Run
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `start` | text | from the recipe (`npm start`, the server entry ...) | | The command that starts the app. It listens on `$PORT`. Without `start_shell` it is split on spaces and run without a shell. | `start = node server.js` |
+| `start_shell` | bool | `false` | | Run `start` with `sh -c` (pipes, `&&`, `$VARS`, quotes). | `start_shell = true` |
+| `path` | path | `/` | URL path | Serve the app under a sub-path (starts with `/`). | `path = /shop` |
+| `memory` | size | `256M` (none for `static`) | bytes | Memory limit of each process of the app; over it the process is killed and restarted. | `memory = 512M` |
+| `writable` | paths | none | | Directories inside the release the app may write to (a copy per release), separated by spaces or commas. | `writable = .next/server/app` |
+| `soak` | number | `30` | seconds | How long a new release must stay up after going live before the deploy counts as good; a crash in it rolls back. | `soak = 60` |
+
+## Health
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `health` | path | `/` | URL path | The route a new release must answer (and the monitor probes) before it takes traffic. | `health = /api/health` |
+| `health_timeout` | number | `60` | seconds | How long a release may take to become healthy; Caddy holds requests that long if it is over 15. | `health_timeout = 90` |
+| `health_expect` | text | any 2xx or 3xx | | What the monitor wants from the health route: a status (`200`, `2xx`) and/or text the answer contains. | `health_expect = 200 ok` |
+| `health_fails` | number | `3` (the host's alert setting) | probes | Failed probes in a row before the `health` alert fires, 1 to 99. | `health_fails = 2` |
+| `health_recover` | number | `2` (the host's alert setting) | probes | Good probes in a row before the alert resolves, 1 to 99. | `health_recover = 3` |
+
+## Limits
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `cpu` | number or percent | none | % of a core, or cores | The app's CPU share: `50%` or `1.5` cores. | `cpu = 150%` |
+| `tasks` | number | `1024` | processes and threads | Processes and threads of the app, 10 to 999999. | `tasks = 512` |
+| `max_conns` | number | `256` | connections | Connections Caddy keeps to the app, 1 to 99999. | `max_conns = 100` |
+| `max_requests` | number | off | requests | Requests in flight through Caddy; over it a visitor waits, then gets a 503. | `max_requests = 200` |
+| `hold` | number | `15`, or `health_timeout` if larger | seconds | How long Caddy holds a request while the app (re)starts, 1 to 999. | `hold = 20` |
+| `stop_timeout` | number | `10` | seconds | How long a stopping process may finish its requests before it is killed, 1 to 999. | `stop_timeout = 30` |
+
+## Data and database
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `data` | path | none (`data` with `database = sqlite`) | | A directory that survives deploys, given to the app as `$TANDO_DATA_DIR`. For a container: the volume's path inside it (`/data`). | `data = data` |
+| `backup` | choice | `daily` when `data` or `database` is set, else off | | `daily` or `off`: a daily backup of the data directory and the database. | `backup = off` |
+| `database` | choice | none | | `postgres` or `sqlite`; the app gets `DATABASE_URL`. | `database = postgres` |
+
+## Database limits
+
+PostgreSQL only (`database = postgres`); `off` turns a limit off.
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `db_statement_timeout` | time or `off` | `30s` | `ms`, `s`, `m`, `h` | How long one statement may run. | `db_statement_timeout = 2m` |
+| `db_idle_tx_timeout` | time or `off` | `5m` | `ms`, `s`, `m`, `h` | How long a connection may sit idle inside an open transaction. | `db_idle_tx_timeout = 1m` |
+| `db_temp_limit` | size or `off` | `1G` | `M`, `G` | Temporary files of one connection (large sorts, index builds). | `db_temp_limit = 4G` |
+
+## Release command
+
+Runs on the server once per deploy, before the switch (migrations). Not for `static` or `container`.
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `release` | text | none | | The command, run in the new release as the app's user. | `release = node scripts/migrate.js` |
+| `release_shell` | bool | `false` | | Run it with `sh -c`; needed for `&&`, pipes, `$VARS` and quotes. | `release_shell = true` |
+| `release_timeout` | number | `300` | seconds | Longest it may run, 1 to 3600; over it the deploy fails and nothing is switched. | `release_timeout = 120` |
+
+## Jobs
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `job.<name>` | text | none | | A scheduled job: `<schedule> \| <command>`. The schedule is a systemd calendar expression (`daily`, `*-*-* 03:00`, `hourly`); the name is lower case letters, digits and `-`. One line per job. | `job.nightly = daily \| node scripts/nightly.js` |
+
+## Domains
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `domain` | list | none | | Domains for the app, separated by spaces or commas; added at the deploy (`tando domain rm` removes one). | `domain = example.com example.org` |
+| `www` | choice | by name, see below | | What `www.<domain>` does: `redirect` to the domain, `serve` the app too, or `off`. | `www = serve` |
+
+`www` defaults to `redirect` for a registered name (`example.com`, `example.co.uk`) and for a
+`www.` name, and to `off` for a sub-domain (`app.example.com`). `tando domain add` prints the mode
+it chose and why.
+
+## Logs
+
+Per app; the host's defaults are set with `tando host setup` (docs/LOGGING.md).
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `log_max` | size | host default, else the smaller of 2G and 5% of the disk | `K`, `M`, `G` | Size cap of the app's journal, at least 4M; the oldest entries go first. | `log_max = 500M` |
+| `log_keep` | time | host default, else `30d` | `h`, `d`, `w` | How long the journal keeps entries. | `log_keep = 14d` |
+| `log_rate` | text | host default, else `5000/30s` | lines / seconds | Lines per interval per service, as `<lines>/<seconds>s`, or `off`. | `log_rate = 2000/10s` |
+| `access_log` | bool-like | `on` | | `on` or `off`: write the request log. | `access_log = off` |
+| `request_log_max` | size | host default, else the smaller of `log_max / 4` and 256M | `K`, `M`, `G` | Disk budget of the request log, at least 4M. | `request_log_max = 100M` |
+
+## Not settings
+
+The client also sends `origin`, `force` and `check` to the server with every deploy. They are
+protocol words, not keys of `tando.conf`, and the file rejects them.

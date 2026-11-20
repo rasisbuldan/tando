@@ -6,6 +6,22 @@ first, grouped by area.
 
 ## Unreleased
 
+- New: docs/CONFIG.md lists every `tando.conf` key (type, default, unit, meaning, example), and
+  `tando help conf` prints a compact version. `tando init`'s file, docs/COMMANDS.md and README.md
+  point at them (the README section they named no longer existed). test/ui-test.sh reads the keys
+  from the client's parser and the server's `configure` and fails when the doc, the help or either
+  program disagree. The developer notes that opened docs/COMMANDS.md moved to docs/DEV-NOTES.md.
+- Changed: `tando doctor` shows the programs that differ from the client's (after a client upgrade)
+  as one row, "N of M programs differ from the client's X: tando host setup <host>", instead of up
+  to nine; `tando doctor --verbose` lists each.
+- Fixed: a name under a two-level public suffix (`example.co.uk`, `example.com.au`, `example.co.id`)
+  was taken for a sub-domain and got no `www` redirect. Client and server share a list of the common
+  suffixes (not the full Public Suffix List); `tando domain add` says which www mode it chose and why;
+  `--www` overrides it.
+- Changed: `tando up` on a new app says when no notifier is set, with the command to add one;
+  `tando status` shows the lines of the last 24 hours first and the journal's size after them (a new
+  app's pre-allocated journal read as "8 MB of logs").
+
 - Fixed: requests could get 502 at once while an app restarted, despite the request hold, after a
   Caddy reload had failed: Caddy keeps the servers it had started of a configuration it could not
   load, serving it without the hold, until it restarts (seen as A7e and A9e failing in

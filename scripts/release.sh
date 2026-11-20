@@ -11,7 +11,7 @@
 # is IO::Compress::Gzip with no file name and a zero timestamp. Only the files listed below
 # ship (no tests, examples or benchmarks).
 #
-# Contents: tando-<v>/{bin/tando, lib/*.sh, lib/help.txt, server/*, templates/*, completions/*, install.sh, uninstall.sh,
+# Contents: tando-<v>/{bin/tando, lib/*.sh, lib/help.txt, lib/help-conf.txt, server/*, templates/*, completions/*, install.sh, uninstall.sh,
 # VERSION, README.md, CHANGELOG.md, LICENSE if present}, and the Go server programs for both CPUs as
 # server/linux-{amd64,arm64}/<name>, built here by scripts/build-server.sh (Go needed; same Go
 # version, same bytes). server/legacy/ does not ship. dist/SHA256SUMS lists the archive.
@@ -42,7 +42,7 @@ export SOURCE_DATE_EPOCH
 files() {
   local f c
   {
-    for f in bin/tando lib/*.sh lib/help.txt server/* templates/* completions/* install.sh uninstall.sh VERSION \
+    for f in bin/tando lib/*.sh lib/help.txt lib/help-conf.txt server/* templates/* completions/* install.sh uninstall.sh VERSION \
              README.md CHANGELOG.md LICENSE; do
       [ -f "$f" ] && printf '%s\t%s\n' "$f" "$f"
     done
