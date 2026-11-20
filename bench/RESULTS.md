@@ -540,3 +540,158 @@ Honestly: (c) brings the app's p95 back to (a)'s and recovers part of the throug
 noise. The other app's HTTP is not measurably affected in any case (it is mostly Caddy and Node,
 not the database). The memory bound is from settings (2 MB per sort or hash node); an OOM kill of a
 backend is never relied on.
+
+## v2 comparison, 21 Nov 2026
+
+tando v0.1.1 (tag) against current main (`ac43b9b`, branch `bench-v2`) on identical fresh test servers.
+Measurement only: no product code was changed. Scripts: `run-v2cmp.sh <old-tree> <new-tree> [rounds]`
+(one fresh server per tree and round: `tando-testvm:caddy-ubuntu`, 2 GB / 1 CPU pinned, `/opt/tando` on an
+ext4 loop disk; the Next.js app in `app/`, with the same `tando.conf` for both trees), `summarize-v2cmp.py`
+(medians and ranges to `raw/v2cmp/summary.txt`), `render-v2cmp.py` + `v2cmp-table.json` (this table). Raw
+output is under `raw/v2cmp/` (not committed: `bench/raw/` is ignored, like every earlier run).
+
+Method: 3 rounds, interleaved old, new, old, new, old, new (about 5 minutes per server), the host load average
+written to `notes.txt` at every step. The laptop was shared with another agent's test runs: load average 8
+(median) with peaks to 11, and one old-round reading of 38; I also ran my own profiling servers
+(1 CPU each, other cores) during rounds 2 and 3, so absolute numbers are 10-20% slower than a quiet laptop and
+ranges are wide. Per round and tree: `host setup`; cold `tando up` (not waiting for the soak); idle memory after
+35 s (3 snapshots 10 s apart, median); warm deploy 1 measured through its 30 s soak; warm deploy 2 measured to
+live; a warm deploy under the ~10 req/s loop (`reqloop.py`, 3 s before and after); 3 x `ls`, `status`, `doctor`,
+`deploy --dry-run`; disk; 100 requests for log growth; two more apps and idle memory with 3 apps. Phase times
+are the deploy output's (0.1 s resolution; the pre-flight, copy and switch are the server's, build, stage
+and upload the laptop's); "live" is when the command says so (the 30 s soak runs on the server afterwards; "verified"
+adds it). Server CPU is the container's `cpu.stat` delta around the command, so it includes sshd, systemd and
+everything else the deploy wakes up. Warm n = 6 for time and CPU (2 per round) except the loop row (3) and
+verified (3).
+
+| Metric (median [min-max], 3 rounds) | v0.1.1 | current | Change |
+|---|---|---|---|
+| **Deploy time, seconds (Next.js bench app; laptop build included)** | | | |
+| Cold first `tando up`: command shows live | 15.9 [15.9-17.2] | 15.2 [15.1-15.3] | -4% (-0.70 s) |
+|   build (laptop) | 4.1 [4.0-4.5] | 4.0 [3.9-4.3] | -2% (-0.10) |
+|   stage (laptop) | 0.9 [0.8-0.9] | 1.2 [1.1-1.2] | +33% (+0.30) |
+|   upload | 1.7 [1.7-2.8] | 1.7 [1.7-1.8] | +0% |
+|   copy | 0.2 [0.2-0.4] | 0.2 [0.1-0.2] | +0% |
+|   pre-flight | 0.7 [0.7-0.7] | 0.7 [0.7-0.7] | +0% |
+|   switch | 0.1 [0.1-0.1] | 0.3 [0.2-0.3] | +200% (+0.20) |
+| Warm deploy, quiet: command shows live | 7.7 [7.3-22.6] | 7.4 [6.9-10.4] | -4% (-0.32 s) |
+| Warm deploy under the request loop: live | 7.2 [7.0-7.9] | 7.8 [6.9-9.0] | +7% (+0.53 s) |
+|   build (laptop), warm | 3.8 [3.5-12.0] | 3.2 [2.9-5.6] | -14% (-0.55) |
+|   stage (laptop), warm | 0.7 [0.7-1.4] | 1.0 [0.9-1.1] | +43% (+0.30) |
+|   upload, warm | 0.3 [0.3-1.8] | 0.4 [0.3-0.5] | +14% (+0.05) |
+|   copy, warm | 0.2 [0.1-0.6] | 0.2 [0.2-0.3] | +0% |
+|   pre-flight, warm | 0.7 [0.6-1.7] | 0.7 [0.7-0.7] | +0% |
+|   switch, warm | 0.2 [0.1-0.5] | 0.2 [0.2-0.4] | +0% |
+| Warm deploy until soak ends (verified) | 38.4 [38.1-39.0] | 38.6 [37.8-41.2] | +1% (+0.20 s) |
+| **Server CPU and client** | | | |
+| Server CPU per warm deploy, to live (s, whole container) | 2.25 [1.50-3.08] | 2.09 [1.62-3.01] | -7% (-0.16 s) |
+| Client CPU (user+sys) per warm deploy, laptop (s) | 10.8 [10.7-13.1] | 11.0 [10.9-12.0] | +2% (+0.17 s) |
+| Client max RSS per warm deploy (MB) | 547 [531-566] | 552 [529-560] | +1% (+4.89) |
+| host setup (fresh server): wall s / server CPU s | 6.8 [6.4-8.3] | 7.5 [7.3-7.7] | +11% (+0.75) |
+| **Memory (MB)** | | | |
+| Idle, 1 app: server anon+shmem | 77.3 [76.4-79.0] | 80.6 [77.9-81.2] | +4% (+3.27) |
+| Idle, 1 app: server memory.current (incl. page cache) | 123 [110-141] | 138 [130-210] | +12% (+14.93) |
+|   tandod anon | 3.7 [3.6-3.7] | 3.7 [3.7-3.8] | +2% (+0.06) |
+|   Caddy anon | 18.0 [18.0-20.0] | 20.3 [18.2-20.3] | +12% (+2.24) |
+|   the app (tando.slice) anon | 34.5 [34.2-34.7] | 35.2 [34.0-35.2] | +2% (+0.66) |
+| Idle, 3 apps: server anon+shmem | 156.1 [155.0-159.6] | 160.7 [159.1-162.3] | +3% (+4.56) |
+| Idle, 3 apps: tandod anon | 4.8 [4.8-4.9] | 5.4 [5.2-5.7] | +11% (+0.55) |
+| Idle, 3 apps: apps (tando.slice) anon | 107.9 [106.9-108.6] | 108.3 [108.1-108.9] | +0% (+0.45) |
+| Peak during a warm deploy (sum of slice peaks, incl. page cache) | 200 [177-239] | 214 [191-249] | +7% (+14.01) |
+| **Bytes and disk** | | | |
+| Bytes to the server per warm deploy (all eth0 rx) | 382 [188-414] | 391 [363-427] | +2% (+8.92 KB) |
+|   of it rsync payload (KB) | 139 [139-139] | 139 [139-139] | +0% |
+| Cold deploy bytes (MB) | 11.7 [11.6-11.8] | 11.8 [11.7-11.8] | +0% |
+| Disk per release, apparent (MB) | 34.1 [34.1-34.1] | 34.1 [34.1-34.1] | +0% |
+| Disk /opt/tando after 6 deploys + 2 more apps (MB) | 218 [218-218] | 225 [225-225] | +3% (+6.95 MB) |
+| Logs: /var/log growth per 100 requests (KB) | 28.5 [28.5-28.5] | 28.5 [28.5-28.5] | +0% (+0.01 KB) |
+| **Request loop during a warm deploy** | | | |
+| Failed requests | 0 [0-0] | 0 [0-0] | 0 -> 0.00 |
+| Longest gap between two 200s (ms) | 486 [407-512] | 530 [480-563] | +9% (+44.00) |
+| Max latency (ms) | 390 [311-410] | 436 [395-459] | +12% (+46.20) |
+| **Command latency (laptop wall s | server CPU s)** | | | |
+| `tando ls` wall | 0.55 [0.52-0.59] | 0.57 [0.52-0.65] | +3% (+0.01) |
+| `tando ls` server CPU | 0.021 [0.012-0.049] | 0.022 [0.011-0.032] | +5% |
+| `tando status` wall | 0.59 [0.57-0.62] | 0.58 [0.56-0.61] | -3% (-0.02) |
+| `tando status` server CPU | 0.013 [0.012-0.026] | 0.023 [0.012-0.027] | +77% (+0.01) |
+| `tando doctor` wall | 1.05 [1.00-1.11] | 1.13 [1.09-1.19] | +7% (+0.08) |
+| `tando doctor` server CPU | 0.185 [0.167-0.211] | 0.204 [0.194-0.226] | +10% (+0.02) |
+| `tando deploy --dry-run` wall (builds and stages) | - | 5.12 [4.51-5.50] | n/a (not in 0.1.1) |
+| `tando deploy --dry-run` server CPU | - | 0.069 [0.049-0.081] | n/a (not in 0.1.1) |
+
+Read the table with the ranges in mind: differences under about 10% are inside this laptop's noise. What the
+data does say: deploy time, memory, bytes, disk and the request loop are the same as v0.1.1 (no failed request in
+any of the 6 loop runs; the longest gap, 0.49 s against 0.53 s, is the app restart under Caddy's hold); the
+client's stage step got slower by about 0.3 s; command latency is unchanged, and `ls` / `status` spend about 0.4 s
+of their 0.55 s on the laptop before the one ssh call.
+
+### Profile of current main (quiet single runs, test server 2 GB / 1 CPU)
+
+A warm deploy of the bench app, 7.3 s to live. The ssh calls (`tando` run with an `ssh` shim that logs every call;
+`bench/` scratch only) and the phases, in order:
+
+| Step | Time | Where |
+|---|---|---|
+| client start (`help_index` in `lib/args.sh`) | 0.40 s | laptop |
+| `agent info`, `configure` (check) | 0.05 + 0.07 s | 2 ssh calls, before the build |
+| build (`next build` + stage script) | 3.2-3.4 s | laptop |
+| stage (`rsync -a -c` 0.3 s; 4-5 `node lib/native.js` starts about 0.045 s each; find, du) | 1.0 s (v0.1.1: 0.7 s) | laptop |
+| `configure`, `begin`, rsync, `activate` | 0.08 + 0.12 + 0.29 + 0.21 s | 4 ssh calls |
+| activation on the server: copy 0.2, pre-flight 0.7, switch 0.2, verify 0.4-0.6 | 1.6-1.9 s | server |
+| `deploy-status` polls, one every 0.5 s | 4-5 calls, 22 ms server CPU each | 4-5 ssh calls |
+
+So 10-11 ssh round trips per warm deploy (v0.1.1: 10); `ls`, `status`, `doctor` are one each; `deploy --dry-run` two.
+
+Inside the server's activation (`bash -x` with timestamps on the transient unit, so about 2x slower than untraced):
+- Pre-flight 0.7 s: the app answers after about 0.35 s but `probe` (`server/tando-agent`) polls with `sleep 0.5`;
+  the first probe is at 0.01 s and fails, the second at 0.54 s. The same 0.5 s granularity is in the client's
+  `deploy-status` loop (`lib/deploy.sh: do_deploy`): the soak phase begins about 0.1-0.5 s before the client sees it.
+- Verify 0.4-0.6 s: the first curl through Caddy waits for the app's second boot (0.33 s; Caddy holds the request).
+  This restart is also the 0.5 s gap in the request loop.
+- 13 `sync` calls (state and activation files), about 12 ms each here (0.16 s of the activation);
+  v0.1.1 had 6. The activation runs 3071 traced lines and 439 forks (26 `getent`); v0.1.1: 2001 lines, 317 forks.
+- The soak (30 s): two `systemctl` calls every second cost 562 ms of CPU per 30 s, an idle server uses 19 ms.
+  That is 0.5 s of the 2.8 s a deploy costs the server, through its soak.
+
+Server CPU per warm deploy by slice (two deploys each, quiet server, cpu.stat deltas; ms, to live | through the soak):
+
+| Slice | v0.1.1 | current |
+|---|---|---|
+| whole container | 1492, 1551 \| 2437, 2400 | 2067, 1966 \| 2813, 2943 |
+| user.slice (ssh sessions: agent calls, rsync) | 371, 385 | 614, 609 |
+| system.slice (activation unit, systemctl, journald) | 375, 415 \| 935, 939 | 593, 542 \| 1091, 1163 |
+| tando.slice (the app: pre-flight boot + live boot) | 665, 670 | 738, 703 |
+| init.scope (systemd) | 81, 81 | 123, 111 |
+
+That quiet profile says current main costs about 0.5 s more server CPU per deploy; the 3-round benchmark (noisy
+machine) says 2.09 s against 2.25 s with ranges that overlap (1.6-3.0 and 1.5-3.1). Treat it as a suspected
+regression until a rerun on a quiet laptop. Per agent call the CPU is 3-5 ms higher (the agent grew from 3701
+lines / 196 KB to 5880 lines / 330 KB: `bash -n` 11 ms -> 15 ms on the laptop; `info` 28 -> 33 ms,
+`deploy-status` 11 -> 15 ms on the server), which is 0.05 s over a deploy; the rest is the activation.
+
+Client startup: `tando help deploy` takes 0.40-0.43 s on both trees, 0.12 s user and 0.24 s system:
+`help_index` in `lib/args.sh` forks `printf | tr` twice per line of `lib/help.txt` (about 300 forks) on every command.
+A copy of the tree with `${c//-/_}` instead takes 0.07 s (median of 5, three times). Every command, including
+every deploy, pays this.
+
+`tando-watch`: the timer run is 3 ms of CPU and 24 ms of wall (v0.1.1 3-11 ms, 18-56 ms); the work is in `tandod`:
+idle server CPU over 120 s is 107 ms (53 ms per minute, tandod 32 ms per minute) on current main and 137 ms (68 ms per
+minute, tandod 9 ms) on v0.1.1; about 0.1% of the one CPU either way. (The journal has no CPU line for the run:
+the unit has `LogLevelMax=notice`.)
+
+Disk: a release is a full copy, 34.1 MB for the 36 MB app; the last upload stays in `incoming/` (34 MB), five
+releases are kept, so one app uses 204 MB of disk plus its share of `/opt/tando` (the bench's 218 MB with 3 apps is
+v0.1.1, 225 MB current). The new shared assets directory (`assets = .next/static, /_next/static` on the bench app,
+3 deploys): 15 files, 628 KB, and `du` of releases plus assets equals `du` of releases alone, so hard links cost no
+blocks. Backups: none (the bench app has no data directory or database). Logs: 28.5 KB of `/var/log` growth per 100
+requests (the Caddy access log, about 285 bytes a request), the same on both trees.
+
+Notes on the method:
+- The first attempt of the current tree failed every verify with HTTP 503 "bench is being deployed": Caddy runs in its
+  own mount namespace and had started before the harness bind-mounted the loop disk on `/opt/tando`, so the `file`
+  matcher in the new site (`try_files current/ live`) saw an empty directory. A harness artefact (a real server has
+  one filesystem); the rounds above restart Caddy after mounting the disk, for both trees.
+- Warm deploy 1 is measured through the soak, warm deploy 2 and the loop deploy to live only; the "server CPU" row
+  holds both kinds (the soak adds about 0.8 s).
+- `deploy --dry-run` does not exist in v0.1.1 (it exits 2 in 0.4 s).
+- Not measured: backups (no data in the app), the full tier, more than 3 apps, a quiet laptop.
