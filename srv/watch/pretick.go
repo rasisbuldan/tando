@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"tando/srv/internal/apps"
@@ -64,6 +65,8 @@ func (w Watch) recoverNeeded() bool {
 			return true
 		case w.reservationOrphaned(d, a, s):
 			return true
+		case w.leaseOrphaned(d):
+			return true
 		case w.rollbackCut(d):
 			// a rollback that died after it wrote its progress file and before its first state
 			// write: the state is idle, nothing holds the lock, and the file says running for ever
@@ -75,6 +78,28 @@ func (w Watch) recoverNeeded() bool {
 		}
 	}
 	return false
+}
+
+// leaseOrphaned: an upload lease with no release id whose holder is gone (the agent's
+// lease_orphaned): taken in an earlier boot, or the activate that holds it ("<pid> <start time>")
+// no longer runs. The agent also checks that no upload writes into incoming/ before it clears it.
+func (w Watch) leaseOrphaned(d string) bool {
+	l, _ := w.Cache.load(filepath.Join(d, "upload"))
+	if l["token"] == "" || l["id"] != "" {
+		return false
+	}
+	if b := l["boot"]; b != "" {
+		cur, _ := os.ReadFile(filepath.Join(w.Env.Proc, "sys/kernel/random/boot_id"))
+		if c := strings.TrimSpace(string(cur)); c != "" && c != b {
+			return true
+		}
+	}
+	pid, start, ok := strings.Cut(l["holder"], " ")
+	n, okp := valid.Uint(pid, 1, 1<<31)
+	if _, oks := valid.Uint(start, 0, 1<<62); !ok || !okp || !oks {
+		return false
+	}
+	return procStart(w.Env.Proc, int(n)) != start
 }
 
 // rollbackCut: the activation file says a rollback is running (cmd_rollback writes it with the

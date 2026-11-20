@@ -193,7 +193,7 @@ machine and, inside `save`, before and after every write of a state file (`pre:s
 `/run/tando-test/fault`; on a real server it costs one builtin test. Actions: kill (SIGKILL of the
 agent there), fail (that action fails, as on a full disk), reboot (the agent waits there, then
 `docker restart`), race (the agent waits there while a second client configures the app with
-the next version's tando.conf, then goes on). A trace of the operation without a fault lists its
+the next version's tando.conf, then goes on)). A trace of the operation without a fault lists its
 points. After the fault,
 recovery runs as on a server (ExecStopPost, then what tando-watch's minute does) and `mx_inv`
 checks the invariants and names the one that broke: one intended release serves; link, state and
@@ -216,7 +216,8 @@ none when the app is stopped (`--selftest` breaks it twice: a worker stopped beh
 a stray worker unit).
 
 `test/e2e-matrix-quick.sh` (full and quick tiers, about 8 minutes) runs `--cells`: one cell for
-each defect fixed in milestone 1, 2a and 2b (the list `CELLS` in the driver: two clients' settings, nothing of a deploy that does not go live reaching the live app, job units that could not be written, a queue that gave up, a site file that was not replaced, a rollback cut before its first state write), node; two cells of
+each defect fixed in milestone 1, 2a and 2b (the list `CELLS` in the driver: two clients' settings, nothing of a deploy that does not go live reaching the live app, job units that could not be written, a queue that gave up, a site file that was not replaced, a rollback cut before its first state write, an upload lease left by a killed begin or activate),
+node; two cells of
 the container recipe (the switch failure, a kill at its spawn) and two of a static site (a kill at
 Caddy's file site, after the link moved), and for the kind `worker` a kill in the middle of the
 workers' switch (`wk.start`) and a failed start of the old workers when a bad release goes back
@@ -233,9 +234,11 @@ rollback and restart not yet), python and next (deploy and deploy-bad at the `--
 kill and fail: 50 cells each, all passed). What did not
 pass is either fixed or listed in `MX_KNOWN` in the driver with the invariant and the reason: such a
 cell prints as `SKIP KNOWN failure ...`, and fails when it starts to pass (remove it from the list
-then). One class is known: an agent killed after it took the upload lease and before the lease got
-its release id leaves the lease (invariant 6); it is stale after 30 s (5 s for the same
-user@machine asking again), `tando unlock` clears it, recovery does not. (A failed write of app.conf inside `start_back` was a second known class; state machine 2a fixed it and its cells pass.)
+then). The list is empty now. The last class, an agent killed after it took the upload lease and
+before the lease got its release id (invariant 6), was fixed in state machine 3a: the client gives
+the lease back when begin or activate fails, and recovery clears a lease with no release id whose
+holder is gone (taken in an earlier boot, or its activate no longer runs). (A failed write of
+app.conf inside `start_back` was a second class; state machine 2a fixed it.)
 
 ### The alerts suites
 

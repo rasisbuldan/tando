@@ -1593,6 +1593,33 @@ lease_age() {
   a=$(( $(now) - 10#$s )); echo $(( a < 0 ? -a : a ))
 }
 
+# The lease's holder: begin records the boot it was taken in (boot), activate itself while it has
+# not yet written the release id (holder="<pid> <start time>"). Between the two the client holds
+# it (its rsync is seen by upload_writing). lease_orphaned: a lease with no release id whose holder
+# is gone: taken in an earlier boot (no client's upload survives a restart), or its activate died
+# (killed, the server's out-of-memory killer) before it wrote the id. Never while an rsync or a
+# deploy key's receiver writes into incoming/. (L loaded, lease lock held.)
+boot_id() { local b; b=$(< /proc/sys/kernel/random/boot_id) 2> /dev/null; echo "$b"; }
+pstart() { # pid: field 22 of /proc/<pid>/stat (its start time), nothing when it is gone
+  local s f=(); s=$(< "/proc/$1/stat") 2> /dev/null || return 1
+  read -ra f <<< "${s##*) }"; echo "${f[19]:-}"
+}
+lease_orphaned() {
+  [[ -n ${L[token]:-} && -z ${L[id]:-} ]] || return 1
+  local h=${L[holder]:-} gone=0
+  [[ -n ${L[boot]:-} && ${L[boot]} != "$(boot_id)" ]] && gone=1
+  [[ $h =~ ^([0-9]+)\ ([0-9]+)$ && $(pstart "${BASH_REMATCH[1]}") != "${BASH_REMATCH[2]}" ]] && gone=1
+  ((gone)) && ! upload_writing
+}
+# rec_upload: recovery clears an orphaned lease (the next deploy need not wait 30 s for it)
+rec_upload() {
+  [[ -f $D/upload ]] || return 0
+  lockfile "$D/lease.lock"; exec 7>"$D/lease.lock"; flock -w 30 7 || return 0
+  load "$D/upload" L
+  lease_orphaned && rm -f "$D/upload"
+  flock -u 7
+}
+
 # upload_writing: an rsync writes into this app's incoming/ (the admin's, or a deploy key's
 # confined receiver: unit tando-rx-<app>@<nonce>, tando-rx-<app> before; list-units matches the
 # patterns against loaded units and loads none)
@@ -1680,15 +1707,16 @@ cmd_begin() { # app who [upload KB] -> token
   # without Caddy no app is reachable: a deploy would wait for its check and roll back a good release
   systemctl is-active -q caddy ||
     die "Caddy is not running on <host>, so no app is reachable and a deploy cannot be checked. Start it on the server: sudo systemctl start caddy (sudo journalctl -u caddy -n 20 shows why it stopped)"
-  L=([token]=$(< /proc/sys/kernel/random/uuid) [who]=$who [started]=$(now) [started_ds]=$(ds))
-  save "$D/upload" L || die "could not record the upload lease (disk full?): tando doctor"
-  # an admin upload: no rsync of the app's deploy key (tando-gate) may still be writing incoming/
-  local du; du=$(deploy_user)
-  [[ $who == ci-* || -z $du ]] || pkill -KILL -u "$du" 2> /dev/null || true
+  L=([token]=$(< /proc/sys/kernel/random/uuid) [who]=$who [started]=$(now) [started_ds]=$(ds) [boot]=$(boot_id))
+  # the token goes out before the lease is written: a begin cut off after the write (killed) has
+  # still told its client the token, and the client gives the lease back (end) when begin fails
   echo "token=${L[token]}"
   # after `tando ci setup`, incoming/ belongs to the app's deploy user: the admin uploads as it
-  local u; u=$(stat -c %U "$D/incoming")
+  local du u; du=$(deploy_user); u=$(stat -c %U "$D/incoming")
   if [[ -n $du && $u == "$du" ]]; then echo "upload_as=$u"; fi
+  save "$D/upload" L || die "could not record the upload lease (disk full?): tando doctor"
+  # an admin upload: no rsync of the app's deploy key (tando-gate) may still be writing incoming/
+  [[ $who == ci-* || -z $du ]] || pkill -KILL -u "$du" 2> /dev/null || true
 }
 
 cmd_end() { # app, token on stdin (or as argument): give the lease back (upload failed or interrupted)
@@ -2777,6 +2805,13 @@ cmd_activate() {
   # deploy key: the activation takes the last configure's
   [[ -z $conf || $conf =~ ^[0-9]{1,10}$ ]] || die "bad settings id"
   [[ -z $conf || -f $D/confs/$conf ]] || die "the settings of this deploy are no longer on the server: run the deploy again"
+  # this activate holds the lease until it writes the release id into it: killed before that,
+  # recovery gives the lease back (lease_orphaned)
+  lease_lock; load "$D/upload" L
+  if [[ -n $token && ${L[token]:-} == "$token" && -z ${L[id]:-} ]]; then
+    L[holder]="$$ $(pstart $$)"; save "$D/upload" L
+  fi
+  flock -u 7
   recover
   [[ $b =~ ^[0-9]+(\.[0-9])?$ && $u =~ ^[0-9]+(\.[0-9])?$ ]] || die "bad timings"
   lease_lock
@@ -3346,6 +3381,7 @@ preflight_static() {
 # verb holds the app's lock it is skipped (after a short wait): that verb runs recover_locked
 # itself once it has the lock (lock), so an interrupted phase is never inherited unfinished.
 recover() {
+  rec_upload    # (the lease lock only: also while an activation holds the app's lock)
   lockfile "$D/lock"; exec 9>"$D/lock"; flock -w 3 9 || return 0
   recover_locked
   flock -u 9
