@@ -204,7 +204,9 @@ The app's scheduled jobs (job.<name> = <schedule> | <command> in tando.conf):
 schedule, next run, last run and its result. A job is run once per schedule and
 not retried: tando cannot know whether a command may run twice. A job that calls
 its own app over HTTP can meet it restarting (a deploy, tando restart): retry in
-the job (curl --retry 5 --retry-connrefused).
+the job (curl --retry 5 --retry-connrefused). A run is stopped after its timeout
+(job_timeout = <seconds>, default 3600; job.<name>.timeout for one job) and
+reported as timed out.
 
 @@ db
 flags: -a= -H= --show

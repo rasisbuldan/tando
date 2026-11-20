@@ -139,7 +139,8 @@ Security model:
   `-digits`, ids `YYYYMMDD-HHMMSS`, cursor `[a-z]=hex;...`, grep 1-256 characters without control
   characters). Anything else fails closed with an error, before journalctl runs.
 - The server builds the journalctl argv itself, with exact unit names only (no globs: another app
-  named `x-job-y` could match `tando-x-job-*`; a job name the agent would refuse is never one). The
+  named `x-job` could match `tando-x-*`; job units are `tando-<app>_job-<name>`, and `_` is in no
+  app or job name; a job name the agent would refuse is never one). The
   pattern is data in tando-logs, never text for a shell; a fixed string also goes to journalctl as
   one argv element, every non-alphanumeric character backslash-escaped so PCRE reads it as a
   literal. An invalid regex is detected before any output. RE2 matches in linear time, so no
@@ -492,7 +493,7 @@ cache (the audit trail keeps its lines).
   stay in the main journal.
 - The 5xx rate for alerts: `tando-agent req-summary <app> 300`, fields `total`, `c5xx`,
   `counts_5xx` (section 3).
-- Unit names are always exact (`tando-<app>.service`, `tando-<app>-job-<name>.service`,
+- Unit names are always exact (`tando-<app>.service`, `tando-<app>_job-<name>.service`,
   `tando-<app>-pre-<id>`): an app may be called `<app>-2`, so `tando-<app>-*` is never safe.
 
 ## Known weaknesses

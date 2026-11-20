@@ -442,9 +442,14 @@ jobs_run() {
   case $name in ""|*[!A-Za-z0-9_-]*) usage_err "bad job name: $name (tando jobs lists them)" jobs;; esac
   note "running job $name of $APP on $HOST..."
   agent sudo job-run "$APP" "$name" < /dev/null > "$TMPD/jr"
-  kv_read "$TMPD/jr" result status secs
+  kv_read "$TMPD/jr" result status secs timeout
   sed -n 's/^log=//p' "$TMPD/jr"
-  if [ "${K_status:-1}" = 0 ]; then note "job $name: ok in ${K_secs:-?}s"; return 0; fi
+  if [ "${K_status:-1}" = 0 ] && [ "${K_result:-success}" = success ]; then note "job $name: ok in ${K_secs:-?}s"; return 0; fi
+  case $K_timeout in *[!0-9a-z\ ]*) K_timeout="?";; esac   # (the server's words, shown)
+  if [ "${K_result:-}" = timeout ]; then
+    note "job $name: timed out after ${K_secs:-?}s and was stopped (its limit: ${K_timeout:-?}; job_timeout in tando.conf)"
+    return 124
+  fi
   note "job $name: failed (${K_result:-failed}, exit ${K_status:-?}) in ${K_secs:-?}s"
   ui_int "${K_status:-}" && [ "$K_status" -gt 0 ] && [ "$K_status" -lt 256 ] && return "$K_status"
   return 1

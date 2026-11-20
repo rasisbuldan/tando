@@ -38,7 +38,7 @@ for i in $(seq 1 "$IT"); do
     restore) ( jitter 3000; id=$(rB backup ls "$APP" 2> /dev/null | grep -oE '[0-9]{8}-[0-9]{6}-[a-z]+' | head -1)
                rB backup restore "$id" -a "$APP" --yes > "$LOG/$i.op.out" 2>&1 ) & ;;
     job) ( jitter 3000; rB jobs run tick -a "$APP" > "$LOG/$i.op.out" 2>&1 ) & ;;
-    jobtimer) ( jitter 3000; sroot systemctl start "tando-$APP-job-tick.service" > "$LOG/$i.op.out" 2>&1 ) & ;;
+    jobtimer) ( jitter 3000; sroot systemctl start "tando-${APP}_job-tick.service" > "$LOG/$i.op.out" 2>&1 ) & ;;
     watch) ( jitter 3000; sroot /opt/tando/bin/tando-watch run > "$LOG/$i.op.out" 2>&1 ) & ;;
     recover) ( for j in 1 2 3 4 5; do jitter 1500; sroot /opt/tando/bin/tando-agent recover "$APP"; done > "$LOG/$i.op.out" 2>&1
                sroot /opt/tando/bin/tando-agent recover-all >> "$LOG/$i.op.out" 2>&1 ) & ;;

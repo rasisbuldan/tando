@@ -545,7 +545,7 @@ app_units() {
   local k
   echo "tando-$A.service=app"
   echo "systemd-journald@tando-$A.service=journald"   # its "Suppressed N messages" notices
-  for k in "${!C[@]}"; do [[ $k == job.* ]] && echo "tando-$A-job-${k#job.}.service=job:${k#job.}"; done
+  for k in "${!C[@]}"; do [[ $k == job.* && $k != job.*.* ]] && echo "tando-${A}_job-${k#job.}.service=job:${k#job.}"; done
 }
 
 cmd_logs() {

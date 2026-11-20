@@ -175,7 +175,7 @@ save() {
 meta_mode() { # file name
   case $2 in
     app.conf|state|activation|upload|history.tsv)
-      if [[ -n ${A:-} ]] && getent group "tando-m-$A" > /dev/null; then
+      if [[ -n ${A:-} ]] && getent group "tando-m-$A" > /dev/null && meta_group_ok; then
         chown "root:tando-m-$A" "$1" && chmod 640 "$1"
       else chmod 600 "$1"; fi;;
     host.conf) chmod 644 "$1";;
@@ -183,12 +183,30 @@ meta_mode() { # file name
   return 0
 }
 
+# deploy_user: this app's deploy user (tando ci setup), only when tando-d-<app> is exactly what
+# tando-gate creates (home ci/<app>, shell tando-gate): the user of an app named d-<app> has the
+# same name, and must never be killed, nor read this app's metadata
+deploy_user() {
+  local e; e=$(getent passwd "tando-d-$A") || return 1
+  IFS=: read -r _ _ _ _ _ h s <<< "$e"
+  [[ $h == "$R/ci/$A" && $s == "$R/bin/tando-gate" ]] && echo "tando-d-$A"
+}
+# meta_group_ok: the metadata group tando-m-<app> is no user's own group (an app named m-<app> has
+# a user and group of that name: its user would read this app's metadata)
+meta_group_ok() { ! getent passwd "tando-m-$A" > /dev/null; }
+
 app_perms() { # the metadata group, its members, the modes of the app's files
-  local g=tando-m-$A f
-  # its gid from new_uid: never one of a destroyed app (retired), so no leftover file is this group's
-  getent group "$g" > /dev/null || groupadd --system -g "$(new_uid)" "$g" || die "groupadd $g failed"
-  id "${AU:-tando-$A}" &> /dev/null && usermod -aG "$g" "${AU:-tando-$A}"   # adopted apps keep their user
-  id "tando-d-$A" &> /dev/null && usermod -aG "$g" "tando-d-$A"
+  local g=tando-m-$A f du
+  if meta_group_ok; then
+    # its gid from new_uid: never one of a destroyed app (retired), so no leftover file is this group's
+    getent group "$g" > /dev/null || groupadd --system -g "$(new_uid)" "$g" || die "groupadd $g failed"
+    id "${AU:-tando-$A}" &> /dev/null && usermod -aG "$g" "${AU:-tando-$A}"   # adopted apps keep their user
+    du=$(deploy_user) && usermod -aG "$g" "$du"
+  else
+    # (the metadata stays root's alone: tando status works for the admin, not for the app's user)
+    echo "tando-agent: warning: $g is the user group of the app m-$A, so $A's settings and state are kept root's only (rename one of the two apps to fix it)" >&2
+    g=root
+  fi
   chown "root:$g" "$D"; chmod 751 "$D"      # others may pass through (Caddy, to a static release)
   for f in app.conf state activation upload history.tsv; do [[ -f $D/$f ]] && meta_mode "$D/$f" "$f"; done
   touch "$D/activation.log" "$D/lock" "$D/lease.lock"
@@ -248,15 +266,22 @@ EOF
   systemd-tmpfiles --create "$f" 2> /dev/null || true
 }
 
-# app_units: every unit of this app, loaded or on disk: tando-<app>.service and tando-<app>-<kind>...
-# A unit belongs to the app with the longest name it starts with, so destroying hello never
-# touches hello-2's units (tando-hello-2-job-x starts with tando-hello- too)
+# app_units: every unit of this app, loaded or on disk, but tando-<app>.service and its slice (the
+# callers name those): tando-<app>_job-<name>.* (exactly this app's: "_" is in no app name), and
+# tando-<app>-<kind>... (act, pre, rel, venv, shell, envcheck, backup, and jobs of the form before).
+# A job unit of the form before is the app's its service file names (old_job_owner); any other
+# unit belongs to the app with the longest name it starts with, so destroying hello never touches
+# hello-2's units (tando-hello-2-act-x starts with tando-hello- too). Every enumeration of an app's
+# units goes through here (destroy; sync_jobs has the same rules for the job units it replaces).
 app_units() {
   local u x best apps=()
   for x in "$R"/apps/*/app.conf; do x=${x%/app.conf}; apps+=("${x##*/}"); done
-  { systemctl list-units --all --plain --no-legend "tando-$A-*" 2> /dev/null | awk '{ print $1 }'
-    ls /etc/systemd/system 2> /dev/null | grep "^tando-$A-" ; } | sort -u |
+  { systemctl list-units --all --plain --no-legend "tando-$A-*" "tando-${A}_*" 2> /dev/null | awk '{ print $1 }'
+    for u in /etc/systemd/system/tando-"$A"-* /etc/systemd/system/tando-"$A"_*; do [[ ! -e $u ]] || echo "${u##*/}"; done; } | sort -u |
   while IFS= read -r u; do
+    # tando-<app>_...: the app is all before the "_" (tando-hello-2_job-x is hello-2's, never hello's)
+    if [[ $u == tando-*_* ]]; then x=${u%%_*}; [[ ${x#tando-} == "$A" ]] && echo "$u"; continue; fi
+    if x=$(old_job_owner "$u"); then [[ $x == "$A" ]] && echo "$u"; continue; fi
     best=""
     for x in "${apps[@]}"; do
       [[ ( $u == "tando-$x-"* || $u == "tando-$x."* ) && ${#x} -gt ${#best} ]] && best=$x   # (hello-2's own .service too)
@@ -1129,9 +1154,47 @@ lease_age() {
 # confined receiver: unit tando-rx-<app>@<nonce>, tando-rx-<app> before; list-units matches the
 # patterns against loaded units and loads none)
 upload_writing() {
-  pgrep -f "apps/$A/incoming" > /dev/null && return 0
+  [[ -n $(upload_pids) ]] && return 0
+  local rx; mapfile -t rx < <(rx_units)
   systemctl list-units --plain --no-legend --state=active,activating,deactivating \
-    "tando-rx-$A.service" "tando-rx-$A@*.service" 2> /dev/null | grepq .
+    "${rx[@]}" 2> /dev/null | grepq .
+}
+# rx_units: the patterns of this app's confined receivers; the old fixed name tando-rx-<app> only
+# while no app rx-<app> exists (that is its service: tando-gate's rxPatterns leave it out too)
+rx_units() {
+  [[ -f $R/apps/rx-$A/app.conf ]] || echo "tando-rx-$A.service"
+  echo "tando-rx-$A@*.service"
+}
+# upload_pids: the processes of the admin's rsync receiving into this app's incoming/ (the plain
+# upload: rsync over the admin's own ssh). Never by command line: any process, another app's too,
+# can put "apps/<app>/incoming" in its own. A receiver is a process whose executable is rsync,
+# whose real and effective user own incoming/ (the admin's user, root, or after `tando ci setup`
+# the deploy user), and that receives into incoming/: its working directory is incoming/ (rsync's
+# receiver and generator change into their destination once the file list is in), or, before
+# that, it is an rsync server (not a sender) whose destination, its last argument, is incoming/.
+# Only those users' own rsync says either, and no app user can make a process of the admin, root
+# or another app's deploy user: nothing of another app or user matches, whatever its arguments.
+# (pgrep -x rsync only narrows the list: a process can rename itself; the user, the executable
+# and the directory are read from /proc for each one.)
+upload_pids() {
+  local inc own p exe cwd l dst av=()
+  inc=$(readlink -e "$D/incoming") || return 0
+  own=$(stat -c %u "$inc") || return 0
+  for p in $(pgrep -U "$own" -u "$own" -x rsync 2> /dev/null); do
+    l=$(grep -m1 '^Uid:' "/proc/$p/status" 2> /dev/null) || continue
+    [[ $l =~ ^Uid:[[:space:]]+([0-9]+)[[:space:]]+([0-9]+) && ${BASH_REMATCH[1]} == "$own" && ${BASH_REMATCH[2]} == "$own" ]] || continue
+    exe=$(readlink "/proc/$p/exe" 2> /dev/null) || continue
+    exe=${exe% (deleted)}   # (rsync upgraded while it runs)
+    [[ $exe == /* && ${exe##*/} == rsync ]] || continue
+    cwd=$(readlink "/proc/$p/cwd" 2> /dev/null) || continue
+    if [[ $cwd != "$inc" && $cwd != "$inc"/* ]]; then
+      mapfile -d '' -t av < "/proc/$p/cmdline" 2> /dev/null || continue
+      ((${#av[@]} >= 3)) && [[ ${av[1]} == --server && " ${av[*]} " != *" --sender "* ]] || continue
+      dst=${av[${#av[@]} - 1]}; dst=${dst%/}
+      [[ $dst == "$D/incoming" || $dst == "$inc" ]] || continue
+    fi
+    echo "$p"
+  done
 }
 
 cmd_begin() { # app who [upload KB] -> token
@@ -1154,8 +1217,9 @@ cmd_begin() { # app who [upload KB] -> token
     local lage; lage=$(lease_age)
     if { [[ ${L[who]:-} == "$who" && $who != ci-* ]] && ((lage >= 5)); } || ((lage > 30)); then
       if upload_writing && ((lage > 30)) && [[ -z $(find "$D/incoming" -newermt '30 seconds ago' -print -quit 2> /dev/null) ]]; then
-        pkill -KILL -f "apps/$A/incoming" 2> /dev/null
-        systemctl kill -s KILL "tando-rx-$A.service" "tando-rx-$A@*.service" 2> /dev/null
+        local p; for p in $(upload_pids); do kill -KILL "$p" 2> /dev/null; done
+        local rx; mapfile -t rx < <(rx_units)
+        systemctl kill -s KILL "${rx[@]}" 2> /dev/null
         for _ in 1 2 3 4 5 6 7 8 9 10; do upload_writing || break; sleep 0.3; done
       fi
       upload_writing || { rm -f "$D/upload"; L=(); }
@@ -1176,11 +1240,12 @@ cmd_begin() { # app who [upload KB] -> token
   L=([token]=$(< /proc/sys/kernel/random/uuid) [who]=$who [started]=$(now) [started_ds]=$(ds))
   save "$D/upload" L || die "could not record the upload lease (disk full?): tando doctor"
   # an admin upload: no rsync of the app's deploy key (tando-gate) may still be writing incoming/
-  [[ $who == ci-* ]] || pkill -KILL -u "tando-d-$A" 2> /dev/null || true
+  local du; du=$(deploy_user)
+  [[ $who == ci-* || -z $du ]] || pkill -KILL -u "$du" 2> /dev/null || true
   echo "token=${L[token]}"
   # after `tando ci setup`, incoming/ belongs to the app's deploy user: the admin uploads as it
   local u; u=$(stat -c %U "$D/incoming")
-  if [[ $u == "tando-d-$A" ]]; then echo "upload_as=$u"; fi
+  if [[ -n $du && $u == "$du" ]]; then echo "upload_as=$u"; fi
 }
 
 cmd_end() { # app, token on stdin (or as argument): give the lease back (upload failed or interrupted)
@@ -1457,6 +1522,8 @@ cmd_info() {
   echo "version=$(cat "$R/VERSION" 2> /dev/null || echo unknown)"   # written by host setup
   echo "arch=$(uname -m)"
   echo "libc=$libc"
+  # (the client refuses a prebuilt native module that needs a newer glibc than this)
+  [[ $libc == glibc ]] && echo "glibc=$(getconf GNU_LIBC_VERSION 2> /dev/null | awk '{print $2}')"
   echo "apps_domain=${H[apps_domain]:-}"
   echo "tls=${H[tls]:-}"
   echo "sum=$(cksum < "$AGENT" | cut -d' ' -f1)"
@@ -1936,6 +2003,26 @@ cmd_doctor() {
 # ---- verbs: app lifecycle --------------------------------------------------------------
 
 # configure <app>: create the app if missing, apply settings read from stdin as key=value
+# name_free app: a new app's name must not make one of its names another's. App names may contain
+# "-", and tando names things tando-<app>, tando-<app>-<kind>, tando-d-<app>, tando-m-<app>:
+#   d-<x>, m-<x>      the user tando-d-x / group tando-m-x of app x (its deploy user, the group
+#                     that reads its settings and state)
+#   <x>-backup        app x's backup unit tando-x-backup.service and its timer
+#   rx-<x>, adopt-<x>, unadopt-<x>: app x's upload receiver (tando-rx-x.service) and adopt units
+#   watch, host, ...  tando's own units (tando-watch.service, tando-host.timer ...)
+# Apps that exist keep working (this is checked when an app is created).
+name_free() {
+  NAME_WHY=""
+  case $1 in
+    d-*|m-*) NAME_WHY="$1 is reserved (tando-$1 is the deploy user or settings group of an app ${1#?-})";;
+    rx-*|adopt-*|unadopt-*) NAME_WHY="$1 is reserved (tando-$1 is a unit tando uses for the app ${1#*-})";;
+    *-backup) NAME_WHY="$1 is reserved (tando-$1 is the backup unit of an app ${1%-backup})";;
+    watch|watch-fallback|host|host-boot|host-window|metrics|offsite|recover|firewall|down)
+      NAME_WHY="$1 is reserved (tando-$1 is one of tando's own units)";;
+  esac
+  [[ -z $NAME_WHY ]]
+}
+
 cmd_configure() {
   need_root
   valid_app "${1:-}" || die "invalid app name"
@@ -1959,6 +2046,7 @@ cmd_configure() {
     # a user of that name is only taken over when an earlier configure of this app made it and was
     # interrupted before app.conf existed (its marker .creating is in the app's directory)
     id "tando-$A" &> /dev/null && [[ ! -f $D/.creating ]] && die "user tando-$A exists but was not created by tando"
+    name_free "$A" || die "$NAME_WHY: choose another app name (app = in tando.conf)"
     new=1
   fi
   app_vars
@@ -1968,7 +2056,7 @@ cmd_configure() {
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" \
-    "C[release]" "C[release_shell]" "C[release_timeout]"
+    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -2015,9 +2103,15 @@ cmd_configure() {
       health_expect) [[ $v =~ ^([1-5]([0-9]{2}|xx))?( ?[\ -~]{1,100})?$ && -n $v && $v != *[\"\\]* ]] ||
                        die "bad health_expect: $v (like 200, 2xx or 200 ok)";;
       health_fails|health_recover) [[ $v =~ ^[1-9][0-9]?$ ]] || die "bad $k: $v (1 to 99)";;
+      # how long a job may run (sync_jobs), for all of the app's jobs or for one
+      job_timeout) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] && ((v <= 86400)) || die "bad job_timeout: $v (seconds, 1 to 86400)";;
+      job.*.timeout) x=${k#job.}; x=${x%.timeout}
+             [[ $x =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "bad job: $k"
+             [[ $v =~ ^[1-9][0-9]{0,4}$ ]] && ((v <= 86400)) || die "bad $k: $v (seconds, 1 to 86400)"
+             jobs+=("$k");;
       job.*) [[ ${k#job.} =~ ^[a-z][a-z0-9-]{0,20}$ && $v == *'|'* ]] || die "bad job: $k"
              systemd-analyze calendar "$(trim "${v%%|*}")" &> /dev/null || die "bad schedule for job ${k#job.}: $(trim "${v%%|*}")"
-             jobs+=("${k#job.}");;
+             jobs+=("$k");;
       # check=1: only validate and say whether the app exists (before a build); origin: where the
       # client deploys from (user@machine:directory), force=1: deploy although it differs
       check) check=1; continue;;
@@ -2032,6 +2126,9 @@ cmd_configure() {
     C[$k]=$v
   done <<< "$input"
   release_ok
+  for k in "${jobs[@]}"; do   # a timeout is for a job of this tando.conf
+    [[ $k != *.timeout || " ${jobs[*]} " == *" ${k%.timeout} "* ]] || die "$k is set but there is no ${k%.timeout}"
+  done
   if [[ -n $origin && -n ${C[origin]:-} && ${C[origin]} != "$origin" ]] && ((!force)); then
     die "$A on <host> was last deployed from ${C[origin]}, not from here ($origin). Deploy from here anyway: tando deploy --force (or tando up --force)"
   fi
@@ -2101,8 +2198,8 @@ cmd_configure() {
     rm -f "$D/.creating"
     flock -u 8
   fi
-  for k in "${!C[@]}"; do   # drop jobs no longer configured
-    [[ $k == job.* && " ${jobs[*]} " != *" ${k#job.} "* ]] && unset "C[$k]"
+  for k in "${!C[@]}"; do   # drop jobs (and their timeouts) no longer configured
+    [[ $k == job.* && " ${jobs[*]} " != *" $k "* ]] && unset "C[$k]"
   done
   [[ ${C[database]:-} == sqlite && -z ${C[data]:-} ]] && C[data]=data   # the file lives in data/
   if [[ -z ${C[backup]:-} && ( -n ${C[data]:-} || -n ${C[database]:-} ) ]]; then C[backup]=daily; fi
@@ -3443,7 +3540,7 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
     echo "data=$([[ -n ${C[data]:-}${C[data_dir]:-} ]] && du -sb "$ADATA" 2> /dev/null | cut -f1)"
     echo "database=${C[database]:-}"
     echo "backups=$(find "$BK/$A" -mindepth 1 -maxdepth 1 2> /dev/null | grep -c .)"
-    echo "jobs=$(printf '%s\n' "${!C[@]}" | grep -c '^job\.')"
+    echo "jobs=$(job_names | grep -c .)"
     echo "final=$(has_backup_data && echo 1 || echo 0)"
     return 0
   fi
@@ -3479,7 +3576,8 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
   if [[ ${C[recipe]:-node} == container ]]; then
     podman images --format '{{.Repository}}:{{.Tag}}' | grep "^localhost/tando-$A:" |
       xargs -r podman rmi -f > /dev/null 2>&1
-    rm -f "$R/run/$A-"*.env
+    # (run/<app>-<port>.env: the port by its digits, so app foo never takes foo-2's files)
+    for f in "$R/run/$A-"*.env; do [[ ${f#"$R/run/$A-"} =~ ^[0-9]+\.env$ ]] && rm -f "$f"; done
   fi
   [[ -x $LOGS ]] && "$LOGS" app-remove "$A" > /dev/null
   [[ -x $R/bin/tando-gate ]] && { $R/bin/tando-gate admin remove "$A" > /dev/null ||
@@ -3521,7 +3619,8 @@ cmd_unlock() { # app: clear an upload lease left by a client that went away
   fi
   echo "held=1"; echo "who=${L[who]}"; echo "age=$(lease_age)"
   rm -f "$D/upload"
-  pkill -KILL -u "tando-d-$A" 2> /dev/null || true   # end the deploy key's uploads with their lease
+  local du; du=$(deploy_user) && { pkill -KILL -u "$du" 2> /dev/null || true; }   # end the deploy key's uploads with their lease
+  return 0
 }
 
 # ---- verbs: views ----------------------------------------------------------------------
@@ -3955,7 +4054,7 @@ jobs_snap() { # id: record the jobs of app.conf (C) as release id's
   local k
   # (mkdir, never install -d: that would recreate an app directory a destroy has just removed)
   [[ -d $D/jobs ]] || { mkdir -m 700 "$D/jobs" && chown root:root "$D/jobs"; } || return 1
-  for k in "${!C[@]}"; do [[ $k != job.* ]] || printf '%s=%s\n' "$k" "${C[$k]}"; done | sort > "$D/jobs/$1.tmp" &&
+  for k in "${!C[@]}"; do ! job_key "$k" || printf '%s=%s\n' "$k" "${C[$k]}"; done | sort > "$D/jobs/$1.tmp" &&
     mv -f "$D/jobs/$1.tmp" "$D/jobs/$1" || { rm -f "$D/jobs/$1.tmp"; return 1; }
 }
 # The start command belongs to a release too ($D/start/<id>, readable by the app: exec-app runs as
@@ -3977,7 +4076,7 @@ start_back() { # live id
 }
 start_snap() { # id: record how release id starts (app.conf as it is now)
   local g=root
-  getent group "tando-m-$A" > /dev/null && g=tando-m-$A
+  getent group "tando-m-$A" > /dev/null && meta_group_ok && g=tando-m-$A
   [[ -d $D/start ]] || { mkdir -m 750 "$D/start" && chown "root:$g" "$D/start"; } || return 1
   printf 'start=%s\nstart_shell=%s\nhealth=%s\nhealth_expect=%s\n' "${C[start]:-}" "${C[start_shell]:-}" \
     "${C[health]:-}" "${C[health_expect]:-}" > "$D/start/$1.tmp" &&
@@ -3989,26 +4088,57 @@ jobs_follow() { # the job units become those of the current release (none withou
   local id=${S[current]:-} k
   local -A J=()
   if [[ -n $id && -f $D/jobs/$id ]]; then load "$D/jobs/$id" J
-  elif [[ -n $id ]]; then for k in "${!C[@]}"; do [[ $k == job.* ]] && J[$k]=${C[$k]}; done; fi
+  elif [[ -n $id ]]; then for k in "${!C[@]}"; do ! job_key "$k" || J[$k]=${C[$k]}; done; fi
   sync_jobs J
 }
+# job_key key: a setting that belongs to the jobs (and goes with a release): job.<name>,
+# job.<name>.timeout, job_timeout
+job_key() { [[ $1 == job.* || $1 == job_timeout ]]; }
+# job_names [array]: the names of the jobs in app.conf (or the array), sorted
+job_names() {
+  local -n _jn=${1:-C}
+  local k
+  for k in "${!_jn[@]}"; do [[ $k != job.* || $k == job.*.* ]] || echo "${k#job.}"; done | sort
+}
+# Job units are tando-<app>_job-<name>.service and .timer. "_" is in neither an app nor a job name,
+# so a unit name says exactly whose job it is. The form before, tando-<app>-job-<name>, did not:
+# app x-job-y's own service was also job y of app x, and app foo's glob tando-foo-job-* took the
+# timers of app foo-job (sync_jobs of foo deleted them). Units of that form are this app's only by
+# their runner line (old_job_owner), and sync_jobs replaces them with the new ones.
+job_unit() { echo "tando-${A}_job-$1"; }   # name -> unit name without .service/.timer
+JOB_TIMEOUT=3600   # seconds a job may run unless job_timeout or job.<name>.timeout says otherwise
+# old_job_owner unit: the app a unit of the form before belongs to, from the line its service file
+# was written with (ExecStart=<agent> run-job <app> <name>, which no other app's unit has); fails
+# for any other unit
+old_job_owner() {
+  local b=${1%.service} l a n x
+  b=${b%.timer}
+  [[ $b == tando-*-job-* && -f /etc/systemd/system/$b.service ]] || return 1
+  l=$(grep -m1 "^ExecStart=$AGENT run-job " "/etc/systemd/system/$b.service") || return 1
+  read -r _ _ a n x <<< "$l"
+  [[ -z $x && $b == "tando-$a-job-$n" ]] && valid_app "$a" && echo "$a"
+}
 # sync_jobs [array]: the units of exactly these jobs (default: app.conf's); only what differs is
-# written, systemd is reloaded once and only then, a timer is enabled only when it is not yet
+# written, systemd is reloaded once and only then, a timer is enabled only when it is not yet.
+# A job runs at most its timeout (job.<name>.timeout, else job_timeout, else JOB_TIMEOUT seconds):
+# TimeoutStartSec of its oneshot unit, so systemd ends it and records the result "timeout" (tando
+# jobs, tando jobs run and the job alert say so)
 sync_jobs() {
   local -n _jobs=${1:-C}
-  local k n f x cal want=" " changed=0 new=()
-  for k in "${!_jobs[@]}"; do
-    [[ $k == job.* ]] || continue
-    n=${k#job.}
+  local k n f x cal to b st want=" " changed=0 new=()
+  for n in $(job_names "${1:-C}"); do
+    k=job.$n
     cal=$(trim "${_jobs[$k]%%|*}")
     if ! systemd-analyze calendar "$cal" &> /dev/null; then
       echo "tando-agent: bad schedule for job $n: $cal (left out)" >&2; continue
     fi
+    to=${_jobs[$k.timeout]:-${_jobs[job_timeout]:-$JOB_TIMEOUT}}
+    [[ $to =~ ^[1-9][0-9]{0,4}$ ]] || to=$JOB_TIMEOUT
     want+="$n "
-    f=/etc/systemd/system/tando-$A-job-$n
+    b=$(job_unit "$n"); f=/etc/systemd/system/$b
     [[ -f $f.service && -f $f.timer ]] || changed=1
     { printf '[Unit]\nDescription=tando job %s %s\n\n[Service]\nType=oneshot\n' "$A" "$n"
-      printf 'ExecStart=%s run-job %s %s\nWorkingDirectory=%s\n' "$AGENT" "$A" "$n" "$(job_dir)"
+      printf 'ExecStart=%s run-job %s %s\nWorkingDirectory=%s\nTimeoutStartSec=%s\n' "$AGENT" "$A" "$n" "$(job_dir)" "$to"
       props - job
     } > "$f.service.new"
     printf '[Unit]\nDescription=tando job timer %s %s\n\n[Timer]\nOnCalendar=%s\nAccuracySec=1s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' \
@@ -4016,13 +4146,28 @@ sync_jobs() {
     for x in service timer; do
       if cmp -s "$f.$x.new" "$f.$x"; then rm -f "$f.$x.new"; else mv -f "$f.$x.new" "$f.$x"; changed=1; fi
     done
-    new+=("tando-$A-job-$n.timer")
+    new+=("$b.timer")
   done
-  for f in /etc/systemd/system/tando-"$A"-job-*.timer; do
+  # units of the form before that are this app's (migration): the new unit takes over the timer's
+  # last run (its stamp: a Persistent timer that missed a run while the server was off still runs
+  # it), then the old one goes; never another app's unit of a similar name
+  for f in /etc/systemd/system/tando-"$A"-job-*.service; do
     [[ -f $f ]] || continue
-    n=${f##*/tando-"$A"-job-}; n=${n%.timer}
+    b=${f##*/}; b=${b%.service}
+    [[ $(old_job_owner "$b") == "$A" ]] || continue
+    n=${b#tando-"$A"-job-}
+    st=/var/lib/systemd/timers/stamp-$b.timer
+    if [[ $want == *" $n "* && -f $st && ! -f /var/lib/systemd/timers/stamp-$(job_unit "$n").timer ]]; then
+      cp -p "$st" "/var/lib/systemd/timers/stamp-$(job_unit "$n").timer"
+    fi
+    systemctl disable -q --now "$b.timer" 2> /dev/null
+    rm -f "/etc/systemd/system/$b.timer" "$f" "$st"; changed=1
+  done
+  for f in /etc/systemd/system/tando-"$A"_job-*.timer; do
+    [[ -f $f ]] || continue
+    b=${f##*/}; b=${b%.timer}; n=${b#tando-"$A"_job-}
     [[ $want == *" $n "* ]] && continue
-    systemctl disable -q --now "tando-$A-job-$n.timer"
+    systemctl disable -q --now "$b.timer"
     rm -f "$f" "${f%.timer}.service"; changed=1
   done
   ((changed)) && systemctl daemon-reload
@@ -4047,15 +4192,15 @@ cmd_run_job() { # app name (as the app user)
   exec /bin/bash -c "${cmd#*|}"
 }
 
-# job-run <app> <name>: run a scheduled job now, in its own unit (tando-<app>-job-<name>.service:
+# job-run <app> <name>: run a scheduled job now, in its own unit (tando-<app>_job-<name>.service:
 # the fixed runner run-job and the job sandbox, props - job), wait for it, then print its output
 # (log=<line>, the last 200 lines of this run) and result=, status= (its exit status), secs=.
 # A run the timer started already is waited for, not doubled.
 cmd_job_run() {
   need_root; app "$1"
   local n=${2:-} u inv t0 l SAN
-  [[ $n =~ ^[A-Za-z0-9_-]{1,40}$ && -n ${C[job.$n]:-} ]] || die "$A has no job ${n//[^A-Za-z0-9_-]/?} (tando jobs lists them)"
-  u=tando-$A-job-$n.service
+  [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ && -n ${C[job.$n]:-} ]] || die "$A has no job ${n//[^A-Za-z0-9_-]/?} (tando jobs lists them)"
+  u=$(job_unit "$n").service
   [[ -f /etc/systemd/system/$u ]] ||
     die "job $n is not scheduled yet: jobs take effect with the first verified release that has them (tando up; tando status)"
   AUDIT_NOTE="job $n"
@@ -4076,6 +4221,7 @@ cmd_job_run() {
   fi
   echo "result=$(systemctl show -P Result "$u")"
   echo "status=$(systemctl show -P ExecMainStatus "$u")"
+  echo "timeout=$(systemctl show -P TimeoutStartUSec "$u")"
   echo "secs=$(el "$t0")"
   [[ $(systemctl show -P Result "$u") == success ]] || AUDIT_RESULT=1
   return 0
@@ -4083,14 +4229,17 @@ cmd_job_run() {
 
 cmd_jobs() {
   app "$1"
-  local k n line
+  local k n line last x
   declare -A U
-  for k in $(printf '%s\n' "${!C[@]}" | grep '^job\.' | sort); do
-    n=${k#job.}; U=()
+  for n in $(job_names); do
+    k=job.$n; U=()
     while IFS= read -r line; do U[${line%%=*}]=${line#*=}; done < <(
-      systemctl show --timestamp=unix -p NextElapseUSecRealtime,LastTriggerUSec "tando-$A-job-$n.timer"
-      systemctl show -p Result,ExecMainStatus "tando-$A-job-$n.service")
-    row job "$n" "$(trim "${C[$k]%%|*}")" "${U[NextElapseUSecRealtime]#@}" "${U[LastTriggerUSec]#@}" \
+      systemctl show --timestamp=unix -p NextElapseUSecRealtime,LastTriggerUSec "$(job_unit "$n").timer"
+      systemctl show --timestamp=unix -p Result,ExecMainStatus,ExecMainStartTimestamp "$(job_unit "$n").service")
+    # the last run: the timer's, or a later one by hand (tando jobs run) or as its timer does
+    last=${U[LastTriggerUSec]#@} x=${U[ExecMainStartTimestamp]#@}
+    [[ $x =~ ^[0-9]+$ ]] && { [[ ! $last =~ ^[0-9]+$ ]] || ((x > last)); } && last=$x
+    row job "$n" "$(trim "${C[$k]%%|*}")" "${U[NextElapseUSecRealtime]#@}" "$last" \
       "${U[Result]:-}" "${U[ExecMainStatus]:-}" "$(trim "${C[$k]#*|}")"
   done
 }
