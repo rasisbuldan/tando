@@ -2217,18 +2217,63 @@ link_shared() { # release dir
   fi
 }
 
-# next_images port release-dir: load sharp where the release ships it, then request every
-# /_next/image URL of the health page and the start page once (at most 60, for at most 60 s).
-# False, with PROBE_WHY, when sharp does not load or the optimiser answers 5xx.
+# next_images port release-dir: load sharp as Next itself finds it (Node's resolution from next's
+# own directory: a copy nested under node_modules/next/node_modules when the project asks for
+# another version), and every other copy the release ships, as the app's user in its sandbox;
+# (a copy whose entry file is not in the release is not counted: nothing can load it);
+# then request every /_next/image URL of the health page and the start page once (at most 60, for
+# at most 60 s). False, with PROBE_WHY, when a sharp does not load (which one, and whether it is
+# the one Next uses) or the optimiser answers 5xx.
 next_images() { # port release-dir
-  local base="http://127.0.0.1:$1" pg u code n=0 bad=0 first="" end sh err
+  local base="http://127.0.0.1:$1" pg u code n=0 bad=0 first="" end err out l rel=$2 others=()
   local -A seen=()
   # the module itself first: images already in the cache are served without it, so the requests
-  # below would not notice a sharp that cannot load (as the app's user, in its sandbox)
-  sh=$(find "$2" -maxdepth 4 -path '*/node_modules/sharp/package.json' -not -path '*/node_modules/*/node_modules/*' 2> /dev/null | head -1)
-  if [[ -n $sh ]] && command -v node > /dev/null; then
-    if ! err=$(as_app_unit node -e 'require(process.argv[1])' "${sh%/package.json}" 2>&1); then
-      PROBE_WHY="the image optimiser cannot start: sharp does not load in this release ($(grep -m1 -E 'Error|error' <<< "$err" | cut -c1-200)). A release built on another kind of machine needs sharp for this server's platform"
+  # below would not notice a sharp that cannot load
+  while IFS= read -r l; do others+=("${l%/package.json}"); done < <(
+    find "$rel" -path '*/node_modules/sharp/package.json' -not -path '*/.next/cache/*' 2> /dev/null | sort | head -20)
+  if command -v node > /dev/null && { ((${#others[@]})) || [[ -d $rel/node_modules/next ]]; }; then
+    # (node prints one line per copy: ok|bad <TAB> path <TAB> next|- <TAB> error; it reads only
+    # the paths given, and loads sharp the way the app does)
+    local js='
+      const path = require("path"), fs = require("fs"), { createRequire } = require("module");
+      const rel = process.argv[1];
+      const clean = (s) => String(s).split("\n")[0].replace(/[^\x20-\x7e]/g, "?").slice(0, 200);
+      const pkgDir = (f, name) => {   // the directory of the package that holds file f
+        for (let d = path.dirname(f); d !== path.dirname(d); d = path.dirname(d)) {
+          try { if (JSON.parse(fs.readFileSync(path.join(d, "package.json"))).name === name) return d; } catch (e) {}
+        }
+        return "";
+      };
+      let next = "", sharp = "";
+      try { next = pkgDir(require.resolve("next", { paths: [rel] }), "next"); } catch (e) {}
+      if (!next && fs.existsSync(path.join(rel, "node_modules/next/package.json"))) next = path.join(rel, "node_modules/next");
+      if (next) {
+        try { sharp = pkgDir(createRequire(path.join(next, "package.json")).resolve("sharp"), "sharp"); } catch (e) {}
+      }
+      const real = (p) => { try { return fs.realpathSync(p); } catch (e) { return ""; } };
+      sharp = sharp && real(sharp);
+      const all = [...new Set([sharp, ...process.argv.slice(2).map(real)].filter(Boolean))];
+      for (const p of all) {
+        const who = p === sharp ? "next" : "-";
+        // a copy without its entry file (Next traced only its package.json) is not loaded by
+        // anything; the copy Next resolves must load
+        if (who === "-") { try { require.resolve(p); } catch (e) { console.log(["skip", p, who, ""].join("\t")); continue; } }
+        try { require(p); console.log(["ok", p, who, ""].join("\t")); }
+        catch (e) { console.log(["bad", p, who, clean(e.message)].join("\t")); }
+      }'
+    out=$(as_app_unit node -e "$js" "$rel" ${others[@]+"${others[@]}"} 2>&1)
+    err=$(awk -F'\t' '$1 == "bad" { print; exit }' <<< "$out")
+    if [[ -n $err ]]; then
+      IFS=$'\t' read -r _ l u code <<< "$err"
+      l=${l#"$rel"/}; l=${l#"$(readlink -f "$rel")"/}
+      [[ $u == next ]] && u=" (the copy Next.js uses)" || u=""
+      n=$(grep -c '^bad' <<< "$out")
+      PROBE_WHY="the image optimiser cannot start: sharp does not load in this release: $l$u: ${code:0:200}"
+      ((n > 1)) && PROBE_WHY+=" ($((n - 1)) more copies do not load either)"
+      PROBE_WHY+=". A release built on another kind of machine needs sharp for this server's platform (docs/CROSS-ARCH.md)"
+      return 1
+    elif ! grep -qE '^(ok|skip)' <<< "$out" && ((${#others[@]})); then
+      PROBE_WHY="the image optimiser cannot start: sharp could not be checked in this release ($(head -c 200 <<< "$out" | tr '\n' ' '))"
       return 1
     fi
   fi

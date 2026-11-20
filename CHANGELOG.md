@@ -18,6 +18,39 @@ first, grouped by area.
 - Tests: the stand-in app of `test/e2e-adopt.sh` keeps connections alive again; the suite adds a
   kept-alive client, POSTs during a rollback (held, stored once), a reload during a restart, and
   the failed-reload cases.
+- Fixed: platform-specific npm packages nested at any depth (Next's own sharp under
+  `node_modules/next/node_modules`, when the project asks for another sharp version) are swapped for
+  the server's platform in their own `node_modules`; before, only `node_modules/<pkg>` and
+  `node_modules/@scope/<pkg>` were, and the guard then refused the deploy. Each swapped package is
+  one line in the deploy box. More families by the same rule (`os`/`cpu` in package.json): the
+  Next compiler, esbuild, Rollup, Lightning CSS, a Linux laptop of another CPU (docs/CROSS-ARCH.md).
+- Security: the version of a swapped package must be exact (no range, tag, URL, git or file spec)
+  and its name valid before `npm pack` runs (with `--ignore-scripts` and `--`). The fetched tarball
+  is checked against the sha512 in package-lock.json/npm-shrinkwrap.json (nested paths too),
+  yarn.lock (v1) or pnpm-lock.yaml; a mismatch stops the deploy. Without a lockfile tando can read
+  the box says `not verified` and why. `.tando/cache` keeps each tarball with its sha512 and fetches
+  again when the file changed.
+- Fixed: the Next.js pre-flight loads sharp as Next resolves it (from Next's own directory, as the
+  app's user in its sandbox), and every other copy in the release; the error names the copy that
+  failed. Before, it tried the first top-level copy only: a broken nested copy passed when the image
+  cache was warm, and a top-level copy that Next traced without its code (a devDependency of
+  another version) failed a good release.
+- Changed: when the guard refuses native code for another platform it lists every file, why tando
+  could not swap it, and what to do (nested copies, `images: { unoptimized: true }`, Prisma
+  `binaryTargets`, `tando ci github`); new docs/CROSS-ARCH.md.
+- Added: `tando deploy --dry-run` builds and stages, swaps, and prints the file count, the size,
+  the largest directories and what was swapped and verified; it uploads nothing, takes no lease,
+  installs nothing and creates no app (it reads the server's platform and whether the app exists).
+- Changed: `tando deploy` in a fresh clone (dependencies in package.json, no node_modules) stops
+  before anything else with the lockfile's install command (`run npm ci first`, pnpm, yarn, bun);
+  `tando up` and the pre-push hook's temporary checkout still install them.
+- Changed: `tando init --yes` prints the lines it added to next.config. Outside a terminal (CI, a
+  log) each deploy step prints a line when it starts. The stage line shows the release's size;
+  over 50 MB the deploy names the three largest directories.
+- Tests: fixture trees for the swap and the guard in `test/native-test.sh` (run by ui-test);
+  e2e-next deploys a project with Next's sharp nested (dry run, deploy, broken nested copy);
+  e2e and e2e-cli cover the dry run, the start lines, the size line and the fresh-clone stop.
+
 - Changed: `tando adopt apply` refuses to start when the hand-written Caddy site does not hold
   requests while the app restarts (no `lb_try_duration`), and `tando adopt plan` says what that
   costs and which command adds it. On the first real server 36 requests got 502 because the hold
