@@ -2878,8 +2878,9 @@ cmd_exec_release() {
   app "$1"
   local dir=${2:-} argv
   [[ $dir == "$D"/releases/* && $dir != *..* ]] || die "bad dir"
-  [[ -n ${C[release]:-} ]] || die "no release command"
   cd "$dir" || die "no release"
+  rel_conf "${dir##*/}"     # (its own settings: app.conf is the live release's until the switch)
+  [[ -n ${C[release]:-} ]] || die "no release command"
   [[ ${C[recipe]:-} == python && -d $dir/.venv ]] && export VIRTUAL_ENV=$dir/.venv PATH="$dir/.venv/bin:$PATH"
   if [[ ${C[release_shell]:-} == true ]]; then exec /bin/sh -c "${C[release]}"; fi
   read -ra argv <<< "${C[release]}"
@@ -4655,12 +4656,10 @@ cmd_exec_app() {
   local dir=${2:-$D/current} argv
   [[ $dir == "$D/current" || $dir == "$D"/releases/* ]] || die "bad dir"
   cd "$dir" || die "no release"
-  # the release's own start command, when a later deploy has changed app.conf since (start_snap)
+  # the release's own settings (start command, recipe...), when app.conf describes another one:
+  # a release in its pre-flight, or one a later deploy changed app.conf for (start_snap)
   local rid; rid=$(pwd -P); rid=${rid##*/}
-  if valid_id "$rid" && [[ -r $D/start/$rid ]]; then
-    local -A RS=(); load "$D/start/$rid" RS
-    if [[ -n ${RS[start]:-} ]]; then C[start]=${RS[start]} C[start_shell]=${RS[start_shell]:-}; fi
-  fi
+  rel_conf "$rid"
   case ${C[recipe]:-node} in
     container) exec_container "$dir";;
     next) export HOSTNAME=127.0.0.1;;      # Next standalone binds to $HOSTNAME
@@ -4757,6 +4756,19 @@ start_snap() { # id: record release id's settings (app.conf, C, as it is now)
     [[ $(head -1 "$D/start/$1.tmp") == conf=1 ]] &&
     chown "root:$g" "$D/start/$1.tmp" && chmod 640 "$D/start/$1.tmp" &&
     mv -f "$D/start/$1.tmp" "$D/start/$1" || { rm -f "$D/start/$1.tmp"; return 1; }
+}
+# rel_conf id: C takes release id's own settings (start/<id>); a file from before conf=1: its
+# start command only
+rel_conf() {
+  local k
+  valid_id "${1:-}" && [[ -r $D/start/$1 ]] || return 0
+  local -A RS=(); load "$D/start/$1" RS
+  if [[ ${RS[conf]:-} == 1 ]]; then
+    for k in "${!C[@]}"; do conf_key "$k" && unset "C[$k]"; done
+    for k in "${!RS[@]}"; do conf_key "$k" && C[$k]=${RS[$k]}; done
+  elif [[ -n ${RS[start]:-} ]]; then C[start]=${RS[start]} C[start_shell]=${RS[start_shell]:-}
+  fi
+  return 0
 }
 # conf_key key: a setting of tando.conf (what configure takes from the client): it belongs to a
 # release. The rest of app.conf is the server's own (port, created, domains, origin, adopt's)
