@@ -1896,8 +1896,11 @@ fw_sync() {
     u=$(id -u "$u" 2> /dev/null) || continue
     for x in "$p" "$sp"; do [[ ", ${own[$u]:-}, " == *", $x, "* ]] || own[$u]+="${own[$u]:+, }$x"; done
     # PostgreSQL only for apps with a database: another app could hold every connection slot
-    # (connections that never answer the password request) and starve them
-    [[ $db == postgres ]] && pgu[$u]=1
+    # (connections that never answer the password request) and starve them. A deploy's settings
+    # staged in confs/ count too: a release that adds the database reaches it from its pre-flight
+    # on, before app.conf takes its settings at the switch (a failed deploy's stay open a day at most)
+    [[ $db == postgres ]] || db=$(grep -shx 'database=postgres' "$R/apps/$a/confs/"* | head -1)
+    [[ ${db#database=} == postgres ]] && pgu[$u]=1
   done
   unset 'outside[2019]'
   others=""; for x in "${!outside[@]}"; do others+=", $x"; done
@@ -3078,13 +3081,18 @@ cmd_run_activation() {
   if has_unit && ! own_listener "${C[port]}" "tando-$A.service" && [[ $PROBE_WHY == *"outside"* ]]; then
     fail "port ${C[port]} is held by another process, not by tando-$A: nothing was switched ($PROBE_WHY)"
   fi
-  local bk=""
+  # the backup is of what the live release has, by its settings (LC): a database or data directory
+  # this release adds has nothing in it yet to keep (and the app's user may reach PostgreSQL only
+  # from this deploy on)
+  local bk="" brc=0
+  # shellcheck disable=SC2034  # NC2 is read by conf_copy through its nameref
+  local -A NC2=(); conf_copy C NC2; conf_copy LC C; app_vars
   if has_backup_data; then
     # (in this shell, not $(...): backup_take records last_backup in the state)
-    { fp sw.backup && backup_take predeploy > /dev/null 2> "$D/backup.err"; } ||
-      fail "the pre-deploy backup failed, so the release was not switched in: $(tail -c 300 "$D/backup.err" | tr '\n' ' ')"
-    bk=$BK_ID
+    { fp sw.backup && backup_take predeploy > /dev/null 2> "$D/backup.err"; } && bk=$BK_ID || brc=1
   fi
+  conf_copy NC2 C; app_vars
+  ((!brc)) || fail "the pre-deploy backup failed, so the release was not switched in: $(tail -c 300 "$D/backup.err" | tr '\n' ' ')"
   # the release command (migrations): after the pre-flight passed and the backup was taken, before
   # the switch. Its time is its own phase; the switch phase is what came before it plus the switch
   if [[ -n ${C[release]:-} ]]; then

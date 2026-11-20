@@ -6,6 +6,13 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: adding `database = postgres` to an app already deployed without one failed the deploy
+  ("the pre-deploy backup failed ... pg_dump: connection refused") since settings are applied at the
+  switch: the backup dumped the new database as the app's user, whose loopback rule (made from the
+  live app.conf) still refused port 5432. The pre-deploy backup now keeps what the live release has
+  (no database yet: nothing to dump), and the per-app loopback rules let the app's user reach
+  PostgreSQL as soon as a deploy's staged settings ask for it, so the new release's pre-flight
+  already has a working `DATABASE_URL`.
 - Added: fingerprinted assets of the last releases stay reachable. After a deploy, a browser still
   holding a page of the old release (or a CDN, or a slow client mid-load) asked for the old
   release's hashed files (`/_next/static/<build>/...`, `/assets/index-<hash>.js`) and got a 404,
