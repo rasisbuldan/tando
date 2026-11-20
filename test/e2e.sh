@@ -368,6 +368,33 @@ check "21d a unit that gave up: 503 \"unavailable\" at once, not a held request 
 "$R" env unset CRASH_VERSION >&2
 check "21e env unset restarts it and proxying resumes (v$live)" eqv "$live"
 
+# 21f. an app with no release yet (first deploy still running, or failed): 503 "being deployed"
+# at once with Retry-After, not a held request and an empty 502; the page goes away by itself when
+# the first release is live. (hello keeps its release throughout: it never gets the page)
+cp -R "$W/hello" "$W/shop" && sed -i.bak 's/^app = hello/app = shop/' "$W/shop/tando.conf"
+rm -f "$W/shop/blob.bin"; echo 1 > "$W/shop/VERSION"   # (UNHEALTHY_VERSION below is this number)
+( cd "$W/shop" || exit 1
+  "$R" env set UNHEALTHY_VERSION=1 >&2
+  "$R" up --yes > "$E/shop1.out" 2>&1 )
+nl=$(curl -s -D "$E/shop.hdr" -o "$E/shop.body" -w '%{http_code} %{time_total}' -m 5 http://shop.localhost:$HP/)
+check "21f first deploy failed, nothing live: 503 \"shop is being deployed\" at once with Retry-After ($nl)" \
+  eval 'echo "$nl" | grep -qE "^503 0\.[0-4]" && grep -q "shop is being deployed" "$E/shop.body" &&
+        grep -qi "^retry-after: 10" "$E/shop.hdr" && grep -qi "^content-type: text/html" "$E/shop.hdr" &&
+        ! grep -qiE "/opt/|tando" "$E/shop.body"'
+check "21f the page is not another app's and hello still answers v$live" eqv "$live"
+( cd "$W/shop" || exit 1
+  "$R" env unset UNHEALTHY_VERSION >&2
+  "$R" env set SLOW_START=8 >&2
+  "$R" up --yes > "$E/shop2.out" 2>&1 ) &
+shop_up=$!
+# while the first release is being brought up it is the same page (until the link switches)
+shop_503() { curl -s -m 5 http://shop.localhost:$HP/ | grep -q "shop is being deployed"; }
+check "21f during the first deploy the page is served" until_ 30 shop_503
+wait $shop_up
+shop_live() { [ "$(curl -s -m 5 http://shop.localhost:$HP/)" = "hello v1 greeting=" ]; }
+check "21f first release live: the page is gone and the app answers" until_ 30 shop_live
+( cd "$W/shop" && echo shop | "$R" destroy --purge >&2 )
+
 # 3f. healthy in pre-flight but failing after the switch: automatic rollback
 port=$(srv "sudo sed -n 's/^port=//p' /opt/tando/apps/hello/app.conf")
 "$R" env set "UNHEALTHY_VERSION=8@$port" >&2; setv 8

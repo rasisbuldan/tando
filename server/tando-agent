@@ -750,6 +750,20 @@ write_caddy() {
     echo "		}"
     echo "	}"
     echo "	respond @tandohost 400"
+    # Before the first release is live ($D/current is made when it switches) a visitor gets a 503
+    # "being deployed" page, not a 502 after the hold or a 404. Caddy looks for the link on each
+    # request (the file matcher), so the page goes away by itself when the release switches in,
+    # with no site rewrite or reload; an app with a release never matches it (a later failed
+    # deploy keeps serving the old one). Not while the stopped or down page is the answer.
+    if [[ -z ${S[stopped]:-}${S[down]:-} ]]; then
+      echo "	@tandonew not file {"
+      echo "		root $D"
+      echo "		try_files current/"
+      echo "	}"
+      echo "	header @tandonew Retry-After 10"
+      echo "	header @tandonew Content-Type \"text/html; charset=utf-8\""
+      echo "	respond @tandonew \"<!doctype html><meta charset=utf-8><title>$A is being deployed</title><h1>$A is being deployed</h1><p>The first version is on its way. Try again in a few seconds.</p>\" 503"
+    fi
     if [[ -n ${S[stopped]:-} ]]; then
       echo "	header Retry-After 60"
       echo "	respond \"$A is stopped\" 503"

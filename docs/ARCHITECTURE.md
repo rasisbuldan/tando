@@ -183,7 +183,11 @@ server has a public address, else `localhost`) plus the app's own domains in the
 Caddyfile before the reload and rolled back if Caddy rejects it.
 Caddy modes per app: proxy (holding requests up to 15 s while the process restarts), file_server
 (static), `503 stopped` (after `tando stop`; the unit is disabled), `503 unavailable` (set by
-`app-down` when the unit has failed for good; cleared by the next start, restart or deploy).
+`app-down` when the unit has failed for good; cleared by the next start, restart or deploy),
+`503 being deployed` (while the app has no release yet, from the site's setup until its first
+release switches in, and again if it ends with none; a small HTML page with `Retry-After: 10`). The
+last one is a Caddy `file` matcher on the app's `current` link, looked at on each request: the page
+goes away by itself when the link appears, with no site rewrite and no reload.
 
 ## Trust boundaries
 - Loopback: Caddy's admin API is on a unix socket in /run/caddy (caddy and root only), never on
