@@ -392,24 +392,29 @@ n7=$(reqlines)
 curl -s --connect-to "req.localhost:80:127.0.0.1:$HP" "http://req.localhost/status/200?[1-100]" > /dev/null
 curl -s --connect-to "req.localhost:80:127.0.0.1:$HP" "http://req.localhost/status/404?[1-40]" > /dev/null
 curl -s --connect-to "req.localhost:80:127.0.0.1:$HP" "http://req.localhost/status/500?[1-20]" > /dev/null
-curl -s --connect-to "req.localhost:80:127.0.0.1:$HP" "http://req.localhost/sleep/100?[1-30]" > /dev/null
-curl -s --connect-to "req.localhost:80:127.0.0.1:$HP" "http://req.localhost/sleep/300?[1-10]" > /dev/null
-t_until 15 eval '[ "$(reqlines)" -ge '"$((n7 + 200))"' ]'   # all 200 requests are in the log
+curl -s --connect-to "req.localhost:80:127.0.0.1:$HP" "http://req.localhost/sleep/100?[1-40]" > /dev/null
+curl -s --connect-to "req.localhost:80:127.0.0.1:$HP" "http://req.localhost/sleep/300?[1-5]" > /dev/null
+t_until 15 eval '[ "$(reqlines)" -ge '"$((n7 + 205))"' ]'   # all 205 requests are in the log
 win=$(( $(date +%s) - T7 + 2 )); [ "$win" -lt 60 ] && win=60
 root /opt/tando/bin/tando-agent req-summary req "$win" > "$E/sum"
 kv() { sed -n "s/^$1=//p" "$E/sum"; }
-check "7a counts: total 200, 2xx 140, 4xx 40, 5xx 20" \
-  test "$(kv total) $(kv c2xx) $(kv c4xx) $(kv c5xx)" = "200 140 40 20"
+check "7a counts: total 205, 2xx 145, 4xx 40, 5xx 20" \
+  test "$(kv total) $(kv c2xx) $(kv c4xx) $(kv c5xx)" = "205 145 40 20"
 codes_ok() {
-  grep -q '^code	200	140$' "$E/sum" && grep -q '^code	404	40$' "$E/sum" && grep -q '^code	500	20$' "$E/sum"
+  grep -q '^code	200	145$' "$E/sum" && grep -q '^code	404	40$' "$E/sum" && grep -q '^code	500	20$' "$E/sum"
 }
-check "7b status codes 200:140 404:40 500:20" codes_ok
+check "7b status codes 200:145 404:40 500:20" codes_ok
 p50=$(kv p50_ms) p95=$(kv p95_ms) p99=$(kv p99_ms)
 log "p50 $p50 ms, p95 $p95 ms, p99 $p99 ms, max $(kv max_ms) ms"
-check "7c percentiles plausible (p50 < 20 ms, p95 ~100 ms, p99 ~300 ms)" awk -v a="$p50" -v b="$p95" -v c="$p99" \
-  'BEGIN { exit !(a < 20 && b >= 95 && b <= 130 && c >= 290 && c <= 360) }'
-check "7d paths: /sleep/:n 40 requests, /status/:n 160 with 20 5xx" sh -c "
-  grep -q '^path	GET /sleep/:n	40	' '$E/sum' && grep -q '^path	GET /status/:n	160	.*	20\$' '$E/sum'"
+# (160 quick requests, 40 of 100 ms, 5 of 300 ms: in order of time the 95th percentile is the
+# 194th of 205, inside the 100 ms group, and the 99th the 202nd, inside the 300 ms group; each
+# is checked to be in its group. A request can only get slower, never faster, than its sleep, so
+# a loaded machine moves values up inside a group; the old traffic put the 95th percentile on
+# the edge of two groups, and a few slow quick requests moved it into the next one)
+check "7c percentiles in their group (p50 quick < 50 ms, p95 in the 100 ms group, p99 in the 300 ms group)" \
+  awk -v a="$p50" -v b="$p95" -v c="$p99" 'BEGIN { exit !(a < 50 && b >= 95 && b < 290 && c >= 295 && c < 1000) }'
+check "7d paths: /sleep/:n 45 requests, /status/:n 160 with 20 5xx" sh -c "
+  grep -q '^path	GET /sleep/:n	45	' '$E/sum' && grep -q '^path	GET /status/:n	160	.*	20\$' '$E/sum'"
 check "7e per-minute counts add up" test "$(kv counts | tr ',' '\n' | awk '{ s += $1 } END { print s }')" = 200
 check "7f 5xx per-minute counts add up" test "$(kv counts_5xx | tr ',' '\n' | awk '{ s += $1 } END { print s }')" = 20
 for w in 80 120; do
