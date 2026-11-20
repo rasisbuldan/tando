@@ -179,5 +179,51 @@ check "N9b the same code without the break deploys (rc=$rc)" test $rc = 0 -a "$(
 COLUMNS=120 "$R" ls > "$E/ls.out" 2>&1; cat "$E/ls.out" >&2
 check "N6 ls shows the link with its path" grep -q "nextdemo.localhost:$HP/demo" "$E/ls.out"
 
+# N10. the project asks for another sharp than Next does (a devDependency here): npm nests Next's
+#      own copy under node_modules/next/node_modules (with its platform packages, depth 4). The
+#      deploy swaps it there and verifies it against package-lock.json; a dry run says so and sends
+#      nothing; the pre-flight loads the copy Next resolves, and names it when it is broken
+log "npm install --save-dev sharp@0.34.5 (Next keeps its own 0.35)"
+npm install --no-audit --no-fund --save-dev sharp@0.34.5 > "$E/npm2.out" 2>&1 || { cat "$E/npm2.out" >&2; exit 1; }
+nested=""
+for p in node_modules/next/node_modules/@img/sharp-[dlw]*-*; do
+  case $p in *libvips*) ;; *) [ -d "$p" ] && nested=$p && break;; esac
+done
+check "N10a npm nested Next's sharp ($nested)" test -n "$nested" -a -f node_modules/next/node_modules/sharp/package.json
+here=$(uname -s | tr 'A-Z' 'a-z')-$(uname -m | sed 's/x86_64/x64/; s/aarch64/arm64/')
+# a deploy box as one line: box_say wraps long lines between words
+flat() { sed -E 's/^[^ ]+ +//; s/ +[^ ]+$//' "$1" | tr '\n' ' ' | tr -s ' '; }   # (the borders: first and last word)
+up_t=$(srv "sudo stat -c %Y $A/upload 2> /dev/null; sudo ls $A/releases | wc -l; sudo cat $A/history.tsv | wc -l" | tr '\n' ' ')
+"$R" deploy --dry-run > "$E/dry.out" 2>&1; rc=$?; cat "$E/dry.out" >&2
+if [ "$here" = "linux-$cpu" ]; then
+  echo "SKIP N10b this machine is linux-$cpu like the server: nothing to swap"
+else
+  check "N10b dry run: the nested package is swapped at its depth, verified against package-lock.json (rc=$rc)" \
+    eval '[ $rc = 0 ] && flat "$E/dry.out" | grep -q "swapped node_modules/next/node_modules/@img/sharp-[a-z]*-[a-z0-9]* for @img/sharp-linux-$cpu 0.35.5, verified against package-lock.json" &&
+          grep -q "dry run: nothing was uploaded" "$E/dry.out"'
+fi
+check "N10c the dry run left nothing on the server: no lease, no release, no history line ($up_t)" \
+  test "$(srv "sudo stat -c %Y $A/upload 2> /dev/null; sudo ls $A/releases | wc -l; sudo cat $A/history.tsv | wc -l" | tr '\n' ' ')" = "$up_t"
+echo "export const VERSION = '3';" > version.js
+"$R" deploy > "$E/d-nested.out" 2>&1; rc=$?; cat "$E/d-nested.out" >&2
+check "N10d deploy with Next's nested sharp goes live (rc=$rc, version $(version)); nothing for another platform staged" \
+  eval '[ $rc = 0 ] && [ "$(version)" = 3 ] && [ -d .tando/stage/node_modules/next/node_modules/@img/sharp-linux-$cpu ] &&
+        ! find .tando/stage -name "*darwin*" -o -name "*win32*" | grep -q .'
+cp tando.conf "$E/tando.conf.keep"
+b=$(sed -n 's/^build *= *//p' tando.conf)
+grep -v '^build *=' tando.conf > tando.conf.tmp && echo "build = ${b:-npm run build} && sh break-sharp.sh" >> tando.conf.tmp && mv tando.conf.tmp tando.conf
+cat > break-sharp.sh <<'SH'
+p=.next/standalone/node_modules/next/node_modules/sharp/package.json
+node -e 'const fs = require("fs"), path = require("path"), p = process.argv[1];
+  const main = JSON.parse(fs.readFileSync(p)).main || "index.js";
+  fs.writeFileSync(path.join(path.dirname(p), main), "throw new Error(\"no sharp for this platform\")\n");' "$p"
+SH
+echo "export const VERSION = '4';" > version.js
+"$R" deploy > "$E/d-nested-bad.out" 2>&1; rc=$?; cat "$E/d-nested-bad.out" >&2
+check "N10e a broken copy that Next uses (nested) fails the pre-flight, named as Next's copy (rc=$rc, still 3)" \
+  eval '[ $rc -ne 0 ] && grep -q "5/7  preflight" "$E/d-nested-bad.out" &&
+        flat "$E/d-nested-bad.out" | grep -q "node_modules/next/node_modules/sharp (the copy Next.js uses)" && [ "$(version)" = 3 ]'
+cp "$E/tando.conf.keep" tando.conf; rm -f break-sharp.sh
+
 echo "$FAILS failed"
 [ $FAILS -eq 0 ]

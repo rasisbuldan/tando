@@ -15,6 +15,7 @@ Read in this order if you are new.
 | [BACKUP.md](BACKUP.md) | Backups, offsite copies (R2 or any S3 storage) and recovery |
 | [HOSTCARE.md](HOSTCARE.md) | Looking after the server: updates, reboots, host checks |
 | [CI.md](CI.md) | Deploying from GitHub Actions with a restricted key |
+| [CROSS-ARCH.md](CROSS-ARCH.md) | Building on a Mac, running on Linux: native npm packages, what is swapped and verified |
 | [TOP.md](TOP.md) | `tando top`, the live dashboard |
 | [MIGRATION.md](MIGRATION.md) | Taking over an app that was deployed by hand |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How the pieces fit: the client, the agent, the server programs, the files on the server |

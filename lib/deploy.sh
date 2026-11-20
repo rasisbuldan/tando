@@ -265,6 +265,7 @@ show_phases() {
       phase_line $n $ph fail "$t"
     else
       phase_line $n $ph ok "$t"
+      phase_after "$ph"
     fi
     SHOWN="$SHOWN $ph"
     n=$((n + 1))
@@ -320,7 +321,10 @@ dir_lock() {
 }
 
 # node_install: the command that installs a Node project's dependencies when node_modules is
-# missing (a fresh clone), "" when nothing is to install; fails with the exact fix when it cannot
+# missing (a fresh clone), "" when nothing is to install, by the project's lockfile. Runs before
+# anything else of a deploy: tando deploy (and --dry-run) stops here with the command to run
+# (it does not change the project's tree); tando up and the pre-push hook's temporary checkout
+# (TANDO_ORIGIN) install them. Fails with the exact fix when the command is not installed.
 node_install() {
   NODE_INSTALL=""
   [ -f package.json ] || return 0
@@ -330,8 +334,14 @@ node_install() {
   [ -d node_modules ] && return 0
   if [ -f pnpm-lock.yaml ]; then NODE_INSTALL="pnpm install --frozen-lockfile"
   elif [ -f yarn.lock ]; then NODE_INSTALL="yarn install --frozen-lockfile"
-  elif [ -f package-lock.json ]; then NODE_INSTALL="npm ci"
+  elif [ -f bun.lock ] || [ -f bun.lockb ]; then NODE_INSTALL="bun install --frozen-lockfile"
+  elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then NODE_INSTALL="npm ci"
   else NODE_INSTALL="npm install"; fi
+  if [ -z "${UP:-}${TANDO_ORIGIN:-}" ] || [ -n "${DRY_RUN:-}" ]; then
+    local again="tando deploy"; [ -z "${DRY_RUN:-}" ] || again="tando deploy --dry-run"
+    die "node_modules is missing (a fresh clone?): run $NODE_INSTALL first, then $again" \
+      "(tando up runs it for you)"
+  fi
   command -v "${NODE_INSTALL%% *}" > /dev/null ||
     die "package.json lists dependencies but node_modules is missing, and ${NODE_INSTALL%% *} is not installed here: install Node.js, then run $NODE_INSTALL"
 }
@@ -344,7 +354,7 @@ next_standalone() {
   cfg=$(next_config)
   [ -n "$cfg" ] && grep -q "$re" "$cfg" && return 0
   # (lib/build.sh) asks, or with --yes edits the real file or writes next.config.mjs
-  if [ -n "$YES" ] || [ -t 0 ]; then init_next; fi
+  if [ -z "${DRY_RUN:-}" ] && { [ -n "$YES" ] || [ -t 0 ]; }; then init_next; fi
   cfg=$(next_config)
   [ -n "$cfg" ] && grep -q "$re" "$cfg" && return 0
   die "Next.js needs  output: \"standalone\"  in ${cfg:-next.config.mjs} (tando ships .next/standalone):" \
@@ -452,7 +462,9 @@ dockerfile_port() {
 
 do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) when missing
   local t0 id errs=0 ph n l existed=1 current=""
-  BUILD_SECS=0 BUILD_SUMMARY="" STAGE_NOTE="" SWAPPED="" VENV_SHOWN=""
+  BUILD_SECS=0 BUILD_SUMMARY="" STAGE_NOTE="" SWAPPED="" VENV_SHOWN="" STARTED=""
+  # a fresh clone: before anything is asked of the server (tando up installs the dependencies)
+  node_install
   agent info > "$TMPD/info"
   kv_read "$TMPD/info" arch libc version
   version_notice "$K_version"
@@ -465,10 +477,16 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   if [ -z "${DEPLOY_KEY:-}" ]; then
     configure check
     existed=$K_exists current=$K_current
-    runtimes
+    # (a dry run installs nothing on the server: it says what tando up or deploy would install)
+    if [ -n "${DRY_RUN:-}" ]; then
+      [ -z "$K_needs" ] || note "dry run: the deploy would install $K_needs on $HOST first"
+    else
+      runtimes
+    fi
     # domains of tando.conf the app does not have yet: DNS first, before anything is built
     NEW_DOMAINS=""
     local d
+    [ -z "${DRY_RUN:-}" ] || C_domain=""   # (domains: tando domain add checks their DNS)
     for d in $C_domain; do
       case ",$K_domains," in *",$d,"*) ;; *) NEW_DOMAINS="$NEW_DOMAINS $d";; esac
     done
@@ -488,15 +506,17 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
       for d in $C_domain; do case " $DNS_LATER " in *" $d "*) ;; *) ok="$ok $d";; esac; done
       C_domain=${ok# }
     fi
-    [ "$existed" = 1 ] || [ -n "${UP:-}" ] ||
+    if [ -n "${DRY_RUN:-}" ] && [ "$existed" != 1 ]; then
+      note "dry run: $APP is not on $HOST yet (tando up creates it); building and staging it here, creating nothing there"
+    fi
+    [ "$existed" = 1 ] || [ -n "${UP:-}" ] || [ -n "${DRY_RUN:-}" ] ||
       die "$APP is not on $HOST (never created, or destroyed): tando up creates it"
   fi
-  target_guard
+  [ -n "${DRY_RUN:-}" ] || target_guard   # (a dry run deploys nowhere: the last target stays)
   dir_lock
   next_standalone
-  node_install
   phases_init
-  ui_box_open "deploy $APP" "$HOST"
+  ui_box_open "${DRY_RUN:+dry run: }deploy $APP" "$HOST"
   t0=$(clock)
 
   if [ -n "$NODE_INSTALL" ]; then
@@ -513,6 +533,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
     box_say "" "        installed dependencies: $NODE_INSTALL, here" \
       "(node_modules was missing$lock; $(ui_dur "$(since "$ti")"))"
   fi
+  needs_build && step_start "build: running ${C_build:-$ENGINE build} here"
   if ! needs_build; then
     phase_line 1 build skip "" "nothing to build (no build in tando.conf)"
   elif run_build; then
@@ -530,13 +551,21 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
     exit 1
   fi
 
-  local t files stage_secs
+  local t files stage_secs kb
+  step_start "stage: copying the release into $STAGE, then the checks"
   t=$(clock)
   stage
   stage_secs=$(since "$t")
   files=$(find "$STAGE" -type f | wc -l | tr -d ' ')
-  phase_line 2 stage ok "$stage_secs" "$(plural "$files" file)${SWAPPED:+, $SWAPPED for $K_arch}"
+  kb=$(du -sk "$STAGE" 2> /dev/null | awk '{ print $1 }')
+  phase_line 2 stage ok "$stage_secs" "$(plural "$files" file), $(ui_bytes $(( ${kb:-0} * 1024 )))${SWAPPED:+, $SWAPPED for $K_arch}"
   [ -n "$STAGE_NOTE" ] && ui_box_line "         $STAGE_NOTE"
+  swap_lines
+  if [ -n "${DRY_RUN:-}" ]; then dry_run_report "$files" "${kb:-0}"; return 0; fi
+  # a large release (over 50 MB): where its size is, one line
+  if [ "${kb:-0}" -gt 51200 ]; then
+    box_say "$UI_DIM" "        over 50 MB; largest: $(stage_largest 3 | awk -F'\t' '{ printf "%s%s %s", (NR > 1 ? ", " : ""), $1, $2 }')"
+  fi
 
   if [ -z "${DEPLOY_KEY:-}" ]; then   # create the app now that there is something to deploy
     configure
@@ -544,6 +573,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
     [ "$K_created" = 1 ] && : > "$TMPD/created"
   fi
 
+  step_start "upload: sending the changes to $HOST"
   upload
   phase_line 3 upload ok "$UPLOAD_SECS" "$(plural "${UPLOAD_FILES:-0}" file) changed, $(ui_bytes "${UPLOAD_BYTES:-0}") sent"
   local build_total
@@ -561,6 +591,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
     return 0
   fi
   ui_box_line "        release $id"
+  phase_start copy
 
   # follow the activation; it runs on the server whether or not we keep watching
   trap 'echo; note "detached: release $id keeps activating on the server; follow it with tando status --watch 2"; exit 130' INT TERM
@@ -663,6 +694,59 @@ after_live() {
     else note "job $n ($cal): scheduled once this release is verified"; fi
   done < "$TMPD/jobs"
   return 0
+}
+
+# step_start text: outside a terminal (CI, a log file) one line when a step starts, so a long
+# upload, pre-flight or verify is not a silent wait; a terminal shows only the result lines
+step_start() {
+  [ "${UI_ISTTY:-0}" = 1 ] && return 0
+  box_say "$UI_DIM" "        $*"
+}
+# phase_after phase: the phase after it (in PHASES) has started
+phase_after() {
+  local p prev=""
+  for p in $PHASES; do [ "$prev" = "$1" ] && { phase_start "$p"; return 0; }; prev=$p; done
+}
+# phase_start phase: step_start for one of the server's phases, once
+phase_start() {
+  local t
+  case " $STARTED " in *" $1 "*) return 0;; esac
+  case $1 in
+    copy) t="copy: the server copies the upload into a new release";;
+    preflight) t="pre-flight: the new release starts on a spare port; its health check (up to ${C_timeout:-60} s)";;
+    release) t="release: running the release command on the server (up to ${C_release_timeout:-300} s)";;
+    switch) t="switch: traffic moves to the new release";;
+    verify) t="verify: checking the live release through Caddy";;
+    *) return 0;;
+  esac
+  STARTED="$STARTED $1"
+  step_start "$t"
+}
+
+# stage_largest n: the n largest directories of the staged release (each npm package on its own,
+# else the top-level directory), as path<TAB>size
+stage_largest() {
+  ( cd "$STAGE" 2> /dev/null || exit 0
+    { find . -mindepth 1 -maxdepth 1 -type d ! -name node_modules
+      [ -d node_modules ] && find node_modules -mindepth 1 -maxdepth 2 -type d ! -name '.*' |
+        awk -F/ '$2 ~ /^@/ ? NF == 3 : NF == 2'
+    } | sed 's|^\./||' > "$TMPD/dirs"
+    [ -s "$TMPD/dirs" ] || exit 0
+    tr '\n' '\0' < "$TMPD/dirs" | xargs -0 du -sk 2> /dev/null ) |
+    sort -rn | head -"$1" | while IFS=$'\t' read -r k p; do printf '%s\t%s\n' "$p" "$(ui_bytes $(( k * 1024 )))"; done
+}
+
+# dry_run_report files kb: what tando deploy --dry-run built and staged; nothing was sent
+dry_run_report() {
+  local p s
+  ui_box_line "        $(plural "$1" file), $(ui_bytes $(( $2 * 1024 ))) in $STAGE"
+  stage_largest 5 > "$TMPD/largest"
+  if [ -s "$TMPD/largest" ]; then
+    ui_box_line "        largest:"
+    while IFS=$'\t' read -r p s; do box_say "$UI_DIM" "          $s  $p"; done < "$TMPD/largest"
+  fi
+  [ -s "$TMPD/swaps" ] || box_say "$UI_DIM" "        no platform packages to swap for $K_arch"
+  ui_box_close "dry run: nothing was uploaded; tando deploy sends it"
 }
 
 plural() { if [ "$1" = 1 ]; then printf '1 %s' "$2"; else printf '%s %ss' "$1" "$2"; fi; }

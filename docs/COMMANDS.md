@@ -65,7 +65,8 @@ static), start command and health path (`/api/health` or `/health` when the proj
 route), and suggests `database = postgres` when `pg`/`postgres`/psycopg is a dependency. With one
 server registered (or `-H`) it writes `host = <name>`. For Next.js it offers to add
 `output: "standalone"` to next.config.*, or to write next.config.mjs when there is none (`--yes`
-does it); declining does not fail init (tando.conf is written; deploy checks again).
+does it, and prints the lines it added with their numbers); declining does not fail init
+(tando.conf is written; deploy checks again).
 Example: `tando init && cat tando.conf`
 
 ### up
@@ -76,7 +77,7 @@ the app was last deployed from another directory. `--wait`: as for `deploy`.
 Example: `cd my-app && tando up`
 
 ### deploy
-`tando deploy [-a app] [-H host] [--force] [--yes] [--wait]`. Arguments: none.
+`tando deploy [-a app] [-H host] [--force] [--yes] [--wait] [--dry-run]`. Arguments: none.
 Build here, upload changes, start the release on a spare port, health-check, switch, check again
 through Caddy, then a soak (30 s, `soak = N`) in which a crash rolls back. Returns once live;
 `--wait` (or `TANDO_WAIT=1`) waits for the soak. `--force`: another directory deployed last;
@@ -87,6 +88,18 @@ finds another one's release soaking is queued and says what it waits for. While 
 (also from another terminal of the same user) is uploading, a deploy is refused at once.
 `release = <command>` in tando.conf runs once per deploy on the server, between pre-flight and
 switch (database migrations): see [The release command](#the-release-command).
+`--dry-run`: build and stage here, swap the platform packages, then print the file count, the
+size, the five largest directories and each swapped package with whether it was verified against
+the lockfile. Nothing is uploaded: no lease, no configure, no runtime install, no release; the
+server is only asked for its platform and whether the app exists (`configure check`). An app that
+does not exist yet is staged all the same (`tando up` creates it). The last deploy target of the
+directory is not changed.
+A fresh clone (dependencies in package.json, no node_modules) stops before anything else with the
+lockfile's install command (`npm ci`, `pnpm install --frozen-lockfile`, `yarn install
+--frozen-lockfile`, `bun install --frozen-lockfile`); `tando up` and the pre-push hook run it.
+Output: the stage line shows the files and the size; each swapped npm package is one line (yellow
+when not verified; docs/CROSS-ARCH.md); a release over 50 MB names its three largest directories.
+Outside a terminal (CI, a log file) every step prints a line when it starts.
 Note: `-a` is accepted but not in the usage line (mismatch 8).
 Example: `tando deploy`
 
