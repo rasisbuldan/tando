@@ -46,6 +46,8 @@ Release command (not static, not container)
   release_timeout seconds, 1-3600 (default 300)
 Jobs
   job.<name>      <schedule> | <command>, like daily | node nightly.js
+  job_timeout     seconds any job may run, 1-86400 (default 3600)
+  job.<name>.timeout  seconds for one job
 Domains
   domain          domains, separated by spaces or commas
   www             redirect | serve | off (by name; domain add says why)

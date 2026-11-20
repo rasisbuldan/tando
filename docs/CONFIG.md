@@ -108,6 +108,8 @@ Runs on the server once per deploy, before the switch (migrations). Not for `sta
 | Key | Type | Default | Unit | Meaning | Example |
 |---|---|---|---|---|---|
 | `job.<name>` | text | none | | A scheduled job: `<schedule> \| <command>`. The schedule is a systemd calendar expression (`daily`, `*-*-* 03:00`, `hourly`); the name is lower case letters, digits and `-`. One line per job. | `job.nightly = daily \| node scripts/nightly.js` |
+| `job_timeout` | number | `3600` | seconds | Longest any of the app's jobs may run, 1 to 86400; past it the job is stopped and its result is `timeout`. | `job_timeout = 600` |
+| `job.<name>.timeout` | number | `job_timeout` | seconds | The same for one job, 1 to 86400. | `job.nightly.timeout = 7200` |
 
 ## Domains
 
