@@ -94,6 +94,9 @@ test/lint*               lint
 test/go.sh               go
 test/ui-test*            ui-test lint
 test/native-test.sh      ui-test lint
+test/detect-test.sh      ui-test lint
+test/fixtures/apps/*     ui-test e2e-frameworks
+test/e2e-frameworks.sh   e2e-frameworks lint
 test/pty-run.sh          ui-test e2e-top lint
 test/top-pty.py          e2e-top
 test/install-test.sh     install-test lint

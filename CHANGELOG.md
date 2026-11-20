@@ -14,6 +14,26 @@ first, grouped by area.
 - Tests: `test/e2e-upgrade.sh`, the upgrade from 0.1.1 to this tree on a server with live apps
   (`host setup` keeps every app serving and running; then every command on the apps 0.1.1
   deployed; a 0.1.1 deploy cut off across the upgrade is recovered by the new agent).
+- Added: `tando init` (and so a bare `tando up`) knows common frameworks and says what it found
+  and why, in one line: `detected: Vite + Vue (vite in package.json, vue-router, package-lock.json),
+  build: npm run build, start: none (Caddy serves the files), output: dist, SPA`. Before, every app
+  with a package.json became a Node app started with `node server.js`, which was wrong for Vite,
+  Astro, Nuxt, SvelteKit and NestJS. Now: Express, Fastify, Koa, Hono (start script, main or entry
+  file), NestJS (`node dist/main`), Nuxt (`.output`), SvelteKit with adapter-node (`node build`),
+  Astro static (`dist`) and SSR (`@astrojs/node`), React Router / Remix (`npm start`), Vite with
+  Vue, React or Svelte (a static site from `dist` or the config's `outDir`), Django, FastAPI and
+  Flask. A monorepo root is refused with its packages and where to run `tando init`. The table:
+  docs/RECIPES.md.
+- Added: `spa = true` for a static single-page app: a path that is not a file gets `index.html`, so
+  deep links of a client-side router (`/about/team`) work. `tando init` sets it for a Vite app with
+  a router dependency (vue-router, react-router, ...).
+- Added: Yarn 2+ installs with `yarn install --immutable`; pnpm and Yarn 2+ fall back to corepack
+  when the command is not installed; Yarn Plug'n'Play is refused with the line to add
+  (`nodeLinker: node-modules`); `.node-version` is read like `.nvmrc`.
+- Changed: Next.js without `output: "standalone"` is refused before the dependencies are
+  installed, and the message says why (measured on a small app: 56 MB and 1,900 files in the
+  release, against 360 MB and 9,000 files for `next start` with all of node_modules).
+
 - Fixed: adding `database = postgres` to an app already deployed without one failed the deploy
   ("the pre-deploy backup failed ... pg_dump: connection refused") since settings are applied at the
   switch: the backup dumped the new database as the app's user, whose loopback rule (made from the

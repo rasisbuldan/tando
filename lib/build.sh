@@ -11,6 +11,105 @@ next_config() { ls next.config.js next.config.mjs next.config.ts next.config.cjs
 # the first file of a list that exists
 first_file() { local f; for f; do [ -f "$f" ] && { echo "$f"; return 0; }; done; return 1; }
 
+# ---- package.json, read without Node (grep and sed on the file; no network, no npm) --------
+
+# pkg_dep name...: one of the names is a key in package.json (dependencies, devDependencies)
+pkg_dep() {
+  local d
+  for d; do grep -q "\"$d\"[[:space:]]*:" package.json && return 0; done
+  return 1
+}
+# pkg_obj key: the inside of the top-level object "key": { ... } of package.json (one line)
+pkg_obj() { tr -d '\n\r' < package.json | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*{\([^}]*\)}.*/\1/p"; }
+# pkg_script name: the command of scripts.<name> (fails when there is none)
+pkg_script() {
+  local s
+  s=$(pkg_obj scripts | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+  [ -n "$s" ] && printf '%s\n' "$s"
+}
+# pkg_str key: a top-level string of package.json (main)
+pkg_str() { tr -d '\n\r' < package.json | sed -n "s/^[[:space:]]*{[[:space:]]*\(.*\)/\1/p" |
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"; }
+
+# node_start: start for a plain Node app (and the file it runs in entry): the start script when
+# it is `node <file>`, a server.js, index.js, app.js or main.js, the main of package.json, or
+# npm start; why says which
+node_start() {
+  local s m
+  s=$(pkg_script start 2> /dev/null || true)
+  case $s in
+    "node "*) set -- $s
+      if [ $# = 2 ] && [ -f "$2" ]; then start=$s entry=$2 why="${why:+$why, }start script"; return 0; fi;;
+  esac
+  if [ -n "$entry" ]; then start="node $entry" why="${why:+$why, }$entry"; return 0; fi
+  [ -f package.json ] && m=$(pkg_str main)
+  if [ -n "$m" ] && [ -f "$m" ]; then start="node $m" entry=$m why="${why:+$why, }main $m"; return 0; fi
+  if [ -n "$s" ]; then start="npm start" why="${why:+$why, }start script"; return 0; fi
+  start="node server.js"
+  note "node: no start script, main, server.js, index.js, app.js or main.js: set  start = node <file>  in tando.conf"
+}
+
+# node_pm: the package manager the lockfile names (what tando up installs the dependencies with)
+node_pm() {
+  if [ -f pnpm-lock.yaml ]; then echo pnpm-lock.yaml
+  elif [ -f yarn.lock ] && [ -f .yarnrc.yml ]; then echo "yarn.lock, Yarn 2+"
+  elif [ -f yarn.lock ]; then echo yarn.lock
+  elif [ -f bun.lock ] || [ -f bun.lockb ]; then echo bun.lock
+  elif [ -f package-lock.json ]; then echo package-lock.json
+  else echo "no lockfile: npm"; fi
+}
+
+# node_framework: a Node framework whose build, start and output tando knows (the first that
+# matches, by its dependency in package.json); sets recipe, build, start, out, fw, why, spa.
+# A workspace root (a monorepo) stops here: which package to deploy cannot be guessed.
+node_framework() {
+  local b=npm\ run\ build v
+  pkg_script build > /dev/null || b=""
+  if [ -f pnpm-workspace.yaml ] || [ -n "$(tr -d '\n\r' < package.json | sed -n 's/.*"workspaces"[[:space:]]*:[[:space:]]*\([[{]\).*/\1/p')" ]; then
+    v=$(for d in */*/package.json; do [ -f "$d" ] && printf '%s ' "${d%/package.json}"; done)
+    d=${v%% *}
+    die "this is a monorepo (a workspace root${v:+ with ${v% }}): tando deploys one app from its own" \
+      "directory, with its dependencies installed there. Run tando init in that directory" \
+      "(cd ${d:-apps/web}); deploying a workspace package from the root is not supported yet"
+  fi
+  if pkg_dep nuxt; then
+    recipe=node fw=Nuxt why="nuxt in package.json" build=${b:-npx nuxt build} out=.output start="node server/index.mjs"
+  elif pkg_dep @sveltejs/adapter-node; then
+    recipe=node fw=SvelteKit why="@sveltejs/adapter-node in package.json" build=${b:-npx vite build} start="node build"
+  elif pkg_dep @sveltejs/kit; then
+    die "SvelteKit without @sveltejs/adapter-node: tando runs it with Node. Install it" \
+      "(npm i -D @sveltejs/adapter-node) and set  adapter: adapter()  from it in svelte.config.js, then tando init"
+  elif pkg_dep @astrojs/node; then
+    recipe=node fw="Astro (SSR)" why="@astrojs/node in package.json" build=${b:-npx astro build} \
+      start="HOST=127.0.0.1 node dist/server/entry.mjs" shell=1
+  elif pkg_dep @react-router/serve @remix-run/serve; then
+    recipe=node fw="React Router (Remix)" why="$(pkg_dep @react-router/serve && echo @react-router/serve || echo @remix-run/serve) in package.json" \
+      build=$b start="npm start"
+    pkg_script start > /dev/null || start="npx react-router-serve ./build/server/index.js"
+  elif pkg_dep @nestjs/core; then
+    recipe=node fw=NestJS why="@nestjs/core in package.json" build=${b:-npx nest build} start="node dist/main"
+    v=$(pkg_script start:prod 2> /dev/null || true)
+    case $v in "node "*) start=$v;; esac
+  elif pkg_dep astro; then
+    recipe=static fw="Astro (static)" why="astro in package.json" build=${b:-npx astro build} out=dist
+  elif pkg_dep vite && ! entry=$(first_file server.js index.js app.js main.js); then
+    recipe=static build=${b:-npx vite build} out=dist fw=Vite why="vite in package.json"
+    if pkg_dep @vitejs/plugin-vue; then fw="Vite + Vue"
+    elif pkg_dep @vitejs/plugin-react @vitejs/plugin-react-swc; then fw="Vite + React"
+    elif pkg_dep @sveltejs/vite-plugin-svelte; then fw="Vite + Svelte"; fi
+    v=$(ls vite.config.js vite.config.mjs vite.config.ts vite.config.mts 2> /dev/null | head -1)
+    [ -n "$v" ] && v=$(sed -n "s/.*outDir:[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" "$v" | head -1)
+    case $v in ""|/*|*..*) ;; *) out=${v#./};; esac
+    # a client-side router in history mode: deep links (/about/team) are the app's, not files
+    for v in vue-router react-router-dom react-router @tanstack/react-router svelte-routing @solidjs/router; do
+      pkg_dep "$v" && { spa=1 why="$why, $v"; break; }
+    done
+  else
+    return 1
+  fi
+  return 0
+}
+
 # detection order: next, node, python, container (Dockerfile), static
 cmd_init() {
   [ -f tando.conf ] && { note "tando.conf exists"; return 0; }
@@ -28,26 +127,35 @@ cmd_init() {
     set -- "$CFG"/hosts/*
     [ $# -eq 1 ] && [ -f "$1" ] && host=${1##*/}
   fi
-  if [ -f package.json ] && grep -q '"next"[[:space:]]*:' package.json; then
-    recipe=next build="npm run build" start="node server.js"
+  local fw="" why="" spa="" v
+  if [ -f package.json ] && pkg_dep next; then
+    recipe=next build="npm run build" start="node server.js" fw=Next.js why="next in package.json"
     cfg=$(next_config)
     if [ -n "$cfg" ]; then
       path=$(sed -n "s/.*basePath:[[:space:]]*['\"]\(\/[^'\"]*\)['\"].*/\1/p" "$cfg" | head -1)
     fi
+    out=.next   # (shown in the detected line; tando.conf has no out for next)
+  elif [ -f package.json ] && node_framework; then
+    :   # (a framework with a known build, start and output: node_framework set them)
   elif entry=$(first_file server.js index.js app.js main.js) || [ -f package.json ]; then
-    recipe=node
-    [ -f package.json ] && grep -q '"build"[[:space:]]*:' package.json && build="npm run build"
-    if [ -n "$entry" ]; then start="node $entry"
-    elif grep -q '"start"[[:space:]]*:' package.json; then start="npm start"
-    else start="node server.js"; note "node: no server.js, index.js, app.js or main.js; check start"; fi
+    recipe=node fw=Node.js why=package.json
+    [ -f package.json ] || why=$entry
+    if [ -f package.json ]; then
+      pkg_script build > /dev/null && build="npm run build"
+      for v in Express:express Fastify:fastify Koa:koa Hono:hono hapi:@hapi/hapi; do
+        pkg_dep "${v#*:}" && { fw=${v%%:*} why="${v#*:} in package.json"; break; }
+      done
+    fi
+    node_start
     node_port_hint "$entry"
   elif entry=$(first_file app.py main.py wsgi.py asgi.py) || [ -f requirements.txt ] || [ -f pyproject.toml ]; then
-    recipe=python start="python ${entry:-app.py}"
+    recipe=python start="python ${entry:-app.py}" fw=Python why="${entry:-requirements.txt}"
     python_start "${entry:-app.py}"
-    [ -f requirements.txt ] || note "python: no requirements.txt; the server builds the virtualenv from it"
+    [ -f requirements.txt ] || [ -f pyproject.toml ] ||
+      note "python: no requirements.txt; the server builds the virtualenv from it"
     [ -n "$entry$shell" ] || note "python: no app.py, main.py, wsgi.py or asgi.py; check start"
   elif [ -f Dockerfile ]; then
-    recipe=container
+    recipe=container fw=container why=Dockerfile
     note "container: the image is built here for the server's platform (docker or podman needed)"
     cport=$(dockerfile_port Dockerfile)
     [ -n "$cport" ] && note "container: the Dockerfile EXPOSEs $cport, so container_port = $cport"
@@ -56,7 +164,14 @@ cmd_init() {
     for out in dist public build .; do [ -f "$out/index.html" ] && break; done
     [ -f "$out/index.html" ] || die "cannot tell what this is: no package.json, Node or Python entry file," \
       "Dockerfile or index.html (tando recipes lists what each recipe looks for)"
+    fw="static site" why="$out/index.html"
   fi
+  case $recipe in node|next) v=$(first_file .nvmrc .node-version) || { grep -q '"engines"' package.json 2> /dev/null && v="engines in package.json"; };; *) v="";; esac
+  [ -f package.json ] && why="$why, $(node_pm)"
+  note "detected: $fw ($why), build: ${build:-none}, start: ${start:-none (Caddy serves the files)}," \
+    "output: $out${spa:+, SPA (unknown paths get index.html)}${v:+, Node $(node_major) ($v)}"
+  [ "$recipe" = next ] && out=.
+  [ "$recipe" = static ] || [ ! -f .yarnrc.yml ] || (yarn_pnp) || true   # (says what to add; deploy refuses)
   if [ "$recipe" != static ]; then
     health=$(health_path "$entry")
     if [ "$health" = / ]; then
@@ -79,6 +194,7 @@ cmd_init() {
     [ "$out" != . ] && echo "out = $out"
     [ -n "$start" ] && echo "start = $start"
     [ -n "$shell" ] && echo "start_shell = true"
+    [ -n "$spa" ] && echo "spa = true"
     [ -n "$cport" ] && echo "container_port = $cport"
     [ -n "$path" ] && echo "path = $path"
     [ "$recipe" = next ] && echo "writable = .next/server/route-cache .next/server/app"
@@ -191,13 +307,15 @@ python_start() {
     for v in ./*/wsgi.py; do [ -f "$v" ] && break; v=""; done
     v=${v#./}; v=${v%/wsgi.py}
     [ -n "$v" ] || return 0
-    start="gunicorn -b 127.0.0.1:\$PORT $v.wsgi" pkg=gunicorn
+    start="gunicorn -b 127.0.0.1:\$PORT $v.wsgi" pkg=gunicorn fw=Django why="manage.py, $v/wsgi.py"
+    note "django: ALLOWED_HOSTS must list the app's domain; for its static files set STATIC_ROOT and" \
+      "  release = python manage.py collectstatic --noinput  in tando.conf"
   elif printf '%s' "$reqs" | grepq 'fastapi' || grepq 'FastAPI(' "$1" 2> /dev/null; then
     v=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=[[:space:]]*FastAPI(.*/\1/p' "$1" 2> /dev/null | head -1)
-    start="uvicorn $m:${v:-app} --host 127.0.0.1 --port \$PORT" pkg=uvicorn
+    start="uvicorn $m:${v:-app} --host 127.0.0.1 --port \$PORT" pkg=uvicorn fw=FastAPI why="fastapi, $1"
   elif printf '%s' "$reqs" | grepq 'flask' || grepq 'Flask(' "$1" 2> /dev/null; then
     v=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=[[:space:]]*Flask(.*/\1/p' "$1" 2> /dev/null | head -1)
-    start="gunicorn -b 127.0.0.1:\$PORT $m:${v:-app}" pkg=gunicorn
+    start="gunicorn -b 127.0.0.1:\$PORT $m:${v:-app}" pkg=gunicorn fw=Flask why="flask, $1"
   else
     grep -q 'environ' "$1" 2> /dev/null ||
       note "python: listen on the port in os.environ[\"PORT\"] (tando gives the app one and blocks the others)"
@@ -205,7 +323,7 @@ python_start() {
   fi
   shell=1
   note "python: start = $start (bound to the PORT tando gives the app)"
-  printf '%s\n' "$reqs" | grepq "^$pkg" ||
+  printf '%s\n' "$reqs" | grepq -E "(^|[\"' ])$pkg" ||
     note "  add $pkg to requirements.txt: the server installs the venv from it"
 }
 
@@ -334,6 +452,9 @@ stage() {
     *)
       [ -d "$out" ] || sfail "out directory not found: $out"
       [ "$C_recipe" = python ] && ex+=(--exclude=/.venv --exclude=__pycache__ '--exclude=*.pyc')
+      # fsevents is macOS only (an optional dependency of vite, rollup, chokidar: they run without
+      # it); its Mach-O file would stop the release at the native-code guard
+      ex+=(--exclude=node_modules/fsevents)
       sync_dir "$out" "$STAGE" "${ex[@]}" --exclude=/.tando --exclude=/tando.conf
       if [ -n "$C_data" ] && [ -e "$out/$C_data" ]; then
         STAGE_NOTE="$C_data/ not uploaded: it is the app's data directory on the server"

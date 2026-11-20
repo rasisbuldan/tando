@@ -318,6 +318,16 @@ else
     echo "native: ${nt_n% *} checks, ${nt_n#* } failed"
 fi
 
+# ---- what tando init detects for each framework fixture (test/detect-test.sh: test/fixtures/apps)
+dt=$("$BASH_BIN" "$here/test/detect-test.sh" 2>&1)
+printf '%s\n' "$dt" | grep '^FAIL' || true
+dt_n=$(printf '%s\n' "$dt" | sed -n 's/^detect: \([0-9]*\) checks, \([0-9]*\) failed$/\1 \2/p')
+if [[ -z $dt_n ]]; then bad "detect-test.sh did not finish: $(printf '%s\n' "$dt" | tail -3)"
+else
+    checks=$((checks + ${dt_n% *})); fails=$((fails + ${dt_n#* }))
+    echo "detect: ${dt_n% *} checks, ${dt_n#* } failed"
+fi
+
 # ---- tando.conf: the client's parser, the server's configure, docs/CONFIG.md and `tando help conf`
 # list the same keys. The keys are read from the code (the arms of the two `case $k in`), not from
 # a list kept here: a key added to either without a row in docs/CONFIG.md and a line in

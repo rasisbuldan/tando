@@ -22,6 +22,7 @@ configure() {
     # soak: seconds a new release must stay up after going live (TANDO_SOAK: tests use a short one)
     [ -n "${C_soak:-${TANDO_SOAK:-}}" ] && printf 'soak=%s\n' "${C_soak:-$TANDO_SOAK}"
     [ -n "$C_path" ] && printf 'path=%s\n' "$C_path"
+    [ "${C_spa:-}" = true ] && printf 'spa=true\n'   # (an older agent knows no spa: sent only when on)
     [ -n "$C_data" ] && printf 'data=%s\n' "$C_data"
     if [ -n "$C_writable" ]; then printf 'writable=%s\n' "$C_writable"
     elif [ "$C_recipe" = next ]; then   # regenerated (ISR) pages: Next 16 and Next 14/15 locations
@@ -146,8 +147,8 @@ agent_wait() {
 # engines.node in package.json; else the current LTS the server would install
 node_major() {
   local v=$C_node n
-  if [ -z "$v" ] && [ -f .nvmrc ]; then
-    v=$(tr -d ' v\r' < .nvmrc | head -1); v=${v%%.*}
+  if [ -z "$v" ] && n=$(first_file .nvmrc .node-version); then
+    v=$(tr -d ' v\r' < "$n" | head -1); v=${v%%.*}
     case $v in lts*|node|"") v="";; esac
   fi
   if [ -z "$v" ] && [ -f package.json ]; then
@@ -345,11 +346,14 @@ dir_lock() {
 node_install() {
   NODE_INSTALL=""
   [ -f package.json ] || return 0
-  case $C_recipe in node|next) ;; *) return 0;; esac
-  # "dependencies": { } with at least one entry
-  tr -d '\n' < package.json | grepq '"dependencies"[[:space:]]*:[[:space:]]*{[[:space:]]*"' || return 0
+  # (a static site built from package.json, like Vite or Astro, needs them for its build)
+  case $C_recipe in node|next) ;; static) [ -n "$C_build" ] || return 0;; *) return 0;; esac
+  # "dependencies" or "devDependencies": { } with at least one entry
+  tr -d '\n' < package.json | grepq -E '"(dependencies|devDependencies)"[[:space:]]*:[[:space:]]*\{[[:space:]]*"' || return 0
+  yarn_pnp
   [ -d node_modules ] && return 0
   if [ -f pnpm-lock.yaml ]; then NODE_INSTALL="pnpm install --frozen-lockfile"
+  elif [ -f yarn.lock ] && [ -f .yarnrc.yml ]; then NODE_INSTALL="yarn install --immutable"   # (Yarn 2+)
   elif [ -f yarn.lock ]; then NODE_INSTALL="yarn install --frozen-lockfile"
   elif [ -f bun.lock ] || [ -f bun.lockb ]; then NODE_INSTALL="bun install --frozen-lockfile"
   elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then NODE_INSTALL="npm ci"
@@ -359,8 +363,20 @@ node_install() {
     die "node_modules is missing (a fresh clone?): run $NODE_INSTALL first, then $again" \
       "(tando up runs it for you)"
   fi
+  # pnpm and Yarn 2+ come with Node as corepack shims: used when the command itself is not installed
+  case $NODE_INSTALL in pnpm*|"yarn install --immutable")
+    command -v "${NODE_INSTALL%% *}" > /dev/null || ! command -v corepack > /dev/null || NODE_INSTALL="corepack $NODE_INSTALL";;
+  esac
   command -v "${NODE_INSTALL%% *}" > /dev/null ||
     die "package.json lists dependencies but node_modules is missing, and ${NODE_INSTALL%% *} is not installed here: install Node.js, then run $NODE_INSTALL"
+}
+
+# yarn_pnp: Yarn 2+ with Plug'n'Play has no node_modules, which is what tando ships
+yarn_pnp() {
+  [ -f .yarnrc.yml ] || return 0
+  grep -q '^nodeLinker:[[:space:]]*["'"'"']*\(node-modules\|pnpm\)' .yarnrc.yml && return 0
+  die "Yarn Plug'n'Play: tando ships node_modules, which PnP does not make. Add  nodeLinker: node-modules" \
+    "to .yarnrc.yml, run yarn install, then deploy again"
 }
 
 # next_standalone: Next.js must build with output: "standalone" (tando ships .next/standalone).
@@ -374,8 +390,9 @@ next_standalone() {
   if [ -z "${DRY_RUN:-}" ] && { [ -n "$YES" ] || [ -t 0 ]; }; then init_next; fi
   cfg=$(next_config)
   [ -n "$cfg" ] && grep -q "$re" "$cfg" && return 0
-  die "Next.js needs  output: \"standalone\"  in ${cfg:-next.config.mjs} (tando ships .next/standalone):" \
-    "add it inside its config object, or run tando up --yes to let tando add it"
+  die "Next.js needs  output: \"standalone\"  in ${cfg:-next.config.mjs}: tando ships .next/standalone, the" \
+    "files the server needs (a small app: 56 MB and 1,900 files, against 360 MB and 9,000 with next start" \
+    "and all of node_modules). Add it inside its config object, or run tando up --yes to let tando add it"
 }
 # next_add_standalone file: one line after the opening of the config object (create-next-app's
 # "const nextConfig: NextConfig = {", "module.exports = {" or "export default {")
@@ -480,6 +497,8 @@ dockerfile_port() {
 do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) when missing
   local t0 id errs=0 ph n l existed=1 current=""
   BUILD_SECS=0 BUILD_SUMMARY="" STAGE_NOTE="" SWAPPED="" VENV_SHOWN="" STARTED=""
+  # Next.js without standalone output is refused (or fixed with --yes) before anything is installed
+  next_standalone
   # a fresh clone: before anything is asked of the server (tando up installs the dependencies)
   node_install
   agent info > "$TMPD/info"
@@ -532,7 +551,6 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   fi
   [ -n "${DRY_RUN:-}" ] || target_guard   # (a dry run deploys nowhere: the last target stays)
   dir_lock
-  next_standalone
   phases_init
   ui_box_open "${DRY_RUN:+dry run: }deploy $APP" "$HOST"
   t0=$(clock)

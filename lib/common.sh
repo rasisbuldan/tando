@@ -302,7 +302,7 @@ ssh_wrapper() {
 
 C_app="" C_host="" C_recipe="" C_build="" C_out="" C_start="" C_start_shell="" C_health=""
 C_memory="" C_timeout="" C_path="" C_data="" C_jobs="" C_writable="" C_backup="" C_database=""
-C_soak=""
+C_soak="" C_spa=""
 C_logs=""   # log_max, log_keep, log_rate, access_log as key=value lines (checked by the server)
 C_image="" C_container_port="" C_build_memory="" C_dockerfile="" C_node="" C_domain="" C_www=""
 C_assets=""   # fingerprinted files served from Caddy: off, or <dir>[, <url prefix>] (checked by the server too)
@@ -540,6 +540,8 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       release_timeout) C_release_timeout=$v
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 3600 ] || die "$f:$n: release_timeout is 1 to 3600 seconds (got \"$v\")";;
       health) C_health=$v;;
+      spa) C_spa=$v
+        case $v in true|false) ;; *) die "$f:$n: spa must be true or false (got \"$v\")";; esac;;
       memory) C_memory=$v;;
       cpu) C_cpu=$v
         case $v in [1-9]%|[1-9][0-9]%|[1-9][0-9][0-9]%|[0-9]|[0-9].[0-9]|[0-9].[0-9][0-9]|[1-9][0-9]|[1-9][0-9].[0-9]) ;;

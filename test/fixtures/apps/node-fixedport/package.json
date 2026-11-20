@@ -1,0 +1,6 @@
+{
+  "name": "fixture-node-fixedport",
+  "private": true,
+  "scripts": { "start": "node app.js" },
+  "dependencies": { "express": "^4.21.2" }
+}
