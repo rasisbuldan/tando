@@ -120,9 +120,19 @@ func TestResourceSettingsRefused(t *testing.T) {
 		"set idle_in_transaction_session_timeout = 0", "set maintenance_work_mem = '1GB'",
 		"select set_config('work_mem', '1GB', false)", "SELECT pg_catalog.set_config('work_mem', '1GB', true), 1",
 		`select "set_config"('jit', 'on', false)`, `select "SET_CONFIG"('jit', 'on', false)`, "select x from t where set_config('a','b',true) is null",
-		"with x as (select set_config('work_mem','1GB',false)) select * from x", "select e'\\'' || set_config('jit','on',true)"}
+		"with x as (select set_config('work_mem','1GB',false)) select * from x", "select e'\\'' || set_config('jit','on',true)",
+		// (found by the red team: the escapes of a U& identifier, and the functions that run SQL text)
+		`select U&"\0073et_config"('work_mem', '1GB', false)`, `select u&"!0073et_config" UESCAPE '!'('jit', 'on', false)`,
+		"select query_to_xml('select set_config(''work_mem'',''1GB'',false)', true, false, '')",
+		"select pg_catalog.QUERY_TO_XML_AND_XMLSCHEMA('select 1', true, false, '')", "select query_to_xmlschema('select 1', true, false, '')",
+		"select ts_stat('select set_config(''jit'',''on'',false)::tsvector')", "select ts_rewrite('a'::tsquery, 'select 1')",
+		"select cursor_to_xml('c', 1, true, false, '')"}
+	// the app's own sessions: the same role may signal them, a read-only transaction does not stop it
+	no = append(no, "select pg_terminate_backend(pid) from pg_stat_activity where usename = current_user",
+		`SELECT "pg_cancel_backend"(1)`, "select pg_logical_emit_message(false, 'x', 'y')")
 	ok := []string{"select 'set_config'", "select 1 -- set_config(\n", "select $$set_config$$", "select /* set_config( */ 1",
-		"select current_setting('work_mem')", "show work_mem", "reset work_mem", "reset all", "set statement_timeout = 0", "select my_set_config()"}
+		"select current_setting('work_mem')", "show work_mem", "reset work_mem", "reset all", "set statement_timeout = 0", "select my_set_config()",
+		"select U&'\\0041'", "select u & 1 from (select 1 u) x", "select pg_backend_pid()", "select 'pg_terminate_backend'"}
 	for _, s := range no {
 		if ReadOnly(s) {
 			t.Errorf("allowed: %q", s)

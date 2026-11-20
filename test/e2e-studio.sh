@@ -10,7 +10,8 @@
 #       no TCP listener, the socket's directory and modes, the app's user, no capabilities
 #   S2  refusals: no or a wrong token, a used or foreign code, foreign Host/Origin/Sec-Fetch-Site,
 #       a form post, a preflight
-#   S3  read-only: every bypass known (the review's and more), each across one and two requests
+#   S3  read-only: every bypass known (the review's and more), each across one and two requests;
+#       the app's own sessions cannot be signalled, the settings not changed through U& or SQL text
 #   S4  limits: 5M rows, a 20 MB cell, the studio's own clock, SET LOCAL timeout, nothing runaway
 #   S5  cancel; S6 browsing; S7 the session's end in every way, nothing left; S8 CI keys (four
 #       layers); S9 no database, not installed, an old agent, sshd without stream forwarding, two
@@ -239,6 +240,23 @@ q "WITH d AS (DELETE FROM items WHERE id = 1 RETURNING id) SELECT count(*) FROM 
 check "S3R a write the allowlist lets through is PostgreSQL's to refuse: $(qerr) $(jx '%->{error}{message}')" \
   eval '[ "$(qerr)" = 25006 ] && jx "%->{error}{message}" | grep -q "read-only transaction"'
 check "S3S after all of it the data is what it was" test "$(datasum)" = "$SUM0"
+# (red team) the app's own sessions: the role may signal them and a read-only transaction does
+# not stop that; and the resource settings through a U& identifier or SQL run from text
+srv "read -r PGPASSWORD; export PGPASSWORD; setsid nohup psql -X -At -h 127.0.0.1 -U tando_shop -d tando_shop -c 'SELECT pg_sleep(30)' > /dev/null 2>&1 < /dev/null &" <<< "$PW"
+T_UNTIL_STEP=0.2 t_until 10 eval '[ "$(echo "SELECT count(*) FROM pg_stat_activity WHERE usename = '"'"'tando_shop'"'"' AND application_name = '"'"'psql'"'"' AND state = '"'"'active'"'"'" | pgsu postgres)" = 1 ]'
+for a in "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'psql'" \
+    "SELECT pg_catalog.pg_cancel_backend(pid) FROM pg_stat_activity WHERE application_name = 'psql'"; do
+  q "$a"; e=$(qerr)
+  alive=$(echo "SELECT count(*) FROM pg_stat_activity WHERE usename = 'tando_shop' AND application_name = 'psql' AND state = 'active'" | pgsu postgres)
+  check "S3T refused ($e), the app's session still runs ($alive): $a" eval '[ "$e" = 25006 ] && [ "$alive" = 1 ]'
+done
+echo "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'tando_shop' AND application_name = 'psql'" | pgsu postgres > /dev/null
+for a in "SELECT U&\"\\0073et_config\"('work_mem', '1GB', false); SHOW work_mem" \
+    "SELECT query_to_xml('select set_config(''work_mem'',''1GB'',false)', true, false, ''); SHOW work_mem" \
+    "SELECT ts_stat('select set_config(''work_mem'',''1GB'',false)::tsvector'); SHOW work_mem"; do
+  q "$a"; e=$(qerr)
+  check "S3U refused ($e, work_mem not changed): $a" eval '[ "$e" = 25006 ] && [ "$(jx "scalar @{%->{results}}")" = 0 ]'
+done
 
 # ---- S4 limits ---------------------------------------------------------------------------------
 log "S4 limits"
@@ -293,6 +311,24 @@ bpid=$(echo "SELECT pid FROM pg_stat_activity WHERE application_name LIKE 'tando
 pr=$(srv "ps -o ni= -p $bpid; ionice -p $bpid; ps -o ni= -p \$(systemctl show -P MainPID tando-shop-studio-$ST_SID12); cut -d: -f3 /proc/$bpid/cgroup; cat /sys/fs/cgroup/tando-shop-studiodb-$bpid.scope/cpu.weight" | tr -s ' \n' ' ')
 check "S13d the backend $bpid in a scope of its own at CPU weight 1, nice 19, idle I/O; the studio at nice 10: $pr" \
   eval 'case "$pr" in *"19 idle 10 /tando-shop-studiodb-$bpid.scope 1 ") true;; *) false;; esac'
+# (red team) the agent lowers no other process: its studio_lower, given the pid of the other
+# app's session (with the studio's application_name), of shop's own app session and of the
+# postmaster, refuses each and leaves it where it was
+srv "read -r A; read -r B; (PGPASSWORD=\$A setsid nohup psql -X -h 127.0.0.1 -U tando_shop -d tando_shop -c 'SELECT pg_sleep(20)' > /dev/null 2>&1 < /dev/null &)
+  (PGAPPNAME='tando studio (x)' PGPASSWORD=\$B setsid nohup psql -X -h 127.0.0.1 -U tando_other -d tando_other -c 'SELECT pg_sleep(20)' > /dev/null 2>&1 < /dev/null &)" <<< "$PW
+$PW2"
+T_UNTIL_STEP=0.2 t_until 10 eval '[ "$(echo "SELECT count(*) FROM pg_stat_activity WHERE query = '"'"'SELECT pg_sleep(20)'"'"'" | pgsu postgres)" = 2 ]'
+cat > "$E/lower-probe" <<'AG'
+a=/opt/tando/bin/tando-agent; head -n "$(($(grep -n '^verb=' "$a" | head -1 | cut -d: -f1) - 1))" "$a" > /root/.agent-head
+set --; . /root/.agent-head; app shop; load "$R/host.conf" H; db_creds
+for p in $(runuser -u postgres -- psql -XAt -c "SELECT pid FROM pg_stat_activity WHERE query = 'SELECT pg_sleep(20)'") "$(head -1 /run/postgresql/*-main.pid)"; do
+  b=$(cut -d: -f3 "/proc/$p/cgroup"); studio_lower "$p"; r=$?; echo "$p:$r:$([[ $(cut -d: -f3 "/proc/$p/cgroup") == "$b" ]] && echo same || echo moved):$(ps -o ni= -p "$p" | tr -d ' ')"
+done; rm -f /root/.agent-head
+AG
+fake=$(srv 'sudo bash -s' < "$E/lower-probe" 2>&1)
+check "S13r the agent refuses to lower another app's session, the app's own and the postmaster: $(echo $fake)" \
+  eval '[ "$(echo "$fake" | grep -c ":1:same:0$")" = 3 ]'
+echo "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query = 'SELECT pg_sleep(20)'" | pgsu postgres > /dev/null
 # a heavy query (a self-join of 100,000 rows sorted on a computed key, and an aggregate): the
 # backend's private memory, sampled while it runs, stays near its settings
 heavy="SELECT count(*), max(h) FROM (SELECT md5(a.name || b.note) h FROM items a JOIN items b ON b.id = a.id ORDER BY 1) s, (SELECT name, count(*) FROM items GROUP BY name ORDER BY 2 DESC LIMIT 5) g"

@@ -253,7 +253,11 @@ Caddy modes per app: proxy (holding requests up to 15 s while the process restar
     ends the transaction stops the batch (no second BEGIN); ROLLBACK and DISCARD ALL after. Each
     statement is its own Parse (one command only). In front of that, an allowlist of first words
     (SELECT, WITH, VALUES, TABLE, SHOW, EXPLAIN, SET, RESET; not SET TRANSACTION/ROLE/SESSION) stops
-    LOCK, VACUUM, ANALYZE, NOTIFY, COMMIT and the rest before they reach the server. The studio's
+    LOCK, VACUUM, ANALYZE, NOTIFY, COMMIT and the rest before they reach the server, and some
+    functions a read-only transaction still runs are refused by name: `pg_cancel_backend` and
+    `pg_terminate_backend` (the role may signal the app's own sessions), `pg_logical_emit_message`,
+    and the ones that run SQL given as text (`query_to_xml` and kin, `ts_stat`, `ts_rewrite`); so is
+    any `U&"..."` identifier (its escapes could spell those names). The studio's
     own clock cancels a statement at 30 s and closes the connection 5 s later. One connection, at
     most 2 studios per host. CI deploy keys cannot start it: the client, the gate's grammar, their
     sudo rule and sshd's DisableForwarding refuse, and the agent refuses SUDO_USER tando-d-*.
@@ -266,6 +270,9 @@ Caddy modes per app: proxy (holding requests up to 15 s while the process restar
     other sessions exist; queries and client addresses of other roles stay hidden.
   - **Resources** (bench/RESULTS.md "db studio"). The bound comes from settings, never from the
     OOM killer: a backend killed by it makes the postmaster restart every session of every app.
+    The settings bound sorts and hashes only: one value a query builds (`repeat`, `string_agg`)
+    may take up to 1 GB of the backend's memory, and PostgreSQL has no per-session cap (residual:
+    on a server with little free memory a deliberate query can still bring the OOM killer).
     The studio's backend starts with `work_mem=2MB`, `hash_mem_multiplier=1`, no parallel workers,
     `temp_buffers=1MB`, `jit=off` (DISCARD ALL after each request puts them back; SET of them and
     `set_config` are refused; a function of the app's that calls set_config is the residual), the

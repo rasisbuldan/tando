@@ -242,12 +242,13 @@ statement, the error's position selected in the editor, notices, CSV download). 
 - **It does not crowd out the apps.** The studio's database process is held to 2 MB per sort or
   hash before it spills to a temporary file (`work_mem`, `hash_mem_multiplier` 1), one process (no
   parallel workers), no JIT, temporary files within the role's `db_temp_limit` (1 GB); these
-  cannot be changed from the editor (`SET` of them and `set_config` are refused). The agent checks
+  cannot be changed from the editor (`SET` of them and `set_config` are refused); one value a
+  query builds (`repeat`, `string_agg`) can still take up to 1 GB while the query runs. The agent checks
   that the process is this app's studio session, then moves it into a cgroup of its own at CPU
   and I/O weight 1 (the apps and PostgreSQL have 100: on a busy CPU it gets about 1%, on an idle
   one all of it), at nice 19 and, where the disk's I/O scheduler has classes, the idle I/O class.
   It never gets a memory limit: the kernel killing a PostgreSQL process makes the server restart
-  every app's sessions; the settings are the bound. It waits at most 2 s for a
+  every app's sessions; the settings are the bound for sorts and hashes. It waits at most 2 s for a
   lock; a statement stops at 30 s in the editor and 10 s when browsing (so an app's migration waits
   for a studio query at most that long); nothing stays open between two requests (no transaction,
   no snapshot); its connection closes after 60 s unused, and it does not connect when the app would

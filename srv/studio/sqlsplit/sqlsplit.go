@@ -201,13 +201,20 @@ var refusedSettings = map[string]bool{"role": true, "session_authorization": tru
 	"idle_in_transaction_session_timeout": true, "maintenance_work_mem": true,
 	"max_parallel_maintenance_workers": true, "logical_decoding_work_mem": true}
 
-// refusedCalls: functions a statement may not call by name: set_config would change the
-// settings above from inside a SELECT
-var refusedCalls = map[string]bool{"set_config": true}
+// refusedCalls: functions a statement may not call by name, though a read-only transaction
+// lets them run: set_config would change the settings above from inside a SELECT; the functions
+// that run SQL given as text (query_to_xml and its kin, ts_stat, ts_rewrite) would hide such a
+// call in a string; pg_cancel_backend and pg_terminate_backend would stop the app's own sessions
+// (the same role may signal them); pg_logical_emit_message writes WAL outside the transaction
+var refusedCalls = map[string]bool{"set_config": true,
+	"query_to_xml": true, "query_to_xmlschema": true, "query_to_xml_and_xmlschema": true,
+	"cursor_to_xml": true, "cursor_to_xmlschema": true, "ts_stat": true, "ts_rewrite": true,
+	"pg_cancel_backend": true, "pg_terminate_backend": true, "pg_logical_emit_message": true}
 
 // Calls says whether stmt names one of the refused functions (an identifier outside quotes and
-// comments, quoted or not, any case, schema-qualified or not). A function the app defined that
-// calls set_config is not seen: the studio's settings are then a default, not a limit (documented).
+// comments, quoted or not, any case, schema-qualified or not), or has a U&"..." identifier (its
+// escapes could spell any of them). A function the app defined that calls set_config is not
+// seen: the studio's settings are then a default, not a limit (documented).
 func calls(stmt string) bool {
 	for i := 0; i < len(stmt); {
 		c := stmt[i]
@@ -244,6 +251,9 @@ func calls(stmt string) bool {
 			}
 			if refusedCalls[strings.ToLower(stmt[i:j])] {
 				return true
+			}
+			if j == i+1 && (c == 'u' || c == 'U') && strings.HasPrefix(stmt[j:], `&"`) {
+				return true // U&"\0073et_config": PostgreSQL decodes the escapes, this scan would not
 			}
 			i = j
 		default:
