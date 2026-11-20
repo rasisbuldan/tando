@@ -316,7 +316,7 @@ next_root() { # -> NEXT_ROOT
 }
 
 stage() {
-  local ex=(--exclude=.git --exclude=.DS_Store '--exclude=.env*') out=${C_out:-.}
+  local ex=(--exclude=.git --exclude=.DS_Store '--exclude=.env*' --exclude=.npmrc) out=${C_out:-.}   # (.npmrc can hold a registry token)
   STAGE_NOTE=""
   # .tando/ is the staging area: never something to commit
   mkdir -p .tando && { [ -f .tando/.gitignore ] || printf '*\n' > .tando/.gitignore; }
@@ -345,6 +345,7 @@ stage() {
   esac
   SWAPPED=""
   swap_native
+  native_fix
   guard
 }
 
@@ -373,8 +374,8 @@ stage_container() {
 # kept in .tando/cache beside its own sha512 (a cached file that changed is fetched again).
 # Sets SWAPPED (the count for the stage line) and $TMPD/swaps: from, name, version, verified.
 swap_native() {
-  local cpu libc kind from dest name ver integ lock tab=$'\t' njs=$TANDO_HOME/lib/native.js
-  SWAPPED=""; : > "$TMPD/swaps"
+  local cpu libc kind from dest name ver integ lock why tab=$'\t' njs=$TANDO_HOME/lib/native.js
+  SWAPPED=""; : > "$TMPD/swaps"; : > "$TMPD/native.notes"
   [ -d "$STAGE/node_modules" ] || return 0
   case $K_arch in x86_64) cpu=x64;; aarch64|arm64) cpu=arm64;; *) cpu=$K_arch;; esac
   libc=glibc; [ "${K_libc:-}" = musl ] && libc=musl
@@ -388,9 +389,9 @@ swap_native() {
     } > "$TMPD/plan.msg"
     sfail_lines "cannot swap the npm packages built for this machine for ones for linux $K_arch:" "$TMPD/plan.msg"
   fi
-  while IFS=$tab read -r kind from dest name ver integ lock; do
+  while IFS=$tab read -r kind from dest name ver integ lock why; do
     case $kind in swap|drop) ;; *) continue;; esac
-    native_path_ok "$from" && native_path_ok "$dest" || sfail "unexpected package path from lib/native.js: $from"
+    { [ "$from" = - ] || native_path_ok "$from"; } && native_path_ok "$dest" || sfail "unexpected package path from lib/native.js: $from"
     if [ "$kind" = drop ]; then   # its Linux build is there already (or another one maps to it)
       rm -rf "${STAGE:?}/$from"
       printf '%s\t%s\t-\t%s\n' "$from" "${dest##*node_modules/}" "removed (the Linux build is installed beside it)" >> "$TMPD/swaps"
@@ -399,7 +400,8 @@ swap_native() {
     native_name_ok "$name" || sfail "not an npm package name: $(printf '%s' "$name" | strip | cut -c1-80)"
     native_ver_ok "$ver" || sfail "$name: not an exact version: $(printf '%s' "$ver" | strip | cut -c1-80)"
     native_fetch "$name" "$ver" "$integ" "${lock#*:}"
-    rm -rf "${STAGE:?}/$from" "${STAGE:?}/$dest"
+    [ "$from" = - ] || rm -rf "${STAGE:?}/$from"
+    rm -rf "${STAGE:?}/$dest"
     mkdir -p "$STAGE/$dest"
     tar -xzf "$TGZ" -C "$STAGE/$dest" --strip-components 1 || sfail "cannot unpack $TGZ"
     node "$njs" check "$STAGE/$dest" "$name" "$ver" > "$TMPD/chk" ||
@@ -411,21 +413,168 @@ swap_native() {
       unsupported:*) lock="not verified: tando cannot read the checksums of ${lock#*:}";;
       *) lock="not verified: no lockfile";;
     esac
+    [ "$from" = - ] && lock="$lock; $why"
     printf '%s\t%s\t%s\t%s\n' "$from" "$name" "$ver" "$lock" >> "$TMPD/swaps"
   done < "$TMPD/plan"
   local n; n=$(grep -c . "$TMPD/swaps")
   [ "$n" = 0 ] || SWAPPED="$(plural "$n" package) swapped"
 }
 
-# swap_lines: one line per swapped package, for the deploy box (yellow when not verified)
+# swap_lines: what was done to the native code of the release, one line per module (yellow when
+# something is not verified), then the notes (Prisma)
 swap_lines() {
-  local from name ver how c tab=$'\t'
-  [ -s "$TMPD/swaps" ] || return 0
+  local from name ver how c tab=$'\t' l
+  [ -s "$TMPD/swaps" ] || [ -s "$TMPD/native.notes" ] || return 0
   while IFS=$tab read -r from name ver how; do
-    c=""; case $how in not*) c=$UI_YELLOW;; esac
-    if [ "$ver" = - ]; then box_say "$UI_DIM" "        $from: $how"
+    c=""; case $how in *"not verified"*) c=$UI_YELLOW;; esac
+    if [ "$from" = - ]; then box_say "$c" "        added $name $ver, $how"
+    elif [ "$ver" = - ]; then box_say "${c:-$UI_DIM}" "        $from: $how"
     else box_say "$c" "        swapped $from for $name $ver, $how"; fi
   done < "$TMPD/swaps"
+  while IFS= read -r l; do box_say "$UI_DIM" "        $l"; done < "$TMPD/native.notes"
+}
+
+# the server's cpu and libc as npm names them: NCPU, NLIBC
+native_target() {
+  case $K_arch in x86_64) NCPU=x64;; aarch64|arm64) NCPU=arm64;; *) NCPU=$K_arch;; esac
+  NLIBC=glibc; [ "${K_libc:-}" = musl ] && NLIBC=musl
+}
+
+# the project directory whose node_modules is the full copy (Next's standalone output holds less)
+native_projdir() { if [ "${C_recipe:-}" = next ]; then echo .; else echo "${C_out:-.}"; fi; }
+
+# the Node major of the server (what the downloaded binaries must fit)
+native_nodemajor() {
+  local v=${K_node:-}
+  case ${v%%.*} in ""|*[!0-9]*) v=$(node_major 2> /dev/null || true);; esac
+  printf '%s' "${v%%.*}"
+}
+
+# native_fix: after the platform packages are swapped, every package with native code must hold
+# the server's binary. Packages that carry several platforms' binaries (prebuilds/) keep theirs and
+# lose the others; a package Next's standalone output pruned is restored from the project's
+# node_modules; one whose install script downloads its binary (prebuild-install, node-pre-gyp)
+# gets the server's from the host its package.json declares; one that only compiles stops the
+# deploy here, before anything is uploaded. Adds a line per module to $TMPD/swaps.
+native_fix() {
+  local kind rel a b c tab=$'\t' njs=$TANDO_HOME/lib/native.js proj nmaj
+  [ -d "$STAGE/node_modules" ] || return 0
+  command -v node > /dev/null || return 0
+  native_target
+  proj=$(native_projdir)
+  nmaj=$(native_nodemajor)
+  : > "$TMPD/fixed"; : > "$TMPD/pruned"
+  native_fix_plan
+  if grep -q "^fail$tab" "$TMPD/fix"; then   # before anything is fetched
+    { while IFS=$tab read -r kind rel a b; do
+        [ "$kind" = fail ] || continue
+        echo "  $rel: $(printf '%s' "$a" | strip | cut -c1-80): $(printf '%s' "$b" | strip | cut -c1-200)"
+      done < "$TMPD/fix"
+      native_ways_out
+    } > "$TMPD/fix.msg"
+    sfail_lines "these packages cannot run on linux $K_arch without being compiled there:" "$TMPD/fix.msg"
+  fi
+  while IFS=$tab read -r kind rel a b c; do
+    case $kind in
+      restore)
+        native_path_ok "$rel" && native_path_ok "$a" || sfail "unexpected package path from lib/native.js: $rel"
+        native_name_ok "$b" && native_ver_ok "$c" || sfail "unexpected package from lib/native.js: $b"
+        mkdir -p "$STAGE/$rel"
+        rsync -a --delete --exclude=/node_modules "$proj/$a/" "$STAGE/$rel/" || sfail "cannot restore $rel from $proj/$a"
+        printf '%s\t-\t-\t%s\n' "$rel" "restored from node_modules ($b $c; the standalone output had dropped its binary for linux-$NCPU)" >> "$TMPD/swaps"
+        printf '%s\n' "$rel" >> "$TMPD/fixed";;
+      prebuilt)
+        native_path_ok "$rel" || sfail "unexpected package path from lib/native.js: $rel"
+        native_name_ok "$a" && native_ver_ok "$b" || sfail "unexpected package from lib/native.js: $a"
+        native_prebuilt "$rel" "$a" "$b" "$nmaj"
+        printf '%s\n' "$rel" >> "$TMPD/fixed";;
+      optional)
+        printf '%s\t-\t-\t%s\n' "$rel" "not verified: $(printf '%s' "$a" | strip | cut -c1-200)" >> "$TMPD/swaps";;
+      note)
+        [ "$rel" = prisma ] && native_prisma_note "$a";;
+    esac
+  done < "$TMPD/fix"
+  # binaries for other platforms beside the server's own go; each module gets its line
+  native_fix_plan
+  while IFS=$tab read -r kind rel a; do
+    [ "$kind" = prune ] || continue
+    native_path_ok "$a" || continue   # (the guard names a file that stays)
+    rm -f "${STAGE:?}/$a"
+    rmdir "$(dirname "$STAGE/$a")" 2> /dev/null || true
+    printf '%s\n' "$a" >> "$TMPD/pruned"
+  done < "$TMPD/fix"
+  while IFS=$tab read -r kind rel a; do
+    [ "$kind" = inside ] || continue
+    native_path_ok "$rel" || continue
+    grep -qxF "$rel" "$TMPD/fixed" && continue
+    printf '%s\t-\t-\t%s\n' "$rel" "already inside the package ($a$(native_pruned_note "$rel"))" >> "$TMPD/swaps"
+  done < "$TMPD/fix"
+  # the final scan: every module has the server's binary now (the guard then looks at every file)
+  native_fix_plan
+  if grep -q -E "^(restore|prebuilt|fail)$tab" "$TMPD/fix"; then
+    sfail "native code is still not right after the fixes (a bug in tando): $(grep -E "^(restore|prebuilt|fail)$tab" "$TMPD/fix" | head -1 | cut -d"$tab" -f2 | strip)"
+  fi
+  return 0
+}
+native_fix_plan() {
+  node "$TANDO_HOME/lib/native.js" fix "$STAGE" "$NCPU" "$NLIBC" "$(native_projdir)" > "$TMPD/fix" 2> "$TMPD/fix.err" ||
+    sfail "could not read the staged node_modules: $(strip < "$TMPD/fix.err" | grep . | tail -1)"
+}
+
+native_ways_out() {
+  echo "what to do:"
+  echo "  - build in CI on Linux, where these compile: tando ci github (GitHub Actions builds and deploys)"
+  echo "  - or build in a Linux container (not available yet)"
+  echo "  More: docs/CROSS-ARCH.md"
+}
+
+# ", N files for other platforms removed" for the package, from the files pruned in this stage
+native_pruned_note() {
+  local n
+  n=$(grep -c "^$1/" "$TMPD/pruned" 2> /dev/null || true)
+  [ "${n:-0}" -gt 0 ] && printf '; %s for other platforms removed' "$(plural "$n" file)"
+  return 0
+}
+
+# native_prebuilt pkg name version node-major: the server's prebuilt binary, from where the
+# package's own package.json says (lib/native.js checks the host and the archive)
+native_prebuilt() {
+  local rel=$1 name=$2 ver=$3 major=$4 kind url glibc why tab=$'\t' host how have
+  [ -n "$major" ] || sfail "cannot tell the server's Node version (needed to pick $name's binary)"
+  node "$TANDO_HOME/lib/native.js" prebuilt "$STAGE" "$rel" "$NCPU" "$NLIBC" "$major" "$TMPD/prebuilt.$RANDOM" \
+    > "$TMPD/prebuilt.out" 2> "$TMPD/prebuilt.err" || sfail "downloading the binary of $name failed: $(strip < "$TMPD/prebuilt.err" | grep . | tail -1)"
+  IFS=$tab read -r kind url glibc < "$TMPD/prebuilt.out"
+  if [ "$kind" != ok ]; then
+    why=$(printf '%s' "$glibc" | strip | cut -c1-240)
+    { echo "  $rel $ver: $why"
+      [ "$url" = refused ] && echo "  tando downloads only from the https host the package declares, and follows no redirects."
+      native_ways_out
+    } > "$TMPD/fix.msg"
+    sfail_lines "the binary of $name for linux $K_arch cannot be downloaded:" "$TMPD/fix.msg"
+  fi
+  host=${url#*://}; host=${host%%/*}
+  how="downloaded prebuilt for linux-$NCPU from $host (not verified by the lockfile)"
+  if [ "$glibc" != - ]; then
+    have=${K_glibc:-}
+    if [ -z "$have" ]; then
+      case $glibc in 2.[0-9]|2.[0-2][0-9]|2.30|2.31) ;; *)
+        how="$how; needs glibc $glibc or newer: tando cannot read the server's glibc yet, check it (Debian 12 has 2.36, Ubuntu 24.04 2.39)";;
+      esac
+    elif [ "$(printf '%s\n%s\n' "$glibc" "$have" | sort -t. -k1,1n -k2,2n | head -1)" != "$glibc" ]; then
+      printf '  %s\n' "$rel needs glibc $glibc or newer, the server has $have" > "$TMPD/fix.msg"
+      native_ways_out >> "$TMPD/fix.msg"
+      sfail_lines "the prebuilt binary of $name does not fit this server:" "$TMPD/fix.msg"
+    fi
+  fi
+  printf '%s\t-\t-\t%s\n' "$rel" "$how" >> "$TMPD/swaps"
+}
+
+# native_prisma_note version: one line, when Prisma is in the release
+native_prisma_note() {
+  case ${1%%.*} in
+    [0-6]) printf '%s\n' "Prisma $1: its query engine is a binary; the guard says when it is for another platform (docs/CROSS-ARCH.md)";;
+    *) printf '%s\n' "Prisma $1: nothing to swap; prisma migrate deploy on the server needs PRISMA_CLI_BINARY_TARGETS=$(native_prisma_target) and libssl3 (docs/CROSS-ARCH.md)";;
+  esac >> "$TMPD/native.notes"
 }
 
 # the directory whose lockfile describes the staged node_modules
@@ -509,8 +658,8 @@ native_fetch() {
 
 guard() {
   local bad l t d st_abs tab=$'\t'
-  bad=$(find "$STAGE" -name '.env*' | head -3)
-  [ -z "$bad" ] || sfail "secret files in the release: $bad"
+  bad=$(find "$STAGE" \( -name '.env*' -o -name '.npmrc' \) | head -3)
+  [ -z "$bad" ] || sfail "secret files in the release (.env* and .npmrc can hold tokens): $bad"
   st_abs=$(cd "$STAGE" && pwd -P)
   find "$STAGE" -type l > "$TMPD/links"
   while IFS= read -r l; do
@@ -524,7 +673,15 @@ guard() {
   find "$STAGE" -type f \( -name '*.node' -o -name '*.dylib' -o -name '*.so' -o -name '*.so.*' \) \
     > "$TMPD/native"
   : > "$TMPD/foreign"
+  # a binary for another platform in prebuilds/ of a package that holds the server's own is not
+  # one the loader picks (node-gyp-build, better-sqlite3 13, bcrypt 6, argon2): it is accepted
+  : > "$TMPD/excused"
+  if command -v node > /dev/null && [ -s "$TMPD/native" ]; then
+    native_target
+    node "$TANDO_HOME/lib/native.js" excused "$STAGE" "$NCPU" "$NLIBC" > "$TMPD/excused" 2> /dev/null || : > "$TMPD/excused"
+  fi
   while IFS= read -r l; do
+    grep -qxF "${l#"$STAGE"/}" "$TMPD/excused" && continue
     d=$(file -b "$l")
     case "$K_arch:$d" in
       x86_64:*ELF*x86-64*|aarch64:*ELF*aarch64*) ;;   # "ARM aarch64" also matches *aarch64*

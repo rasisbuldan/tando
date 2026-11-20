@@ -10,7 +10,7 @@ calls: work happens in commands, transient units and one per-minute timer.
 | `bin/tando` | entry point: flags, dispatch, host/env/rollback/backup/db/destroy/unlock commands |
 | `lib/help.txt`, `lib/args.sh` | every command's help, flags and argument counts; checked before anything runs |
 | `lib/common.sh` | messages, validation, host registry, ssh options, tando.conf parser, agent calls |
-| `lib/build.sh` | `init`, build step, staging, release guard, npm platform-package swap (planned by `lib/native.js`, which only reads JSON; docs/CROSS-ARCH.md) |
+| `lib/build.sh` | `init`, build step, staging, release guard, npm platform-package swap and the fixes for other native packages (planned by `lib/native.js`, which reads JSON and file headers, and downloads declared prebuilt binaries; docs/CROSS-ARCH.md) |
 | `lib/deploy.sh` | `configure`, upload lease and rsync, activation polling, deploy box |
 | `lib/views.sh` | boxed views: ls (one host, `--all`), status, history, releases, jobs, env, backups, doctor, host ls |
 | `lib/ui.sh` | boxed UI library |

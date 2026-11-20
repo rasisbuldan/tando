@@ -6,7 +6,7 @@
 | `test/lint.sh` (`make lint`) | shellcheck + tando checks on every shell file, the no-shell rule on `srv/**/*.go`, against a baseline | shellcheck or Docker, perl |
 | `test/go.sh` | the Go server programs (srv/): gofmt, go vet, go test, race detector, no-shell lint (srvlint), layering, static builds for amd64 and arm64 | Go |
 | `test/install-test.sh` | install from the checkout and from a release archive into temp prefixes: every `$TANDO_HOME` path the code reads is installed, every command's `--help` and `ci github --help` work, uninstall | perl |
-| `test/ui-test.sh` | lib/ui.sh at 5 widths, 2 locales, colour on/off; render speed; the platform-package swap and the native-code guard on fixture trees (`test/native-test.sh`: a stub `npm` and a local fake registry, no network) | perl, node, openssl |
+| `test/ui-test.sh` | lib/ui.sh at 5 widths, 2 locales, colour on/off; render speed; the platform-package swap and the native-code guard on fixture trees (`test/native-test.sh`: a stub `npm`, a local fake registry and a stub download host, no network) | perl, node, openssl |
 | `test/e2e.sh`, `test/e2e-*.sh` | end-to-end against a throwaway Ubuntu+systemd container | Docker (OrbStack), some need npm |
 | `test/portability.sh` (`make portability`) | macOS bash 3.2, Debian, Linux and BusyBox clients | Docker |
 

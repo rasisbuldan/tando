@@ -18,6 +18,24 @@ first, grouped by area.
 - Tests: the stand-in app of `test/e2e-adopt.sh` keeps connections alive again; the suite adds a
   kept-alive client, POSTs during a rollback (held, stored once), a reload during a restart, and
   the failed-reload cases.
+- Added: native modules that are not per-platform npm packages now run on the server without a
+  container build (the measured container build is about 3 times slower under emulation; this takes
+  about half the time of it). After the platform-package swap tando: accepts and trims packages that
+  carry several platforms' binaries inside them (`prebuilds/`: better-sqlite3 13, bcrypt 6, argon2,
+  bufferutil, utf-8-validate; the guard no longer refuses them as it did); restores such a package
+  from your `node_modules` when Next's standalone output pruned the server's binary; downloads the
+  server's binary for packages that fetch it at install with `prebuild-install` or `node-pre-gyp`
+  (sqlite3, canvas, bcrypt 5), from the https host the package's own package.json declares, no
+  redirects, a validated archive, never running the package's scripts (output: `not verified by
+  the lockfile`; the glibc the binary needs is read, and checked against the server's once
+  `tando-agent info` reports it); and stops before upload, naming the module, for packages that
+  only compile on Linux (node-pty), with `tando ci github` as the way out. `@parcel/watcher`'s
+  `-glibc` packages are swapped; `@tailwindcss/oxide` gets its Linux binary when only its
+  WebAssembly fallback was installed. The deploy box and `--dry-run` list what was done per module;
+  a Prisma note is printed when Prisma is in the release. docs/CROSS-ARCH.md has the coverage table,
+  the trust statement and the timings.
+- Security: a project `.npmrc` (it can carry a registry token) is never copied into a release for
+  any recipe, and the guard refuses a release that has one.
 - Fixed: platform-specific npm packages nested at any depth (Next's own sharp under
   `node_modules/next/node_modules`, when the project asks for another sharp version) are swapped for
   the server's platform in their own `node_modules`; before, only `node_modules/<pkg>` and
