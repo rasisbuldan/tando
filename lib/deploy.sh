@@ -39,6 +39,7 @@ configure() {
     [ -n "${C_max_requests:-}" ] && printf 'max_requests=%s\n' "$C_max_requests"
     [ -n "${C_stop_timeout:-}" ] && printf 'stop_timeout=%s\n' "$C_stop_timeout"
     [ -n "${C_hold:-}" ] && printf 'hold=%s\n' "$C_hold"
+    [ -n "${C_assets:-}" ] && printf 'assets=%s\n' "$C_assets"
     [ -n "$C_job_timeout" ] && printf 'job_timeout=%s\n' "$C_job_timeout"
     printf '%s' "$C_jobs"
     printf '%s' "$C_logs"

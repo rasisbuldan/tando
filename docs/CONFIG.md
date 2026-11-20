@@ -75,6 +75,12 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 | `hold` | number | `15`, or `health_timeout` if larger | seconds | How long Caddy holds a request while the app (re)starts, 1 to 999. | `hold = 20` |
 | `stop_timeout` | number | `10` | seconds | How long a stopping process may finish its requests before it is killed, 1 to 999. | `stop_timeout = 30` |
 
+## Assets
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `assets` | `off`, or a directory and optionally a URL prefix | found by tando for `next` (`.next/static`) and `static` (the first of `assets`, `_astro`, `static`, `_next/static` whose files all have a hash in their name); nothing for other recipes and containers | | The release's fingerprinted files (names that carry their content: `index-DiwrgTda.js`), which stay reachable after a newer release goes live and are sent with `Cache-Control: public, max-age=31536000, immutable`. `<dir>` is inside the release; the prefix is the URL they are served under, with the app's `path` if it has one (default `/<dir>/`). `off` turns it off. Name only files whose names change with their content. | `assets = public/build, /build/` |
+
 ## Data and database
 
 | Key | Type | Default | Unit | Meaning | Example |

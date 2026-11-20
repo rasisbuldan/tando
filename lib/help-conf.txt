@@ -33,6 +33,8 @@ Limits
   max_requests    requests in flight, over it a 503 (default off)
   hold            seconds Caddy holds requests at a restart (default 15)
   stop_timeout    seconds a stopping process may finish (default 10)
+Assets
+  assets          off, or <dir>[, <url prefix>]: hashed files kept across releases (next and static: found by themselves)
 Data
   data            directory that survives deploys ($TANDO_DATA_DIR)
   backup          daily | off (daily when data or database is set)

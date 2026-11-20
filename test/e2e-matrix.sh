@@ -304,6 +304,8 @@ if [ "$SELFTEST" = 1 ]; then
   st_case 9 "the data sentinel changed" \
     "cp -p $D/shared/data/sentinel /root/mxsent; echo changed >> $D/shared/data/sentinel" "cp -p /root/mxsent $D/shared/data/sentinel"
   st_case 10 "a visitor got a 502" ":" ":"
+  st_case 11 "the serving release's fingerprinted file is gone from the shared directory" \
+    "rm -f $D/assets/assets/app-*.js" "ln $D/current/assets/app-*.js $D/assets/assets/"
   t_done
 fi
 
@@ -314,7 +316,9 @@ fi
 # Milestone 2a: g: two clients with different settings (the other's configure lands between this
 # deploy's configure and its activation); h: a deploy refused or cut off before the switch leaves
 # the live app's unit file and Caddy site as they were (configure no longer changes them); i: job
-# units that could not be written are not counted done (recovery writes them)
+# units that could not be written are not counted done (recovery writes them). Milestone 3: k: a kill
+# while the release's fingerprinted files are linked into the app's shared assets directory (before
+# the first link, after the last): the old release still serves its files (inv 11), nothing is left
 CELLS="
 a deploy run-activation ra.restart 1 fail after
 a rollback rollback ra.restart 1 fail after
@@ -334,6 +338,8 @@ h deploy-pre - - 0 none after
 h deploy run-activation pre.stop 1 kill before
 i deploy run-activation deploy.jobs 1 fail after
 i deploy run-activation jobs.write 1 fail after
+k deploy run-activation imp.assets 1 kill before
+k deploy run-activation imp.assets2 1 kill before
 e deploy run-activation run.queue 1 fail before
 j stop stop caddy.mv 1 fail after"
 [ "$KIND" = container ] && CELLS="a deploy run-activation ra.restart 1 fail after"

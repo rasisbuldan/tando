@@ -69,6 +69,7 @@ npm ci --no-audit --no-fund > "$E/npm.out" 2>&1 || { cat "$E/npm.out" >&2; exit 
 "$R" host setup test public_port=$HP >&2
 "$R" up > "$E/up1.out" 2>&1; rc=$?; cat "$E/up1.out" >&2
 check "N2a up: /demo/api/version answers 1 (rc=$rc)" test $rc = 0 -a "$(version)" = 1
+B1=$(find .next/static -mindepth 1 -maxdepth 1 -type d ! -name chunks -exec basename {} \;)   # release 1's build id: its _next/static/<id>/ files go with it
 check "N2b the page renders under the base path" eval 'curl -s "$(url /demo)" | grep -q "tando next example v"'
 loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$(url /)")
 check "N2c / redirects to the base path ($loc)" test "$loc" = "$(url /demo)"
@@ -265,6 +266,39 @@ echo "export const VERSION = '6';" > version.js
 check "N11e as Next wrote it (binaries for several platforms in the package): deployed, accepted as already inside (rc=$rc)" \
   eval '[ $rc = 0 ] && [ "$(version)" = 6 ] && flat "$E/d-sqlite2.out" | grep -q "node_modules/better-sqlite3: already inside the package (prebuilds/linux-$cpu.node" &&
         [ "$(sqlite)" = "{\"ok\":true,\"x\":2,\"platform\":\"linux-$cpu\"}" ]'
+
+# N12. version skew: a page of an older release asks for that release's hashed files after newer
+#      releases went live (docs/ARCHITECTURE.md "Assets"). Release 6 is live here; 7 and 8 follow.
+ah() { curl -s -m 5 -D - -o /dev/null "$(url "$1")" | tr -d '\r'; }
+B6=$(find .next/static -mindepth 1 -maxdepth 1 -type d ! -name chunks -exec basename {} \;); cp ".next/static/$B6/_buildManifest.js" "$E/b6.js"
+C6=$(find .next/static/chunks -name '*.js' -size +1k | head -1); C6=${C6#.next/static/}
+for v in 7 8; do
+  echo "export const VERSION = '$v';" > version.js
+  "$R" deploy > "$E/d-skew$v.out" 2>&1; rc=$?
+  [ $rc = 0 ] || { cat "$E/d-skew$v.out" >&2; break; }
+done
+B8=$(find .next/static -mindepth 1 -maxdepth 1 -type d ! -name chunks -exec basename {} \;)
+check "N12a releases 6, 7 and 8 have three build ids ($B6 $B8) and 8 is live (rc=$rc)" test "$B6" != "$B8" -a "$(version)" = 8
+h=$(ah "/demo/_next/static/$B6/_buildManifest.js")
+# shellcheck disable=SC2034  # h is read in the eval of the check
+check "N12b release 6's build files answer 200 after release 8 is live, with Next's own immutable header, and its bytes" \
+  eval 'echo "$h" | head -1 | grep -q " 200" && echo "$h" | grep -qi "^cache-control: public, max-age=31536000, immutable$" &&
+        [ "$(curl -s "$(url "/demo/_next/static/$B6/_buildManifest.js")" | cksum)" = "$(cksum < "$E/b6.js")" ]'
+# shellcheck disable=SC2034  # h is read in the eval of the check
+h=$(ah "/demo/_next/static/$B1/_buildManifest.js"); on1=$(srv "sudo find $A/assets $A/assetlog -name '*$B1*' | wc -l" | tr -d ' ')
+check "N12c release 1 was pruned: its build file is a 404 and is gone from the shared directory ($on1 files)" \
+  eval 'echo "$h" | head -1 | grep -q " 404" && [ "$on1" = 0 ]'
+check "N12d what Caddy serves is a hard link of the live release's file (no second copy)" \
+  eval '[ "$(srv "sudo stat -c %h $A/assets/demo/_next/static/$B8/_buildManifest.js")" -ge 2 ]'
+check "N12e pages and API routes get no caching header from tando" \
+  eval '! ah /demo | grep -qi "immutable" && ! ah /demo/api/version | grep -qi "immutable"'
+"$R" rollback > "$E/d-skewrb.out" 2>&1; rc=$?
+check "N12f after a rollback to release 7 its own build files answer, with its bytes (rc=$rc, version $(version))" \
+  eval 'B7=$(srv "sudo ls $A/current/.next/static | grep -v ^chunks\$"); [ $rc = 0 ] && [ "$(version)" = 7 ] &&
+        [ "$(curl -s "$(url "/demo/_next/static/$B7/_buildManifest.js")" | cksum)" = "$(srv "sudo cat $A/current/.next/static/$B7/_buildManifest.js" | cksum)" ]'
+check "N12g the page's own scripts all load (200) through the shared directory" \
+  eval 'bad=0; for p in $(curl -s "$(url /demo)" | grep -o "/demo/_next/static/[^\"]*\.js" | sort -u); do
+          [ "$(curl -s -o /dev/null -w "%{http_code}" "$(url "$p")")" = 200 ] || bad=1; done; [ $bad = 0 ]'
 
 echo "$FAILS failed"
 [ $FAILS -eq 0 ]

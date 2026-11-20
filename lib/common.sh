@@ -305,6 +305,7 @@ C_memory="" C_timeout="" C_path="" C_data="" C_jobs="" C_writable="" C_backup=""
 C_soak=""
 C_logs=""   # log_max, log_keep, log_rate, access_log as key=value lines (checked by the server)
 C_image="" C_container_port="" C_build_memory="" C_dockerfile="" C_node="" C_domain="" C_www=""
+C_assets=""   # fingerprinted files served from Caddy: off, or <dir>[, <url prefix>] (checked by the server too)
 C_job_timeout=""   # seconds a scheduled job may run (the server's default: 3600)
 C_release="" C_release_shell="" C_release_timeout=""   # the release command (lib/deploy.sh; checked by the server too)
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
@@ -388,6 +389,10 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 999 ] || die "$f:$n: hold is 1 to 999 seconds (got \"$v\")";;
       stop_timeout) C_stop_timeout=$v
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 999 ] || die "$f:$n: stop_timeout is 1 to 999 seconds (got \"$v\")";;
+      assets) C_assets=$v
+        case $v in off) ;;
+          *[!A-Za-z0-9_./,\ ~-]*|""|/*|*..*) die "$f:$n: assets is off, or a directory in the release like assets and optionally the URL prefix: assets, /static/ (got \"$v\")";; esac
+        [ "$C_recipe" != container ] || [ "$v" = off ] || die "$f:$n: assets is not supported for a container app (its files are inside the image)";;
       health_timeout) C_timeout=$v;;
       soak) C_soak=$v; is_num "$v" || die "$f:$n: soak is seconds (got \"$v\")";;
       path) C_path=$v;;

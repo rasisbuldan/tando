@@ -938,6 +938,96 @@ srv "sudo find /opt/tando/apps/hello/incoming -name '.env*' -delete"
 check "S3 a forged file name: one history row ($n0 -> $n1), no C1 byte ($raw), no injected key ($keys)" \
   test "$n1" = $((n0 + 1)) -a "$raw" = 0 -a "$keys" = 0
 
+# AS. fingerprinted assets: a page of the old release asks for the old release's hashed files
+# (docs/ARCHITECTURE.md "Assets"). A Vite-like static site (assets/index-<hash>.js, found by its names)
+# and a node app with `assets = public/build, /build/` that sets a header of its own.
+ah() { curl -s -m 5 -D - -o /dev/null "http://$1.localhost:$HP$2" | tr -d '\r'; }   # headers of a GET
+site_release() { # dir n: release n of the site: a hashed js and css, an unhashed page
+  mkdir -p "$1/assets"; rm -f "$1"/assets/*
+  AS_H=$(printf 'rel%s' "$2" | cksum | cut -d' ' -f1)
+  { echo "console.log('release $2');"; head -c 3000 /dev/zero | tr '\0' ' '; } > "$1/assets/index-$AS_H.js"
+  echo "b{c:$2}" > "$1/assets/style-$AS_H.css"; mkdir -p "$E/ref"; cp "$1/assets/index-$AS_H.js" "$E/ref/rel$2.js"
+  printf '<!doctype html><script src=/assets/index-%s.js></script><h1>release %s</h1>\n' "$AS_H" "$2" > "$1/index.html"
+}
+mkdir -p "$W/skew"; printf 'app = skew\nrecipe = static\n' > "$W/skew/tando.conf"
+cd "$W/skew" || exit 2
+site_release "$W/skew" 1; H1=$AS_H
+"$R" up > "$E/as1.out" 2>&1; rc=$?
+"$R" domain add skew.example.test --force > "$E/asdom.out" 2>&1   # (no DNS here: --force)
+check "AS0 the static site deploys (rc=$rc)" test $rc = 0 -a "$(get skew | grep -c 'release 1')" = 1
+for n in 2 3; do site_release "$W/skew" $n; "$R" deploy > "$E/as$n.out" 2>&1; done; H3=$AS_H
+# shellcheck disable=SC2034  # read in the eval of a check below
+hdr=$(ah skew "/assets/index-$H1.js")
+check "AS1 release 1's hashed file still answers after releases 2 and 3 went live, with the immutable header" \
+  eval 'echo "$hdr" | head -1 | grep -q " 200" && echo "$hdr" | grep -qi "^cache-control: public, max-age=31536000, immutable"'
+check "AS1b its bytes are release 1's" eval '[ "$(curl -s "http://skew.localhost:$HP/assets/index-$H1.js" | cksum)" = "$(cksum < "$E/ref/rel1.js")" ]'
+check "AS2 the page itself gets no caching header from tando" eval '! ah skew / | grep -qi "^cache-control"'
+check "AS2b a path that is not in the shared directory is the site's: its 404 gets no caching header either" \
+  eval 'h=$(ah skew /assets/none-12345678.js); echo "$h" | head -1 | grep -q " 404" && ! echo "$h" | grep -qi "^cache-control"'
+check "AS2c a custom domain of the site is in the same site block as the assets handle, and Caddy accepts the file" \
+  eval 'srv "sudo grep -q tandoassets /etc/caddy/tando/skew.caddy" && srv "sudo grep -q skew.example.test /etc/caddy/tando/skew.caddy" &&
+        srv "sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile" > /dev/null 2>&1'
+check "AS2d a Host with a port is still answered 400 (not served from the shared directory)" \
+  eval '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Host: skew.localhost:99" "http://127.0.0.1:$HP/assets/index-$H1.js")" = 400 ]'
+links=$(srv "sudo stat -c %h /opt/tando/apps/skew/assets/assets/index-$H3.js")
+check "AS3 the shared file is a hard link of the release's (link count $links): no second copy on disk" test "$links" -ge 2
+# rollback: its own assets
+"$R" rollback > "$E/asrb.out" 2>&1; rc=$?
+check "AS4 after a rollback the page is release 2's and its file answers with its own bytes (rc=$rc)" \
+  eval '[ $rc = 0 ] && get skew | grep -q "release 2" && src=$(get skew | grep -o "/assets/index-[^ >]*\.js") &&
+        [ "$(curl -s "http://skew.localhost:$HP$src" | cksum)" = "$(cksum < "$E/ref/rel2.js")" ]'
+"$R" deploy > "$E/as4.out" 2>&1
+# pruning: five more releases push release 1 out
+for n in 4 5 6 7 8; do site_release "$W/skew" $n; "$R" deploy > "$E/as$n.out" 2>&1; done
+# shellcheck disable=SC2034  # read in the eval of a check below
+H8=$AS_H
+nrel=$(srv "sudo ls /opt/tando/apps/skew/releases | wc -l" | tr -d ' ')
+code1=$(curl -s -o /dev/null -w '%{http_code}' "http://skew.localhost:$HP/assets/index-$H1.js")
+on1=$(srv "sudo find /opt/tando/apps/skew/assets /opt/tando/apps/skew/assetlog -name '*$H1*' | wc -l" | tr -d ' ')
+check "AS5 release 1 was pruned (kept $nrel releases): its file answers $code1 and is gone from disk ($on1 left)" \
+  eval '[ "$code1" = 404 ] && [ "$on1" = 0 ] && [ "$(curl -s -o /dev/null -w "%{http_code}" "http://skew.localhost:$HP/assets/index-$H8.js")" = 200 ]'
+nfiles=$(srv "sudo find /opt/tando/apps/skew/assets -type f | wc -l" | tr -d ' ')
+nlist=$(srv "sudo cat \$(sudo find /opt/tando/apps/skew/assetlog -maxdepth 1 -type f ! -name '*.*') | sort -u | wc -l" | tr -d ' ')
+check "AS5b the shared directory holds exactly what the kept releases list ($nfiles files, $nlist listed)" test "$nfiles" = "$nlist" -a "$nfiles" -ge 2
+# detection says nothing about names that are not hashed: no mount, no header
+mkdir -p "$W/plain/assets"; printf 'app = plain\nrecipe = static\n' > "$W/plain/tando.conf"
+echo "x" > "$W/plain/assets/app.js"; echo "x" > "$W/plain/assets/logo-large.png"; echo "<h1>plain</h1>" > "$W/plain/index.html"
+(cd "$W/plain" && "$R" up > "$E/asp.out" 2>&1)
+check "AS6 a directory whose names are not all hashed is not shared and gets no caching header" \
+  eval '! ah plain /assets/app.js | grep -qi "^cache-control" && [ "$(get plain /assets/app.js)" = x ] &&
+        [ -z "$(srv "sudo ls /opt/tando/apps/plain/assetlog 2> /dev/null")" ] && ! srv "sudo grep -q tandoassets /etc/caddy/tando/plain.caddy"'
+# a node app: assets = <dir>, <url prefix>; its own Cache-Control stays
+mkdir -p "$W/skewn/public/build"; cd "$W/skewn" || exit 2
+cat > server.js <<'JS'
+const http = require("http"), fs = require("fs"), path = require("path");
+http.createServer((req, res) => {
+  const u = req.url.split("?")[0];
+  if (u.startsWith("/build/")) {   // the app's own caching for its files
+    const f = path.join(__dirname, "public", u);
+    if (!fs.existsSync(f)) { res.statusCode = 404; return res.end("no"); }
+    res.setHeader("Cache-Control", "public, max-age=3600"); return res.end(fs.readFileSync(f));
+  }
+  res.end("node release " + fs.readFileSync(path.join(__dirname, "VERSION"), "utf8").trim());
+}).listen(process.env.PORT, "127.0.0.1");
+JS
+printf 'app = skewn\nrecipe = node\nstart = node server.js\nhealth = /\nmemory = 128M\nassets = public/build, /build/\n' > tando.conf
+echo 1 > VERSION; echo "var r=1;" > public/build/app-7f3a9c21.js
+"$R" up > "$E/asn1.out" 2>&1; rc=$?
+echo 2 > VERSION; rm -f public/build/app-7f3a9c21.js; echo "var r=2;" > public/build/app-b81d40e5.js
+"$R" deploy > "$E/asn2.out" 2>&1
+# shellcheck disable=SC2034  # read in the eval of a check below
+h=$(ah skewn /build/app-7f3a9c21.js)
+check "AS7 node app: release 1's file (gone from the app) answers 200 after release 2; the app's own Cache-Control is what it carries (rc=$rc)" \
+  eval 'echo "$h" | head -1 | grep -q " 200" && echo "$h" | grep -qi "^cache-control: public, max-age=3600$" && ! echo "$h" | grep -qi immutable'
+check "AS7b the app answers what the shared directory does not hold (a file made after the deploy)" \
+  eval 'srv "sudo sh -c '"'"'echo late > /opt/tando/apps/skewn/current/public/build/late.js'"'"'"; [ "$(get skewn /build/late.js)" = late ]'
+check "AS7c a container app with assets is refused by the server" \
+  eval 'agent_check container "assets=assets" | grep -q "assets is not supported for a container"'
+check "AS7d a bad assets value is refused (a path outside the release)" \
+  eval 'agent_check node "assets=../etc" | grep -q "bad assets"'
+cd "$W" || exit 2
+
+for a in skew plain skewn; do "$R" destroy "$a" --purge --yes > /dev/null 2>&1; done   # (section 20 counts the host's apps)
 # 20. several hosts: the same container under two names plus one that does not answer
 "$R" host add test2 vmadmin@127.0.0.1 --port $SP --key "$ROOT/test/server/id_test" --insecure-test >&2  # the one insecure entry
 "$R" host add dead vmadmin@127.0.0.1 --port 2299 --key "$ROOT/test/server/id_test" --no-check >&2
