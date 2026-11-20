@@ -115,6 +115,23 @@ Runs on the server once per deploy, before the switch (migrations). Not for `sta
 | `job_missed` | `run` or `skip` | `run` | | What a run the server missed while it was off or down becomes: `run` makes it up once when the server is back (a nightly backup), `skip` waits for the next time (a morning digest that would arrive at night). | `job_missed = skip` |
 | `job.<name>.missed` | `run` or `skip` | `job_missed` | | The same for one job. | `job.digest.missed = skip` |
 
+## Workers
+
+Long-running processes beside the web one: queue consumers, websocket servers, schedulers. Each is
+its own process (`tando-<app>_worker-<name>`), as the app's user, in the same sandbox, with the
+same env and in the same release as the web process, with no port. A worker that exits is started
+again (after 2 s, then longer); one that keeps exiting is shown by `tando status` and `tando ls`
+and raises the `worker.<name>` alert, and never stops the web process. At a deploy the workers
+change once the new release's web process passed its health check: the old ones are stopped (each
+gets its `stop_timeout`), then the new ones start; one that does not stay up fails the deploy and
+the old ones run again. Not for `static`, not for `container` yet. At most 20.
+
+| Key | Type | Default | Unit | Meaning | Example |
+|---|---|---|---|---|---|
+| `worker.<name>` | text | none | | The command of a worker, run in the release (`sh -c` when it has shell syntax). The name is lower case letters, digits and `-`, at most 21, and not a job's name. One line per worker. | `worker.queue = node worker.js` |
+| `worker.<name>.memory` | size | `memory` | bytes | Memory limit of that worker; the app's limits count it. | `worker.queue.memory = 512M` |
+| `worker.<name>.stop_timeout` | number | `30` | seconds | How long a stopping worker (a deploy, `tando stop`) may finish its work after SIGTERM before it is killed, 1 to 3600. | `worker.queue.stop_timeout = 120` |
+
 ## Domains
 
 | Key | Type | Default | Unit | Meaning | Example |

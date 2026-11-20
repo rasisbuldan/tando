@@ -10,7 +10,9 @@ loop_start $A
 deploy $A 3 ok; log "deploy rc=$DRC: $(grep -iE 'backup|failed' "$W/$A.d3.out" | head -2 | tr '\n' ' ')"
 (cd "$W/$A" && "$R" backup now > "$W/bk.out" 2>&1); brc=$?; log "backup now rc=$brc: $(tail -1 "$W/bk.out")"
 loop_stop; ok "no failed request ($F_BAD)" test "$F_BAD" = 0
-ok "deploy fails clearly" sh -c "[ $DRC != 0 ] && grep -qi backup '$W/$A.d3.out'"
+# (the deploy stops at the database role, before the pre-deploy backup is reached: either says why)
+ok "deploy fails clearly" sh -c "[ $DRC != 0 ] && grep -qiE 'backup|could not create role' '$W/$A.d3.out'"
+ok "backup now fails, and does not blame the ssh connection" sh -c "[ $brc != 0 ] && ! grep -qi 'cannot reach' '$W/bk.out'"
 truth $A 2
 srv "sudo systemctl start postgresql"; sleep 3
 next_deploy $A 4

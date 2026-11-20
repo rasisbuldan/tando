@@ -11,7 +11,7 @@ where changes are tested. Server suites need Docker
 |---|---|---|---|
 | After every edit | `test/check.sh` | seconds | The changed files parse (bash 3.2 and the server's bash), lint is clean on them, the changed Go packages vet and pass, no secret or private detail is in the tree, the suite map knows the change. |
 | Before you say a change works | `test/all.sh --tier quick` | minutes | The suites the changed files can break (it prints which, from `test/suites.map`) plus one smoke deploy. |
-| Before a push to main, a tag, or when quick said "every suite" | `test/all.sh` (the full tier) | see docs/TESTING.md | Every suite, nothing cached, the fault scenarios in four parallel shards. |
+| Before a push to main, a tag, or when quick said "every suite" | `test/all.sh` (the full tier) | see docs/TESTING.md | Every suite, nothing cached, the fault scenarios in six parallel shards. |
 | After a failure | `test/all.sh --failed` | the failed suites | Only what failed in the last run. Fix, then rerun this, then the tier you were in. |
 | When the owner asks, or the machine is free | `--tier nightly`, `--tier weekly` | long | The fault scenarios in longer chains (order matters there), weekly with the long soak everywhere. |
 
@@ -44,7 +44,7 @@ uses; `test/server/down.sh` with the same `TANDO_TEST_NAME` removes it).
 | `srv/<package>` | `go`, and the suite of that package's feature: watch, hostcare → the alerts suites and `e2e-host`; logs → `e2e-logs`; offsite → `e2e-offsite`; status, metrics → `e2e-status`, `e2e-top`; gate → `e2e-ci`, `e2e-sec2`. `srv/internal`, `srv/daemon`, `srv/cmd`: everything. |
 | Next.js handling (`recipe = next`, sharp, the image pre-flight) | `e2e-next` |
 | backups, restore | `e2e-data`, `e2e-offsite` |
-| anything about failure handling in a deploy | `e2e`, the fault shards `e2e-faults-q1` to `q4`, `e2e-matrix-quick`; for the state machine itself (recover, finish, switch, rollback) also `test/e2e-matrix.sh` with the flags in docs/TESTING.md, "The fault matrix" |
+| anything about failure handling in a deploy | `e2e`, the fault shards `e2e-faults-q1` to `q6`, `e2e-matrix-quick`; for the state machine itself (recover, finish, switch, rollback) also `test/e2e-matrix.sh` with the flags in docs/TESTING.md, "The fault matrix" |
 | a test suite | that suite, and `lint` |
 | docs only | `lint`, `ui-test`, `e2e-cli`, `install-test` (they check that docs, help and commands agree) |
 

@@ -43,6 +43,7 @@ configure() {
     [ -n "$C_job_spread" ] && printf 'job_spread=%s\n' "$C_job_spread"
     [ -n "$C_job_missed" ] && printf 'job_missed=%s\n' "$C_job_missed"
     printf '%s' "$C_jobs"
+    printf '%s' "$C_workers"
     printf '%s' "$C_logs"
     [ -n "$C_domain" ] && printf 'domain=%s\n' "$C_domain"
     [ -n "$C_www" ] && printf 'www=%s\n' "$C_www"

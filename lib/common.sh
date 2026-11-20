@@ -307,6 +307,7 @@ C_logs=""   # log_max, log_keep, log_rate, access_log as key=value lines (checke
 C_image="" C_container_port="" C_build_memory="" C_dockerfile="" C_node="" C_domain="" C_www=""
 C_job_timeout=""   # seconds a scheduled job may run (the server's default: 3600)
 C_job_spread="" C_job_missed=""   # the spread of a job's start (default 15 s), run or skip a run missed while the server was off
+C_workers=""       # worker.<name> = <command> and their .memory, .stop_timeout as key=value lines
 C_release="" C_release_shell="" C_release_timeout=""   # the release command (lib/deploy.sh; checked by the server too)
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
 
@@ -600,6 +601,20 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         C_jobs="$C_jobs$k=$JOB_V
 ${JOB_CRON:+$k.cron=$JOB_CRON
 }";;
+      worker.*.memory|worker.*.stop_timeout|worker.*)   # processes beside the web one (the server checks them again)
+        x=${k#worker.}; x=${x%%.*}
+        case $x in [a-z]*) ;; *) die "$f:$n: bad worker name: $x (it starts with a lower case letter)";; esac
+        case $x in *[!a-z0-9-]*) die "$f:$n: bad worker name: $x (lower case letters, digits and -)";; esac
+        [ ${#x} -le 21 ] || die "$f:$n: worker name $x is longer than 21 characters"
+        case $k in
+          worker.*.memory) case $v in [1-9]*K|[1-9]*M|[1-9]*G) ui_int "${v%?}" || die "$f:$n: $k is a size like 256M (got \"$v\")";;
+                             *) die "$f:$n: $k is a size like 256M (got \"$v\")";; esac;;
+          worker.*.stop_timeout) ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 3600 ] || die "$f:$n: $k is 1 to 3600 seconds (got \"$v\")";;
+          worker.*.*) die "$f:$n: unknown key: $k (a worker has .memory and .stop_timeout)";;
+          *) [ -n "$v" ] || die "$f:$n: $k is a command, like node worker.js";;
+        esac
+        C_workers="$C_workers$k=$v
+";;
       *) die "$f:$n: unknown key: $k";;
     esac
   done < "$f"
@@ -622,6 +637,19 @@ ${JOB_CRON:+$k.cron=$JOB_CRON
   for jt in $(printf '%s' "$C_jobs" | sed -n 's/^\(job\.[^=.]*\)\.[a-z]*=.*/\1/p'); do
     printf '%s' "$C_jobs" | grepq "^$jt=" || die "$f: $jt.* is set but there is no $jt = <schedule> | <command>"
   done
+  # workers: where they can run, their settings need them, a job has another name
+  if [ -n "$C_workers" ]; then
+    case $C_recipe in
+      static) die "$f: workers are not supported for a static site: it has no process (recipe = static)";;
+      container) die "$f: workers are not supported for recipe = container yet: run the process in its own app";;
+    esac
+    for jt in $(printf '%s' "$C_workers" | sed -n 's/^worker\.\([^.=]*\)\.[a-z_]*=.*/\1/p'); do
+      printf '%s' "$C_workers" | grepq "^worker\.$jt=" || die "$f: worker.$jt.* is set but there is no worker.$jt = <command>"
+    done
+    for jt in $(printf '%s' "$C_workers" | sed -n 's/^worker\.\([^.=]*\)=.*/\1/p'); do
+      printf '%s' "$C_jobs" | grepq "^job\.$jt=" && die "$f: worker $jt has the name of a job: give one of them another name"
+    done
+  fi
   CONF_LOADED=$f
   return 0
 }
@@ -928,7 +956,7 @@ ssh_explain() {
     *"kex_exchange_identification"*|*"MaxStartups"*)
       explain "$HOST closed the connection during login: too many logins at once (sshd MaxStartups), or sshd is overloaded" \
         "run fewer tando commands at once; if it keeps happening: tando doctor $HOST";;
-    *"Connection refused"*)
+    *"connect to host "*"Connection refused"*)   # (ssh's own line: a command's "Connection refused" is its own)
       explain "cannot reach $HOST ($TARGET, port $port): connection refused" \
         "is sshd listening on that port? check with: ssh -p $port $TARGET" \
         "another port: tando host add $HOST $TARGET --port N --force";;

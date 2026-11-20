@@ -36,6 +36,7 @@ var specCheck = map[string]func(string) bool{
 	"level":     regexp.MustCompile(`^[0-7]$`).MatchString,
 	"release":   valid.ID,
 	"deploy":    valid.ID,
+	"worker":    reJob.MatchString, // (a worker name is a job name's pattern)
 	"format":    func(v string) bool { return v == "text" || v == "json" },
 	"follow":    func(v string) bool { return v == "1" || v == "0" },
 	"cursor":    func(v string) bool { return v == "1" || v == "0" },
@@ -201,6 +202,12 @@ func (a *app) planQuery(q map[string]string, now int64) (*queryPlan, error) {
 			}
 			p.header = append(p.header, a.deployHeader(deploy)...)
 		}
+	} else if w := q["worker"]; w != "" {
+		// one worker's own output (tando logs --worker NAME): its unit only
+		if _, ok := a.conf["worker."+w]; !ok {
+			return nil, fmt.Errorf("%s has no worker %s", a.name, w)
+		}
+		units = [][2]string{{workerUnit(a.name, w), "worker:" + w}}
 	} else {
 		units = a.units()
 	}
@@ -389,8 +396,21 @@ func (a *app) units() [][2]string {
 	for _, j := range jobs {
 		u = append(u, [2]string{jobUnit(a.name, j), "job:" + j})
 	}
+	var workers []string
+	for k := range a.conf {
+		if w, ok := strings.CutPrefix(k, "worker."); ok && reJob.MatchString(w) {
+			workers = append(workers, w)
+		}
+	}
+	slices.Sort(workers)
+	for _, w := range workers {
+		u = append(u, [2]string{workerUnit(a.name, w), "worker:" + w})
+	}
 	return u
 }
+
+// workerUnit: the unit of a worker, as the agent names it (worker_unit).
+func workerUnit(app, w string) string { return "tando-" + app + "_worker-" + w + ".service" }
 
 // jobUnit: the unit of a scheduled job, as the agent names it (job_unit): "_" is in neither an app
 // nor a job name, so the name is exactly this app's job (tando-<app>-job-<name>, the form before,

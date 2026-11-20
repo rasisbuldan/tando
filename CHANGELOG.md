@@ -23,6 +23,30 @@ first, grouped by area.
   rollbacks and reboots. Not done: retries of a failed run. The job units gain two root hooks
   (`ExecStartPre`/`ExecStopPost`, `job-begin`/`job-end`) that write the history; a hook that fails
   never changes the job's result.
+- Fixed: a command that failed on the server with "Connection refused" in its own message (a
+  `pg_dump` with PostgreSQL stopped, say) was reported as "cannot reach <host>: connection
+  refused", as if ssh had failed. Only ssh's own "connect to host ... Connection refused" says
+  that now.
+- Fixed: tando-watch's minute now recovers a rollback that died after it wrote its progress file
+  and before its first state write: the progress said "running" for ever and the rollback had no
+  history line until the next command that changes the app.
+- Added: workers. `worker.<name> = <command>` in tando.conf runs a long-lived process beside the web
+  one (a queue consumer, a websocket server, a scheduler): its own unit
+  `tando-<app>_worker-<name>.service`, as the app's user, with the app's sandbox, env and release,
+  no port. `worker.<name>.memory` (default: `memory`, counted in the app's slice and the doctor's
+  memory caps) and `worker.<name>.stop_timeout` (seconds after SIGTERM, default 30). Workers belong
+  to the release: at a deploy they change once the new web process passed its check (the old ones
+  stop and finish, then the new ones start; never both), the soak watches them, and a worker that
+  does not stay up rolls the deploy back with the old workers running again; rollback, stop, start,
+  restart, env set, backup restore, destroy and a reboot include them, and recovery after a kill at
+  any point brings back exactly the serving release's. A worker that exits is restarted with a
+  backoff, never stops the web process, and one that keeps exiting shows in `tando status` and
+  `tando ls` and fires the `worker.<name>` alert (`worker=off`). `tando logs --worker NAME`.
+  Refused for static sites and (for now) containers; at most 20, names like jobs', not a job's
+  name. No `count` yet. An app without workers deploys as before (one glob per recover).
+- Tests: `test/e2e-workers.sh` (new suite); the fault matrix has a kind `worker` (invariant 11:
+  the workers that run are the serving release's; two cells in `e2e-matrix-quick`).
+
 - Changed: `tando db studio` reads only the app's own tables. The sidebar no longer has "system
   schemas"; the table list, structure and rows never show or serve pg_catalog,
   information_schema or pg_toast (a request for one of their tables is a 404). In the SQL
@@ -66,10 +90,10 @@ first, grouped by area.
   could be installed cut short, and a deploy's end was recorded with half its jobs old. Each file
   must be complete before it is installed; a failure leaves the operation's end unfinished, and
   recovery (tando-watch's minute, the next command) writes the jobs again.
-- Fixed: tando-watch and `tando status` tested an app's lock by taking it for an instant: a
-  command's own try at that moment waited, and two probes at once saw each other as "busy" (a
-  recovery skipped for a minute). They now read /proc/locks and take no lock (also the agent's
-  `busy` check).
+- Fixed: tando-watch and `tando status` tested an app's lock by taking it exclusively for an
+  instant: two probes at once saw each other as "busy" (a recovery skipped for a minute, a deploy
+  told it waits when nothing held the app). They (and the agent's `busy` check) now try a shared
+  lock: probes never see each other; a command's own try in that instant only waits for it to drop.
 - Fixed: after the clock was set back, pre-deploy (and other) backups were pruned by name: backups
   named from the future kept their place and each new one was deleted at the next backup. Backups
   now carry their order (`seq` in meta) and are pruned by it.

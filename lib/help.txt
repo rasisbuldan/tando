@@ -134,10 +134,10 @@ The apps of a server: state, when deployed, memory, cpu, uptime and link.
 Example: tando ls --all
 
 @@ logs
-flags: -a= -H= -f -n= --since= --until= --grep= --regex -E -i --level= --release= --deploy= --json
+flags: -a= -H= -f -n= --since= --until= --grep= --regex -E -i --level= --release= --deploy= --worker= --json
 args: 0-2
 usage: tando logs [app] [-f] [-n N] [--since T] [--until T] [--grep TEXT [-i] [--regex|-E]]
-usage:            [--level L] [--json]
+usage:            [--level L] [--worker NAME] [--json]
 usage: tando logs [app] --release ID | --deploy ID
 usage: tando logs pull <file> [--since T] [--until T]
 The app's output (stdout and stderr), from its own journal on the server.
@@ -145,7 +145,8 @@ The app's output (stdout and stderr), from its own journal on the server.
 (GMT, as the lines are shown);
 --level err|warning|notice|info|debug; --release ID: the lines from the time
 that release was live (for one that never was: its deploy log); --deploy ID:
-that deploy's own log and its start test;
+that deploy's own log and its start test; --worker NAME: only that worker's
+output (worker.<name> in tando.conf);
 pull writes everything to a local file.
 Example: tando logs -f --grep error -i
 

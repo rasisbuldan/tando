@@ -58,7 +58,7 @@ var defaults = []struct{ key, def, desc string }{
 // The checks that can be turned off ("<check>=off", "<app>.<check>=off"). "logs" is of low
 // severity: no high priority in ntfy, "(low)" in the text.
 var (
-	appChecks  = []string{"down", "health", "memory", "oom", "restarts", "tls", "backup", "stuck", "disk", "http", "slow", "errors", "logs", "job", "db_conns"}
+	appChecks  = []string{"down", "health", "memory", "oom", "restarts", "tls", "backup", "stuck", "disk", "http", "slow", "errors", "logs", "job", "worker", "db_conns"}
 	hostChecks = []string{"disk", "inodes", "host_memory", "swap", "load", "host_oom", "caddy", "caddy_config", "firewall", "monitor", "postgres"}
 )
 
