@@ -415,7 +415,7 @@ check "7c percentiles in their group (p50 quick < 50 ms, p95 in the 100 ms group
   awk -v a="$p50" -v b="$p95" -v c="$p99" 'BEGIN { exit !(a < 50 && b >= 95 && b < 290 && c >= 295 && c < 1000) }'
 check "7d paths: /sleep/:n 45 requests, /status/:n 160 with 20 5xx" sh -c "
   grep -q '^path	GET /sleep/:n	45	' '$E/sum' && grep -q '^path	GET /status/:n	160	.*	20\$' '$E/sum'"
-check "7e per-minute counts add up" test "$(kv counts | tr ',' '\n' | awk '{ s += $1 } END { print s }')" = 200
+check "7e per-minute counts add up" test "$(kv counts | tr ',' '\n' | awk '{ s += $1 } END { print s }')" = 205
 check "7f 5xx per-minute counts add up" test "$(kv counts_5xx | tr ',' '\n' | awk '{ s += $1 } END { print s }')" = 20
 for w in 80 120; do
   COLUMNS=$w "$R" requests -a req --last 15m > "$E/rq.$w"
