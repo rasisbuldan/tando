@@ -220,6 +220,7 @@ render_ls() {
   if [ $n -gt 0 ]; then ui_table "l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"   # LINK whole: other columns go first
   else ui_box_line "No apps on $HOST yet. In your app's directory: tando up"; fi
   worker_hint
+  restore_hint
   hc_hint
   local na foot
   na=$(grep -c "^alert${TAB}[^${TAB}]*${TAB}[^${TAB}]*${TAB}firing" "$TMPD/st")
@@ -230,6 +231,22 @@ render_ls() {
 }
 # hc_hint: one line when host care has something to do (the hostcare row of status: tando-host's
 # hourly summary, a file read on the server; nothing extra runs)
+# restore_cut_text: the restorecut row (app, backup to restore again, safety backup, what was being
+# replaced) as one sentence: the restore was cut, the command to run, the data from before
+restore_cut_text() {
+  local what=$4 safe=$3
+  [ "$safe" = - ] && safe="none, it was not taken"
+  printf 'the %s restore was cut: tando backup restore %s (the data from before it is in backup %s)' "$what" "$2" "$safe"
+}
+# restore_hint: in ls, one line per app whose restore was cut off (the way worker_hint marks a worker)
+restore_hint() {
+  local r ra rid rsf rwh
+  while IFS=$TAB read -r r ra rid rsf rwh _x; do
+    [ "$r" = restorecut ] || continue
+    ui_box_line "${UI_RED}$ra: $(restore_cut_text "$ra" "$rid" "$rsf" "$rwh"): tando status $ra${UI_NC}"
+  done < "$TMPD/st"
+  return 0
+}
 hc_hint() {
   local r todo fail warn at
   while IFS=$TAB read -r r todo fail warn at; do
@@ -311,6 +328,10 @@ render_status() {
   fi
   ui_kv cpu "$CPUP%"
   worker_lines
+  local rcid rcsf rcwh
+  while IFS=$TAB read -r r _x rcid rcsf rcwh _y; do
+    [ "$r" = restorecut ] && ui_kv restore "${UI_RED}$(restore_cut_text "$a" "$rcid" "$rcsf" "$rcwh")${UI_NC}"
+  done < "$TMPD/st"
   limits_line
   if [ -n "$WATCH" ]; then ui_kv trend "cpu $(ui_spark "$SPC" 16)  mem $(ui_spark "$SPM" 16)"
   elif [ -n "$hm" ]; then ui_kv "16 min" "cpu $(ui_spark "$hc" 16)  mem $(ui_spark "$hm" 16)"; fi

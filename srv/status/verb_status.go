@@ -99,6 +99,10 @@ func (c *Collector) Status(ctx context.Context, w io.Writer, name string) error 
 		for _, r := range c.workerRows(ctx, a.name, a.conf, a.state) {
 			s.row(r...)
 		}
+		if a.state.get("restore_cut") != "" { // a restore cut off while it replaced the data (the agent's restore_cut_row)
+			s.row("restorecut", a.name, orV(a.state.get("restore_cut_id"), "-"), orV(a.state.get("restore_cut_safety"), "-"),
+				orV(a.state.get("restore_cut_what"), "data"))
+		}
 	}
 	if one != nil {
 		if lc != nil {

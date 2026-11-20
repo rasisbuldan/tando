@@ -29,7 +29,8 @@
 # deploy-pre (refused in the pre-flight), deploy-stopped (to a stopped app), rollback, restart,
 # stop, start, env (env set), env-bad (an env that breaks the app: reverted), recover (a second
 # fault inside the recovery of a first one), restore (backup restore of a backup taken before the
-# data changed; kind data), destroy (the app is removed: after it, nothing of it may be left but its final backup).
+# data changed; kind data), destroy (the app is removed: after it, nothing of it may be left but its final backup),
+# destroy-purge (destroy --purge: the database, the role and the backups go too; kind data).
 # bash 3.2 compatible.
 set -u
 : "${TANDO_TEST_SSH_PORT:-2222}"   # the server comes from the environment (test/all.sh reads this line)
@@ -64,7 +65,7 @@ if [ -z "$OPS" ]; then
     static) OPS="deploy deploy-pre rollback";;
     container) OPS="deploy deploy-bad rollback restart";;
     worker) OPS="deploy deploy-bad deploy-pre rollback restart stop start env recover";;
-    data) OPS="deploy deploy-bad rollback restart restore destroy";;
+    data) OPS="deploy deploy-bad rollback restart restore destroy destroy-purge";;
     *) OPS="deploy deploy-bad rollback restart";;
   esac
 fi
@@ -127,7 +128,7 @@ mx_pre() {
     mx_facts > /dev/null 2>&1; MX_DATA_BK=$(fv data_sum) MX_DB_BK=$(fv db_rows)
     mx_seed
   fi
-  if [ "$1" = destroy ]; then   # (a final backup of an earlier destroy cell's must not count)
+  if [ "$1" = destroy ] || [ "$1" = destroy-purge ]; then   # (a final backup of an earlier destroy cell's must not count)
     MX_UID=$(dx id -u "tando-$A" 2> /dev/null); dxs "rm -rf /var/backups/tando/$A"
   fi
   return 0
@@ -150,6 +151,7 @@ mx_go() {
     env-bad) mx_client "$W/op.out" env set MX_BAD=1;;
     restore) mx_client "$W/op.out" backup restore "$MX_BK" --yes;;
     destroy) mx_client "$W/op.out" destroy --yes;;
+    destroy-purge) mx_client "$W/op.out" destroy --purge --yes;;
   esac
 }
 # the point where an operation has done what it was asked (after it, a kill must end in the new
@@ -544,6 +546,13 @@ n deploy run-activation ra.restart 1 fail after
 n deploy run-activation link.moved 1 kill after
 n deploy run-activation fin.verify 1 fail after
 n deploy-bad run-activation ra.restart 2 fail after";;
+  # a destroy --purge (the database and role go too, with the backups): killed at the database
+  # drop and at the user removal, and the server restarted at the database drop; invariant 14
+  # then also needs the database, the role and every backup of the app gone
+  data) WEEKLY_CELLS="
+y destroy-purge destroy ds.db 1 kill none
+y destroy-purge destroy ds.user 1 kill none
+y destroy-purge destroy ds.db 1 reboot none";;
   *) WEEKLY_CELLS="";;
 esac
 [ "$WEEKLY" = 0 ] || CELLS=$WEEKLY_CELLS

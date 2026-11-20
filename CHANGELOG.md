@@ -30,6 +30,16 @@ first, grouped by area.
   destroy again. Both are recorded operations now (`phase restore`, `phase destroy`): recovery
   finishes a destroy, and ends a restore with the app running its release; a database cut off
   half restored is reported by `tando doctor` with the backup to restore again and the safety backup.
+- Changed: `tando status <app>` shows a restore that was cut off while it replaced the database
+  (one `restore` line: the backup to restore again with its command, `tando backup restore <id>`,
+  and the safety backup), and `tando ls` marks the app the same way it marks a worker that does
+  not run. Both come from the agent and from srv/status (`restorecut` row).
+- Fixed: a destroy cut off after it renamed the app's directory to `.gone-*` left that directory
+  until the next boot; tando-watch now runs recover-all within the minute when one exists (and its
+  destroy is no longer running).
+- Tests: the fault matrix has `destroy-purge` (data kind, weekly cells: killed at the database
+  drop and at the user removal, and a restart at the drop); invariant 14 also needs the database,
+  the role and the app's backups gone after `--purge`, and fails when psql cannot say.
 - Tests: the fault matrix has the operations `restore` and `destroy` (invariant 13: a restore's
   data is the backup's or the old, else recorded and reported; 14: nothing of a destroyed app is
   left), with cells in the quick set.
