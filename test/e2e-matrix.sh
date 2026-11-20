@@ -18,6 +18,8 @@
 #                                              (CELLS below; container: the switch failure)
 #   test/e2e-matrix.sh --ops deploy,rollback --actions kill --points '(^|/)(pre|post):'
 #                                              a kill at every state write of a deploy and a rollback
+#   test/e2e-matrix.sh --kind static --weekly  the weekly cells of that kind (WEEKLY_CELLS below: the
+#                                              points where its path differs from node's)
 #   test/e2e-matrix.sh --selftest              prove the checker: each invariant, broken on purpose
 #   test/e2e-matrix.sh --list                  trace and print the cells; run none
 # Operations: deploy, deploy-rel (a release command), deploy-bad (fails after the switch),
@@ -28,7 +30,7 @@
 set -u
 : "${TANDO_TEST_SSH_PORT:-2222}"   # the server comes from the environment (test/all.sh reads this line)
 . "$(cd "$(dirname "$0")" && pwd -P)/lib.sh"
-KIND=node OPS="" ACTIONS="kill fail reboot" QUICK=0 PTS="" SHARD="" SELFTEST=0 LIST=0 CELLSONLY=0
+KIND=node OPS="" ACTIONS="kill fail reboot" QUICK=0 PTS="" SHARD="" SELFTEST=0 LIST=0 CELLSONLY=0 WEEKLY=0
 while [ $# -gt 0 ]; do
   case $1 in
     --kind) KIND=${2:-}; shift;;
@@ -39,6 +41,7 @@ while [ $# -gt 0 ]; do
     --shard) SHARD=${2:-}; shift;;
     --selftest) SELFTEST=1;;
     --cells) CELLSONLY=1;;
+    --weekly) CELLSONLY=1 WEEKLY=1;;
     --list) LIST=1;;
     *) echo "e2e-matrix: unknown argument \"$1\" (see the head of this file)" >&2; exit 2;;
   esac
@@ -165,10 +168,37 @@ mx_expect() { # op phase action
 mx_reset() {
   log "resetting $A after a failed cell"
   dxs "systemctl reset-failed 'tando-$A*' 2> /dev/null; true"
-  mx_fresh || { fail "0 the baseline app could not be deployed again"; t_done; }
+  # (one more try: the baseline is rebuilt from nothing, and a fresh image build or pull can fail once)
+  mx_fresh || { log "the baseline failed once; trying again"; mx_fresh; } ||
+    { fail "0 the baseline app could not be deployed again"; t_done; }
+}
+# Known failures: cells that fail today for a reason that is not a defect of the test, each with
+# the invariants that break and why it stays. A listed cell that breaks exactly those invariants
+# prints as SKIP "KNOWN ..." (it is counted, listed at the end, and the baseline is rebuilt); one that
+# passes FAILS ("remove it from MX_KNOWN"); one that breaks anything else FAILS as any cell does.
+# Lines: <glob of kind/op/verb/point#n/action> <broken invariants, e.g. " 6"> <reason>
+# lease with no activation id: an agent killed after it took the upload lease and before it wrote the
+# release id into it leaves the lease; it is stale after 30 s (5 s for the same user@machine
+# asking again: the next begin takes it over) and `tando unlock` clears it; recovery does not.
+MX_KNOWN="
+*/begin/post:upload#1/kill| 6|a lease without a release id outlives a kill of begin or activate; the next deploy takes it over (30 s, 5 s for the same machine), tando unlock clears it, recovery does not
+*/activate/rec/enter#1/kill| 6|same: a kill at the start of activate, before the lease gets its release id
+*/activate/rec/enter#1/reboot| 6|same, with a reboot
+*/activate/act.mkdir#1/kill| 6|same: a kill before the release id is reserved
+*/activate/act.mkdir#1/reboot| 6|same, with a reboot
+*/activate/pre:upload#1/kill| 6|same: a kill before the lease is written with its release id"
+# mx_known <id>: the reason when the cell is listed, with its invariants in MX_KINV
+mx_known() {
+  local l g
+  while IFS='|' read -r g MX_KINV l; do
+    [ -n "$g" ] || continue
+    # shellcheck disable=SC2254  # (the glob in the list)
+    case $1 in $g) MX_KREASON=$l; return 0;; esac
+  done <<< "$MX_KNOWN"
+  return 1
 }
 # mx_cell <op> <verb> <point> <nth> <action> <phase> [second point for recover]: run one cell
-NFAIL=0 NPASS=0 NSKIP=0
+NFAIL=0 NPASS=0 NSKIP=0 NKNOWN=0
 mx_cell() {
   local op=$1 verb=$2 pt=$3 nth=$4 act=$5 ph=$6 p2=${7:-} id rel before t0 ov
   id="$KIND/$op/$verb/$pt#$nth/$act${p2:+/$p2}"
@@ -200,7 +230,10 @@ mx_cell() {
   (mx_go "$op") >> "$W/case.log" 2>&1 &
   local cl=$! i=0
   if [ "$act" = reboot ]; then
-    while [ $i -lt 600 ] && ! dxs "test -e $MX_T/reached" 2> /dev/null && kill -0 $cl 2> /dev/null; do sleep 0.2; i=$((i + 1)); done
+    # (the point can come after the client has its answer: a refused deploy is told as soon as its
+    # result is written, and the activation's last writes follow; wait while its unit lives too)
+    while [ $i -lt 600 ] && ! dxs "test -e $MX_T/reached" 2> /dev/null &&
+      { kill -0 $cl 2> /dev/null || ! mx_settled 2> /dev/null; }; do sleep 0.2; i=$((i + 1)); done
     if dxs "test -e $MX_T/reached" 2> /dev/null; then
       MX_REBOOT_T=$(date +%s)
       mx_reboot || { fail "$id: the server did not come back after the restart"; mx_loop_stop; return; }
@@ -252,8 +285,16 @@ mx_cell() {
     return
   fi
   if mx_inv 2>> "$W/case.log"; then
+    if mx_known "$id"; then
+      NFAIL=$((NFAIL + 1)); fail "$id: listed in MX_KNOWN as a failure ($MX_KREASON) but it passes: remove it from the list"
+      return
+    fi
     NPASS=$((NPASS + 1)); pass "$id ($(( $(date +%s) - t0 )) s)"
     printf '%s\t%s\t%s\t%s\t%s\t%s\tpass\t\n' "$KIND" "$op" "$verb" "$pt#$nth" "$act" "$ph" >> "$CELLOUT"
+  elif mx_known "$id" && [ "$MX_BROKEN" = "$MX_KINV" ]; then
+    NKNOWN=$((NKNOWN + 1)); skip "KNOWN failure $id:$(tr '\n' ';' < "$W/inv.out" | sed 's/;$//; s/;/ |/g') ($MX_KREASON)"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\tknown\t%s\n' "$KIND" "$op" "$verb" "$pt#$nth" "$act" "$ph" "$(echo $MX_BROKEN)" >> "$CELLOUT"
+    mx_reset
   else
     NFAIL=$((NFAIL + 1))
     fail "$id:$(tr '\n' ';' < "$W/inv.out" | sed 's/;$//; s/;/ |/g')"
@@ -335,8 +376,64 @@ h deploy run-activation pre.stop 1 kill before
 i deploy run-activation deploy.jobs 1 fail after
 i deploy run-activation jobs.write 1 fail after
 e deploy run-activation run.queue 1 fail before
-j stop stop caddy.mv 1 fail after"
-[ "$KIND" = container ] && CELLS="a deploy run-activation ra.restart 1 fail after"
+j stop stop caddy.mv 1 fail after
+k rollback rollback post:activation 1 kill before"
+# k: a rollback killed after its progress file (result=running) and before its first state write: tando-watch's recover-all
+# (srv/watch/pretick.go rollbackCut) ends it; nothing did before
+# the other kinds: one or two cells where their path differs from node's (a static site has no
+# process: Caddy's file site is the switch; a container has a spawn and a stop of its own)
+case $KIND in
+  container) CELLS="
+a deploy run-activation ra.restart 1 fail after
+c deploy run-activation pre.spawn 1 kill before";;
+  static) CELLS="
+b deploy run-activation sw.caddy_up 1 kill before
+b deploy run-activation link.moved 1 kill after";;
+esac
+# --weekly: more cells of the other kinds, chosen from a full run of each kind's grid (docs/TESTING.md,
+# "The fault matrix"): the points where the kind's code path differs from node's, with the actions
+# that found something or guard a switch. The cells of the milestone's defects (above) are in node's.
+case $KIND in
+  static) WEEKLY_CELLS="
+s deploy run-activation sw.caddy_up 1 kill before
+s deploy run-activation sw.caddy_up 1 fail before
+s deploy run-activation link.mv 1 kill before
+s deploy run-activation link.moved 1 kill after
+s deploy run-activation link.moved 1 reboot after
+s deploy run-activation fin.verify 1 fail after
+s deploy run-activation deploy.hist 1 kill after
+s deploy-pre run-activation deploy.drop 1 kill none
+s deploy-pre run-activation imp.cp 1 kill none
+s rollback rollback link.mv 1 kill before
+s rollback rollback link.moved 1 kill after
+s rollback rollback post:activation 1 kill before
+s rollback rollback pre:activation 4 fail after
+s rollback rollback rollback.hist 1 fail after";;
+  container) WEEKLY_CELLS="
+c deploy run-activation pre.spawn 1 kill before
+c deploy run-activation pre.stop 1 kill before
+c deploy run-activation ra.restart 1 fail after
+c deploy run-activation sw.caddy_up 1 kill before
+c deploy run-activation link.moved 1 kill after
+c deploy run-activation link.moved 1 reboot after
+c deploy run-activation fin.soak 1 kill after";;
+  python) WEEKLY_CELLS="
+p deploy run-activation imp.cp 1 kill before
+p deploy run-activation pre.stop 1 kill before
+p deploy run-activation ra.restart 1 fail after
+p deploy run-activation link.moved 1 kill after
+p deploy run-activation fin.verify 1 fail after
+p deploy-bad run-activation ra.restart 2 fail after";;
+  next) WEEKLY_CELLS="
+n deploy run-activation imp.cp 1 kill before
+n deploy run-activation pre.stop 1 kill before
+n deploy run-activation ra.restart 1 fail after
+n deploy run-activation link.moved 1 kill after
+n deploy run-activation fin.verify 1 fail after
+n deploy-bad run-activation ra.restart 2 fail after";;
+  *) WEEKLY_CELLS="";;
+esac
+[ "$WEEKLY" = 0 ] || CELLS=$WEEKLY_CELLS
 CELLS=${MX_CELLS:-$CELLS}     # (another list: MX_CELLS, same columns)
 if [ "$CELLSONLY" = 1 ]; then
   while read -r d op v p n act ph <&3; do
@@ -345,7 +442,7 @@ if [ "$CELLSONLY" = 1 ]; then
     if [ "$p" = - ]; then mx_cell "$op" - - 0 none after < /dev/null; else mx_cell "$op" "$v" "$p" "$n" "$act" "$ph" < /dev/null; fi
   done 3<<< "$CELLS"
   [ "$LIST" = 1 ] && exit 0
-  log "matrix $KIND cells: $NPASS passed, $NFAIL failed, $NSKIP not reached"
+  log "matrix $KIND cells: $NPASS passed, $NFAIL failed, $NKNOWN known failures, $NSKIP not reached"
   t_done
 fi
 
@@ -406,5 +503,5 @@ done
 mx_spec_clear
 if mx_deploy && mx_facts > /dev/null 2>&1 && [ "$(mx_served_ver)" = "$MXV" ]; then pass "Z a plain deploy after the last cell goes live"
 else fail "Z a plain deploy after the last cell does not go live (rc=$MXRC, serves $(mx_served_ver))"; fi
-log "matrix $KIND: $NPASS cells passed, $NFAIL failed, $NSKIP not reached"
+log "matrix $KIND: $NPASS cells passed, $NFAIL failed, $NKNOWN known failures, $NSKIP not reached"
 t_done

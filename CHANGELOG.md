@@ -6,6 +6,13 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: a command that failed on the server with "Connection refused" in its own message (a
+  `pg_dump` with PostgreSQL stopped, say) was reported as "cannot reach <host>: connection
+  refused", as if ssh had failed. Only ssh's own "connect to host ... Connection refused" says
+  that now.
+- Fixed: tando-watch's minute now recovers a rollback that died after it wrote its progress file
+  and before its first state write: the progress said "running" for ever and the rollback had no
+  history line until the next command that changes the app.
 - Changed: `tando db studio` reads only the app's own tables. The sidebar no longer has "system
   schemas"; the table list, structure and rows never show or serve pg_catalog,
   information_schema or pg_toast (a request for one of their tables is a 404). In the SQL

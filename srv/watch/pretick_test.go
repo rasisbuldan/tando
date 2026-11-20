@@ -52,3 +52,25 @@ func TestRecoverNeededOutcome(t *testing.T) {
 		t.Fatal("an operation whose end was not written out must be recovered")
 	}
 }
+
+// recoverNeeded sees a rollback that died after its progress file (result=running) and before
+// its first state write (the state is idle), and leaves one whose lock is held (it is running).
+func TestRecoverNeededRollbackCut(t *testing.T) {
+	f := newFakeHost(t)
+	f.app("shop")
+	os.MkdirAll(f.path("opt/apps/shop/releases/20261114-170102"), 0o700)
+	os.Symlink("releases/20261114-170102", f.path("opt/apps/shop/current"))
+	f.write("opt/apps/shop/state", "current=20261114-170102\nphase=idle\nstatus_20261114-170102=verified\n")
+	f.write("opt/apps/shop/activation", "id=20261114-160000\nkind=rollback\nphase=switch\nresult=ok\n")
+	if f.watch().recoverNeeded() {
+		t.Fatal("a finished rollback needs no recover")
+	}
+	f.write("opt/apps/shop/activation", "id=20261114-160000\nkind=rollback\nphase=switch\nresult=running\n")
+	if !f.watch().recoverNeeded() {
+		t.Fatal("a rollback that says running, with the lock free and the state idle, must be recovered")
+	}
+	f.write("opt/apps/shop/activation", "id=20261114-170200\nkind=deploy\nphase=queued\nresult=running\n")
+	if f.watch().recoverNeeded() {
+		t.Fatal("a queued deploy that says running is not a cut rollback")
+	}
+}

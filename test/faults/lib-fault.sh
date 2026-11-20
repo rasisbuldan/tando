@@ -213,7 +213,10 @@ app_port() { srv "sudo sed -n 's/^port=//p' /opt/tando/apps/$1/app.conf"; }
 client_bg() { # app args...
   local a=$1; shift
   set -m
-  (cd "$W/$a" && "$R" "$@" > "$W/client.out" 2>&1; echo "rc=$?" >> "$W/client.out") &
+  # (a shell started in the background, as test/all.sh starts a suite, hands its children SIGINT
+  # ignored, and a client that ignores Ctrl-C is no test of it: perl puts the default back, as a
+  # terminal has it)
+  (cd "$W/$a" && perl -e '$SIG{INT} = "DEFAULT"; $SIG{QUIT} = "DEFAULT"; exec @ARGV' "$R" "$@" > "$W/client.out" 2>&1; echo "rc=$?" >> "$W/client.out") &
   CL=$!
   set +m
 }
@@ -225,7 +228,11 @@ client_rc() { sed -n 's/^rc=//p' "$W/client.out"; }
 # wait until a server-side upload (rsync as vmadmin into incoming/) is running
 wait_rsync() { srv "for i in \$(seq 300); do pgrep -u vmadmin -f '[r]sync --server' > /dev/null && exit 0; sleep 0.1; done; exit 1"; }
 # Ctrl-C / kill of the whole client process group (what a terminal does)
-client_sig() { kill -"$1" -- "-$CL" 2> /dev/null; }
+client_sig() { # the signal to the client's process group; said aloud when there is none (the signal went nowhere)
+  kill -"$1" -- "-$CL" 2> /dev/null && return 0
+  echo "  (client_sig $1: no process group $CL; signalling the process)" >&2
+  kill -"$1" "$CL" 2> /dev/null
+}
 serves() { [ "$(ver "$1")" = "$2" ]; }          # until_ 60 serves <app> <version>
 serves_any() { local v; v=$(ver "$1"); shift; for x; do [ "$v" = "$x" ] && return 0; done; return 1; }
 

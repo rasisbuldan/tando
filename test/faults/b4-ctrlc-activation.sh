@@ -10,7 +10,8 @@ wait_phase $A preflight 60; ok "activation in preflight" test $? = 0
 client_sig INT
 client_wait 20; ok "client detaches" test $? = 0; tail -2 "$W/client.out" >&2
 until_ 60 serves $A 3; ok "activation finished on its own: v3 serves" test $? = 0
-sleep 2; loop_stop; ok "no failed request" test "$F_BAD" = 0
+until_ 90 act_gone $A; ok "the activation ended (soak done)" test $? = 0
+sleep 1; loop_stop; ok "no failed request" test "$F_BAD" = 0
 truth $A 3
 next_deploy $A 4
 f_end

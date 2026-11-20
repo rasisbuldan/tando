@@ -18,9 +18,9 @@ What to run when. [AGENTS.md](../AGENTS.md) has the short version and the rules.
 |---|---|---|---|
 | check | `test/check.sh` | after every edit | on the changed files only: `bash -n` (3.2, and the server's bash for `server/`), lint, gofmt/vet/test of the changed Go packages, the secret scan, and that `test/suites.map` knows the change. No server. |
 | quick | `test/all.sh --tier quick` | before saying a change works | the suites `test/select.sh` maps the changed files to (`test/suites.map`), plus `e2e-trial` as a smoke deploy. Go without the race detector; lint and Go may reuse cached results. A core file, or a file no rule knows, selects every suite. |
-| full | `test/all.sh` | before a push to main and before a tag | every suite, nothing cached, the fault scenarios as four parallel shards (`e2e-faults-q1` to `q4`) and the fault matrix's cells (`e2e-matrix-quick`). The map is not read. |
-| nightly | `test/all.sh --tier nightly` | by hand, when the machine is free for half an hour (not in CI) | full, with the fault scenarios as two chains (`e2e-faults-h1`, `h2`) whose split moves every day, so over a week every scenario runs right after every neighbour. |
-| weekly | `test/all.sh --tier weekly` | by hand, about once a week and before a release that touched deploys (not in CI) | full, with the fault scenarios as one chain (`e2e-faults`) and the 25 s soak on every deploy (`FAULT_SETUP_SOAK=25`): the suite as it was before it was made faster. |
+| full | `test/all.sh` | before a push to main and before a tag | every suite, nothing cached, the fault scenarios as six parallel shards (`e2e-faults-q1` to `q6`) and the fault matrix's quick cells (`e2e-matrix-quick`: node, container, static). The map is not read. |
+| nightly | `test/all.sh --tier nightly` | by hand, when the machine is free for half an hour (not in CI) | full, with the fault scenarios as two chains (`e2e-faults-h1`, `h2`) whose split moves every day, so over a week every scenario runs right after every neighbour; the matrix's weekly cells of the other kinds of app (`e2e-matrix-weekly`). |
+| weekly | `test/all.sh --tier weekly` | by hand, about once a week and before a release that touched deploys (not in CI) | full, with the fault scenarios as one chain (`e2e-faults`) and the 25 s soak on every deploy (`FAULT_SETUP_SOAK=25`): the suite as it was before it was made faster, with every scenario file (`--all`, 49 more than the shards run) and `e2e-matrix-weekly`. |
 
 Why the fault scenarios differ by tier: they are independent by design, but a scenario that leaves
 something behind is only found by the one that runs after it (the upload lease left by a refused
@@ -170,7 +170,7 @@ each on its own server.
 `FAULT_SETUP_SOAK=25`: every deploy soaks 25 s, the suite as it was). `--shard i/K` runs the i-th
 of K chunks of the list, balanced by the scenarios' known durations, s00 first in each;
 `--rotate N` (or `auto`: by the day of the year) rotates the list before it is cut; `--plan`
-prints the chunks and runs nothing. `test/e2e-faults-q1.sh` to `q4.sh` are the four quarters (full
+prints the chunks and runs nothing. `test/e2e-faults-q1.sh` to `q6.sh` are the six shards (full
 and quick tiers), `test/e2e-faults-h1.sh` and `h2.sh` the two halves with `--rotate auto`
 (nightly). The script fails at once when a scenario of the list has no file or would be in no
 shard. Scenarios that need the long soak everywhere say so themselves (n5 compares the settings of
@@ -205,13 +205,24 @@ Versions alternate their health path, start command, memory, `max_conns` and a j
 settings is named (inv2).
 
 `test/e2e-matrix-quick.sh` (full and quick tiers, about 6 minutes) runs `--cells`: one cell for
-each defect fixed in milestone 1 and 2a (the list `CELLS` in the driver: two clients' settings,
-nothing of a deploy that does not go live reaching the live app, job units that could not be
-written, a queue that gave up, a site file that was not replaced), node and the container
-recipe's switch failure. The rest only by name: `test/e2e-matrix.sh --ops deploy,rollback
---actions kill --points '(^|/)(pre|post):'` (a kill at every state write of a deploy and a
-rollback), or any `--ops`, `--actions`, `--kind`, `--quick`. Not covered: a real power cut (a
-container keeps the page cache) and a real reboot.
+each defect fixed in milestone 1, 2a and 2b (the list `CELLS` in the driver: two clients' settings, nothing of a deploy that does not go live reaching the live app, job units that could not be written, a queue that gave up, a site file that was not replaced, a rollback cut before its first state write), node; two cells of
+the container recipe (the switch failure, a kill at its spawn) and two of a static site (a kill at
+Caddy's file site, after the link moved). `test/e2e-matrix-weekly.sh` (nightly and weekly tiers,
+about 15 minutes) runs `--weekly` for static, container, python and next: the cells of each kind's
+`WEEKLY_CELLS`, the points where its path differs from node's. Everything else only by name:
+`test/e2e-matrix.sh --ops deploy,rollback --actions kill --points '(^|/)(pre|post):'` (a kill at
+every state write of a deploy and a rollback), or any `--kind`, `--ops`, `--actions`, `--quick`.
+Not covered: a real power cut (a container keeps the page cache) and a real reboot.
+
+The grid of each kind was run in milestone 2b: static in full (deploy, deploy-pre, rollback: 274
+cells, kill, fail and reboot at every point), container (deploy and deploy-bad: 204 cells; its
+rollback and restart not yet), python and next (deploy and deploy-bad at the `--quick` points,
+kill and fail: 50 cells each, all passed). What did not
+pass is either fixed or listed in `MX_KNOWN` in the driver with the invariant and the reason: such a
+cell prints as `SKIP KNOWN failure ...`, and fails when it starts to pass (remove it from the list
+then). One class is known: an agent killed after it took the upload lease and before the lease got
+its release id leaves the lease (invariant 6); it is stale after 30 s (5 s for the same
+user@machine asking again), `tando unlock` clears it, recovery does not. (A failed write of app.conf inside `start_back` was a second known class; state machine 2a fixed it and its cells pass.)
 
 ### The alerts suites
 

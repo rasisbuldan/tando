@@ -7,7 +7,7 @@ A=fk1; f_fresh $A
 srv "sudo bash -c 'echo 0.0.9 > /opt/tando/VERSION; echo \"# older build\" >> /opt/tando/bin/tando-agent'"
 deploy $A 3 ok; ok "deploy works" test $DRC = 0
 ok "deploy mentions the version difference" grep -q '0.0.9' "$W/$A.d3.out"
-"$R" doctor > "$W/doc.out" 2>&1; ok "doctor warns about the agent" grep -q 'agent.*differs' "$W/doc.out"
+"$R" doctor > "$W/doc.out" 2>&1; ok "doctor warns about the agent" grep -qE 'programs.*warn.*differ from the client' "$W/doc.out"
 truth $A 3
 "$R" host setup test public_port="$HP" > /dev/null 2>&1
 next_deploy $A 4
