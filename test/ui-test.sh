@@ -324,12 +324,12 @@ fi
 # lib/help-conf.txt fails; so does a documented key the parser rejects.
 conf_arms() { # file start-regex end-regex: the labels of the 6-space case arms in that range, one key per line
     sed -n "/$2/,/$3/p" "$1" | perl -0777 -ne 's/\\\n\s*//g; for (/^ {6}([a-z][^\n) "]*)\)/mg) { print "$_\n" }' |
-        tr '|' '\n' | sed 's/^job\.\*$/job.<name>/; s/^job\.\*\.timeout$/job.<name>.timeout/; s/^worker\.\*$/worker.<name>/' |
+        tr '|' '\n' | sed 's/^job\.\*$/job.<name>/; s/^job\.\*\.\([a-z]*\)$/job.<name>.\1/; s/^worker\.\*$/worker.<name>/' |
         sed 's/^worker\.\*\.\([a-z_]*\)$/worker.<name>.\1/' | sort -u
 }
 conf_client=$(conf_arms "$here/lib/common.sh" '^conf_load() {' '^  done < "\$f"')
 # check, origin and force are words of the client's request to configure, not tando.conf keys
-conf_server=$(conf_arms "$here/server/tando-agent" '^cmd_configure() {' '^  done <<< "\$input"' | grep -vx -e check -e origin -e force)
+conf_server=$(conf_arms "$here/server/tando-agent" '^cmd_configure() {' '^  done <<< "\$input"' | grep -vx -e check -e origin -e force -e 'job.<name>.cron')
 conf_doc=$(grep -o '^| `[^`]*`' "$here/docs/CONFIG.md" | sed 's/^| `//; s/`$//' | sort -u)
 conf_code=$(printf '%s\n%s\n' "$conf_client" "$conf_server" | sort -u)
 if [[ $(printf '%s\n' "$conf_code" | wc -l) -lt 40 ]]; then bad "tando.conf keys: read only $(printf '%s\n' "$conf_code" | wc -l) from the code"; else ok; fi
@@ -435,6 +435,156 @@ out=$(doctor_run "")
 if ! grep -Eq '^│ programs ' <<< "$out" && [[ $out == *"1 warning"* ]]; then ok; else bad "doctor with nothing differing shows a programs row ($out)"; fi
 out=$(doctor_run "" agent)
 if grep -Eq '^│ programs +.*warn' <<< "$out" && [[ $out == *"1 of 9 programs differ"* ]]; then ok; else bad "doctor with one program differing ($out)"; fi
+
+# job schedules: the cron syntax becomes systemd's OnCalendar (cron_to_cal in lib/common.sh), exactly
+# or not at all. One line per case: <cron text>|<OnCalendar>, or |!<the refusal, saying what to write>.
+# The same expressions are checked against systemd-analyze and a reference of the cron rules by
+# test/e2e-jobs.sh (J2).
+cron_table() { cat <<'CRON'
+* * * * *|*-*-* *:*:00
+0 * * * *|*-*-* *:00:00
+5 * * * *|*-*-* *:05:00
+59 23 31 12 *|*-12-31 23:59:00
+0 0 1 1 *|*-01-01 00:00:00
+*/15 * * * *|*-*-* *:00/15:00
+*/5 * * * *|*-*-* *:00/5:00
+*/2 * * * *|*-*-* *:00/2:00
+*/10 * * * *|*-*-* *:00/10:00
+*/20 * * * *|*-*-* *:00/20:00
+*/30 * * * *|*-*-* *:00,30:00
+*/7 * * * *|*-*-* *:00/7:00
+*/59 * * * *|*-*-* *:00,59:00
+0,15,30,45 * * * *|*-*-* *:00/15:00
+0,30 * * * *|*-*-* *:00,30:00
+1,2 * * * *|*-*-* *:01,02:00
+1-5 * * * *|*-*-* *:01..05:00
+10-20 * * * *|*-*-* *:10..20:00
+0-59 * * * *|*-*-* *:*:00
+10-50/10 * * * *|*-*-* *:10/10:00
+10-40/10 * * * *|*-*-* *:10,20,30,40:00
+0-30/15 * * * *|*-*-* *:00,15,30:00
+5-59/15 * * * *|*-*-* *:05/15:00
+0 */2 * * *|*-*-* 00/2:00:00
+0 */6 * * *|*-*-* 00/6:00:00
+0 */5 * * *|*-*-* 00/5:00:00
+0 8-17 * * *|*-*-* 08..17:00:00
+0 9-17/2 * * *|*-*-* 09,11,13,15,17:00:00
+0 0,12 * * *|*-*-* 00,12:00:00
+0 22,23,0 * * *|*-*-* 00,22,23:00:00
+30 2 1 * *|*-*-01 02:30:00
+0 0 */2 * *|*-*-01/2 00:00:00
+0 0 1-7 * *|*-*-01..07 00:00:00
+0 0 1,15 * *|*-*-01,15 00:00:00
+0 0 1,2,3 * *|*-*-01..03 00:00:00
+0 0 */10 * *|*-*-01/10 00:00:00
+0 0 31 * *|*-*-31 00:00:00
+0 0 * * *|*-*-* 00:00:00
+0 0 * 1 *|*-01-* 00:00:00
+0 0 * jan *|*-01-* 00:00:00
+0 0 * JAN,Jul *|*-01,07-* 00:00:00
+0 0 * jan-mar *|*-01..03-* 00:00:00
+0 0 * 1-3 *|*-01..03-* 00:00:00
+0 0 * */3 *|*-01/3-* 00:00:00
+0 0 * */2 *|*-01/2-* 00:00:00
+0 0 * 2,5,8,11 *|*-02/3-* 00:00:00
+0 0 * * 0|Sun *-*-* 00:00:00
+0 0 * * 7|Sun *-*-* 00:00:00
+0 0 * * sun|Sun *-*-* 00:00:00
+0 0 * * SUN|Sun *-*-* 00:00:00
+0 0 * * 1|Mon *-*-* 00:00:00
+0 0 * * mon-fri|Mon..Fri *-*-* 00:00:00
+0 0 * * 1-5|Mon..Fri *-*-* 00:00:00
+0 0 * * MON-FRI|Mon..Fri *-*-* 00:00:00
+0 0 * * sat,sun|Sat,Sun *-*-* 00:00:00
+0 0 * * 6,0|Sat,Sun *-*-* 00:00:00
+0 0 * * 0-2|Mon,Tue,Sun *-*-* 00:00:00
+0 0 * * 5-7|Fri..Sun *-*-* 00:00:00
+0 0 * * 1,3,5|Mon,Wed,Fri *-*-* 00:00:00
+0 0 * * 1-3,5|Mon..Wed,Fri *-*-* 00:00:00
+0 0 * * */2|Tue,Thu,Sat,Sun *-*-* 00:00:00
+0 0 * * 0-6|*-*-* 00:00:00
+0 0 * * 0-7|*-*-* 00:00:00
+0 0 * * *|*-*-* 00:00:00
+0 0 */2 * mon|Mon *-*-01/2 00:00:00
+0 0 * * wed|Wed *-*-* 00:00:00
+15 4 * jan,jul *|*-01,07-* 04:15:00
+0 9 * * mon-fri|Mon..Fri *-*-* 09:00:00
+30 8 1 1 *|*-01-01 08:30:00
+  0   9  *  *  1  |Mon *-*-* 09:00:00
+@hourly|*-*-* *:00:00
+@daily|*-*-* 00:00:00
+@midnight|*-*-* 00:00:00
+@weekly|Sun *-*-* 00:00:00
+@monthly|*-*-01 00:00:00
+@yearly|*-01-01 00:00:00
+@annually|*-01-01 00:00:00
+@HOURLY|*-*-* *:00:00
+@reboot|!@reboot is not a schedule: a job runs at times (a command to start at boot is not a job)
+@every|!"@every" is not a schedule: @hourly, @daily, @weekly, @monthly, @yearly or five fields
+5/15 * * * *|!"5/15" (minute): a step needs * or a range (cron does not take 5/15); write 5-59/15, or list the values
+0 0 1 * mon|!day-of-month and weekday are both set: cron runs on either, a systemd schedule only when both match. Use two jobs (one with the day of month, one with the weekday), or put * in one of the two fields
+0 0 1-31 * mon|!day-of-month and weekday are both set: cron runs on either, a systemd schedule only when both match. Use two jobs (one with the day of month, one with the weekday), or put * in one of the two fields
+0 0 1 * 1-5|!day-of-month and weekday are both set: cron runs on either, a systemd schedule only when both match. Use two jobs (one with the day of month, one with the weekday), or put * in one of the two fields
+61 * * * *|!"61" is outside the minute field's range 0-59
+60 * * * *|!"60" is outside the minute field's range 0-59
+* 24 * * *|!"24" is outside the hour field's range 0-23
+0 0 0 * *|!"0" is outside the day-of-month field's range 1-31
+0 0 32 * *|!"32" is outside the day-of-month field's range 1-31
+0 0 * 0 *|!"0" is outside the month field's range 1-12
+0 0 * 13 *|!"13" is outside the month field's range 1-12
+0 0 * * 8|!"8" is outside the weekday field's range 0-7
+0 0 * * 5-1|!"5-1" (weekday) goes backwards; cron has no wrap-around: write two ranges, like 22-23,0-5
+0 0 5-1 * *|!"5-1" (day-of-month) goes backwards; cron has no wrap-around: write two ranges, like 22-23,0-5
+*/0 * * * *|!"*/0" (minute): a step of 0
+*/x * * * *|!the step in "*/x" (minute) is not a number
+a * * * *|!"a" in the minute field is not a number
+0 0 * foo *|!"foo" in the month field is not a number or name
+0 0 * * funday|!"funday" in the weekday field is not a number or name
+0 0 ? * *|!"?" (day-of-month) is a Quartz extension (L, W, #, ?), not cron: tando takes the 5-field cron of crontab(5)
+0 0 L * *|!"l" in the day-of-month field is not a number
+0 0 * * 1#2|!"1#2" (weekday) is a Quartz extension (L, W, #, ?), not cron: tando takes the 5-field cron of crontab(5)
+0 0 15W * *|!"15w" in the day-of-month field is not a number
+0 0 * * 5L|!"5l" in the weekday field is not a number or name
+0,,5 * * * *|!the minute field "0,,5" has an empty item
+,5 * * * *|!the minute field ",5" has an empty item
+5, * * * *|!the minute field "5," has an empty item
+1-2-3 * * * *|!"2-3" in the minute field is not a number
+-5 * * * *|!"-5" in the minute field is not a number
+* * * *|!cron has five fields (minute hour day-of-month month weekday), got 4
+* * * * * *|!cron has five fields (minute hour day-of-month month weekday), got 6
+0 0 * * * 2026|!cron has five fields (minute hour day-of-month month weekday), got 6
+*/5 */2 * * *|*-*-* 00/2:00/5:00
+0-5,10-15 * * * *|*-*-* *:00..05,10..15:00
+0 0 1,3-5,9 * *|*-*-01,03..05,09 00:00:00
+CRON
+}
+d="" n=0
+while IFS='|' read -r e want; do
+    n=$((n + 1))
+    got=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; if cron_to_cal "$2"; then echo "$CRON_CAL"; else echo "!$CRON_WHY"; fi' _ "$here" "$e")
+    [[ $got == "$want" ]] || d="$d [$e: want $want, got $got]"
+done < <(cron_table)
+if [[ -z $d && $n -ge 100 ]]; then ok; else bad "cron schedules ($n cases):$d"; fi
+# a cron schedule in tando.conf: translated before anything is sent, with what was written kept
+# beside it; an OnCalendar one is left alone; a refused one names the file, the line and the job
+printf 'app = x\njob.sync = */15 * * * * | node a.js | tee log\njob.nightly = daily | node b.js\njob.mon = 0 9 * * mon-fri | echo hi\n' > "$tmp/conf.t"
+r=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; conf_load "$2" && printf "%s" "$C_jobs"' _ "$here" "$tmp/conf.t" 2>&1)
+want=$'job.sync=*-*-* *:00/15:00 | node a.js | tee log\njob.sync.cron=*/15 * * * *\njob.nightly=daily | node b.js\njob.mon=Mon..Fri *-*-* 09:00:00 | echo hi\njob.mon.cron=0 9 * * mon-fri'
+if [[ $r == "$want" ]]; then ok; else bad "tando.conf job lines with cron schedules: $r"; fi
+printf 'app = x\njob.sync = 0 0 1 * mon | node a.js\n' > "$tmp/conf.t"
+r=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; conf_load "$2"' _ "$here" "$tmp/conf.t" 2>&1)
+if [[ $r == *"conf.t:2: job.sync: 0 0 1 * mon: day-of-month and weekday are both set"* ]]; then ok; else bad "a cron schedule cron cannot say in systemd: $r"; fi
+d=""
+for l in 'job.a = | echo hi' 'job.a = daily |' 'job.a = daily' 'job.a.spread = 5' 'job.a = daily | x
+job.a.spread = 4000' 'job.a = daily | x
+job.a.missed = maybe' 'job_spread = -1' 'job_missed = often' 'job.a = daily | x
+job.a.timeout = 0'; do
+    printf 'app = x\n%s\n' "$l" > "$tmp/conf.t"
+    r=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; conf_load "$2"' _ "$here" "$tmp/conf.t" 2>&1) && d="$d [accepted: $l]"
+done
+printf 'app = x\njob.a = daily | x\njob.a.spread = 0\njob.a.missed = skip\njob_spread = 30\njob_missed = run\n' > "$tmp/conf.t"
+"$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; conf_load "$2"' _ "$here" "$tmp/conf.t" > /dev/null 2>&1 || d="$d [refused the good job settings]"
+if [[ -z $d ]]; then ok; else bad "job settings in tando.conf:$d"; fi
 
 echo "$checks checks, $fails failed"
 [[ $fails == 0 ]]

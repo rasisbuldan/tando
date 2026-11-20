@@ -307,6 +307,7 @@ C_logs=""   # log_max, log_keep, log_rate, access_log as key=value lines (checke
 C_image="" C_container_port="" C_build_memory="" C_dockerfile="" C_node="" C_domain="" C_www=""
 C_assets=""   # fingerprinted files served from Caddy: off, or <dir>[, <url prefix>] (checked by the server too)
 C_job_timeout=""   # seconds a scheduled job may run (the server's default: 3600)
+C_job_spread="" C_job_missed=""   # the spread of a job's start (default 15 s), run or skip a run missed while the server was off
 C_workers=""       # worker.<name> = <command> and their .memory, .stop_timeout as key=value lines
 C_release="" C_release_shell="" C_release_timeout=""   # the release command (lib/deploy.sh; checked by the server too)
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
@@ -346,6 +347,169 @@ conf_chk_extra() {
       ui_int "$1" && [ "${1#0}" = "$1" ] && [ ${#1} -le "$2" ];;
   esac
 }
+# ---- job schedules: the 5-field cron syntax as systemd's OnCalendar ---------------------------
+# job.<name> = <schedule> | <command>. The schedule is a systemd calendar expression (daily,
+# *-*-* 03:00, Mon..Fri 09:00) or the cron syntax people know: five fields, minute hour day-of-month
+# month weekday, with *, lists, ranges, steps (*/15, 10-50/10) and month and weekday names; or
+# @hourly @daily @weekly @monthly @yearly. A cron schedule becomes an OnCalendar one here, before
+# anything is sent (the server only knows OnCalendar), and only when the two mean exactly the same:
+# what cannot be said that way is refused with what to write instead (cron_why).
+# cron_looks_like text: five words and no ":" (an OnCalendar time has one), or one word with "@"
+cron_looks_like() {
+  local w
+  set -f; set -- $1; set +f
+  w=$#
+  [ "$w" = 1 ] && { case $1 in @*) return 0;; esac; return 1; }
+  [ "$w" = 5 ] || return 1
+  case " $* " in *:*) return 1;; esac
+  return 0
+}
+# cron_field <name> <min> <max> <text> [names]: CRON_SET[min..max] = 1 for the values the text
+# selects; CRON_STAR=1 when it starts with "*"; fails with CRON_WHY. names: words for 0.. (month
+# jan..dec from 1, weekday sun..sat from 0)
+cron_num() { # word names -> CRON_N (a number or a name), 1 on failure
+  local w=$1 i=0 x
+  case $w in ""|*[!0-9]*)
+    for x in $2; do
+      [ "$x" = "$w" ] && { CRON_N=$((i + CRON_NAME0)); return 0; }
+      i=$((i + 1))
+    done
+    return 1;;
+  esac
+  [ ${#w} -le 3 ] || return 1
+  CRON_N=$((10#$w)); return 0
+}
+cron_field() {
+  local what=$1 min=$2 max=$3 text=$4 names=${5:-} item rng step a b i lo hi
+  CRON_SET=(); CRON_STAR=0
+  i=$min; while [ "$i" -le "$max" ]; do CRON_SET[$i]=0; i=$((i + 1)); done
+  case $text in \**) CRON_STAR=1;; esac
+  case $text in ""|,*|*,|*,,*) CRON_WHY="the $what field \"$text\" has an empty item"; return 1;; esac
+  local IFS=,
+  set -f; set -- $text; set +f
+  IFS=$' \t\n'
+  for item in "$@"; do
+    rng=${item%%/*} step=1
+    case $item in
+      */*) step=${item#*/}
+        case $step in ""|*[!0-9]*) CRON_WHY="the step in \"$item\" ($what) is not a number"; return 1;; esac
+        step=$((10#$step))
+        [ "$step" -ge 1 ] || { CRON_WHY="\"$item\" ($what): a step of 0"; return 1; };;
+    esac
+    case $rng in
+      \*) lo=$min hi=$max;;
+      ?*-?*) a=${rng%%-*} b=${rng#*-}
+        cron_num "$a" "$names" && lo=$CRON_N || { CRON_WHY="\"$a\" in the $what field is not a number${names:+ or name}"; return 1; }
+        cron_num "$b" "$names" && hi=$CRON_N || { CRON_WHY="\"$b\" in the $what field is not a number${names:+ or name}"; return 1; }
+        [ "$lo" -le "$hi" ] || { CRON_WHY="\"$item\" ($what) goes backwards; cron has no wrap-around: write two ranges, like 22-23,0-5"; return 1; };;
+      *) cron_num "$rng" "$names" && lo=$CRON_N || {
+           case $rng in *[LW#?]*) CRON_WHY="\"$item\" ($what) is a Quartz extension (L, W, #, ?), not cron: tando takes the 5-field cron of crontab(5)";;
+             *) CRON_WHY="\"$rng\" in the $what field is not a number${names:+ or name}";; esac
+           return 1; }
+        hi=$lo
+        case $item in */*) CRON_WHY="\"$item\" ($what): a step needs * or a range (cron does not take 5/15); write $lo-$max/${item#*/}, or list the values"; return 1;; esac;;
+    esac
+    [ "$lo" -ge "$min" ] && [ "$hi" -le "$max" ] ||
+      { CRON_WHY="\"$item\" is outside the $what field's range $min-$max"; return 1; }
+    i=$lo; while [ "$i" -le "$hi" ]; do CRON_SET[$i]=1; i=$((i + step)); done
+  done
+  return 0
+}
+# cron_render <min> <max> <pad> [names]: CRON_SET as an OnCalendar field: * when it is all, a/n when
+# it is exactly a, a+n, ... up to the maximum, else a list with runs of three or more as a..b
+cron_render() {
+  local min=$1 max=$2 pad=$3 names=${4:-} i cnt=0 first=-1 last=-1 step=0 prev=-1 ok=1 out="" run=0 start=-1 v
+  local vals=""
+  i=$min; while [ "$i" -le "$max" ]; do
+    if [ "${CRON_SET[$i]}" = 1 ]; then
+      cnt=$((cnt + 1)); vals="$vals $i"
+      [ "$first" = -1 ] && first=$i
+      if [ "$prev" != -1 ]; then
+        if [ "$step" = 0 ]; then step=$((i - prev)); elif [ $((i - prev)) != "$step" ]; then ok=0; fi
+      fi
+      prev=$i; last=$i
+    fi
+    i=$((i + 1))
+  done
+  CRON_OUT=""
+  [ "$cnt" = $((max - min + 1)) ] && { CRON_OUT='*'; return 0; }
+  if [ "$cnt" -ge 3 ] && [ "$ok" = 1 ] && [ "$step" -ge 2 ] && [ $((last + step)) -gt "$max" ] && [ -z "$names" ]; then
+    printf -v CRON_OUT "%0${pad}d/%d" "$first" "$step"; return 0
+  fi
+  prev=-1; start=-1
+  for v in $vals X; do
+    if [ "$v" != X ] && [ "$prev" != -1 ] && [ "$v" = $((prev + 1)) ]; then prev=$v; continue; fi
+    if [ "$start" != -1 ]; then   # close the run start..prev
+      if [ $((prev - start)) -ge 2 ]; then CRON_OUT="$CRON_OUT,$(cron_name "$start" "$pad" "$names")..$(cron_name "$prev" "$pad" "$names")"
+      else
+        CRON_OUT="$CRON_OUT,$(cron_name "$start" "$pad" "$names")"
+        [ "$prev" != "$start" ] && CRON_OUT="$CRON_OUT,$(cron_name "$prev" "$pad" "$names")"
+      fi
+    fi
+    start=$v prev=$v
+  done
+  CRON_OUT=${CRON_OUT#,}
+}
+cron_name() { # value pad names
+  local i=0 x
+  if [ -n "$3" ]; then for x in $3; do [ "$i" = "$1" ] && { printf '%s' "$x"; return; }; i=$((i + 1)); done; fi
+  printf "%0${2}d" "$1"
+}
+# cron_to_cal "<cron schedule>": CRON_CAL (the OnCalendar expression), or fails with CRON_WHY
+cron_to_cal() {
+  local s f mi h dom mon dow dowstar domstar wd d i
+  s=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  set -f; set -- $s; set +f
+  if [ $# = 1 ]; then
+    case $1 in
+      @hourly) set -- 0 '*' '*' '*' '*';;
+      @daily|@midnight) set -- 0 0 '*' '*' '*';;
+      @weekly) set -- 0 0 '*' '*' 0;;
+      @monthly) set -- 0 0 1 '*' '*';;
+      @yearly|@annually) set -- 0 0 1 1 '*';;
+      @reboot) CRON_WHY="@reboot is not a schedule: a job runs at times (a command to start at boot is not a job)"; return 1;;
+      *) CRON_WHY="\"$1\" is not a schedule: @hourly, @daily, @weekly, @monthly, @yearly or five fields"; return 1;;
+    esac
+  fi
+  [ $# = 5 ] || { CRON_WHY="cron has five fields (minute hour day-of-month month weekday), got $#"; return 1; }
+  # (cron_field uses these names as its own: keep the five results apart)
+  CRON_NAME0=0
+  cron_field minute 0 59 "$1" || return 1; cron_render 0 59 2; mi=$CRON_OUT
+  cron_field hour 0 23 "$2" || return 1; cron_render 0 23 2; h=$CRON_OUT
+  cron_field day-of-month 1 31 "$3" || return 1; cron_render 1 31 2; dom=$CRON_OUT; domstar=$CRON_STAR
+  CRON_NAME0=1
+  cron_field month 1 12 "$4" "jan feb mar apr may jun jul aug sep oct nov dec" || return 1; cron_render 1 12 2; mon=$CRON_OUT
+  CRON_NAME0=0
+  cron_field weekday 0 7 "$5" "sun mon tue wed thu fri sat" || return 1; dowstar=$CRON_STAR
+  # (7 is Sunday too; then the weekdays in systemd's order, Monday first)
+  [ "${CRON_SET[7]}" = 1 ] && CRON_SET[0]=1
+  wd=(); i=0
+  for d in 1 2 3 4 5 6 0; do wd[$i]=${CRON_SET[$d]}; i=$((i + 1)); done
+  CRON_SET=(); i=0; while [ "$i" -lt 7 ]; do CRON_SET[$i]=${wd[$i]}; i=$((i + 1)); done
+  cron_render 0 6 1 "Mon Tue Wed Thu Fri Sat Sun"; dow=$CRON_OUT
+  if [ "$domstar" = 0 ] && [ "$dowstar" = 0 ]; then
+    CRON_WHY="day-of-month and weekday are both set: cron runs on either, a systemd schedule only when both match. Use two jobs (one with the day of month, one with the weekday), or put * in one of the two fields"
+    return 1
+  fi
+  CRON_CAL="*-$mon-$dom $h:$mi:00"
+  [ "$dow" = '*' ] || CRON_CAL="$dow $CRON_CAL"
+  return 0
+}
+# job_sched_norm <name> <value> <file:line>: the value of a job.<name> line with a cron schedule
+# written as OnCalendar (JOB_V); dies with what to write when it cannot
+job_sched_norm() {
+  local sched cmd
+  case $2 in *'|'*) ;; *) die "$3: job.$1 needs a schedule and a command: job.$1 = daily | node scripts/$1.js";; esac
+  trim_v "${2%%|*}"; sched=$TRIM; trim_v "${2#*|}"; cmd=$TRIM
+  [ -n "$sched" ] || die "$3: job.$1 has no schedule before the |"
+  [ -n "$cmd" ] || die "$3: job.$1 has no command after the |"
+  JOB_V=$2 JOB_CRON=""
+  if cron_looks_like "$sched"; then
+    cron_to_cal "$sched" || die "$3: job.$1: $sched: $CRON_WHY"
+    JOB_V="$CRON_CAL | $cmd" JOB_CRON=$sched   # (kept, so that tando jobs shows what was written)
+  fi
+}
+
 conf_load() { # [file]; a file already loaded in this run is not read again
   local f=${1:-tando.conf} line k v n=0 x
   [ -f "$f" ] || return 1
@@ -426,12 +590,22 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         case $v in redirect|serve|off) ;; *) die "$f:$n: www must be redirect, serve or off";; esac;;
       job_timeout) C_job_timeout=$v
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 86400 ] || die "$f:$n: job_timeout is 1 to 86400 seconds (got \"$v\")";;
-      job.*.timeout)
-        ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 86400 ] || die "$f:$n: $k is 1 to 86400 seconds (got \"$v\")"
+      job_spread) C_job_spread=$v
+        ui_int "$v" && [ "$v" -le 3600 ] || die "$f:$n: job_spread is 0 to 3600 seconds (got \"$v\")";;
+      job_missed) C_job_missed=$v
+        case $v in run|skip) ;; *) die "$f:$n: job_missed is run or skip (got \"$v\")";; esac;;
+      job.*.timeout|job.*.spread|job.*.missed)
+        case $k in
+          *.timeout) ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 86400 ] || die "$f:$n: $k is 1 to 86400 seconds (got \"$v\")";;
+          *.spread) ui_int "$v" && [ "$v" -le 3600 ] || die "$f:$n: $k is 0 to 3600 seconds (got \"$v\")";;
+          *) case $v in run|skip) ;; *) die "$f:$n: $k is run or skip (got \"$v\")";; esac;;
+        esac
         C_jobs="$C_jobs$k=$v
 ";;
-      job.*) C_jobs="$C_jobs$k=$v
-";;
+      job.*) job_sched_norm "${k#job.}" "$v" "$f:$n"
+        C_jobs="$C_jobs$k=$JOB_V
+${JOB_CRON:+$k.cron=$JOB_CRON
+}";;
       worker.*.memory|worker.*.stop_timeout|worker.*)   # processes beside the web one (the server checks them again)
         x=${k#worker.}; x=${x%%.*}
         case $x in [a-z]*) ;; *) die "$f:$n: bad worker name: $x (it starts with a lower case letter)";; esac
@@ -463,10 +637,10 @@ conf_load() { # [file]; a file already loaded in this run is not read again
   elif [ -n "$C_release_shell$C_release_timeout" ]; then
     die "$f: release_shell and release_timeout need release = <command>"
   fi
-  # a job's timeout needs the job
+  # a job's setting needs the job
   local jt
-  for jt in $(printf '%s' "$C_jobs" | sed -n 's/^\(job\.[^=]*\)\.timeout=.*/\1/p'); do
-    printf '%s' "$C_jobs" | grepq "^$jt=" || die "$f: $jt.timeout is set but there is no $jt = <schedule> | <command>"
+  for jt in $(printf '%s' "$C_jobs" | sed -n 's/^\(job\.[^=.]*\)\.[a-z]*=.*/\1/p'); do
+    printf '%s' "$C_jobs" | grepq "^$jt=" || die "$f: $jt.* is set but there is no $jt = <schedule> | <command>"
   done
   # workers: where they can run, their settings need them, a job has another name
   if [ -n "$C_workers" ]; then

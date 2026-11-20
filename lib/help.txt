@@ -22,7 +22,7 @@ Start here
 
 Deploy     up · deploy · rollback [id] · releases · history
 Run        status · logs [-f] · start · stop · restart · top
-Configure  env · jobs [run] · db · backup [offsite] · restore
+Configure  env · jobs [run|log|pause] · db · backup [offsite] · restore
 Observe    ls · health · errors · alerts · requests · audit
 Servers    host add|ls|setup|status|care|update|reboot|rm · domain · doctor
 CI         ci setup|ls|revoke|rotate|github|hook
@@ -204,18 +204,27 @@ Set by tando: PORT, HOME, TANDO_DATA_DIR (and DATABASE_URL with database =).
 Example: tando env set STRIPE_KEY        (paste, then Enter)
 
 @@ jobs
-flags: -a= -H=
-subs: ls=0-1 run=1 default=ls
+flags: -a= -H= -n=
+subs: ls=0-1 run=1 log=1 pause=1 resume=1 default=ls
 usage: tando jobs [ls [app]] [-H host]
 usage: tando jobs run <name>
-run <name> runs a scheduled job now and shows its output and exit code.
-The app's scheduled jobs (job.<name> = <schedule> | <command> in tando.conf):
-schedule, next run, last run and its result. A job is run once per schedule and
-not retried: tando cannot know whether a command may run twice. A job that calls
-its own app over HTTP can meet it restarting (a deploy, tando restart): retry in
-the job (curl --retry 5 --retry-connrefused). A run is stopped after its timeout
-(job_timeout = <seconds>, default 3600; job.<name>.timeout for one job) and
-reported as timed out.
+usage: tando jobs log <name> [-n N]
+usage: tando jobs pause <name> | resume <name>
+The app's scheduled jobs (job.<name> = <schedule> | <command> in tando.conf): schedule, next
+run, last run, how it ended (ok, exit N, timed out, killed), how long it took, and the next
+three run times by the server's clock, so a wrong schedule shows at once. The schedule is
+cron (*/15 * * * *, 0 9 * * mon-fri, @daily) or systemd's (daily, Mon..Fri 09:00); times are
+the server's time zone. run <name> runs a job now and shows its output and exit code. log
+shows the output of its last runs (default 3) with the time and result of each. pause switches
+a job's timer off without editing tando.conf (a deploy or a reboot keeps it off) and resume
+switches it on; a run going on finishes, a run by hand still works. A job is run once per
+schedule and not retried: tando cannot know whether a command may run twice. A job that calls
+its own app over HTTP can meet it restarting (a deploy, tando restart): retry in the job
+(curl --retry 5 --retry-connrefused). A job still running when its next time comes is not
+started a second time. A run is stopped after its timeout (job_timeout = <seconds>, default
+3600; job.<name>.timeout for one job) and reported as timed out. A run the server missed while
+it was off is made up once at boot (job_missed = skip to drop it); starts are spread over
+15 s (job_spread). The last 50 runs of each job (time, result, duration) are kept.
 
 @@ db
 flags: -a= -H= --show --no-open --idle= --stop

@@ -609,7 +609,7 @@ check "30m tando jobs run of a job past its timeout: stopped after about 3 s, ti
   eval '[ $rc = 124 ] && [ $dt -lt 30 ] && grep -q "job slow: timed out after .* (its limit: 3s" "$E/jobrun-slow.out" &&
     srv "! pgrep -u tando-ops -x sleep" && [ "$(srv "systemctl show -P Result tando-ops_job-slow.service")" = timeout ]'
 "$R" jobs -a ops > "$E/jobs-slow.out" 2>&1
-check "30n tando jobs shows the run's result: timeout" grep -q 'slow.*timeout' "$E/jobs-slow.out"
+check "30n tando jobs shows the run's result: timed out (it said the raw systemd word \"timeout\" before the result words of tando jobs)" grep -q 'slow.*timed out' "$E/jobs-slow.out"
 wrun
 check "30o the timed-out run fires job.slow once, saying it was killed by its timeout" \
   eval '[ "$(nev firing ops job.slow)/$(st ops.job.slow.st)" = 1/firing ] && jdet "job slow failed at .* UTC: killed by its timeout"'
