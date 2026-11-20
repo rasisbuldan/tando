@@ -7,7 +7,9 @@
 //
 //	fakes3 -addr :9000 -bucket b -access K -secret S -names s3.test,10.0.0.5 -ca /out/ca.pem
 //
-// /_ctl/ (no signature; tests only): fail=writes|off, list (key size per line), get?key=, count.
+// /_ctl/ (no signature; tests only): fail?mode=writes|off, deny?mode=delete|lock|versions|off (a
+// key that may not delete, a bucket lock, a bucket with versions), list (key size per line),
+// get?key=, count.
 package main
 
 import (
@@ -108,6 +110,11 @@ func (f *fakeS3) ctl(w http.ResponseWriter, r *http.Request) {
 		if f.failMode == "off" {
 			f.failMode = ""
 		}
+	case "deny": // what the key may not do: delete, lock, versions, off (see fakeS3.deny)
+		f.deny = r.URL.Query().Get("mode")
+		if f.deny == "off" {
+			f.deny = ""
+		}
 	case "list":
 		var ks []string
 		for k := range f.objs {
@@ -155,6 +162,10 @@ type fakeS3 struct {
 	delay    time.Duration
 	n        int
 	sigFails int
+	// deny: what the key may not do to an object. "delete": DeleteObject is refused (a key
+	// without that permission); "lock": deleting or replacing an existing object is refused (a
+	// bucket lock rule); "versions": the bucket keeps versions (a PUT answers with a version id).
+	deny string
 }
 
 type fakeObj struct {
@@ -308,9 +319,17 @@ func (f *fakeS3) serve(w http.ResponseWriter, r *http.Request) {
 		u.parts[pn] = o
 		w.Header().Set("ETag", `"`+o.etag+`"`)
 	case r.Method == "PUT":
+		if f.deny == "lock" && f.objs[key] != nil {
+			s3err(w, 409, "ObjectLockedByBucketPolicy")
+			return
+		}
 		o := f.store(body)
 		f.objs[key] = o
 		w.Header().Set("ETag", `"`+o.etag+`"`)
+		if f.deny == "versions" {
+			f.nextID++
+			w.Header().Set("X-Amz-Version-Id", "v"+strconv.Itoa(f.nextID))
+		}
 	case r.Method == "POST" && q.Has("uploads"):
 		f.nextID++
 		id := "up" + strconv.Itoa(f.nextID)
@@ -356,6 +375,14 @@ func (f *fakeS3) serve(w http.ResponseWriter, r *http.Request) {
 		delete(f.uploads, q.Get("uploadId"))
 		w.WriteHeader(204)
 	case r.Method == "DELETE":
+		if f.deny == "delete" {
+			s3err(w, 403, "AccessDenied")
+			return
+		}
+		if f.deny == "lock" && f.objs[key] != nil {
+			s3err(w, 409, "ObjectLockedByBucketPolicy")
+			return
+		}
 		delete(f.objs, key)
 		w.WriteHeader(204)
 	case r.Method == "HEAD" || r.Method == "GET":

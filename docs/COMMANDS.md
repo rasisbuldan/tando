@@ -183,8 +183,10 @@ data and a database dump) and refuses an existing file. `ls` heads its time colu
 `tando backup offsite [status|set|test|hosts|sync|off]` · `tando backup offsite key --show|--saved|--import|--rotate`:
 copies of every backup in Cloudflare R2 or any S3-compatible store, encrypted on the server with a
 recovery key shown once (docs/BACKUP.md). `set` asks for the account id or endpoint, bucket, access
-key id and secret (no echo; or key=value lines on stdin) and checks them by writing, reading,
-listing and deleting a test object before it saves anything. With offsite on, `ls` has a WHERE
+key id and secret (no echo; or key=value lines on stdin) and checks them by writing, reading and
+listing a test object before it saves anything. `test` repeats that check; its `overwrite` and
+`delete` rows say whether this key could replace or erase a backup (`delete refused` is the safe
+setup; pruning is then left to a lifecycle rule of the bucket). With offsite on, `ls` has a WHERE
 column (`local`, `local + offsite`, `offsite only`, `local, uploading`, `local, upload failed`), and
 `restore` and `pull` fetch an offsite-only backup first (verified).
 Example: `tando backup pull 20261113-171815-manual backup.tar`
@@ -210,7 +212,7 @@ Example: `tando ls --all`
 `tando alerts [--watch N]` · `enable` · `disable` · `test [name]` · `history [app] [-n N]` ·
 `set [key=value ...]` · `silence <app|all> <30m|2h|1d|off>` ·
 `notifier add <name> webhook|slack|telegram|ntfy|email` · `notifier rm <name>` · `notifier ls` ·
-`heartbeat [off]`. Flags: `-a -H --watch -n`. Default subcommand: show.
+`heartbeat [off]` · `backup-ping [off]`. Flags: `-a -H --watch -n`. Default subcommand: show.
 What is firing on the server and where alerts go; checks run every minute (docs/MONITORING.md).
 Secrets are read without echo. `notifiers` = `notifier` (mismatch 9).
 Example: `tando alerts notifier add phone ntfy`

@@ -43,6 +43,10 @@ type fakeS3 struct {
 	fault    func(w http.ResponseWriter, r *http.Request, n int) bool
 	n        int
 	sigFails int
+	// deny: what the key may not do to an object. "delete": DeleteObject is refused (a key
+	// without that permission); "lock": deleting or replacing an existing object is refused (a
+	// bucket lock rule); "versions": the bucket keeps versions (a PUT answers with a version id).
+	deny string
 }
 
 type fakeObj struct {
@@ -229,9 +233,17 @@ func (f *fakeS3) serve(w http.ResponseWriter, r *http.Request) {
 		u.parts[pn] = o
 		w.Header().Set("ETag", `"`+o.etag+`"`)
 	case r.Method == "PUT":
+		if f.deny == "lock" && f.objs[key] != nil {
+			s3err(w, 409, "ObjectLockedByBucketPolicy")
+			return
+		}
 		o := f.store(body)
 		f.objs[key] = o
 		w.Header().Set("ETag", `"`+o.etag+`"`)
+		if f.deny == "versions" {
+			f.nextID++
+			w.Header().Set("X-Amz-Version-Id", "v"+strconv.Itoa(f.nextID))
+		}
 	case r.Method == "POST" && q.Has("uploads"):
 		f.nextID++
 		id := "up" + strconv.Itoa(f.nextID)
@@ -277,6 +289,14 @@ func (f *fakeS3) serve(w http.ResponseWriter, r *http.Request) {
 		delete(f.uploads, q.Get("uploadId"))
 		w.WriteHeader(204)
 	case r.Method == "DELETE":
+		if f.deny == "delete" {
+			s3err(w, 403, "AccessDenied")
+			return
+		}
+		if f.deny == "lock" && f.objs[key] != nil {
+			s3err(w, 409, "ObjectLockedByBucketPolicy")
+			return
+		}
 		delete(f.objs, key)
 		w.WriteHeader(204)
 	case r.Method == "HEAD" || r.Method == "GET":

@@ -103,6 +103,8 @@ func explainCode(e *S3Error) string {
 		return "access denied: the token has no permission for this (R2: Object Read & Write on this bucket)" + skew
 	case "NoSuchKey":
 		return "no such object"
+	case "ObjectLockedByBucketPolicy":
+		return "the object is locked by a rule of the bucket: it cannot be deleted or replaced yet"
 	case "XAmzContentSHA256Mismatch", "BadDigest", "InvalidDigest":
 		return "the storage received different bytes than were sent (" + e.Code + ")"
 	case "EntityTooLarge", "EntityTooSmall", "InvalidPart", "InvalidPartOrder", "NoSuchUpload":
@@ -335,8 +337,30 @@ func xferTimeout(n int) time.Duration {
 	return time.Minute + time.Duration(n/(32<<10))*time.Second
 }
 
+// refused: the storage understood the request and will not do it for this key: no permission
+// for it (403 AccessDenied), or a lock on the object (R2 answers 409 ObjectLockedByBucketPolicy;
+// others 403 or 405). Not a wrong key, signature or bucket: those fail every request.
+func refused(err error) bool {
+	var e *S3Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	switch e.Code {
+	case "InvalidAccessKeyId", "SignatureDoesNotMatch", "RequestTimeTooSkewed", "NoSuchBucket", "redirect":
+		return false
+	}
+	return e.Status == 403 || e.Status == 405 || e.Code == "ObjectLockedByBucketPolicy"
+}
+
 // put stores body under key (a single request: small objects and the manifests).
 func (c *s3Client) put(ctx context.Context, key string, body []byte, ctype string) error {
+	_, err := c.putVersion(ctx, key, body, ctype)
+	return err
+}
+
+// putVersion is put; it also returns the version id the storage gave the object ("" when the
+// bucket keeps no versions).
+func (c *s3Client) putVersion(ctx context.Context, key string, body []byte, ctype string) (string, error) {
 	b64, hx := bodyMD5(body)
 	h := http.Header{"Content-Md5": {b64}}
 	if ctype != "" {
@@ -348,18 +372,18 @@ func (c *s3Client) put(ctx context.Context, key string, body []byte, ctype strin
 	}
 	resp, cancel, err := c.do(ctx, rs)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer cancel()
 	if resp.StatusCode != 200 {
-		return c.errorOf(rs, resp)
+		return "", c.errorOf(rs, resp)
 	}
 	io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrBody))
 	resp.Body.Close()
 	if et := unquote(resp.Header.Get("ETag")); isMD5Hex(et) && !strings.EqualFold(et, hx) {
-		return &S3Error{Op: "put", Key: key, Status: 200, Code: "BadDigest"}
+		return "", &S3Error{Op: "put", Key: key, Status: 200, Code: "BadDigest"}
 	}
-	return nil
+	return resp.Header.Get("X-Amz-Version-Id"), nil
 }
 
 // createMultipart starts a multipart upload: its id

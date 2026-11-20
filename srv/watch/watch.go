@@ -60,17 +60,18 @@ import (
 // Watch holds the paths and the outside world of tando-watch. Tests build one over a temp
 // directory with a fixed clock, a run.Func and fake probes.
 type Watch struct {
-	Env    env.Env
-	Conf   string        // /opt/tando/alerts.conf
-	Sec    string        // /opt/tando/alerts.d
-	Dir    string        // /var/lib/tando/watch
-	RunDir string        // /run/tando-watch
-	Self   string        // /opt/tando/bin/tando-watch (its checksum is the `version` row of show)
-	Units  string        // /etc/systemd/system
-	Caddy  string        // /etc/caddy
-	PID    int           // names this run's queue files (the shell's $$)
-	Seq    *atomic.Int64 // with PID: every commit of a long-running process its own queue file
-	Disks  []string      // the file systems tando writes to: /, /var, /opt/tando
+	Env     env.Env
+	Conf    string        // /opt/tando/alerts.conf
+	Sec     string        // /opt/tando/alerts.d
+	Dir     string        // /var/lib/tando/watch
+	RunDir  string        // /run/tando-watch
+	Self    string        // /opt/tando/bin/tando-watch (its checksum is the `version` row of show)
+	Units   string        // /etc/systemd/system
+	Caddy   string        // /etc/caddy
+	PID     int           // names this run's queue files (the shell's $$)
+	Seq     *atomic.Int64 // with PID: every commit of a long-running process its own queue file
+	Disks   []string      // the file systems tando writes to: /, /var, /opt/tando
+	Backups string        // /var/backups/tando (the backup ping reads a backup's offsite state)
 
 	Probe Prober     // health and liveness probes (HTTP through Caddy or to the app's port)
 	Certs CertReader // the certificate Caddy serves for a site
@@ -84,17 +85,18 @@ type Watch struct {
 // New is the real machine under e.
 func New(e env.Env, pid int) Watch {
 	w := Watch{
-		Env:    e,
-		Conf:   filepath.Join(e.Root, "alerts.conf"),
-		Sec:    filepath.Join(e.Root, "alerts.d"),
-		Dir:    filepath.Join(e.Lib, "watch"),
-		RunDir: "/run/tando-watch",
-		Self:   filepath.Join(e.Root, "bin", "tando-watch"),
-		Units:  "/etc/systemd/system",
-		Caddy:  "/etc/caddy",
-		PID:    pid,
-		Seq:    new(atomic.Int64),
-		Disks:  []string{"/", "/var", e.Root},
+		Env:     e,
+		Conf:    filepath.Join(e.Root, "alerts.conf"),
+		Sec:     filepath.Join(e.Root, "alerts.d"),
+		Dir:     filepath.Join(e.Lib, "watch"),
+		RunDir:  "/run/tando-watch",
+		Self:    filepath.Join(e.Root, "bin", "tando-watch"),
+		Units:   "/etc/systemd/system",
+		Caddy:   "/etc/caddy",
+		PID:     pid,
+		Seq:     new(atomic.Int64),
+		Disks:   []string{"/", "/var", e.Root},
+		Backups: "/var/backups/tando",
 	}
 	w.Probe = httpProber{header: filepath.Join(e.Root, "probe.header"), loopback: "127.0.0.1"}
 	w.Certs = tlsCerts{loopback: "127.0.0.1"}

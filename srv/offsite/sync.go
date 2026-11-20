@@ -65,7 +65,20 @@ func (o Offsite) Sync(ctx context.Context, w *out.Writer, now bool) error {
 		if absDur(s.cli.skew) > 5*time.Minute {
 			w.KV("retention", "skipped: this server's clock is "+absDur(s.cli.skew).Round(time.Second).String()+" off the storage's")
 		} else {
-			deleted = o.retention(ctx, s, apps)
+			var denied bool
+			deleted, denied = o.retention(ctx, s, apps)
+			// a key that may not delete (the safer key: docs/BACKUP.md) or a lock on the bucket:
+			// said here, in status and in doctor, until a run's deletes go through again
+			hs = o.loadHostState()
+			if !denied {
+				hs["prune_refused"] = ""
+			} else {
+				if num(hs["prune_refused"]) == 0 {
+					hs["prune_refused"] = strconv.FormatInt(o.now(), 10)
+				}
+				w.KV("retention", "skipped: "+textPruneRefused)
+			}
+			o.saveHostState(hs)
 		}
 		if o.now()-num(hs["inventory"]) > 20*3600 {
 			if err := o.putInventory(ctx, s); err == nil {
@@ -116,8 +129,9 @@ func (o Offsite) syncApp(ctx context.Context, s *session, app string, now bool) 
 	return up, fail
 }
 
-// retention deletes, per app, what prune says; only under this server's host id
-func (o Offsite) retention(ctx context.Context, s *session, local map[string]bool) int {
+// retention deletes, per app, what prune says; only under this server's host id. denied: the
+// storage refused a delete (refused in s3.go): what is left of that app waits, nothing is lost.
+func (o Offsite) retention(ctx context.Context, s *session, local map[string]bool) (n int, denied bool) {
 	apps := map[string]bool{}
 	for a := range local {
 		apps[a] = true
@@ -130,7 +144,6 @@ func (o Offsite) retention(ctx context.Context, s *session, local map[string]boo
 			}
 		}
 	}
-	n := 0
 	for a := range apps {
 		rb, err := o.remoteBackups(ctx, s, s.hostID, a)
 		if err != nil || len(rb) <= s.conf.Keep.Min {
@@ -138,13 +151,14 @@ func (o Offsite) retention(ctx context.Context, s *session, local map[string]boo
 		}
 		for _, id := range prune(rb, s.conf.Keep) {
 			if err := s.cli.del(ctx, s.key(s.hostID, a, id+".rbk")); err != nil {
+				denied = denied || refused(err)
 				break
 			}
 			s.cli.del(ctx, s.key(s.hostID, a, id+".manifest"))
 			n++
 		}
 	}
-	return n
+	return n, denied
 }
 
 // ---- the timer -------------------------------------------------------------------------------

@@ -23,71 +23,149 @@ func step(w *out.Writer, name, st, detail string) {
 	w.KV("step", name+" "+st+" "+out.Clean(detail))
 }
 
-// probe checks the settings the way backups will use them: write, read back, list, delete a
-// small test object under this server's directory, and compare the clocks. Each failure says
-// what is wrong (wrong key, no such bucket, no permission for this step, clock skew).
-func (o Offsite) probe(ctx context.Context, w *out.Writer, c Conf, hostID string) error {
+// keyPowers is what the probe found the access key may do to an object it wrote: "allowed",
+// "refused", or "versions" (the bucket keeps versions: nothing is lost by a replace, and a
+// delete only hides the object; whether the key may remove a version is not tested).
+type keyPowers struct{ Overwrite, Delete string }
+
+// The probe's object: one fixed name per server, so that a key that may not delete leaves one
+// tiny object behind, which the next check uses again, and never a growing pile.
+const probeObject = ".tando-key-test/can-this-key-delete-or-overwrite.txt"
+
+func probeBody(nonce string) []byte {
+	return []byte("tando offsite key test " + nonce + "\n" +
+		"Written by `tando backup offsite test` to find out whether this server's access key may\n" +
+		"replace or delete an object it wrote. It holds no data and is safe to delete.\n")
+}
+
+const (
+	textCanDelete = "allowed: this key can delete the offsite backups, so a break-in on this server could erase them (docs/BACKUP.md, Backups the server cannot erase)"
+	textNoDelete  = "refused: this key cannot delete what it wrote, so a break-in on this server cannot erase the offsite backups; the tiny test object stays and is used again"
+	textVersions  = "not tested: the bucket keeps versions, so a delete only hides an object; make sure this key may not delete versions (docs/BACKUP.md)"
+	// what sync, status and doctor say while the storage refuses the retention's deletes
+	textPruneRefused = "the storage refuses this key's deletes (a key that may not delete, or a lock on the bucket): tando removes no old copies there; let a lifecycle rule of the bucket expire them (docs/BACKUP.md)"
+)
+
+// probe checks the settings the way backups will use them: write, read back and list a small
+// test object under this server's directory, compare the clocks, and find out whether the key
+// may replace and delete that object. A key that may not is the safer one (a compromised server
+// cannot erase its offsite backups), so a refusal there is a finding, not a failure. Each
+// failure says what is wrong (wrong key, no such bucket, no permission for this step, clock
+// skew).
+func (o Offsite) probe(ctx context.Context, w *out.Writer, c Conf, hostID string) (keyPowers, error) {
+	var kp keyPowers
 	cli, err := o.client(c)
 	if err != nil {
-		return err
+		return kp, err
 	}
 	cli.tries = min(cli.tries, 3)
 	host := cli.base.Host
-	fail := func(name string, err error) error {
-		step(w, name, "fail", err.Error())
-		if absDur(cli.skew) > 5*time.Minute {
-			step(w, "clock", "fail", "this server's clock is "+absDur(cli.skew).Round(time.Second).String()+" off the storage's: request signing breaks at 15 minutes (timedatectl set-ntp true)")
+	clockFail := func() bool {
+		if absDur(cli.skew) <= 5*time.Minute {
+			return false
 		}
-		return errors.New(name + " failed: " + err.Error())
+		step(w, "clock", "fail", "this server's clock is "+absDur(cli.skew).Round(time.Second).String()+" off the storage's: request signing breaks at 15 minutes (timedatectl set-ntp true)")
+		return true
+	}
+	fail := func(name string, err error) (keyPowers, error) {
+		step(w, name, "fail", err.Error())
+		clockFail()
+		return kp, errors.New(name + " failed: " + err.Error())
 	}
 	pre := c.hostPrefix(hostID)
-	cctx, cancel := context.WithTimeout(ctx, time.Minute)
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	if _, err := cli.listOne(cctx, pre, "", "", 1); err != nil {
 		return fail("connect", err)
 	}
 	step(w, "connect", "ok", host+", bucket "+c.Bucket)
-	rb := make([]byte, 16)
+	rb := make([]byte, 32)
 	io.ReadFull(o.Rand, rb)
-	key := pre + ".tando-test-" + hexString(rb[:6])
-	body := []byte("tando offsite test " + hexString(rb) + "\n")
-	if err := cli.put(cctx, key, body, "text/plain"); err != nil {
+	key := pre + probeObject
+	body := probeBody(hexString(rb[:16]))
+	_, left, _ := cli.head(cctx, key) // (the test object of an earlier check that could not delete it)
+	ver, err := cli.putVersion(cctx, key, body, "text/plain")
+	switch {
+	case err == nil:
+		step(w, "write", "ok", "a small test object under "+pre)
+	case left && refused(err):
+		// (it was written by this check once, so writing works; replacing does not)
+		kp.Overwrite = "refused"
+		step(w, "write", "ok", "the test object of an earlier check is still there")
+	default:
 		return fail("write", err)
 	}
-	step(w, "write", "ok", "a test object under "+pre)
+	if ver != "" && ver != "null" {
+		kp.Overwrite, kp.Delete = "versions", "versions"
+	}
 	got, err := cli.getSmall(cctx, key, 4096)
 	if err != nil {
-		cli.del(cctx, key)
 		return fail("read", err)
 	}
-	if !bytes.Equal(got, body) {
-		cli.del(cctx, key)
+	if kp.Overwrite != "refused" && !bytes.Equal(got, body) {
 		return fail("read", errors.New("the object read back differs from what was written"))
 	}
 	step(w, "read", "ok", "the same bytes came back")
 	lp, err := cli.listOne(cctx, key, "", "", 10)
 	if err != nil {
-		cli.del(cctx, key)
 		return fail("list", err)
 	}
 	if len(lp.Objects) != 1 || lp.Objects[0].Key != key {
-		cli.del(cctx, key)
 		return fail("list", errors.New("the test object is not listed"))
 	}
 	step(w, "list", "ok", "")
-	if err := cli.del(cctx, key); err != nil {
-		return fail("delete", err)
+	if kp.Overwrite == "" {
+		body = probeBody(hexString(rb[16:]))
+		switch err := cli.put(cctx, key, body, "text/plain"); {
+		case err == nil:
+			kp.Overwrite = "allowed"
+		case refused(err):
+			kp.Overwrite = "refused"
+		default:
+			return fail("overwrite", err)
+		}
 	}
-	if _, ok, err := cli.head(cctx, key); err != nil || ok {
-		return fail("delete", errors.New("the test object is still there after its delete"))
+	switch kp.Overwrite {
+	case "allowed":
+		step(w, "overwrite", "warn", "allowed: this key can replace an object it wrote")
+	case "refused":
+		step(w, "overwrite", "ok", "refused: this key cannot replace an object it wrote")
+	default:
+		step(w, "overwrite", "ok", "kept: the bucket keeps versions, so replaced content stays")
 	}
-	step(w, "delete", "ok", "")
-	if absDur(cli.skew) > 5*time.Minute {
-		step(w, "clock", "fail", "this server's clock is "+absDur(cli.skew).Round(time.Second).String()+" off the storage's: request signing breaks at 15 minutes (timedatectl set-ntp true)")
-		return errors.New("clock skew")
+	if kp.Delete == "" {
+		switch err := cli.del(cctx, key); {
+		case err == nil:
+			if _, ok, err := cli.head(cctx, key); err != nil || ok {
+				return fail("delete", errors.New("the test object is still there after its delete"))
+			}
+			kp.Delete = "allowed"
+		case refused(err):
+			kp.Delete = "refused"
+		default:
+			return fail("delete", err)
+		}
+	}
+	switch kp.Delete {
+	case "allowed":
+		step(w, "delete", "warn", textCanDelete)
+	case "refused":
+		step(w, "delete", "ok", textNoDelete)
+	default:
+		step(w, "delete", "warn", textVersions)
+	}
+	if clockFail() {
+		return kp, errors.New("clock skew")
 	}
 	step(w, "clock", "ok", "within "+absDur(cli.skew).Round(time.Second).String()+" of the storage's")
-	return nil
+	return kp, nil
+}
+
+// keyResult records what the probe found the key may do (status shows it)
+func (o Offsite) keyResult(kp keyPowers) {
+	m := o.loadHostState()
+	m["key_overwrite"], m["key_delete"], m["key_checked"] = kp.Overwrite, kp.Delete, strconv.FormatInt(o.now(), 10)
+	o.saveHostState(m)
 }
 
 // readSettings: key=value lines from stdin (at most 64 KiB), only known keys
@@ -149,7 +227,8 @@ func (o Offsite) Set(ctx context.Context, w *out.Writer, stdin io.Reader) error 
 	if err != nil {
 		return err
 	}
-	if err := o.probe(ctx, w, c, hostID); err != nil {
+	kp, err := o.probe(ctx, w, c, hostID)
+	if err != nil {
 		return fmt.Errorf("%v; nothing was saved", err)
 	}
 	b, err := kvfile.Format(c.fields())
@@ -160,6 +239,7 @@ func (o Offsite) Set(ctx context.Context, w *out.Writer, stdin io.Reader) error 
 		return err
 	}
 	o.credsResult(nil)
+	o.keyResult(kp)
 	if c.Encrypt {
 		keys, err := loadKeys(o.KeyFile, o.Owner)
 		if err != nil {
@@ -217,8 +297,11 @@ func (o Offsite) Test(ctx context.Context, w *out.Writer) error {
 	if err != nil {
 		return err
 	}
-	err = o.probe(ctx, w, c, id)
+	kp, err := o.probe(ctx, w, c, id)
 	o.credsResult(credsErrOnly(err))
+	if err == nil {
+		o.keyResult(kp)
+	}
 	return err
 }
 
@@ -291,7 +374,8 @@ func (o Offsite) Status(ctx context.Context, w *out.Writer) error {
 	w.KV("keep", fmt.Sprintf("daily %d, weekly %d, monthly %d, other %d each, final all, newest %d always",
 		c.Keep.Daily, c.Keep.Weekly, c.Keep.Monthly, c.Keep.Other, c.Keep.Min))
 	hs := o.loadHostState()
-	for _, k := range []string{"creds", "creds_error", "creds_since", "checked", "inventory", "skew"} {
+	for _, k := range []string{"creds", "creds_error", "creds_since", "checked", "inventory", "skew",
+		"key_overwrite", "key_delete", "key_checked", "prune_refused"} {
 		w.KV(k, hs[k])
 	}
 	if o.systemctl(ctx, "is-active", "-q", "tando-offsite.timer") == nil {
@@ -532,6 +616,10 @@ func (o Offsite) Doctor(ctx context.Context, w *out.Writer) error {
 		w.Row("check", "ok", "offsite queue", fmt.Sprintf("%d waiting (%d failed); %s", pending, failed, lu))
 	default:
 		w.Row("check", "ok", "offsite queue", "nothing waiting; "+lu)
+	}
+	if since := num(hs["prune_refused"]); since > 0 {
+		// (short: doctor cuts an ok row at its column; status and sync say it whole)
+		w.Row("check", "ok", "offsite retention", "deletes refused: left to a bucket lifecycle rule")
 	}
 	if o.systemctl(ctx, "is-active", "-q", "tando-offsite.timer") != nil {
 		w.Row("check", "fail", "offsite timer", "tando-offsite.timer is not active: failed uploads are not retried (tando backup offsite set installs it)")

@@ -9,6 +9,7 @@ Contents: [What is backed up](#what-is-backed-up) · [Local backups](#local-back
 [Offsite: Cloudflare R2, step by step](#offsite-cloudflare-r2-step-by-step) ·
 [Other S3 stores](#other-s3-stores) · [Commands](#commands) · [The recovery key](#the-recovery-key) ·
 [Disaster recovery runbook](#disaster-recovery-runbook) · [Retention](#retention) ·
+[Backups the server cannot erase](#backups-the-server-cannot-erase) ·
 [Monitoring](#monitoring) · [Encryption format](#encryption-format) · [Object layout](#object-layout) ·
 [Threat model](#threat-model) · [Testing against a real bucket](#testing-against-a-real-bucket) ·
 [Costs](#costs)
@@ -43,19 +44,19 @@ of each of the 4 weeks before them, the newest 5 of each other kind, every final
    permission **Object Read & Write**, *Apply to specific buckets only* → your bucket, TTL as you like.
    Create it and copy the **Access Key ID** and the **Secret Access Key** (shown once). Do not use an
    Admin token: a token limited to one bucket is what a leak would expose.
-3. **Recommended: protect what is written.** R2 → your bucket → Settings → *Bucket lock rules* (object
-   lock): add a rule for prefix `tando/` that keeps objects for e.g. 30 days. A leaked token can then
-   not delete or overwrite recent backups (see the threat model). Set the age above your `keep_*`
-   retention needs, or tando's own deletes of older backups are refused until they age out (that is
-   harmless: they are retried at the next run). Also: *Object lifecycle rules* → abort incomplete
-   multipart uploads after 1 day (R2 does this after 7 days by default).
+3. **Recommended: protect what is written.** The key on the server can, by default, delete every
+   backup in the bucket, and so can whoever breaks into the server. A lock on the bucket takes that
+   away: see [Backups the server cannot erase](#backups-the-server-cannot-erase). Also: *Object
+   lifecycle rules* → abort incomplete multipart uploads after 1 day (R2 does this after 7 days by
+   default).
 4. **On your laptop:**
 
    ```
    tando backup offsite set              # asks: account id (or endpoint), bucket, key id, secret (not shown)
    ```
 
-   tando writes, reads back, lists and deletes a test object, checks the server's clock, and only then
+   tando writes, reads back and lists a small test object, tries to replace and delete it (a
+   refusal there is reported, not a failure), checks the server's clock, and only then
    saves the settings (`/opt/tando/offsite.conf`, root only). On the first `set` it makes the
    **recovery key** and shows it once: store it now (password manager, or paper), then
 
@@ -103,7 +104,7 @@ answered with a redirect").
 |---|---|
 | `tando backup offsite [status]` | settings (never the secret), encryption and key, the last credentials check, per app: waiting, failed, last upload |
 | `tando backup offsite set [key=value...]` | set or change the settings; checked against the bucket before they are saved |
-| `tando backup offsite test` | the same check with the saved settings |
+| `tando backup offsite test` | the same check with the saved settings; its `overwrite` and `delete` rows say whether this key could replace or erase a backup ([below](#backups-the-server-cannot-erase)) |
 | `tando backup offsite sync` | upload what waits now (also failed ones not due yet), apply retention |
 | `tando backup offsite hosts` | the servers whose backups are in the bucket (host id, hostname, apps, key id) |
 | `tando backup offsite key --show` | print the recovery key(s) (asks first) |
@@ -159,7 +160,89 @@ local policy; `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_other` keep mor
 `tando backup offsite set keep_daily=30 keep_monthly=12`). Every final backup is kept. Whatever the
 policy says, the `keep_min` objects the storage received last (by the storage's own clock) are never
 deleted, and a run whose clock is more than 5 minutes off the storage's deletes nothing: a server
-whose clock jumped cannot delete its newest backups.
+whose clock jumped cannot delete its newest backups. With a key that may not delete, or a lock on
+the bucket, tando prunes nothing there and says so: the bucket's lifecycle rule does it
+([Backups the server cannot erase](#backups-the-server-cannot-erase)).
+
+## Backups the server cannot erase
+
+The server holds the bucket's key, because it uploads unattended. Whoever takes over the server
+has that key. Encryption keeps them from reading other servers' backups, but with an ordinary key
+they can delete or overwrite every copy in the bucket, which is what ransomware does first. The
+defence is in the storage, not in tando: make deletes and overwrites impossible for this key, and
+let the storage itself remove old copies.
+
+**What tando tells you.** `tando backup offsite test` (and `set`) writes one small object,
+`<prefix>/<host id>/.tando-key-test/can-this-key-delete-or-overwrite.txt`, and tries to replace
+and to delete it:
+
+| row | says | meaning |
+|---|---|---|
+| `overwrite` | `allowed` | this key can replace an object it wrote (a backup could be overwritten with garbage) |
+| | `refused` | it cannot (a lock on the bucket) |
+| | `kept` | the bucket keeps versions: the replaced content stays as an older version |
+| `delete` | `allowed` | this key can delete the offsite backups. The test still passes; this is the default setup and the one to improve |
+| | `refused` | it cannot: the good outcome. The test object stays (under 300 bytes, its text says what it is) and the next test uses the same one, so they never pile up |
+| | `not tested` | the bucket keeps versions, so a delete only hides an object; whether the key may delete a *version* is not tested by tando: check its policy |
+
+`tando backup offsite status` shows the last result (`this key`).
+
+**Retention then belongs to the bucket.** tando prunes old offsite copies with the same key
+([Retention](#retention)). When the storage refuses those deletes, nothing fails and uploads go
+on, but tando removes nothing: `tando backup offsite sync` says `retention skipped`, and `status`
+(`pruning`) and `tando doctor` (`offsite retention`) say so until a delete goes through again.
+Set a **lifecycle rule** on the bucket that expires objects under `<prefix>/` after as many days
+as you want to keep backups (for example 35, or 400 to keep a year). A lifecycle rule knows only
+age: tando's `keep_*` counts (7 daily, 4 weekly ...) do not apply offsite any more, and `final`
+backups expire like the rest. Never set the expiry below the lock's period, and keep it well above
+one day so that the newest backup always exists.
+
+The two setups below are written from the providers' documentation (Cloudflare: "Bucket locks",
+"Object lifecycles", "Authentication"; AWS: "Locking objects with Object Lock"). **tando's tests
+cover them only against its own S3 test server** (a key whose deletes are refused with 403, a lock
+that answers 409, a bucket that returns version ids); they were not verified against a real R2 or
+S3 bucket. Run `tando backup offsite test` after setting one up: the `delete` row tells you
+whether it worked.
+
+**Cloudflare R2.** R2's API tokens have no "write but not delete" permission (Object Read & Write
+is the narrowest that can upload), so the protection is a bucket lock rule, which the token cannot
+change (editing a bucket's configuration needs an Admin token; never give the server one).
+
+1. R2 → your bucket → Settings → *Bucket lock rules* → add a rule for the prefix `tando/` (your
+   `prefix`) with a retention by age, e.g. 30 days. A locked object cannot be deleted or
+   overwritten until it is that old; R2 answers such a request with `409
+   ObjectLockedByBucketPolicy`.
+2. Settings → *Object lifecycle rules* → add a rule for the same prefix that deletes objects
+   after more days than the lock, e.g. 35. (A lock takes precedence over a lifecycle rule.)
+3. `tando backup offsite test`: `overwrite refused`, `delete refused`.
+
+A limit to know: besides the backups (each under a new name), tando rewrites three small objects
+in place, `<app>/app.rbk` (the app's settings and env), `inventory.rbk` and `host.manifest`. Under
+an R2 lock a rewrite is refused until the old object has aged out, so these are as old as the
+lock's period at worst, and with the lifecycle rule above they are deleted and written again once
+per period. `tando restore --from-host` takes an app's settings and env from `app.rbk`: after a
+loss of the server, check the env of a recreated app against what you know changed recently.
+Keep the lock's period short enough for that (7 to 30 days), not years.
+
+**AWS S3** (and stores with the same model). Two parts, both needed:
+
+1. *Keep versions.* Create the bucket with **Object Lock** enabled (this turns on versioning) and
+   a default retention, e.g. governance or compliance mode, 30 days. An overwrite then creates a
+   new version and a delete only adds a delete marker; the locked version underneath stays until
+   its retention ends. (Versioning alone, without Object Lock, protects the same way as long as
+   the key cannot delete versions: part 2.)
+2. *A key that cannot remove versions.* Give the server's IAM user a policy with only
+   `s3:PutObject`, `s3:GetObject`, `s3:AbortMultipartUpload` on `arn:aws:s3:::<bucket>/<prefix>/*`
+   and `s3:ListBucket` on the bucket; no `s3:DeleteObject`, no `s3:DeleteObjectVersion`, no
+   `s3:BypassGovernanceRetention`, no `s3:PutLifecycleConfiguration`, no `s3:PutBucketVersioning`.
+3. *Lifecycle.* A rule for the prefix that expires current versions after N days, permanently
+   deletes noncurrent versions some days after that, and removes expired delete markers.
+4. `tando backup offsite test`: without `s3:DeleteObject` the `delete` row says `refused`; in a
+   bucket with versions it says `not tested` (tando does not try to delete a version).
+
+In a bucket that keeps versions, an attacker's deletes and overwrites only hide the backups:
+`tando backup ls` and a restore see the current versions, so recovering after such an attack means
+removing the delete markers or restoring the older versions with the provider's own tools first.
 
 ## Monitoring
 
@@ -168,7 +251,10 @@ whose clock jumped cannot delete its newest backups.
   working. (The watch side of this is being added separately; until then `tando doctor` and
   `tando status <app>` show it.)
 - **`tando doctor`**: `offsite` (bucket, encrypted, credentials failing), `offsite queue` (waiting,
-  failed, last upload; a warning when one is late), `offsite timer`, `recovery key` (saved or not).
+  failed, last upload; a warning when one is late), `offsite retention` (only while the storage
+  refuses tando's deletes), `offsite timer`, `recovery key` (saved or not).
+- **The backup ping** (`tando alerts backup-ping`, docs/MONITORING.md "From outside"): an outside
+  service is called once a day, only when every daily backup worked and is in the bucket.
 - **`tando status <app>`**: an `offsite` line: last upload, uploads waiting or late, failing credentials.
 
 State file per app (`/var/lib/tando/offsite/state/<app>`, root 644, key=value, rewritten after each
@@ -238,7 +324,10 @@ plaintext compared with the manifest before the backup directory appears (whole 
 - **The bucket's credentials leak.** The attacker reads only ciphertext and the plaintext manifests
   (app names, backup times and sizes, hostname). They can **delete or overwrite** objects: the defence
   is the bucket, not tando: object lock (R2 bucket lock rules, S3 Object Lock, B2 object lock) or
-  versioning, as in step 3. Planted objects do not get restored: a plaintext object is refused while
+  versioning with a key that cannot delete ([Backups the server cannot
+  erase](#backups-the-server-cannot-erase)); `tando backup offsite test` says which you have.
+- **The server is taken over** (root): the same, with the key in hand. The offsite copies survive
+  only with that protection in the bucket. Planted objects do not get restored: a plaintext object is refused while
   encryption is on, and an encrypted one needs the recovery key. Use a token limited to one bucket.
 - **The recovery key leaks** (with bucket access): the backups can be read. Rotate (`key --rotate`),
   and consider older objects exposed.

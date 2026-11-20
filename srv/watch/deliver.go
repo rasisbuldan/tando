@@ -15,9 +15,10 @@ import (
 
 // deliverResult is one notifier's (or the heartbeat's) attempt of this run.
 type deliverResult struct {
-	name string // "" for the heartbeat
+	name string // "" for the heartbeat, backupPingName for the backup ping
 	ok   bool
 	why  string
+	upto int64 // the backup ping: the newest daily backup it covers
 }
 
 // deliver sends the queued messages: every notifier in parallel, one attempt per run (a
@@ -96,6 +97,20 @@ func (w Watch) sendAll(ctx context.Context, cfg settings, vs, st *store, now int
 			}()
 		}
 	}
+	// the backup ping: once per whole run of the daily backups (backupping.go)
+	if u, upto := w.backupPingDue(st, now); u != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := deliverResult{name: backupPingName, ok: true, upto: upto}
+			if err := w.Send.Ping(ctx, u); err != nil {
+				r.ok, r.why = false, errText(err)
+			}
+			mu.Lock()
+			res = append(res, r)
+			mu.Unlock()
+		}()
+	}
 	wg.Wait()
 	return res
 }
@@ -113,6 +128,10 @@ func (w Watch) recordResults(res []deliverResult, vs *store, now int64) {
 			} else {
 				st.set("_hb.err", decimal.Itoa(now))
 			}
+			continue
+		}
+		if r.name == backupPingName {
+			recordBackupPing(st, r, now)
 			continue
 		}
 		p := "_nf." + r.name + "."

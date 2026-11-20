@@ -15,6 +15,7 @@
 //	tando-watch notifier-add <name> <type>   fields as key=value lines on stdin (secrets)
 //	tando-watch notifier-rm <name>
 //	tando-watch heartbeat                 "url=<url>" or "off" on stdin
+//	tando-watch backup-ping               the same, for the URL requested after whole daily backups
 //	tando-watch silence <app|all> <seconds>
 //	tando-watch test [name]               a test message through each notifier
 //	tando-watch version                   the tando version it was built from
@@ -94,6 +95,8 @@ func run(args []string) error {
 		err = w.NotifierRm(o, args)
 	case "heartbeat":
 		err = w.Heartbeat(o, os.Stdin)
+	case "backup-ping":
+		err = w.BackupPing(ctx, o, os.Stdin)
 	case "silence":
 		err = w.Silence(o, args)
 	case "test":

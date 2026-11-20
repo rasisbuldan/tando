@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"tando/srv/internal/apps"
 	"tando/srv/internal/bashread"
 	"tando/srv/internal/decimal"
 	"tando/srv/internal/fsinfo"
@@ -158,6 +159,7 @@ func (w Watch) Doctor(ctx context.Context, o *out.Writer) {
 				"; messages wait in its queue (tando alerts test "+n+")")
 		}
 	}
+	w.outsideRows(o, st, now)
 	switch {
 	case len(names) == 0:
 		o.Row("check", "ok", "notifiers", "none: alerts show only in tando alerts")
@@ -227,6 +229,10 @@ func (w Watch) Show(ctx context.Context, o *out.Writer, args []string) error {
 	if hbf := filepath.Join(w.Sec, "heartbeat"); fsinfo.RegularFollow(hbf) {
 		hb := loadQuiet(hbf)
 		o.Row("heartbeat", mask(hb["url"]), vs.get("hb"), st.get("_hb.err"), decimal.Itoa(cfg.num("heartbeat_every", "")))
+	}
+	w.backupPingRow(o, st)
+	if an, _ := apps.Names(w.Env.Root); len(an) > 0 {
+		o.Row("apps", decimal.Itoa(int64(len(an)))) // (no heartbeat is a warning once there are apps)
 	}
 	n := int64(8)
 	if len(args) > 0 {

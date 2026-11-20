@@ -1,6 +1,7 @@
 # lib/cmd-alerts.sh: `tando alerts`, the client side of tando-watch (srv/watch) (see docs/MONITORING.md).
 # help: alerts [--watch N] | enable | disable | test [name] | history [-n N]   alert state and delivery
 # help: alerts set [key=value ...] | silence <app|all> <30m|2h|1d|off> | heartbeat [off]
+# help: alerts backup-ping [off]                                  a URL called after whole daily backups
 # help: alerts notifier add <name> webhook|slack|telegram|ntfy|email | notifier rm <name> | notifier ls
 #
 # bash 3.2. Secrets (webhook URLs, tokens) are read from the terminal without echo (or from stdin
@@ -129,8 +130,23 @@ render_alerts() {
       elif [ "$b" = - ]; then ui_kv heartbeat "$a, every ${d}m, not pinged yet"
       else ui_kv heartbeat "$(ui_badge ok ok) $a, every ${d}m, last $(ago "$b")"; fi
     }
+  elif [ -n "$(awk -F '\t' '$1 == "apps"' "$TMPD/al")" ]; then
+    # a server with apps and nothing outside that would miss it: said in colour (tando doctor warns)
+    ui_kv heartbeat "${UI_YELLOW}none: the server cannot report its own death; see tando alerts heartbeat${UI_NC}"
   else
     ui_kv heartbeat "${UI_DIM}none: the server cannot report its own death; see tando alerts heartbeat${UI_NC}"
+  fi
+  # the backup ping (tando alerts backup-ping): its last request, or why none is sent now
+  hb=$(awk -F '\t' '$1 == "backup-ping"' "$TMPD/al")
+  if [ -n "$hb" ]; then
+    printf '%s\n' "$hb" | {
+      IFS=$TAB read -r r a b c d
+      [ "$d" = - ] && d=""
+      if [ "$c" != - ]; then ui_kv_wrap backups "ping $(ui_badge failed failing) $a: ${d:-the request failed}, since $(ago "$c")"
+      elif [ "$b" = - ]; then ui_kv_wrap backups "ping not sent yet${d:+: $d} ($a)"
+      elif [ -n "$d" ]; then ui_kv_wrap backups "${UI_YELLOW}ping not sent now: $d${UI_NC} (last sent $(ago "$b"), $a)"
+      else ui_kv backups "ping $(ui_badge ok ok) $a, sent after the last daily backups, $(ago "$b")"; fi
+    }
   fi
   while IFS=$TAB read -r r a b; do
     [ "$r" = silence ] || continue
@@ -203,6 +219,7 @@ alerts_set() {
   for kv in "$@"; do
     case $kv in
       heartbeat|heartbeat=*) die "the heartbeat URL is a secret: use tando alerts heartbeat (it asks for it)";;
+      backup-ping|backup-ping=*|backup_ping=*) die "the backup ping URL is a secret: use tando alerts backup-ping (it asks for it)";;
       allow_ports=*) case ${kv#*=} in *[!a-z0-9/,-]*) die "allow_ports is like tcp/5432,udp/51820";; esac;;
       *[!A-Za-z0-9_.=-]*) die "bad setting: $kv";;
       *=*) ;;
@@ -325,6 +342,21 @@ cmd_alerts() {
         watch_do sudo heartbeat < <(printf 'url=%s\n' "$SECRET") > "$TMPD/o"; SECRET=""
         note "heartbeat set: an outside service (such as healthchecks.io) now hears from $HOST every few minutes"
       fi;;
+    backup-ping)
+      if [ "${ARGS[2]:-}" = off ]; then
+        watch_do sudo backup-ping < <(printf 'off\n') > "$TMPD/o"; note "backup ping removed"
+      else
+        if [ -t 0 ]; then
+          printf '%s\n' "A backup that silently stopped is found out when it is needed. The backup ping turns that" \
+            "around: after the daily backups, when every app's backup worked (and reached the offsite bucket," \
+            "when that is on), tando calls a URL once. An outside service (such as healthchecks.io, free)" \
+            "alerts you when a day passes without the call. Create a check there with a period of 1 day" \
+            "and a grace of a few hours, and paste its ping URL." >&2
+        fi
+        read_secret "backup ping URL, called after the daily backups when all worked (not shown)"
+        watch_do sudo backup-ping < <(printf 'url=%s\n' "$SECRET") > "$TMPD/o"; SECRET=""
+        note "backup ping set: $HOST calls it after each whole run of the daily backups; tando alerts shows the last call"
+      fi;;
     silence)
       local who=${ARGS[2]:-} d=${ARGS[3]:-}
       [ -n "$who" ] && [ -n "$d" ] || die "usage: tando alerts silence <app|all> <30m|2h|1d|off>"
@@ -334,6 +366,6 @@ cmd_alerts() {
       kv_read "$TMPD/o" until
       if [ "$SECS" = 0 ]; then note "alerts for $who are no longer silenced"
       else note "alerts for $who silenced until $(when "$K_until"); still recorded, sent afterwards if they keep firing"; fi;;
-    *) die "alerts: (no argument), enable, disable, test, set, notifier, history, silence or heartbeat";;
+    *) die "alerts: (no argument), enable, disable, test, set, notifier, history, silence, heartbeat or backup-ping";;
   esac
 }
