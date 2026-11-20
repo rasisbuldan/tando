@@ -6,6 +6,16 @@ first, grouped by area.
 
 ## Unreleased
 
+- Less disk: a new release hard-links every file whose bytes are the same as in the live release
+  (`rsync -c --link-dest`) instead of copying the whole upload. A linked file stays root's and
+  read-only to the app (only files that already have the release's owner and mode 640/750 are
+  shared, so the release's chown and chmod change nothing on them); files in `writable`,
+  `public_dirs` and assets directories are always the release's own copy, the upload's own hard
+  links are still refused, and nothing is ever linked to `incoming/`. Next.js bench app, 2 GB / 1
+  CPU test server, 3 interleaved rounds of 5 deploys each: `releases/` 183 MB to 42 MB (with
+  `incoming/` 220 MB to 79 MB; df delta the same), copy phase median 0.20 s to 0.25 s (0.1 s
+  resolution), warm deploy to live 7.6 s to 7.8 s median (inside the noise). `du` counts a
+  shared file once, so the `app_max_mb` check now sees the real bytes.
 - Faster: three measured speedups, each against the previous tree on the same test server (Next.js
   bench app, interleaved runs, 5 each; stage 10 each). The stage step runs one `node lib/native.js`
   process instead of four or five (plan, fix and the guard's excused list in one walk of the staged

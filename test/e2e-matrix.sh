@@ -391,6 +391,7 @@ b deploy run-activation link.moved 1 reboot after
 b rollback rollback link.moved 1 kill after
 c rollback - - 0 none after
 c deploy run-activation imp.cp 1 kill before
+c deploy run-activation imp.unshare 1 kill before
 d deploy-stopped run-activation imp.cp 1 kill before
 e deploy activate act.spawn 1 kill before
 e deploy run-activation run.locked 1 kill before
