@@ -73,7 +73,7 @@ log "fault matrix: kind $KIND, operations: $OPS; actions: $ACTIONS${QUICK:+ (qui
 t_server_up --reset || exit 1
 mx_markers || { fail "0 could not make the test markers on the server"; t_done; }
 t_host_add > /dev/null 2>&1
-setup_args="public_port=$T_HTTP_PORT"
+setup_args="public_port=$T_HTTP_PORT domain_tls=off"
 [ "$KIND" = data ] && setup_args="$setup_args postgres=yes"
 [ "$KIND" = container ] && setup_args="$setup_args podman=yes"
 [ "$KIND" = python ] && setup_args="$setup_args python=yes"
@@ -83,16 +83,17 @@ setup_args="public_port=$T_HTTP_PORT"
 mx_seed() {
   dxs "runuser -u tando-$A -- sh -c 'echo seed-$RANDOM > /opt/tando/apps/$A/shared/data/sentinel'" 2>> "$W/case.log"
   if [ "$KIND" = data ]; then
-    dxs "sudo -u postgres psql -X -q -d tando_$A -c 'create table if not exists mx(i int); insert into mx select generate_series(1, 50)'" >> "$W/case.log" 2>&1
+    # (as the app's role: a table of the superuser's is one the app's pre-deploy pg_dump cannot read)
+    dxs "sudo -u postgres psql -X -q -d tando_$A -c 'set role tando_$A' -c 'create table if not exists mx(i int)' -c 'insert into mx select generate_series(1, 50)'" >> "$W/case.log" 2>&1
   fi
 }
 mx_fresh() {
   log "fresh $A"
   if dx test -d "/opt/tando/apps/$A"; then echo "$A" | (cd "$W/$A" && "$R" destroy -a "$A" --purge > "$W/destroy.out" 2>&1); fi
-  rm -f "$W/ids"; : > "$W/ids"
+  rm -f "$W/ids" "$W/served"; : > "$W/ids"
   MXV=$((MXV + 1)); mx_version "$MXV"
   mx_client "$W/d$MXV.out" up || { cat "$W/d$MXV.out" >&2; return 1; }
-  mx_note_id "$(mx_rid "$W/d$MXV.out")" "$MXV"
+  mx_note_id "$(mx_rid "$W/d$MXV.out")" "$MXV"; echo "$MXV" >> "$W/served"
   mx_deploy || { cat "$W/d$MXV.out" >&2; return 1; }
   mx_seed
 }
@@ -322,6 +323,8 @@ if [ "$SELFTEST" = 1 ]; then
   st_case 1 "the app's process is stopped behind tando's back" "systemctl stop tando-$A" "systemctl start tando-$A; sleep 2"
   st_case 2 "app.conf has the other version's health path" \
     "$SEDI 's|^health=/hc-|health=/hcx-|' $D/app.conf" "$SEDI 's|^health=/hcx-|health=/hc-|' $D/app.conf"
+  st_case 2 "app.conf has the domain of a version that never went live" \
+    "$SEDI 's/^domains=/domains=v999.mx.test|off /' $D/app.conf" "$SEDI 's/^domains=v999.mx.test|off /domains=/' $D/app.conf"
   st_case 3 "the live release is recorded bad" \
     "c=\$(sed -n 's/^current=//p' $D/state); $SEDI \"s/^status_\$c=verified/status_\$c=bad/\" $D/state" \
     "c=\$(sed -n 's/^current=//p' $D/state); $SEDI \"s/^status_\$c=bad/status_\$c=verified/\" $D/state"
@@ -398,6 +401,10 @@ b deploy run-activation sw.caddy_up 1 kill before
 b deploy run-activation link.moved 1 kill after";;
   # workers (kind worker): a kill when the web process passed its check and the workers are about
   # to follow; going back after a failed check, the old workers could not be started at once
+  # a database (kind data): a deploy refused in the pre-flight leaves the role's limits and the
+  # domains as the live release has them (milestone 3b: they took effect at configure)
+  data) CELLS="
+m deploy-pre - - 0 none after";;
   worker) CELLS="
 w deploy run-activation wk.start 1 kill after
 w deploy-bad run-activation bad.workers 1 fail after";;

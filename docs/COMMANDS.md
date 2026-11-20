@@ -621,7 +621,7 @@ Per app in tando.conf; `off` turns one off.
 | `db_temp_limit =` | 1G | temporary files of one connection (large sorts, hashes, index builds) | `temporary file size exceeds "temp_file_limit"`; the statement fails |
 
 Times are `500ms`, `30s`, `5m`, `2h`; sizes `512M`, `2G`. They are set on the role (`ALTER ROLE ...
-SET`) by a deploy (`tando up`, `tando deploy`) and by `tando host setup`, which also gives them to
+SET`) by a deploy when it goes live (before its release command, if it has one; a deploy that does not go live leaves the live ones) and by `tando host setup`, which also gives them to
 apps deployed by an older tando. A running app gets them with its next connection (a deploy
 restarts it). `tando db` shows what is set. `lock_timeout` is not set.
 

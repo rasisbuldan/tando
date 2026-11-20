@@ -1493,8 +1493,18 @@ revert() { # kind why [note] [soaked 0|1] [result: rolledback, or failed when it
   fb=$(fallback_of "${S[fallback]:-}" "$id")
   st phase rollback reverting 1
   pg phase rollback
+  # the domains this deploy added are taken out (the site follows with the fallback's restart)
+  if [[ $kind == deploy && -n ${S[domains_new]:-} ]]; then
+    local x y nd=""
+    for y in ${C[domains]:-}; do
+      for x in ${S[domains_new]}; do [[ ${y%|*} == "${x%|*}" ]] && continue 2; done
+      nd+="${nd:+ }$y"
+    done
+    if [[ -n $nd ]]; then C[domains]=$nd; else unset "C[domains]"; fi
+    { fp bad.domains && save "$D/app.conf" C; } || back=0
+  fi
   # the fallback's settings first (app.conf, the unit file), so it restarts as it was deployed
-  if [[ -n $fb && $id != "$fb" ]]; then { fp bad.start_back && start_back "$fb" && conf_put; } || back=0; fi
+  if ((back)) && [[ -n $fb && $id != "$fb" ]]; then { fp bad.start_back && start_back "$fb" && conf_put; } || back=0; fi
   if ((!back)); then :
   elif [[ -n $fb ]]; then
     if [[ -n ${S[pre_stopped]:-} ]]; then
@@ -2692,12 +2702,17 @@ cmd_configure() {
   [[ -z $needs ]] || die "$A needs${needs} on <host>, which is not installed: tando up installs it (or tando host setup <host>${needs// / }=yes)"
   [[ -n $origin ]] && C[origin]=$origin
   # domains in tando.conf are added to the app's domains (tando domain rm removes one); who owns
-  # a domain is checked and written under the host-wide domain lock (two apps, one domain)
+  # a domain is checked under the host-wide domain lock (two apps, one domain). With a live
+  # release they wait with this deploy's settings (DOM_STAGE: domain_add= in confs/<id>) and are
+  # added at its switch, checked again there (run-activation): a deploy that does not go live
+  # adds none and holds none. Without one (a new app) app.conf takes them at once
   [[ -n $confdom ]] && domains_lock
+  DOM_STAGE=""
   for x in $confdom; do
     [[ " ${C[domains]:-} " == *" $x|"* ]] && continue
     domain_free "$x" "${confwww:-$(default_www "$x")}"
-    C[domains]="${C[domains]:+${C[domains]} }$x|${confwww:-$(default_www "$x")}"
+    if ((!new)) && valid_id "${S[current]:-}"; then DOM_STAGE+="${DOM_STAGE:+ }$x|${confwww:-$(default_www "$x")}"
+    else C[domains]="${C[domains]:+${C[domains]} }$x|${confwww:-$(default_www "$x")}"; fi
   done
   if ((new)); then
     lockfile "$R/.ports.lock"; exec 8>"$R/.ports.lock"
@@ -2750,7 +2765,7 @@ cmd_configure() {
   # cut off, an upload that failed) changes none of them, and a second client's configure in
   # between never hands its settings to this one's activation. (Not for a new app or one with no
   # live release: there is nothing live to keep, app.conf takes them at once.) The server's own
-  # keys (domains of tando.conf, origin) are app.conf's at once.
+  # key origin is app.conf's at once; new domains of tando.conf wait with them (DOM_STAGE).
   local -A NC=() LC=()
   conf_copy C NC
   local conf; conf=$(conf_stage) || die "could not write the settings of this deploy (disk full?)"
@@ -2776,7 +2791,7 @@ cmd_configure() {
   # what the new release needs before its pre-flight (its database, its shared directories) is
   # made from its own settings; the live app's unit, site and jobs from the live ones
   conf_copy C LC; conf_copy NC C; app_vars
-  [[ ${C[database]:-} == postgres ]] && db_ensure
+  local ndb=${C[database]:-}
   [[ -x $LOGS ]] && { "$LOGS" app-setup "$A" > /dev/null || die "log setup failed"; }
   app_perms
   # the shared/ directories the app uses, created once now by its own user (see ensure_shared)
@@ -2785,6 +2800,9 @@ cmd_configure() {
   [[ ${C[recipe]:-} == next && ${C[next_cache]:-} != release ]] && ensure_shared next-cache
   [[ ${C[recipe]:-} == python ]] && ensure_shared .cache
   conf_copy LC C; app_vars
+  # the role and its database now (the pre-flight and the release command use them), with the live
+  # release's limits: this release's are set when it goes live (db_follow, from conf_put)
+  [[ $ndb == postgres ]] && db_ensure
   write_unit || die "could not write the unit of $A (disk full?)"
   write_caddy || die "$WC_WHY"
   jobs_follow || die "could not write the job units of $A (disk full?)"
@@ -3046,7 +3064,7 @@ cmd_run_activation() {
   # client's or a deploy key's, the last configure's): in memory now, for the copy and pre-flight;
   # app.conf, the unit file and the site take them at the switch. LC: the live release's
   local cf=${5:-${S[staged]:-}} k CONF_PUT=0
-  local -A LC=(); conf_copy C LC
+  local -A LC=() NC=(); conf_copy C LC
   fail() {
     AUDIT_NOTE="release $id: $1"
     S[status_$id]=bad
@@ -3054,6 +3072,7 @@ cmd_run_activation() {
     conf_copy LC C
     { fp fail.start_back && start_back "$prev" && { ((!CONF_PUT)) || conf_put; }; } ||
       echo "tando-agent: could not put back the live release's settings (disk full?)" >&2
+    db_follow   # (the role's limits: the live release's again, when the release command had this one's)
     end_op "$id" deploy failed "$1"
     free_lease 2> /dev/null   # (a failure before the copy ended: the upload's lease goes with it)
     exit 1
@@ -3061,7 +3080,7 @@ cmd_run_activation() {
   if [[ -n $cf ]]; then
     [[ $cf =~ ^[0-9]{1,10}$ && -f $D/confs/$cf ]] ||
       fail "the settings of this deploy are no longer on the server (staged over a day ago?): run the deploy again"
-    local -A NC=(); load "$D/confs/$cf" NC
+    load "$D/confs/$cf" NC
     for k in "${!C[@]}"; do conf_key "$k" && unset "C[$k]"; done
     for k in "${!NC[@]}"; do conf_key "$k" && C[$k]=${NC[$k]}; done
     app_vars
@@ -3117,8 +3136,12 @@ cmd_run_activation() {
   : > "$D/activation.log"
   pg t_preflight "$(el "$t")" phase switch
 
-  # back up the app's data, switch, then verify through Caddy (finish goes back to last_good)
-  t=$(ds); st phase switch
+  # back up the app's data, switch, then verify through Caddy (finish goes back to last_good).
+  # domains_new: the domains of tando.conf this release adds (configure staged them), recorded
+  # with the phase: a revert, also recovery's, takes them out again
+  local dnew="" x why
+  for x in ${NC[domain_add]:-}; do [[ " ${C[domains]:-} " == *" ${x%|*}|"* ]] || dnew+="${dnew:+ }$x"; done
+  t=$(ds); st phase switch domains_new "$dnew"
   { fp sw.caddy_up && caddy_up; } || fail "Caddy is not running on <host> and did not start, so nothing was switched (sudo journalctl -u caddy -n 20)"
   if has_unit && ! own_listener "${C[port]}" "tando-$A.service" && [[ $PROBE_WHY == *"outside"* ]]; then
     fail "port ${C[port]} is held by another process, not by tando-$A: nothing was switched ($PROBE_WHY)"
@@ -3138,6 +3161,9 @@ cmd_run_activation() {
   # the release command (migrations): after the pre-flight passed and the backup was taken, before
   # the switch. Its time is its own phase; the switch phase is what came before it plus the switch
   if [[ -n ${C[release]:-} ]]; then
+    # (under this release's database limits: a migration needs the db_temp_limit it was deployed
+    # with; a deploy that does not go live puts the live release's back: fail, recover)
+    fp rel.db && db_follow
     local sw=$(( $(ds) - t ))
     t=$(ds); st phase release; pg phase release
     fp rel.run
@@ -3145,11 +3171,23 @@ cmd_run_activation() {
     pg t_release "$(el "$t")" phase switch
     t=$(( $(ds) - sw )); st phase switch
   fi
+  # its domains: another app may have taken one since configure checked it. Checked again and
+  # written under the host-wide domain lock (taken after the app's: one order), held until
+  # app.conf has them
+  if [[ -n $dnew ]]; then
+    { fp sw.domains && lockfile "$R/.domains.lock" && exec 6>"$R/.domains.lock" && flock -w 120 6; } ||
+      fail "another domain change on this server takes too long, so nothing was switched; deploy again"
+    for x in $dnew; do
+      why=$(domain_free "${x%|*}" "${x#*|}" 2>&1) || fail "${why#tando-agent: }; nothing was switched"
+      C[domains]="${C[domains]:+${C[domains]} }$x"
+    done
+  fi
   # its settings: app.conf and the unit file now (the site with the restart in switch_to)
-  if [[ $(conf_text C) != "$(conf_text LC)" ]]; then
+  if [[ -n $dnew || $(conf_text C) != "$(conf_text LC)" ]]; then
     CONF_PUT=1
     { fp sw.conf && conf_put; } || fail "could not apply this release's settings (disk full?)"
   fi
+  [[ -z $dnew ]] || flock -u 6
   local rc=0
   if ! switch_to "$id"; then
     ((SW_MOVED)) || fail "could not switch to the new release (disk full?)"
@@ -3407,6 +3445,7 @@ recover_locked() {
       systemctl reset-failed "tando-$A-rel-$id" "tando-$A-venv-$id" 2> /dev/null
       S[status_$id]=bad
       start_back "${S[current]:-}"
+      db_follow     # (the release command ran under this release's database limits)
       rec_lease "$id"
       end_op "$id" deploy failed "interrupted during $ph";;
     switch|verify|soak|rollback)
@@ -4193,17 +4232,34 @@ db_guc() {
     *) return 1;;
   esac
 }
-# db_limits role: the connection limit and the three settings, from app.conf (C) or the defaults
+# db_limits role: the connection limit and the three settings, from app.conf (C) or the defaults.
+# What was set is recorded in the state (db_limits=), for db_follow
 db_limits() {
-  local st it tf
-  st=$(db_guc db_statement_timeout "${C[db_statement_timeout]:-30s}") &&
+  local stv it tf
+  stv=$(db_guc db_statement_timeout "${C[db_statement_timeout]:-30s}") &&
     it=$(db_guc db_idle_tx_timeout "${C[db_idle_tx_timeout]:-5m}") &&
     tf=$(db_guc db_temp_limit "${C[db_temp_limit]:-1G}") || return 1
   # the app's database is its role's only: no CONNECT or TEMPORARY for PUBLIC (a database made by
   # an older tando, or by hand, may still have them; host setup and every deploy come here)
   pgsql -c "REVOKE ALL ON DATABASE $1 FROM PUBLIC" -c "GRANT CONNECT, TEMPORARY ON DATABASE $1 TO $1" || return 1
-  pgsql -c "ALTER ROLE $1 CONNECTION LIMIT $DB_CONN_LIMIT" -c "ALTER ROLE $1 SET statement_timeout = '$st'" \
-    -c "ALTER ROLE $1 SET idle_in_transaction_session_timeout = '$it'" -c "ALTER ROLE $1 SET temp_file_limit = '$tf'"
+  pgsql -c "ALTER ROLE $1 CONNECTION LIMIT $DB_CONN_LIMIT" -c "ALTER ROLE $1 SET statement_timeout = '$stv'" \
+    -c "ALTER ROLE $1 SET idle_in_transaction_session_timeout = '$it'" -c "ALTER ROLE $1 SET temp_file_limit = '$tf'" || return 1
+  [[ ${S[db_limits]:-} == "$stv $it $tf" ]] || st db_limits "$stv $it $tf"
+}
+# db_follow: the role's limits are those of C (the release going live, or the live one again: a
+# revert, a rollback, a deploy that did not go live). Configure sets the live release's; this
+# changes them only when C's differ from what was set last. A failure is a warning: the next
+# deploy or host setup sets them again
+db_follow() {
+  [[ ${C[database]:-} == postgres && ${H[postgres]:-} == yes ]] || return 0
+  local stv it tf
+  stv=$(db_guc db_statement_timeout "${C[db_statement_timeout]:-30s}") &&
+    it=$(db_guc db_idle_tx_timeout "${C[db_idle_tx_timeout]:-5m}") &&
+    tf=$(db_guc db_temp_limit "${C[db_temp_limit]:-1G}") || return 0
+  [[ ${S[db_limits]:-} != "$stv $it $tf" ]] || return 0
+  fp db.limits && db_limits "$(db_role)" ||
+    echo "tando-agent: could not set the database limits of $A (is PostgreSQL running? tando doctor)" >&2
+  return 0
 }
 
 db_drop() {
@@ -5229,6 +5285,8 @@ conf_stage() {
   local t h
   [[ -d $D/confs ]] || { mkdir -m 700 "$D/confs" && chown root:root "$D/confs"; } || return 1
   t=$(conf_text C) || return 1
+  # (the domains of tando.conf this deploy adds when it goes live: configure's DOM_STAGE)
+  [[ -z ${DOM_STAGE:-} ]] || t+=$'\n'"domain_add=$DOM_STAGE"
   h=$(printf '%s\n' "$t" | cksum | cut -d' ' -f1)
   [[ $h =~ ^[0-9]+$ ]] || return 1
   if [[ -f $D/confs/$h ]] && cmp -s "$D/confs/$h" <(printf '%s\n' "$t"); then touch "$D/confs/$h"
@@ -5249,6 +5307,7 @@ conf_put() {
   ((WU_CHANGED)) && systemctl daemon-reload
   [[ $bk == "${C[backup]:-}" ]] || sync_backup_timer
   [[ -x $LOGS ]] && "$LOGS" app-setup "$A" > /dev/null
+  db_follow
   return 0
 }
 # shellcheck disable=SC2034  # J is read by sync_jobs through its nameref

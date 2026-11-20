@@ -158,6 +158,23 @@ its `sharp` module and answer for the pages' optimised images. switch: pre-deplo
 backup, atomic `current` swap, restart. verify: through Caddy. `recover` (boot and every mutating
 verb) reverts copy/preflight and finishes or reverts switch/verify/rollback.
 
+A deploy's settings (its tando.conf) wait in `confs/<id>` from `configure` to the switch, where
+`conf_put` writes them into app.conf, the unit file and the site; a revert, a rollback or a deploy
+that does not go live puts the fallback's back (`start/<id>`, `start_back`). Two things follow the
+same rule. New domains of tando.conf: `configure` checks them (`domain_free`, under
+`.domains.lock`) and stages them (`domain_add=` in `confs/<id>`); the switch checks them again
+under the same lock (another app may have taken one meanwhile: the deploy then fails before the
+swap) and adds them to app.conf; the state records them (`domains_new`) and a revert takes them out.
+Nothing is reserved meanwhile, so a deploy that never goes live holds no domain. A new app (no
+live release) takes them at configure, as before. The site gets a new domain at the switch, so its
+certificate is asked for then, not before: a deploy that fails asks for none, and the client's
+check after the deploy (`domain-check`, up to 90 s) covers the issuance. The database role's
+limits (`db_limits`) are the live release's: `configure` creates the role and database (the
+pre-flight and the release command need them) with the live limits; the new ones are set just
+before the release command, if there is one (a migration runs under the `db_temp_limit` it was
+deployed with), else at the switch (`db_follow` in `conf_put`, only when they differ from the
+state's `db_limits`); a failure, a revert, recovery and a rollback set the fallback's again.
+
 With `release = <command>` in tando.conf there is a phase `release` between the pre-deploy backup
 and the swap: `switch` (Caddy up, backup) → `release` → `switch` (swap). The command runs in the
 transient unit `tando-<app>-rel-<id>` (the job sandbox, `props - job`; `exec-release` reads the

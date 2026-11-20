@@ -208,9 +208,12 @@ release's file answers through Caddy with its bytes and the immutable header, an
 link or list is left in the shared directory (the cells `k` kill the activation just before and just
 after the files are linked). `--selftest` breaks each invariant on purpose and expects it named.
 
-Versions alternate their health path, start command, memory, `max_conns` and a job's schedule
-(odd and even), so a unit file, Caddy site, job timer or app.conf left with the other version's
-settings is named (inv2).
+Versions alternate their health path, start command, memory, `max_conns`, a job's schedule and
+(kind data) the role's `db_statement_timeout` (odd and even), so a unit file, Caddy site, job
+timer, role or app.conf left with the other version's settings is named (inv2). Each version also
+has its own `domain =` (`v<n>.mx.test`, resolved by `TANDO_TEST_RESOLVE`; the matrix's host has
+`domain_tls=off`): the serving release's domain must be in app.conf and the site, and a domain of
+a version that never served (refused, reverted, a second client's) in neither.
 
 `--kind worker` gives the app workers (odd versions `a` and `b`, even ones `a` only) and adds
 invariant 11: the workers that run are exactly the serving release's, each running it, enabled;
@@ -223,7 +226,8 @@ node; two cells of
 the container recipe (the switch failure, a kill at its spawn) and two of a static site (a kill at
 Caddy's file site, after the link moved), and for the kind `worker` a kill in the middle of the
 workers' switch (`wk.start`) and a failed start of the old workers when a bad release goes back
-(`bad.workers`). `test/e2e-matrix-weekly.sh` (nightly and weekly tiers,
+(`bad.workers`), and for the kind `data` (PostgreSQL) a deploy refused in the pre-flight, which
+must leave the role's limits and the domains as the live release has them. `test/e2e-matrix-weekly.sh` (nightly and weekly tiers,
 about 15 minutes) runs `--weekly` for static, container, python and next: the cells of each kind's
 `WEEKLY_CELLS`, the points where its path differs from node's. Everything else only by name:
 `test/e2e-matrix.sh --ops deploy,rollback --actions kill --points '(^|/)(pre|post):'` (a kill at
