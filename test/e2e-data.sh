@@ -295,8 +295,8 @@ COLUMNS=220 "$R" status notes > "$E/cut-status.out" 2>&1; cat "$E/cut-status.out
 COLUMNS=220 "$R" ls > "$E/cut-ls.out" 2>&1; cat "$E/cut-ls.out" >&2
 check "D9d status shows the cut restore: the database, the backup to restore again, the safety backup" \
   eval 'grep -q "restore.*database restore was cut: tando backup restore $id " "$E/cut-status.out" &&
-        grep -q "data from before it is in backup [0-9]*-[0-9]*-safety" "$E/cut-status.out"'
-check "D9e ls marks the app with a cut restore" eval 'grep -q "notes: .*restore was cut: tando backup restore $id " "$E/cut-ls.out"'
+        grep -q "safety .*data from before it is in backup [0-9]*-[0-9]*-safety" "$E/cut-status.out"'
+check "D9e ls marks the app with a cut restore" eval 'grep -q "notes: the database restore was cut: tando status notes" "$E/cut-ls.out"'
 srv 'sudo rm -f /usr/local/bin/pg_restore'
 "$R" backup restore "$id" --yes > "$E/restore-again.out" 2>&1; rc=$?; cat "$E/restore-again.out" >&2
 COLUMNS=220 "$R" status notes > "$E/cut-status2.out" 2>&1; COLUMNS=220 "$R" ls > "$E/cut-ls2.out" 2>&1
