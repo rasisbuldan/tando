@@ -199,12 +199,24 @@ phase_line() { # n label state seconds [detail]
 # client name shown to a second deploy that finds the upload lease taken
 client_name() { printf '%s@%s' "$(id -un)" "$(hostname -s)" | tr -cd 'A-Za-z0-9_.@-' | cut -c1-64; }
 
+# lease_giveback file: `end` with the token in that file (token=<t> or the token on its first
+# line), if it has one; quiet (the failure that led here was already told)
+lease_giveback() {
+  local t; t=$(sed -n '1s/^token=//; 1p' "$1" 2> /dev/null)
+  case $t in ""|*[!a-f0-9-]*) return 0;; esac
+  printf '%s\n' "$t" | ERRF=$TMPD/err.end agent_raw sudo end "$APP" > /dev/null 2>&1
+  return 0
+}
+
 upload() { # sets UPLOAD_SECS, UPLOAD_FILES, UPLOAD_BYTES, TOKEN
   local t0
   # (with its size, so a server refuses an upload over its per-app limit before it is sent; a
   # deploy key's gate takes no size)
   local kb=""; [ -n "${DEPLOY_KEY:-}" ] || kb=$(du -sk "$STAGE" 2> /dev/null | awk '{ print $1 }')
-  agent sudo begin "$APP" "$(client_name)" ${kb:+"$kb"} > "$TMPD/lease"
+  # (a begin that failed after it printed the token may have written the lease: given back)
+  if ! agent_raw sudo begin "$APP" "$(client_name)" ${kb:+"$kb"} > "$TMPD/lease"; then
+    lease_giveback "$TMPD/lease"; bail 1
+  fi
   kv_read "$TMPD/lease" token upload_as
   TOKEN=$K_token
   case $TOKEN in ""|*[!a-f0-9-]*) die "agent returned no upload token";; esac
@@ -583,7 +595,11 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   # the lease token, then the id of this deploy's settings (configure staged them on the server:
   # the activation runs with these, whatever another client configured meanwhile)
   printf '%s\n%s\n' "$TOKEN" "${K_conf:-}" > "$TMPD/token"
-  agent sudo activate "$APP" "$build_total" "$UPLOAD_SECS" < "$TMPD/token" > "$TMPD/act"
+  # (an activate that failed before it wrote the release id leaves the lease: given back, so the
+  # next deploy need not wait for it; one with the id keeps it, end leaves that alone)
+  if ! agent_raw sudo activate "$APP" "$build_total" "$UPLOAD_SECS" < "$TMPD/token" > "$TMPD/act"; then
+    lease_giveback "$TMPD/token"; bail 1
+  fi
   kv_read "$TMPD/act" id same
   id=$K_id
   valid_id "$id" || die "agent returned no release id"

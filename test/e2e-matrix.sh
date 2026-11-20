@@ -10,7 +10,9 @@
 #                                              container data (node + data dir, postgres, a job)
 #   test/e2e-matrix.sh --ops deploy,rollback   these operations only (default: all of the kind)
 #   test/e2e-matrix.sh --actions kill,fail     these actions only (default kill fail reboot; race:
-#                                              a second client's configure, with other settings, at the point)
+#                                              a second client's configure, with other settings, at the point;
+#                                              queue: a second client's deploy queues behind this one held at
+#                                              the point, then this one is killed and recovered)
 #   test/e2e-matrix.sh --quick                 the points most likely to hide a defect only
 #   test/e2e-matrix.sh --points 'link|ra\.'    points matching this extended regex only
 #   test/e2e-matrix.sh --shard 2/4             every 4th cell from the 2nd (after the traces)
@@ -178,16 +180,7 @@ mx_reset() {
 # prints as SKIP "KNOWN ..." (it is counted, listed at the end, and the baseline is rebuilt); one that
 # passes FAILS ("remove it from MX_KNOWN"); one that breaks anything else FAILS as any cell does.
 # Lines: <glob of kind/op/verb/point#n/action> <broken invariants, e.g. " 6"> <reason>
-# lease with no activation id: an agent killed after it took the upload lease and before it wrote the
-# release id into it leaves the lease; it is stale after 30 s (5 s for the same user@machine
-# asking again: the next begin takes it over) and `tando unlock` clears it; recovery does not.
-MX_KNOWN="
-*/begin/post:upload#1/kill| 6|a lease without a release id outlives a kill of begin or activate; the next deploy takes it over (30 s, 5 s for the same machine), tando unlock clears it, recovery does not
-*/activate/rec/enter#1/kill| 6|same: a kill at the start of activate, before the lease gets its release id
-*/activate/rec/enter#1/reboot| 6|same, with a reboot
-*/activate/act.mkdir#1/kill| 6|same: a kill before the release id is reserved
-*/activate/act.mkdir#1/reboot| 6|same, with a reboot
-*/activate/pre:upload#1/kill| 6|same: a kill before the lease is written with its release id"
+MX_KNOWN=""
 # mx_known <id>: the reason when the cell is listed, with its invariants in MX_KINV
 mx_known() {
   local l g
@@ -197,6 +190,11 @@ mx_known() {
     case $1 in $g) MX_KREASON=$l; return 0;; esac
   done <<< "$MX_KNOWN"
   return 1
+}
+# mx_queued: two activations of the app run (one holds the lock, one waits for it)
+mx_queued() {
+  local n; n=$(dxs "systemctl list-units --plain --no-legend 'tando-$A-act-*' | grep -c ." 2> /dev/null)
+  [ "${n:-0}" -ge 2 ] 2> /dev/null
 }
 # mx_cell <op> <verb> <point> <nth> <action> <phase> [second point for recover]: run one cell
 NFAIL=0 NPASS=0 NSKIP=0 NKNOWN=0
@@ -212,7 +210,7 @@ mx_cell() {
   mx_facts > /dev/null 2>&1
   MX_OLD=$(fv s_current) MX_H0=$(fv hist_n) MX_DATA0=$(fv data_sum) MX_DB0=$(fv db_rows) MX_ENV0=$(fv env_val)
   [ -n "$MX_ENV0" ] || MX_ENV0=""
-  before=$(mx_releases) MX_NEW="" MX_OP=$op MX_REBOOT_T=0 MX_UP_T=0 MX_RACED=""
+  before=$(mx_releases) MX_NEW="" MX_OP=$op MX_REBOOT_T=0 MX_UP_T=0 MX_RACED="" MX_QUEUED=""
   if [ "$op" = rollback ]; then   # the newest verified release older than the current one
     MX_NEW=$(sed -n 's/^rel_\([^=]*\)=verified$/\1/p' "$W/facts" | grep -vx "$MX_OLD" | sort | tail -1)
   fi
@@ -222,7 +220,7 @@ mx_cell() {
   [ -n "$ov" ] && [ $(( (MXN - ov) % 2 )) = 0 ] && MXN=$((MXN + 1))
   mx_expect "$op" "$ph" "$act"
   if [ "$pt" != - ]; then
-    local a=$act; case $act in reboot|race) a=hang;; esac
+    local a=$act; case $act in reboot|race|queue) a=hang;; esac
     mx_spec fault "$pt" "$a" "$nth" "$verb"
     [ -n "$p2" ] && mx_spec next "${p2#* }" "${MX_ACT2:-kill}" 1 "${p2%% *}"
   fi
@@ -252,8 +250,31 @@ mx_cell() {
       dxs "touch $MX_T/release"
     fi
   fi
+  local cl2="" MX_Q2RC=0
+  if [ "$act" = queue ]; then
+    # a second client deploys the version after (its own settings: the other parity) while this
+    # one holds the app's lock at the point; once it is queued (a second activation unit runs),
+    # this one's activation is killed: its recovery fails it, and the waiter runs after it
+    while [ $i -lt 600 ] && ! dxs "test -e $MX_T/reached" 2> /dev/null && kill -0 $cl 2> /dev/null; do sleep 0.2; i=$((i + 1)); done
+    if dxs "test -e $MX_T/reached" 2> /dev/null; then
+      (mx_version $((MXN + 1)); mx_client "$W/op2.out" deploy) >> "$W/case.log" 2>&1 &
+      cl2=$!
+      if T_UNTIL_STEP=0.3 t_until 120 mx_queued; then
+        MX_QUEUED=1
+        # (this deploy's release: its client printed it when activate returned)
+        dxs "systemctl kill -s KILL tando-$A-act-$(mx_rid "$W/op.out")" >> "$W/case.log" 2>&1
+      else
+        echo "  (the second deploy did not queue)" >> "$W/case.log"
+      fi
+      dxs "touch $MX_T/release"
+    fi
+  fi
   i=0; while kill -0 $cl 2> /dev/null && [ $i -lt 1200 ]; do sleep 0.5; i=$((i + 1)); done
   mx_killtree $cl; wait $cl 2> /dev/null
+  if [ -n "$cl2" ]; then
+    i=0; while kill -0 $cl2 2> /dev/null && [ $i -lt 1200 ]; do sleep 0.5; i=$((i + 1)); done
+    mx_killtree $cl2; wait $cl2 2> /dev/null; MX_Q2RC=$?
+  fi
   [ "$op" = env ] && MXE=$((MXE + 1))
   case $op in deploy*|recover) MXV=$MXN;; esac
   mx_wait_settled 240 || echo "  (not settled after 240 s)" >> "$W/case.log"
@@ -265,6 +286,7 @@ mx_cell() {
   # (a reboot clears /run: there, reaching the point is what counts)
   if [ "$act" = reboot ]; then [ "$MX_REBOOT_T" != 0 ] || fired=0
   elif [ "$act" = race ]; then [ "${MX_RACED:-}" = 1 ] || fired=0
+  elif [ "$act" = queue ]; then [ "${MX_QUEUED:-}" = 1 ] || fired=0
   elif [ "$pt" != - ]; then mx_fired || fired=0; fi
   mx_spec_clear
   # the operation's release: what the client printed, else one that appeared on disk or in history
@@ -279,11 +301,23 @@ mx_cell() {
       fi
       [ -n "$MX_NEW" ] && mx_note_id "$MX_NEW" "$MXV";;
   esac
+  if [ "$act" = queue ] && [ "$fired" = 1 ]; then
+    # the waiter's release is the operation's: it must serve, verified, with its settings; the
+    # killed one's line (failed) is one more history line before it
+    MXV=$((MXN + 1)) MX_NEW=$(mx_rid "$W/op2.out") MX_WANT=new MX_H0=$((MX_H0 + 1))
+    [ -n "$MX_NEW" ] && mx_note_id "$MX_NEW" "$MXV"
+    cat "$W/op2.out" >> "$W/case.log" 2> /dev/null
+  fi
   if [ "$fired" = 0 ]; then
     NSKIP=$((NSKIP + 1)); skip "$id not reached (the point was not passed this time)"
     printf '%s\t%s\t%s\t%s\t%s\t%s\tskip\t\n' "$KIND" "$op" "$verb" "$pt#$nth" "$act" "$ph" >> "$CELLOUT"
     mx_inv > /dev/null 2>&1 || mx_reset
     return
+  fi
+  # (queue: the waiter's client must also say it succeeded)
+  if [ "$MX_Q2RC" != 0 ]; then
+    NFAIL=$((NFAIL + 1)); fail "$id: the queued deploy failed (exit $MX_Q2RC): $(tail -3 "$W/op2.out" | tr '\n' ' ')"
+    mx_reset; return
   fi
   if mx_inv 2>> "$W/case.log"; then
     if mx_known "$id"; then
@@ -385,7 +419,10 @@ i deploy run-activation deploy.jobs 1 fail after
 i deploy run-activation jobs.write 1 fail after
 e deploy run-activation run.queue 1 fail before
 j stop stop caddy.mv 1 fail after
-k rollback rollback post:activation 1 kill before"
+k rollback rollback post:activation 1 kill before
+l deploy begin post:upload 1 kill before
+l deploy activate act.mkdir 1 kill before
+q deploy run-activation imp.cp 1 queue before"
 # k: a rollback killed after its progress file (result=running) and before its first state write: tando-watch's recover-all
 # (srv/watch/pretick.go rollbackCut) ends it; nothing did before
 # the other kinds: one or two cells where their path differs from node's (a static site has no

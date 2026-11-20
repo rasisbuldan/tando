@@ -74,3 +74,32 @@ func TestRecoverNeededRollbackCut(t *testing.T) {
 		t.Fatal("a queued deploy that says running is not a cut rollback")
 	}
 }
+
+// recoverNeeded sees an upload lease with no release id whose holder is gone (taken in an earlier
+// boot, or its activate no longer runs), and leaves one a client or a live activate holds alone.
+func TestRecoverNeededLeaseOrphaned(t *testing.T) {
+	f := newFakeHost(t)
+	f.app("shop")
+	os.MkdirAll(f.path("opt/apps/shop/releases/20261114-170102"), 0o700)
+	os.Symlink("releases/20261114-170102", f.path("opt/apps/shop/current"))
+	f.write("opt/apps/shop/state", "current=20261114-170102\nphase=idle\nstatus_20261114-170102=verified\n")
+	f.write("proc/sys/kernel/random/boot_id", "b-now\n")
+	f.write("proc/4242/stat", "4242 (tando-agent) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 777 20\n")
+	for _, c := range []struct {
+		lease string
+		want  bool
+	}{
+		{"token=t\nboot=b-now\n", false},                        // the client holds it (uploading)
+		{"token=t\nboot=b-now\nholder=4242 777\n", false},       // its activate runs
+		{"token=t\nboot=b-now\nholder=4242 778\n", true},        // that pid is another process now
+		{"token=t\nboot=b-now\nholder=4343 777\n", true},        // its activate is gone
+		{"token=t\nboot=b-before\n", true},                      // taken before a restart
+		{"token=t\nboot=b-before\nid=20261114-180000\n", false}, // the activation's: rec_reap's
+		{"token=t\n", false},                                    // an older agent's lease
+	} {
+		f.write("opt/apps/shop/upload", c.lease)
+		if got := f.watch().recoverNeeded(); got != c.want {
+			t.Errorf("lease %q: recoverNeeded=%v, want %v", c.lease, got, c.want)
+		}
+	}
+}
