@@ -3941,12 +3941,14 @@ cmd_backup_run() { # app kind: the timer (daily), `tando backup now` (manual)
   lock 3600
   load "$D/state" S
   # (the daily run's outcome, for the backup ping of tando-watch: docs/MONITORING.md, "From
-  # outside". backup_take ran in a subshell and wrote the state there: read it again first)
-  if ! id=$(backup_take "$kind"); then
-    [[ $kind == daily ]] && { load "$D/state" S; st backup_daily_failed "$(now)"; }
+  # outside". backup_take runs in this shell, not $(...): a subshell does not keep the handler
+  # that lets this verb outlive a dropped ssh session, and its first write would end the backup)
+  if ! backup_take "$kind" > /dev/null; then
+    [[ $kind == daily ]] && st backup_daily_failed "$(now)"
     die "backup failed"
   fi
-  [[ $kind == daily ]] && { load "$D/state" S; st backup_daily_ok "$(now)" backup_daily_id "$id"; }
+  id=$BK_ID
+  [[ $kind == daily ]] && st backup_daily_ok "$(now)" backup_daily_id "$id"
   echo "id=$id"
 }
 
@@ -4015,8 +4017,9 @@ cmd_backup_restore() {
   # (its workers too: nothing of the app writes while its data is replaced)
   fp rs.stop
   systemctl stop "tando-$A" "tando-${A}_worker-*"
-  safety=$(backup_take safety) || { rs_end; die "could not take the safety backup; nothing restored"; }
-  load "$D/state" S      # (backup_take wrote it in a subshell)
+  # (in this shell, not $(...): it keeps the handler for a dropped ssh session)
+  backup_take safety > /dev/null || { rs_end; die "could not take the safety backup; nothing restored"; }
+  safety=$BK_ID
   echo "safety=$safety"
   st restore_safety "$safety" restore_step data
   fp rs.data
@@ -4718,10 +4721,11 @@ destroy_finish() {
       fp ds.stop
       systemctl stop "tando-$A" "tando-${A}_worker-*"
       # (the app runs again when nothing is removed)
-      id=$(backup_take final) || { st phase idle destroy_purge "" destroy_step ""
+      # (in this shell, not $(...): it keeps the handler for a dropped ssh session)
+      backup_take final > /dev/null || { st phase idle destroy_purge "" destroy_step ""
         [[ -z ${S[stopped]:-} && -n ${S[current]:-} ]] && restart_app && workers_follow all
         die "final backup failed; nothing removed (use --purge to skip it)"; }
-      load "$D/state" S      # (backup_take wrote it in a subshell)
+      id=$BK_ID
       echo "backup=$BK/$A/$id"
     fi
     st destroy_step remove
