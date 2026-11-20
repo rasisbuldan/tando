@@ -81,7 +81,7 @@ _tando() {
     host) subs="add setup ls rm status care update reboot" flags="$flags --port --key --yes --force --insecure-test --no-check --deploy --json --watch --all --now --updates --reboot --window --tz --lead --even-with-other-sites" args=""
       [ "$COMP_CWORD" -eq $((i + 2)) ] && case $sub in setup|rm) args=hosts;; esac;;
     domain) subs="add rm ls" flags="$flags --www --wait --force -a -H" args="apps";;
-    doctor) subs="" flags="$flags -H" args="hosts";;
+    doctor) subs="" flags="$flags --verbose -H" args="hosts";;
     version) subs="" flags="$flags -H" args="";;
     destroy) subs="" flags="$flags -H --purge --yes -a" args="apps";;
     unlock) subs="" flags="$flags -H -a" args="apps";;

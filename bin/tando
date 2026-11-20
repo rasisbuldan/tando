@@ -28,7 +28,7 @@ ui_init
 . "$TANDO_HOME/lib/args.sh"
 
 # the flags every command shares (lib/args.sh has already refused the ones a command does not take)
-WATCH="" FOLLOW="" NLINES=100 ARGS=() ALL="" PURGE="" SHOW="" HELP="" JSON="" YES="" FORCE="" DRY_RUN=""
+WATCH="" FOLLOW="" NLINES=100 ARGS=() ALL="" PURGE="" SHOW="" HELP="" JSON="" YES="" FORCE="" DRY_RUN="" VERBOSE=""
 parse() {
   while [ $# -gt 0 ]; do
     case $1 in
@@ -40,6 +40,7 @@ parse() {
       --all) ALL=1; shift;;
       --purge) PURGE=1; shift;;
       --show) SHOW=1; shift;;
+      --verbose) VERBOSE=1; shift;;   # doctor: every program on its own row
       --dry-run) DRY_RUN=1; shift;;   # deploy: build and stage, upload nothing (lib/deploy.sh)
       --json|--yes|--force|--wait)   # plugins read these from ARGS themselves
         # --wait: deploy/up wait out the soak (lib/deploy.sh); domain add polls DNS (lib/cmd-domain.sh)
@@ -530,7 +531,9 @@ main() {
     help)
       case " $* " in *" -h "*|*" --help "*) command_help help; exit 0;; esac
       check_args help "$@"
-      if [ -n "${1:-}" ]; then command_help "$1"; else help_overview; fi
+      # `tando help conf`: the tando.conf settings (not a command: lib/help-conf.txt)
+      if [ "${1:-}" = conf ] && [ $# -eq 1 ]; then help_glyphs < "$TANDO_HOME/lib/help-conf.txt"
+      elif [ -n "${1:-}" ]; then command_help "$1"; else help_overview; fi
       exit 0;;
   esac
   case $cmd in *[!a-z0-9-]*|-*) unknown_cmd "$cmd";; esac

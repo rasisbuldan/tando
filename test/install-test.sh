@@ -51,7 +51,7 @@ check_tree() {
     [ -e "$home/$p" ] || missing="$missing $p"
   done
   check "$L.1 every \$TANDO_HOME path the code uses is installed${missing:+ (missing:$missing)}" test -z "$missing"
-  for p in templates/github-deploy.yml templates/pre-push lib/help.txt VERSION; do
+  for p in templates/github-deploy.yml templates/pre-push lib/help.txt lib/help-conf.txt VERSION; do
     [ -e "$ROOT/$p" ] && { [ -e "$home/$p" ] || missing="$missing $p"; }
   done
   check "$L.2 templates, help.txt and VERSION installed${missing:+ (missing:$missing)}" test -z "$missing"

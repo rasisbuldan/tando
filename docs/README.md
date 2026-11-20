@@ -10,6 +10,7 @@ Read in this order if you are new.
 | [SETUP-EXISTING-VM.md](SETUP-EXISTING-VM.md) | A server that already runs things: what tando touches, conflicts, `adopt`, removal |
 | [EASE.md](EASE.md) | `tando go`, the one-command wizard |
 | [COMMANDS.md](COMMANDS.md) | Every command and flag |
+| [CONFIG.md](CONFIG.md) | Every `tando.conf` setting: type, default, unit, example |
 | [LOGGING.md](LOGGING.md) | App logs, request logs and how long they are kept |
 | [MONITORING.md](MONITORING.md) | Alerts, health checks and where notices go |
 | [BACKUP.md](BACKUP.md) | Backups, offsite copies (R2 or any S3 storage) and recovery |
@@ -20,6 +21,7 @@ Read in this order if you are new.
 | [MIGRATION.md](MIGRATION.md) | Taking over an app that was deployed by hand |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How the pieces fit: the client, the agent, the server programs, the files on the server |
 | [STATUS.md](STATUS.md) | What is built, what is verified, what is open |
+| [DEV-NOTES.md](DEV-NOTES.md) | Where the docs and the code differ (for developers) |
 | [TESTING.md](TESTING.md) | How to run the test suites |
 | [RELEASING.md](RELEASING.md) | How a release is made |
 | [SECURITY-REVIEW-CI.md](SECURITY-REVIEW-CI.md), [SECURITY-REVIEW-2.md](SECURITY-REVIEW-2.md), [FAULT-REVIEW.md](FAULT-REVIEW.md), [VERIFY.md](VERIFY.md) | Review reports on security and faults |

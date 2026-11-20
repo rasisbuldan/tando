@@ -85,7 +85,7 @@ cmd_init() {
     echo "health = $health"
     [ "$recipe" = static ] || echo "memory = 256M"   # Caddy serves a static site: no process
     echo
-    echo "# More settings (README.md lists them all). Change them, then: tando deploy"
+    echo "# More settings (tando help conf lists them all). Change them, then: tando deploy"
     echo "# data = data                      # a directory that survives deploys (\$TANDO_DATA_DIR)"
     echo "# ${db:-database = postgres              # or sqlite; the app gets DATABASE_URL}"
     echo "# job.nightly = daily | node scripts/nightly.js"

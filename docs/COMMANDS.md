@@ -28,33 +28,7 @@ Conventions that apply to every command:
   This check covers the commands with a section in help.txt. The plugins `go`, `next`, `link`,
   `open`, `ssh` and `cheat` have none, so their flags are not checked by args.sh (`go` checks its own).
 - Exit codes: 0 ok, 1 failed, 2 usage error.
-
-## Docs vs code mismatches (for the developers)
-
-"Ran" = reproduced with `bin/tando` on 14 Nov 2026; "read" = from the code. README.md and
-ARCHITECTURE.md are listed but were not edited (owned by the core developer).
-
-| # | Where | Docs say | Code does | Evidence |
-|---|---|---|---|---|
-| 1 | README.md "Commands" | fixed (CODE-REVIEW D8): README says only `-a -H --json --yes --force` go before the command, which is what `main` does; any other flag there gets the reordered command line | ran |
-| 2 | help.txt overview "Flags: -a <app>, -H <host> ..." | `-a` as a general flag | `init`, `up`, `ls`, `top`, `host`, `doctor`, `version`, `recipes`, `adopt` refuse `-a` (exit 2) | ran `ls -a x`, `up -a x` |
-| 3 | docs/TOP.md line 3 | `tando top [host] [-n seconds]` | `-n` refused ("top does not take -n"); the flag is `--watch N` | ran |
-| 4 | `tando go --help`, help overview "Plugins" | now `go [user@address] [--port N] [--key FILE] [--domain D] [--dns wait\|skip] [--yes] [--forget] [public_port=N ...]` | also accepts `--www`, `--dns`, `--name`, `--memory`, `--port`, `--key`, `--no-swap`, `--free-link`, `--ci`, `--insecure-test`, `--plain` and `apps_domain= tls= public_port= domain_tls= swap= ufw=` (docs/EASE.md lists all but `--plain`) | read `lib/cmd-go.sh` `go_flags` |
-| 5 | help.txt `@@ ci` usage, `tando ci --help` | no `--env` | `ci github --env NAME` accepted (flags line, and `ci_usage` in lib/cmd-ci.sh lists it) | ran `ci github --env x --help` |
-| 6 | help.txt `@@ logs` usage | `--until` only with `pull`; no `--json`, no `-E` | `--until`, `--json` and `-E` (same as `--regex`) are accepted on plain `logs` too; docs/LOGGING.md documents `--until`/`--json` | read `lib/cmd-logx.sh`; help.txt flags line |
-| 7 | help.txt `@@ host` usage | `host add ... [--port N] [--key FILE] [--yes] [--force]` | also `--no-check` (in the text), `--deploy` (registers a CI deploy key host) and `--insecure-test` (used in README's own transcript) | ran `host add a b@c --deploy --no-check` |
-| 8 | help.txt `@@ deploy` usage | no `-a` | `deploy -a <app>` accepted | help.txt flags line |
-| 9 | help.txt `@@ alerts` usage | `notifier add/rm/ls` | `notifiers` is accepted as a synonym (subs line) | read `lib/cmd-alerts.sh:279` |
-| 10 | help.txt `@@ requests` vs docs/LOGGING.md and the plugin header | help: `--since`; LOGGING.md: `--last` | both work (`--last` is a synonym, help says so); only the wording differs | read |
-| 11 | help.txt `@@ ls` | fixed (CODE-REVIEW B5): `ls --all` repaints with `--watch N`; `--json` is one object, `{"host","error"}` for a server that did not answer | ran; test/e2e-cli.sh 9i |
-| 12 | README.md "tando.conf" ("Every key") | the list | the parser also accepts `build_memory`, `dockerfile`, `start_shell`, `soak` (listed), `access_log`, `log_max`, `log_keep`, `log_rate` (the last four only in docs/LOGGING.md) | read `lib/common.sh` `conf_load` |
-| 13 | README.md "Commands" table | no `go`, `next`, `link`, `open`, `ssh`, `cheat` | all six exist as plugins and are listed by `tando help` | ran `tando help` |
-| 14 | completions/ (CODE-REVIEW D-9) | fixed: each command is offered only the flags of its help.txt `flags:` line, `-E`, `--4xx` and `-H` included (completions/gen.sh) | read the regenerated `completions/tando.bash` |
-
-Fixed since CODE-REVIEW (checked): `tando requests summary` and `tando alerts show` are accepted
-(B6); help.txt `--release` text now says "the lines from the time that release was live" (D-2).
-
----
+- Every `tando.conf` setting: [docs/CONFIG.md](CONFIG.md), or `tando help conf`.
 
 ## Deploy
 
@@ -100,7 +74,7 @@ lockfile's install command (`npm ci`, `pnpm install --frozen-lockfile`, `yarn in
 Output: the stage line shows the files and the size; each swapped npm package is one line (yellow
 when not verified; docs/CROSS-ARCH.md); a release over 50 MB names its three largest directories.
 Outside a terminal (CI, a log file) every step prints a line when it starts.
-Note: `-a` is accepted but not in the usage line (mismatch 8).
+Note: `-a` is accepted but not in the usage line (docs/DEV-NOTES.md, mismatch 8).
 Example: `tando deploy`
 
 ### rollback
@@ -139,7 +113,7 @@ Arguments: 0-2 (`pull <file>`).
 The app's stdout/stderr from its own journal namespace. `-n` defaults to 100. `--level
 err|warning|notice|info|debug`. `--release ID`: lines from the time that release was live (for one
 that never was: its deploy log). `--deploy ID`: that deploy's log and its start test. `pull` writes
-to a local file. Note: `--until`, `--json` and `-E` are not in the usage lines (mismatch 6).
+to a local file. Note: `--until`, `--json` and `-E` are not in the usage lines (docs/DEV-NOTES.md, mismatch 6).
 Example: `tando logs -f --grep error -i`
 
 ### start, stop, restart
@@ -152,7 +126,7 @@ Example: `tando restart -a shop`
 `tando top [host] [--watch N] [--read-only]`. Flags: `-H --watch --read-only`. Arguments: 0-1.
 Full-screen dashboard of every registered server: apps, graphs, logs, history; start, stop,
 restart and rollback from the keyboard unless `--read-only`. `--watch N` refresh (default 2 s).
-`-n` does not exist (mismatch 3).
+`-n` does not exist (docs/DEV-NOTES.md, mismatch 3).
 Example: `tando top --read-only`
 
 ## Configure
@@ -254,7 +228,7 @@ every setting; `job=off`, `db_conns=off`, `postgres=off` turn the newest checks 
 (80) and `db_conn_for` (5) are the connection threshold and its samples.
 `heartbeat [off]` · `backup-ping [off]`. Flags: `-a -H --watch -n`. Default subcommand: show.
 What is firing on the server and where alerts go; checks run every minute (docs/MONITORING.md).
-Secrets are read without echo. `notifiers` = `notifier` (mismatch 9).
+Secrets are read without echo. `notifiers` = `notifier` (docs/DEV-NOTES.md, mismatch 9).
 Example: `tando alerts notifier add phone ntfy`
 
 ### health
@@ -304,7 +278,7 @@ nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Setting
 once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections per second, burst
 3x; default 100). Without `apps_domain`, links use
 `<ip-with-dashes>.sslip.io` (an outside service). `--deploy` and `--insecure-test` are not in the
-usage (mismatch 7). `care=on|off`: host care's security updates (on by default where tando
+usage (docs/DEV-NOTES.md, mismatch 7). `care=on|off`: host care's security updates (on by default where tando
 installed Caddy itself; docs/HOSTCARE.md).
 Example: `tando host setup vps apps_domain=apps.example.com tls=auto`
 
@@ -331,9 +305,11 @@ lists it).
 Example: `tando domain add example.com`
 
 ### doctor
-`tando doctor [host]`. Flags: `-H`. Arguments: 0-1.
+`tando doctor [host] [--verbose]`. Flags: `-H`, `--verbose`. Arguments: 0-1.
 Checks a server end to end (connection, sudo, tando pieces and versions, Caddy, DNS, disk, memory,
-timers, apps) and names the fix. Works on a server that is not set up yet.
+timers, apps) and names the fix. Works on a server that is not set up yet. When the server's
+programs differ from the client's (after a client upgrade) they are one row, "N of M programs ...
+differ ...: tando host setup <host>"; `--verbose` lists each program. doctor has no `--json`.
 Example: `tando doctor vps`
 
 ### version
@@ -351,7 +327,7 @@ Flags: `-a -H --ref --repo --branch --node --env --force --remove`. A subcommand
 Run by the admin in the app's directory. `setup` creates a deploy key for this app only and prints
 the CI secrets once; `rotate` replaces every key; `github` writes `.github/workflows/deploy.yml`;
 `hook` installs a git pre-push hook. See docs/CI.md. `--env` is not in help.txt's usage
-(mismatch 5).
+(docs/DEV-NOTES.md, mismatch 5).
 Example: `tando ci setup > ci-secrets.txt`
 
 ## More
@@ -600,7 +576,7 @@ Setup wizard from an empty server to a live link over the real commands (host ad
 init, up, domain add, alerts, ci). Nothing changes before the Run screen; answers are kept in
 `$TANDO_CONFIG_DIR/go/` and resumed (`--forget` drops them). `--yes` takes every default; no
 terminal gives numbered prompts (`--plain` forces them). `--insecure-test` is for test servers.
-`tando go --help` shows the common flags (mismatch 4). A setting such as `public_port=N` that a
+`tando go --help` shows the common flags (docs/DEV-NOTES.md, mismatch 4). A setting such as `public_port=N` that a
 set-up server does not have yet adds `tando host setup` to the plan. See docs/EASE.md.
 Example: `tando go root@203.0.113.7 --domain example.com --yes`
 

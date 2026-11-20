@@ -71,7 +71,37 @@ domain_dns() {
   done
 }
 
-default_www() { case $1 in www.*) echo redirect;; *.*.*) echo off;; *) echo redirect;; esac; }
+# www_kind domain -> www (starts with www.), apex (a registered name: the part after its first label
+# is one label, like example.com, or a two-level public suffix, like example.co.uk) or sub (a
+# sub-domain: app.example.com, shop.example.co.uk). WWW_SFX2 is a pragmatic list of the common
+# two-level suffixes, not the full Public Suffix List: a name under a suffix missing from it is
+# taken for a sub-domain (no www redirect); tando domain add --www redirect overrides that.
+# The twin in server/tando-agent must stay identical (test/ui-test.sh runs both over one table).
+WWW_SFX2=" \
+  co.uk org.uk ac.uk gov.uk me.uk ltd.uk plc.uk sch.uk net.uk com.au net.au org.au \
+  edu.au gov.au id.au co.nz net.nz org.nz govt.nz ac.nz co.jp or.jp ne.jp ac.jp go.jp \
+  co.kr or.kr co.in net.in org.in firm.in gen.in ind.in ac.in com.br net.br org.br \
+  gov.br com.mx org.mx gob.mx com.sg edu.sg com.my com.hk org.hk edu.hk com.tw org.tw \
+  com.cn net.cn org.cn gov.cn co.id or.id ac.id web.id my.id sch.id go.id biz.id co.za \
+  org.za net.za ac.za gov.za com.tr org.tr net.tr com.ar com.co com.ph com.vn co.th \
+  ac.th or.th in.th com.pk com.ng com.eg com.sa com.ua com.pe com.ve co.il org.il co.ke \
+"
+www_kind() {
+  case $1 in www.*) echo www; return;; esac
+  local rest=${1#*.}
+  case $rest in *.*) ;; *) echo apex; return;; esac
+  case $WWW_SFX2 in *" $rest "*) echo apex; return;; esac
+  echo sub
+}
+default_www() { case $(www_kind "$1") in sub) echo off;; *) echo redirect;; esac; }
+# www_why domain: the one line `tando domain add` prints about the www handling it chose
+www_why() {
+  case $(www_kind "$1") in
+    www) echo "$1 starts with www., so it redirects to ${1#www.}";;
+    apex) echo "$1 is a registered name, so www.$1 redirects to it";;
+    *) echo "$1 is a sub-domain, so it gets no www twin";;
+  esac
+}
 
 # domain_live domain: wait (the server gives it up to 90 s) for the domain to answer through Caddy
 # with a valid certificate; prints the outcome, fails when it does not
@@ -125,8 +155,13 @@ cmd_domain() {
     add)
       d=$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]'); d=${d%.}
       case $d in ""|*[!a-z0-9.-]*|.*|*..*) usage_err "not a domain name: $d" domain;; esac
-      [ -n "$w" ] || w=$(default_www "$d")
-      case $w in redirect|serve|off) ;; *) usage_err "--www is redirect, serve or off" domain;; esac
+      if [ -n "$w" ]; then
+        case $w in redirect|serve|off) ;; *) usage_err "--www is redirect, serve or off" domain;; esac
+        note "www: $w (--www $w)"
+      else
+        w=$(default_www "$d")
+        note "www: $w ($(www_why "$d"); change it with --www redirect|serve|off)"
+      fi
       server_addrs
       domain_dns "$d" "$w" || exit 1
       agent sudo domain-add "$APP" "$d" "$w" < /dev/null > "$TMPD/o"

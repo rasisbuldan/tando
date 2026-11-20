@@ -107,7 +107,7 @@ run `tando doctor`.
 - Listen on `process.env.PORT`. tando picks the port.
 - Keep files that change in `$TANDO_DATA_DIR` (set `data = data` in `tando.conf`). The release is read-only.
 - Next.js needs `output: "standalone"`. `tando up` offers to add it.
-- `tando.conf` holds the app's settings. `tando init` writes it; see `tando help init`.
+- `tando.conf` holds the app's settings. `tando init` writes it; every setting is in [docs/CONFIG.md](docs/CONFIG.md) (or `tando help conf`).
 
 ## Alerts
 
@@ -124,7 +124,7 @@ See [docs/STATUS.md](docs/STATUS.md) for what is verified and what is open.
 
 - [Quickstart](docs/QUICKSTART.md) and the [index of all docs](docs/README.md)
 - Setup guides: [laptop](docs/SETUP-LAPTOP.md), [empty server](docs/SETUP-EMPTY-VM.md), [server with existing services](docs/SETUP-EXISTING-VM.md)
-- [Commands](docs/COMMANDS.md), [Monitoring](docs/MONITORING.md), [Backups](docs/BACKUP.md)
+- [Commands](docs/COMMANDS.md), [tando.conf settings](docs/CONFIG.md), [Monitoring](docs/MONITORING.md), [Backups](docs/BACKUP.md)
 - [Host care](docs/HOSTCARE.md), [CI](docs/CI.md), [Logging](docs/LOGGING.md)
 - [Changelog](CHANGELOG.md), [Security policy](SECURITY.md)
 

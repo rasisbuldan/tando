@@ -1,0 +1,64 @@
+tando.conf: one "key = value" per line, # for comments. Applied at the next
+deploy; a line you remove is cleared. Full reference: docs/CONFIG.md
+
+App
+  app             name on the server (lower case, digits, -)
+  host            server to deploy to (tando host ls)
+  recipe          node | next | static | python | container
+  node            Node.js major version, like 24
+Build
+  build           command run here before the upload
+  out             directory to upload, inside the project (default .)
+  dockerfile      Dockerfile for recipe = container (default Dockerfile)
+  image           ready image the server pulls (container)
+  container_port  port the container listens on
+  build_memory    memory of the Python build, like 1G (default 512M)
+Run
+  start           command that starts the app, listens on $PORT
+  start_shell     true: run start with sh -c (default false)
+  path            serve under a sub-path, like /shop
+  memory          per process, like 256M (default 256M)
+  writable        release directories the app may write to
+  soak            seconds a new release must stay up (default 30)
+Health
+  health          route a new release must answer (default /)
+  health_timeout  seconds to become healthy (default 60)
+  health_expect   status and/or text the monitor wants: 200, 2xx, 200 ok
+  health_fails    failed probes before the alert, 1-99 (default 3)
+  health_recover  good probes before it resolves, 1-99 (default 2)
+Limits
+  cpu             50% of a core, or cores like 1.5 (default none)
+  tasks           processes and threads, 10-999999 (default 1024)
+  max_conns       connections from Caddy, 1-99999 (default 256)
+  max_requests    requests in flight, over it a 503 (default off)
+  hold            seconds Caddy holds requests at a restart (default 15)
+  stop_timeout    seconds a stopping process may finish (default 10)
+Data
+  data            directory that survives deploys ($TANDO_DATA_DIR)
+  backup          daily | off (daily when data or database is set)
+  database        postgres | sqlite (gives DATABASE_URL)
+  db_statement_timeout  postgres, like 30s, or off (default 30s)
+  db_idle_tx_timeout    postgres, like 5m, or off (default 5m)
+  db_temp_limit         postgres temp files, like 1G, or off (default 1G)
+Release command (not static, not container)
+  release         command run on the server before every switch
+  release_shell   true: run it with sh -c (default false)
+  release_timeout seconds, 1-3600 (default 300)
+Jobs
+  job.<name>      <schedule> | <command>, like daily | node nightly.js
+  job_timeout     seconds any job may run, 1-86400 (default 3600)
+  job.<name>.timeout  seconds for one job
+Domains
+  domain          domains, separated by spaces or commas
+  www             redirect | serve | off (by name; domain add says why)
+Logs
+  log_max         journal size cap, at least 4M, like 500M
+  log_keep        journal retention, like 12h, 30d, 2w (default 30d)
+  log_rate        lines/seconds like 5000/30s, or off
+  access_log      on | off: write the request log (default on)
+  request_log_max request log disk budget, at least 4M
+
+Example:  app = shop
+          recipe = node
+          start = node server.js
+          data = data

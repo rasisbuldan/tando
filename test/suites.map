@@ -34,8 +34,10 @@ test/server/*            ALL
 
 # ---- laptop side
 lib/ui.sh                lint ui-test e2e-cli e2e-ease e2e-top e2e-status
-lib/views.sh             lint ui-test e2e-cli e2e-status e2e-data e2e e2e-alerts
+lib/views.sh             lint ui-test e2e-cli e2e-status e2e-data e2e e2e-alerts e2e-host e2e-logs
 lib/help.txt             lint ui-test e2e-cli install-test
+lib/help-conf.txt        lint ui-test e2e-cli install-test
+docs/CONFIG.md           lint ui-test
 completions/*            lint ui-test e2e-cli install-test
 lib/cmd-adopt.sh         lint ui-test e2e-cli e2e-adopt
 lib/cmd-alerts.sh        lint ui-test e2e-cli @alerts

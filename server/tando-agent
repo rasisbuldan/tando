@@ -316,8 +316,27 @@ domain_tls() { # the TLS of an app's own domains: the host's, but never plain ht
   elif [[ ${H[tls]:-off} == internal ]]; then echo internal
   else echo auto; fi
 }
-default_www() { # apex-looking (one dot) or www.: redirect the twin; deeper names: no twin
-  if [[ $1 == www.* || $1 =~ ^[^.]+\.[^.]+$ ]]; then echo redirect; else echo off; fi
+# www_kind domain -> www, apex or sub. The twin of www_kind in lib/cmd-domain.sh: keep them
+# identical (test/ui-test.sh runs both over one table). WWW_SFX2 is a pragmatic list of the common
+# two-level public suffixes, not the full Public Suffix List.
+WWW_SFX2=" \
+  co.uk org.uk ac.uk gov.uk me.uk ltd.uk plc.uk sch.uk net.uk com.au net.au org.au \
+  edu.au gov.au id.au co.nz net.nz org.nz govt.nz ac.nz co.jp or.jp ne.jp ac.jp go.jp \
+  co.kr or.kr co.in net.in org.in firm.in gen.in ind.in ac.in com.br net.br org.br \
+  gov.br com.mx org.mx gob.mx com.sg edu.sg com.my com.hk org.hk edu.hk com.tw org.tw \
+  com.cn net.cn org.cn gov.cn co.id or.id ac.id web.id my.id sch.id go.id biz.id co.za \
+  org.za net.za ac.za gov.za com.tr org.tr net.tr com.ar com.co com.ph com.vn co.th \
+  ac.th or.th in.th com.pk com.ng com.eg com.sa com.ua com.pe com.ve co.il org.il co.ke \
+"
+www_kind() {
+  [[ $1 == www.* ]] && { echo www; return; }
+  local rest=${1#*.}
+  [[ $rest != *.* ]] && { echo apex; return; }
+  [[ $WWW_SFX2 == *" $rest "* ]] && { echo apex; return; }
+  echo sub
+}
+default_www() { # a registered name or www.: redirect the twin; sub-domains: no twin
+  if [[ $(www_kind "$1") == sub ]]; then echo off; else echo redirect; fi
 }
 www_twin() { if [[ $1 == www.* ]]; then echo "${1#www.}"; else echo "www.$1"; fi; }
 valid_domain() {

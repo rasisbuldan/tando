@@ -28,7 +28,8 @@ Servers    host add|ls|setup|status|care|update|reboot|rm · domain · doctor
 CI         ci setup|ls|revoke|rotate|github|hook
 More       init · destroy · unlock · recipes · adopt
 
-tando help <command>: details and an example.  Something wrong? tando doctor
+tando help <command>: details and an example.  Settings: tando help conf
+Something wrong? tando doctor
 The app: tando.conf here, or tando logs shop, tando env ls shop (-a shop where
 a command has words of its own: env set, domain add...). Flags: -H <host>,
 --json, --yes; only -a -H --json --yes --force before the command. Exit: 0 ok,
@@ -329,12 +330,13 @@ at tando up. The app's own link (<app>.<apps_domain>) keeps working.
 Example: tando domain add example.com
 
 @@ doctor
-flags: -H=
+flags: -H= --verbose
 args: 0-1
-usage: tando doctor [host]
+usage: tando doctor [host] [--verbose]
 Check a server: connection, sudo, every tando piece and its version, Caddy,
 DNS, disk, memory, timers and every app. Works on a server that is not set up
-yet (it then says what setup would do).
+yet (it then says what setup would do). After a client upgrade the programs
+that differ are one row: --verbose lists each.
 
 @@ version
 flags: -H=
@@ -446,4 +448,4 @@ flags:
 args: 0-3
 usage: tando help [command [subcommand]]
 The list of commands, or the help of one command (tando help alerts notifier
-shows the help of alerts).
+shows the help of alerts). tando help conf lists the tando.conf settings.

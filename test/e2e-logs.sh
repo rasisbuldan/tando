@@ -509,6 +509,8 @@ check "15b default retention 30 days, journal files closed daily" \
 "$R" status -a hello > "$E/st.hello" 2>&1
 check "15c status shows use, cap and retention (logs ... of ..., keeps 30 d)" \
   grep -q 'logs .* of .*, keeps 30 d' "$E/st.hello"
+check "15c2 status puts the lines of the last 24 h first and the journal size after them" \
+  grep -Eq 'logs +[0-9]+ lines/24h +journal .* of .*, keeps 30 d' "$E/st.hello"
 # an app with log_keep = 1h: short journal files so that retention can trim whole files
 mkapp keep 'log_keep = 1h
 log_rate = off
