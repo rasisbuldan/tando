@@ -1832,7 +1832,7 @@ cmd_configure() {
     "C[container_port]" "C[build_memory]" "C[log_max]" "C[log_keep]" "C[log_rate]" "C[access_log]" \
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" \
-    "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]"
+    "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" \
     "C[release]" "C[release_shell]" "C[release_timeout]"
   local line
   while IFS= read -r line; do
