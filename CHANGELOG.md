@@ -6,6 +6,18 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: requests could get 502 at once while an app restarted, despite the request hold, after a
+  Caddy reload had failed: Caddy keeps the servers it had started of a configuration it could not
+  load, serving it without the hold, until it restarts (seen as A7e and A9e failing in
+  test/e2e-adopt.sh). tando now refuses a Caddyfile that listens on a port another program holds
+  before reloading (site changes and `tando adopt site`), restarts Caddy after a failed reload when
+  the previous file loads, and `tando doctor` reports a failed reload since Caddy started
+  (`caddy reload`) with the fix. A reload also ends the requests Caddy holds: tando's site changes
+  now wait while an app restarts until it listens again. docs/COMMANDS.md says exactly what the
+  hold covers.
+- Tests: the stand-in app of `test/e2e-adopt.sh` keeps connections alive again; the suite adds a
+  kept-alive client, POSTs during a rollback (held, stored once), a reload during a restart, and
+  the failed-reload cases.
 - Changed: `tando adopt apply` refuses to start when the hand-written Caddy site does not hold
   requests while the app restarts (no `lb_try_duration`), and `tando adopt plan` says what that
   costs and which command adds it. On the first real server 36 requests got 502 because the hold

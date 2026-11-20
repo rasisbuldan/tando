@@ -379,6 +379,15 @@ health_path() { # under path; "/" with a path is the path itself (Next redirects
 has_unit() { [[ ${C[recipe]:-} != static ]]; }
 app_unit() { if has_unit; then echo "tando-$A.service"; fi; }
 
+# hold_secs: how long Caddy holds a request of the app while it restarts (lb_try_duration): HOLD, or
+# the health timeout when longer. hold = (tando.conf) sets it: an app that starts in a second or two
+# can have a short hold, which is also how long a request over max_requests waits before its 503
+# (one loop in Caddy)
+hold_secs() {
+  local hold=${HOLD%s}; (( ${C[health_timeout]:-15} > hold )) && hold=${C[health_timeout]}
+  [[ ${C[hold]:-} =~ ^[1-9][0-9]{0,2}$ ]] && hold=${C[hold]}
+  echo "$hold"
+}
 # (Re)start the app and make Caddy proxy to it again (it may show the stopped or down page).
 # Caddy holds requests while the process restarts, so none fail.
 restart_app() {
@@ -391,7 +400,16 @@ restart_app() {
   write_caddy
   has_unit || return 0
   systemctl reset-failed "tando-$A" 2> /dev/null
-  systemctl restart "tando-$A"
+  # no Caddy reload while requests wait for the app (hold_window_start says why)
+  local rc=0
+  hold_window_start
+  systemctl restart "tando-$A" || rc=$?
+  # the wait runs beside the caller, which goes on (its health check) without waiting for it; it
+  # keeps only the Caddy lock (not the app's lock or any other the caller holds)
+  ( exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- 10>&-
+    hold_window_end "${C[port]:-0}" "tando-$A.service" "$(hold_secs)" ) < /dev/null > /dev/null 2>&1 &
+  exec 11>&-
+  return $rc
 }
 # lock [secs]: the app's lock (fd 9). While it waits, $D/lock.wait.<pid> says so; once it holds
 # it, $D/lock.holder names the verb. busy_info reports both, so a client tells "my call is
@@ -628,11 +646,7 @@ write_caddy() {
       [[ -n ${C[path]:-} ]] && echo "	redir / ${C[path]}"
       # hold requests while the app restarts (at most HOLD each), so a deploy drops none
       echo "	reverse_proxy 127.0.0.1:${C[port]} {"
-      local hold=${HOLD%s}; (( ${C[health_timeout]:-15} > hold )) && hold=${C[health_timeout]}
-      # hold = (tando.conf) sets it: an app that starts in a second or two can have a short hold,
-      # which is also how long a request over max_requests waits before its 503 (one loop in Caddy)
-      [[ ${C[hold]:-} =~ ^[1-9][0-9]{0,2}$ ]] && hold=${C[hold]}
-      echo "		lb_try_duration ${hold}s"
+      echo "		lb_try_duration $(hold_secs)s"
       echo "		lb_try_interval 100ms"
       # the probe secret (skips the request log) is Caddy's and root's: never handed to an app
       echo "		header_up -X-Tando-Probe"
@@ -679,13 +693,22 @@ write_caddy() {
   caddy_lock
   [[ -f $f ]] && cp -p "$f" "$f.old"
   mv -f "$f.tmp" "$f"
-  local verr=""
-  if ! verr=$(caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1) ||
-     ! verr=$(systemctl reload caddy 2>&1); then
-    if [[ -f $f.old ]]; then mv -f "$f.old" "$f"; else rm -f "$f"; fi
-    exec 11>&-
+  local verr="" busy
+  wc_back() { if [[ -f $f.old ]]; then mv -f "$f.old" "$f"; else rm -f "$f"; fi; }
+  if ! verr=$(caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1); then
+    wc_back; exec 11>&-
     verr=$(printf '%s\n' "$verr" | grep -i 'error\|fail' | tail -1 | cut -c1-300)
     die "caddy rejected the site config for $A${verr:+: $verr}"
+  fi
+  busy=$(caddy_binds /etc/caddy/Caddyfile)
+  if [[ -n $busy ]]; then
+    wc_back; exec 11>&-
+    die "caddy rejected the site config for $A: the Caddyfile listens on $busy, which another program holds (nothing was reloaded)"
+  fi
+  if ! caddy_reload; then
+    wc_back; verr=$CADDY_ERR
+    busy=$(caddy_unload); exec 11>&-
+    die "caddy rejected the site config for $A${verr:+: $verr}; $busy"
   fi
   rm -f "$f.old"
   exec 11>&-
@@ -693,6 +716,85 @@ write_caddy() {
 caddy_lock() {
   exec 11>"$R/.caddy.lock"; chmod 600 "$R/.caddy.lock"
   flock -w 120 11 || die "another change of Caddy's sites takes over 2 minutes; try again"
+}
+
+# A failed reload is not harmless. Caddy (2.6 to 2.10 at least) loads a configuration by starting
+# its servers one after the other; when one cannot start (its port is taken, its address is not on
+# this host), the reload fails, but the servers it had started keep accepting connections beside
+# the running ones until Caddy restarts. They serve the rejected configuration with its context
+# cancelled: lb_try_duration no longer holds anything there, so a request that finds the app
+# restarting gets 502 at once (test/e2e-adopt.sh A4). So: no reload that would fail that way
+# (caddy_binds), and after a failed one, a restart (caddy_unload).
+#
+# caddy_binds file: the addresses the file's servers listen on that a program other than Caddy
+# holds ("127.0.0.1:3100 (node)"), empty when there are none
+caddy_binds() {
+  local a l=""
+  for a in $(caddy adapt --config "$1" --adapter caddyfile 2> /dev/null | grep -o '"listen":\[[^]]*\]' |
+             sed 's/^"listen":\[//; s/\]$//; s/"//g; s/,/ /g'); do
+    a=${a#tcp/}; [[ ${a##*:} =~ ^[0-9]+$ ]] && l+=" $a"
+  done
+  [[ -n $l ]] || return 0
+  local addr pid who out=""
+  while read -r addr pid; do
+    who=$(ps -o unit= -p "$pid" 2> /dev/null); [[ $who == *.service ]] || who=$(ps -o comm= -p "$pid" 2> /dev/null)
+    out+="${out:+, }$addr (${who:-pid $pid})"
+  done < <(ss -Hltnp 2> /dev/null | awk -v want="$l" '
+    function wild(h) { return h == "" || h == "*" || h == "0.0.0.0" || h == "[::]" }
+    BEGIN { n = split(want, w, " ") }
+    { a = $4; p = a; sub(/.*:/, "", p); h = a; sub(/:[0-9]+$/, "", h)
+      prog = $0; if (!sub(/.*users:\(\("/, "", prog)) prog = "?"; pid = prog; sub(/".*/, "", prog)
+      sub(/^[^,]*,pid=/, "", pid); sub(/[^0-9].*/, "", pid)
+      if (prog == "caddy") next
+      for (i = 1; i <= n; i++) {
+        wp = w[i]; sub(/.*:/, "", wp); wh = w[i]; sub(/:[0-9]+$/, "", wh)
+        if (wp == p && (wild(wh) || wild(h) || wh == h) && !seen[w[i]]++) print w[i], (pid == "" ? 0 : pid)
+      }
+    }')
+  echo "$out"
+}
+# caddy_reload: reload Caddy; on failure CADDY_ERR is what Caddy said (from its journal)
+caddy_reload() {
+  local t0; t0=$(now); CADDY_ERR=""
+  systemctl reload caddy &> /dev/null && return 0
+  CADDY_ERR=$(journalctl -u caddy --since "@$t0" --no-pager -o cat 2> /dev/null |
+    grep -o '"error":"[^"]*"' | tail -1 | sed 's/^"error":"//; s/"$//' | cut -c1-300)
+  [[ -n $CADDY_ERR ]] || CADDY_ERR="systemctl reload caddy failed"
+  return 1
+}
+# caddy_unload: after a failed reload, with the previous file back: load it, then restart Caddy so
+# nothing of the rejected configuration keeps serving. Prints what happened, for the message.
+# When the previous file does not load either (the cause is in it), Caddy is not restarted: it
+# would not start again. The owner fixes the file and restarts it (tando doctor says so).
+caddy_unload() {
+  if caddy_reload && systemctl restart caddy &> /dev/null && systemctl -q is-active caddy; then
+    echo "the previous configuration is back, and Caddy was restarted with it (a failed reload leaves part of the rejected configuration serving until a restart)"
+  else
+    echo "Caddy cannot load the previous configuration either (${CADDY_ERR:-it did not restart}): it keeps running what it had, but part of the rejected configuration may serve beside it, without the request hold. Fix the Caddyfile (sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile), then sudo systemctl restart caddy"
+  fi
+}
+# hold_window_start / hold_window_end: around an app's restart. A Caddy reload ends every request
+# Caddy holds at that moment with a 502 (it cancels the old configuration, and its retry loop with
+# it), so no tando change of Caddy's sites (caddy_lock) runs while the app is down: the window lasts
+# until the app listens again, the unit stops trying, or <secs> pass. fd 11, like caddy_lock.
+hold_window_start() {
+  exec 11>"$R/.caddy.lock"; chmod 600 "$R/.caddy.lock"
+  flock -w 60 11 || true      # (a site change that hangs must not stop a restart or a rollback)
+}
+hold_window_end() { # port unit secs
+  local end n0=""; mono; end=$((MONO + ${3:-15}))
+  [[ -n $2 ]] && n0=$(systemctl show -P NRestarts "$2" 2> /dev/null)
+  while mono; ((MONO < end)); do
+    # listening: a held request waits up to lb_try_interval (100ms) before it tries again, and a
+    # reload in that pause still ends it (seen in test/e2e-adopt.sh A7g): a second more
+    if ss -Hltn "sport = :$1" 2> /dev/null | grepq .; then sleep 1; break; fi
+    if [[ -n $2 ]]; then   # it stopped, or crashed and is restarted: nothing to wait for
+      [[ $(systemctl show -P ActiveState "$2" 2> /dev/null) == activ* ]] || break
+      [[ $(systemctl show -P NRestarts "$2" 2> /dev/null) == "$n0" ]] || break
+    fi
+    sleep 0.1
+  done
+  exec 11>&-
 }
 
 # ---- health --------------------------------------------------------------------------------
@@ -1686,6 +1788,20 @@ cmd_doctor() {
     row check ok "caddy memory" "GOMEMLIMIT set"
   else
     row check warn "caddy memory" "no GOMEMLIMIT: 20,000 keep-alive connections took 1.8 GB and got Caddy OOM-killed on a 2 GB server. Add /etc/systemd/system/caddy.service.d/memory.conf with [Service] Environment=GOMEMLIMIT=$(caddy_mem_mb)MiB, then sudo systemctl daemon-reload && sudo systemctl restart caddy"
+  fi
+  # a reload that failed while starting its servers left the ones it had started serving
+  # (caddy_binds says how), whoever reloaded: tando, or the owner for a site tando does not own
+  local cfail=""
+  if ((cstart)) && systemctl -q is-active caddy; then
+    cfail=$(journalctl -u caddy --since "@$cstart" --no-pager -o cat 2> /dev/null |
+      grep -o '"ts":[0-9.]*,[^{]*"error":"loading config: loading new config: [a-z]* app module: start: [^"]*"' | tail -1)
+  fi
+  if [[ -n $cfail ]]; then
+    local cts=${cfail#\"ts\":}; cts=${cts%%[.,]*}
+    cfail=${cfail##*app module: start: }; cfail=${cfail%\"}
+    row check fail "caddy reload" "a reload failed at $(date -d "@$cts" '+%F %T' 2> /dev/null) while starting ($(cut -c1-160 <<< "$cfail")): part of that configuration may still serve beside the running one, and there an app's restart gives 502 instead of holding requests. Fix the Caddyfile (sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile), then sudo systemctl restart caddy. After editing a site by hand: reload, and restart Caddy when the reload fails"
+  elif ((cstart)); then
+    row check ok "caddy reload" "every reload since Caddy started loaded completely"
   fi
   if command -v nft > /dev/null && nft list table inet tando &> /dev/null; then
     row check ok "loopback rules" "apps reach only their own ports (nftables)"

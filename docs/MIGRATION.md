@@ -319,7 +319,12 @@ reverse_proxy 127.0.0.1:3100 {
 Measured on the replica with both apps adopted: tando deploy, rollback and restart of each app, about
 2,500 requests and 72 orders, **0 failed**; the longest stall was 0.65 s (requests held, then served).
 Validate (`caddy validate`) and `systemctl reload caddy` (no restart). This also helps any future
-deploy, with tando or by hand.
+deploy, with tando or by hand. If that reload fails (`systemctl reload caddy` exits non-zero), fix
+the file and restart Caddy (`sudo systemctl restart caddy`): a reload that failed while Caddy started
+its servers leaves those it started serving the rejected configuration, where nothing is held,
+until a restart (`tando doctor` shows it as `caddy reload`). The hold covers requests that cannot
+reach the app and GETs whose connection broke; a POST already sent to the stopping app is not sent
+again (docs/COMMANDS.md, "What the hold covers, exactly").
 
 ## What only the real server can confirm
 

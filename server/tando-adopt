@@ -601,14 +601,17 @@ adopt_restore() {
   fi
   # 3. the unit: stop tando's, start the hand-written one, wait until it answers
   systemctl disable -q "tando-$A.service" 2> /dev/null
+  hold_window_start          # no Caddy reload while it holds requests (tando-agent says why)
   stop_within "tando-$A.service" 20
   own_transient pre | xargs -r systemctl stop 2> /dev/null
   [[ ${F[enabled]} == enabled ]] && systemctl enable -q "${F[unit]}.service"
   if [[ ${F[active]} == active ]]; then
     systemctl reset-failed "${F[unit]}.service" 2> /dev/null; systemctl start "${F[unit]}.service"
+    hold_window_end "${F[port]}" "${F[unit]}.service" 60
     hp=${F[path]:-}${F[health]:-/}; [[ -n ${F[path]:-} && ${F[health]:-/} == / ]] && hp=${F[path]}
     probe 60 "${F[unit]}.service" "http://127.0.0.1:${F[port]}$hp" || true
   fi
+  exec 11>&-
   # 4. the hand-written timers again, now that the app answers (a run due meanwhile runs once now)
   for n in "${resume[@]}"; do
     set -- $n
@@ -798,9 +801,11 @@ cmd_adopt_run() { # unit health jobs owner (inside its own transient unit)
   C[health_timeout]=15
   via_caddy "" || afail 4 switch "after the link switch: $PROBE_WHY"
   t0=$(ds)
+  hold_window_start          # no Caddy reload while it holds requests (tando-agent says why)
   stop_within "$unit.service" 20
   systemctl reset-failed "tando-$A.service" 2> /dev/null
   systemctl start "tando-$A.service" || afail 4 switch "tando-$A.service did not start"
+  hold_window_end "${F[port]}" "tando-$A.service" 60
   C[health_timeout]=60
   via_caddy "tando-$A.service" || afail 4 switch "tando-$A.service: $PROBE_WHY"
   dt=$(( ( $(ds) - t0 ) * 100 ))
@@ -1079,14 +1084,21 @@ cmd_adopt_site() {
   if ! verr=$(caddy validate --config "$new" --adapter caddyfile 2>&1); then
     sdie "Caddy rejects the edited file, so nothing was changed: $(tail -1 <<< "$verr" | cut -c1-300)"
   fi
+  # a reload that fails while Caddy starts its servers leaves part of it serving (caddy_binds)
+  verr=$(caddy_binds "$new")
+  [[ -z $verr ]] || sdie "the Caddyfile listens on $verr, which another program holds, so Caddy could not load it: nothing was changed. Free the port or change that site, then try again"
   ((pre)) || install -d -m 700 -o root -g root "$BK"
   install -d -m 700 -o root -g root "$kdir"
   keep=$kdir/Caddyfile.$(date -u +%Y%m%d-%H%M%S)
   cp -p "$cf" "$keep" || sdie "could not keep a copy of $cf"
   mv -f "$new" "$cf"
-  if ! verr=$(systemctl reload caddy 2>&1) || ! via_caddy ""; then
-    cp -p "$keep" "$cf"; systemctl reload caddy &> /dev/null
-    sdie "after the reload the site did not answer (${verr:-$PROBE_WHY}): the previous Caddyfile is back"
+  if ! caddy_reload; then
+    cp -p "$keep" "$cf"; verr=$CADDY_ERR
+    sdie "Caddy could not load the edited file ($verr): the previous Caddyfile is back; $(caddy_unload)"
+  fi
+  if ! via_caddy ""; then
+    cp -p "$keep" "$cf"; verr=""; caddy_reload || verr="; $(caddy_unload)"
+    sdie "after the reload the site did not answer ($PROBE_WHY): the previous Caddyfile is back$verr"
   fi
   ((pre)) || { [[ -f $AD/$A/fingerprint ]] && sed -i "s|^caddyfile .*|caddyfile $(sha "$cf")|" "$AD/$A/fingerprint"; }
   rm -f "$snip"

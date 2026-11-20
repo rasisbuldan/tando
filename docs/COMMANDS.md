@@ -351,8 +351,12 @@ The order is `plan`, `site --apply`, `apply`.
 `site` shows what your own Caddy site lacks next to one tando renders: `lb_try_duration` in the
 app's `reverse_proxy` (requests wait while the app restarts instead of getting 502) and the request
 log that `tando requests`, `tando errors` and the 5xx alert read. `site --apply` adds them: a copy of
-the Caddyfile is kept, the new file is validated, Caddy is reloaded (never restarted) and the app is
-checked through it; a failure puts the previous file back. A site it cannot read with certainty
+the Caddyfile is kept, the new file is validated, its ports are checked (one another program holds
+is refused before anything is reloaded), Caddy is reloaded and the app is checked through it; a
+failure puts the previous file back. Caddy is restarted only after a reload that failed, and only
+when the previous file loads: a failed reload leaves part of the rejected configuration serving
+until a restart ("What the hold covers, exactly" under Limits and load). When the previous file
+does not load either, Caddy is left running and the output says to fix the file and restart it. A site it cannot read with certainty
 (several `reverse_proxy` lines to the port, a log of its own, an imported file) is not edited: the
 lines to add by hand are printed.
 Before adoption `site` takes the unit, as `plan` does (with the same `--health`), and reports and
@@ -461,6 +465,26 @@ distribution has one major version only): try it on a copy of the server first.
    `sudo pg_dropcluster --stop 18 main`. Until then, going back is steps 3 and 4 with the versions
    swapped (the old cluster still has its data and the old passwords; restore after that as well,
    since step 4 sets new passwords).
+
+**What the hold covers, exactly.** While an app restarts (deploy, rollback, `restart`, adoption,
+`adopt undo`), Caddy holds a request up to the hold and sends it once the app listens, so it is
+answered late instead of failing. Held: every request that cannot connect, whatever its method
+(nothing reached the app), and a GET whose connection to the app broke (Caddy 2.6 to 2.10 retry a
+GET on any error; nothing else needs adding for that). Not held, and answered 502:
+- a request that is not a GET (POST, PUT, DELETE, HEAD) already sent on a kept-alive connection
+  that the stopping app then closed. It may have been processed, so neither Caddy nor tando sends it
+  again. The window is the instant the app closes an idle connection Caddy has just picked; the
+  tests (test/e2e-adopt.sh A7f) have not met it;
+- a request the old process still had when it was killed after `stop_timeout`;
+- a restart longer than the hold;
+- a request held while Caddy reloads: the reload ends it. tando's own site changes wait until the
+  app listens again; a reload you run yourself at that moment is not covered;
+- every request, held or not, that reaches what is left of a reload that failed while Caddy started
+  its servers: Caddy (2.6 to 2.10) keeps the servers it had started, with the rejected
+  configuration and nothing held, until it restarts. tando refuses a Caddyfile that listens on a
+  port another program holds (the usual cause) before reloading; after a failed reload it puts the
+  previous file back and restarts Caddy when that file loads; `tando doctor` shows a failed reload
+  since Caddy started (row `caddy reload`) and says to restart Caddy.
 
 Loopback is never limited (tando's probes, an app calling itself through Caddy); ssh is not touched.
 All apps together get half the CPU weight of the system services (Caddy, sshd, the agent), and an
