@@ -4,15 +4,14 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"tando/srv/internal/bashread"
 	"tando/srv/internal/decimal"
 	"tando/srv/internal/fsinfo"
+	"tando/srv/internal/lock"
 	"tando/srv/internal/run"
 	"tando/srv/internal/valid"
 )
@@ -185,21 +184,6 @@ func actLog(path string) []string {
 	return bashread.Lines(b)
 }
 
-// lockHeld is `[[ -f $D/lock ]] && ! flock -n "$D/lock" true`: another process holds the app's
-// lock. The lock is tried and released at once, as flock(1) did.
-func lockHeld(p string) bool {
-	fi, err := os.Stat(p)
-	if err != nil || !fi.Mode().IsRegular() {
-		return false
-	}
-	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return true // flock(1) fails (not "free") when it cannot open the file
-	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return true
-	}
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	return false
-}
+// lockHeld: another process holds the app's lock (busy_info's `flock -n "$D/lock" true`, without
+// taking it: lock.Held reads /proc/locks, so this probe never delays or fails a verb's own try).
+func lockHeld(p string) bool { return lock.Held(p) }
