@@ -42,6 +42,9 @@ kv listen_pre "$(ss -Hltn "sport = :$pre" 2> /dev/null | grep -c .)"
 f=/etc/caddy/tando/$A.caddy
 kv u_mem "$(sed -n 's/^MemoryMax=//p' "/etc/systemd/system/$u" 2> /dev/null | head -1)"
 kv job_cal "$(sed -n 's/^OnCalendar=//p' "/etc/systemd/system/tando-${A}_job-tick.timer" 2> /dev/null | head -1)"
+kv c_domains "$(g domains "$D/app.conf")"
+# the names Caddy's site answers for (its first line: "name, name {"), without http://
+kv site_names "$(head -1 "$f" 2> /dev/null | sed 's/ *{$//; s|http://||g; s/,/ /g' | tr -s ' ')"
 kv site_mc "$(awk '$1 == "max_conns_per_host" { print $2; exit }' "$f" 2> /dev/null)"
 if grep -q "is stopped" "$f" 2> /dev/null; then kv site stopped
 elif grep -q "is unavailable" "$f" 2> /dev/null; then kv site down
@@ -79,6 +82,8 @@ kv data_sum "$(sha256sum "$D/shared/data/sentinel" 2> /dev/null | cut -c1-16)"
 if [ "$(g database "$D/app.conf")" = postgres ]; then
   db=tando_$(echo "$A" | tr - _)
   kv db_rows "$(sudo -u postgres psql -X -At -d "$db" -c 'select count(*) from mx' 2> /dev/null)"
+  kv db_st "$(sudo -u postgres psql -X -At -c "select c from pg_roles, unnest(rolconfig) c where rolname = '$db'" 2> /dev/null |
+    sed -n 's/^statement_timeout=//p' | head -1)"
 fi
 # the workers: every unit file and loaded unit, "wk=<name>:<state>:<release it runs>:<enabled>"
 for w in $( { for x in /etc/systemd/system/tando-"$A"_worker-*.service; do [ -e "$x" ] && echo "${x##*/}"; done

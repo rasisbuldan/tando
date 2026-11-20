@@ -53,6 +53,10 @@ mx_has_job() { case $KIND in node|data) return 0;; esac; return 1; }
 # and the workers (kind worker): odd versions have a and b, even ones a only, so a worker left
 # from the other version (or missing) is seen by the checker (inv11)
 mx_workers_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo "a b"; else echo "a"; fi; }
+# and a domain (domain = in tando.conf; every version its own, as domains are only added: one
+# of a version that never went live must not be the app's) and, with a database, a role limit
+mx_dom_of() { if [ -n "${MX_SAMECONF:-}" ]; then echo mx.test; else echo "v$1.mx.test"; fi; }
+mx_dbst_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo 30s; else echo 45s; fi; }
 mx_mc_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo 64; else echo 96; fi; }
 mx_start_of() {
   local n=$1; [ -n "${MX_SAMECONF:-}" ] && n=1
@@ -81,9 +85,10 @@ mx_version() {
     echo "health = $h"
     echo "health_timeout = 10"
     echo "soak = ${MX_SOAK:-2}"
+    echo "domain = $(mx_dom_of "$n")"; echo "www = off"
     [ "$KIND" = static ] || { echo "memory = $(mx_mem_of "$n")"; echo "max_conns = $(mx_mc_of "$n")"; }
     case $KIND in
-      data) echo "data = data"; echo "database = postgres";;
+      data) echo "data = data"; echo "database = postgres"; echo "db_statement_timeout = $(mx_dbst_of "$n")";;
     esac
     mx_has_job && echo "job.tick = $(mx_job_of "$n") | true"
     [ "$KIND" = node ] && echo "assets = assets"
@@ -130,14 +135,20 @@ mx_settings() {
   printf 'health=%s\nhealth_timeout=10\nsoak=%s\n' "$(mx_health_of "$n")" "${MX_SOAK:-2}"
   [ "$KIND" = static ] || printf 'memory=%s\nmax_conns=%s\n' "$(mx_mem_of "$n")" "$(mx_mc_of "$n")"
   [ "$KIND" = container ] && printf 'container_port=8080\n'
-  [ "$KIND" = data ] && printf 'data=data\ndatabase=postgres\n'
+  [ "$KIND" = data ] && printf 'data=data\ndatabase=postgres\ndb_statement_timeout=%s\n' "$(mx_dbst_of "$n")"
+  printf 'domain=%s\nwww=off\n' "$(mx_dom_of "$n")"
   mx_has_job && printf 'job.tick=%s | true\n' "$(mx_job_of "$n")"
   [ "$KIND" = node ] && printf 'assets=assets\n'
   if [ "$KIND" = worker ]; then for w in $(mx_workers_of "$n"); do printf 'worker.%s=node worker.js\n' "$w"; done; fi
   return 0
 }
 # mx_client <out> <args...>: the CLI in the app's work dir; status in MXRC
-mx_client() { local o=$1; shift; (cd "$W/$A" && "$R" "$@" > "$o" 2>&1); MXRC=$?; return $MXRC; }
+# (the version's domain resolves to the test server: the client checks a new domain's DNS first)
+mx_client() {
+  local o=$1; shift
+  (cd "$W/$A" && TANDO_TEST_RESOLVE="$(sed -n 's/^domain = \(.*\)/\1=127.0.0.1/p' tando.conf)" "$R" "$@" > "$o" 2>&1); MXRC=$?
+  return $MXRC
+}
 # the release id a deploy printed ("release <id>"), recorded with its version
 mx_rid() { sed -n 's/.*release \([0-9][0-9-]*\).*/\1/p' "$1" | head -1; }
 mx_note_id() { [ -n "$1" ] && echo "$1 $2" >> "$W/ids"; }
@@ -150,6 +161,7 @@ mx_deploy() {
   mx_version "$MXV" "${1:-ok}"
   mx_client "$W/d$MXV.out" deploy; local rc=$MXRC
   mx_note_id "$(mx_rid "$W/d$MXV.out")" "$MXV"
+  [ "$rc" != 0 ] || echo "$MXV" >> "$W/served"
   return $rc
 }
 
@@ -249,6 +261,24 @@ mx_inv() {
       mx_bad 2 "agree: Caddy's site has max_conns $(fv site_mc), release $want (v$v2) is deployed with $(mx_mc_of "$v2")"
     ! mx_has_job || [ "$(fv job_cal)" = "$(mx_job_of "$v2")" ] ||
       mx_bad 2 "agree: the job timer says OnCalendar=$(fv job_cal), release $want (v$v2) is deployed with $(mx_job_of "$v2")"
+    [ "$KIND" != data ] || [ "$(fv db_st)" = "$(mx_dbst_of "$v2")" ] ||
+      mx_bad 2 "agree: the database role has statement_timeout=$(fv db_st), release $want (v$v2) is deployed with $(mx_dbst_of "$v2")"
+  fi
+  # domains: the serving release's is the app's (app.conf and Caddy's site); one of a version that
+  # never went live (a refused deploy's, a reverted one's, a second client's) is in neither
+  if [ -n "$want" ] && [ -n "$(mx_ver_of "$want")" ]; then
+    local v3 dm dv; v3=$(mx_ver_of "$want")
+    [ -n "$sv" ] && echo "$sv" >> "$W/served"
+    case " $(fv c_domains) " in *" $(mx_dom_of "$v3")|"*) ;; *)
+      mx_bad 2 "agree: app.conf has domains=$(fv c_domains), release $want (v$v3) is deployed with $(mx_dom_of "$v3")";; esac
+    case " $(fv site_names) " in *" $(mx_dom_of "$v3") "*) ;; *)
+      mx_bad 2 "agree: Caddy's site answers for $(fv site_names), release $want (v$v3) is deployed with $(mx_dom_of "$v3")";; esac
+    for dm in $( { fv c_domains | tr ' ' '\n' | cut -d'|' -f1; fv site_names | tr ' ' '\n'; } | sort -u); do
+      dv=$(printf '%s' "$dm" | sed -n 's/^v\([0-9]*\)\.mx\.test$/\1/p')
+      [ -n "$dv" ] || continue
+      grep -qx "$dv" "$W/served" 2> /dev/null ||
+        mx_bad 2 "agree: $dm (app.conf: $(fv c_domains); site: $(fv site_names)) is of v$dv, which never went live"
+    done
   fi
   case $stopped:$(fv site) in
     1:stopped|0:proxy|0:static) ;;

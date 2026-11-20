@@ -6,6 +6,14 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: a deploy that did not go live (refused in the pre-flight, cut off, rolled back) still
+  added the new domains of its tando.conf to the live app and set its database limits
+  (`db_statement_timeout`, `db_idle_tx_timeout`, `db_temp_limit`) on the live app's role. Both now
+  take effect when the release goes live (the limits just before its release command, if it has
+  one), and go back with it. A new domain is checked at configure and again at the switch, so a
+  failed deploy keeps no claim on it; its certificate is asked for once it goes live.
+- Tests: the fault matrix's versions alternate a domain and a database role limit too; invariant 2
+  names a domain or a role limit that does not match the serving release.
 - Added: a version handshake between the client and the server. The agent's `info` says which
   protocol it speaks (`proto=2`; 0.1.1 printed none). A deploy from this client to a server still
   on 0.1.1 stops before it changes anything: "the server's tando is older than this client: run
