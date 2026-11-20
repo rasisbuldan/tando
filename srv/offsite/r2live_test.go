@@ -68,7 +68,7 @@ func TestProviderLive(t *testing.T) {
 	// the probe `tando backup offsite set` runs
 	var pb bytes.Buffer
 	w := out.New(&pb)
-	err = o.probe(ctx, w, c, "checkhost")
+	_, err = o.probe(ctx, w, c, "checkhost")
 	w.Flush()
 	t.Logf("probe:\n%s", pb.String())
 	step("probe (write, read, list, delete, clock)", err)

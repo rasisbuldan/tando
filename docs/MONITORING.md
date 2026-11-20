@@ -11,7 +11,8 @@ tando alerts enable                          # once per host (`tando host setup`
 tando alerts notifier add phone ntfy         # asks for the topic URL without echoing it
 tando alerts test                            # one test message through every notifier
 tando alerts                                 # active alerts, notifier health, recent history
-tando alerts heartbeat                       # outside dead man's switch (see "What it cannot see")
+tando alerts heartbeat                       # outside dead man's switch (see "From outside")
+tando alerts backup-ping                     # a URL called after each whole run of the daily backups
 ```
 
 ## How it runs
@@ -373,6 +374,40 @@ Kuma's push monitor, Better Stack heartbeats, ...) with a period of `heartbeat_e
 grace of a few minutes. The ping is skipped while every notifier has been failing for 30 min, so
 "alerts cannot be delivered" also becomes a missed heartbeat.
 
+## From outside
+
+Everything above runs on the server it watches. Three things outside it close the gap; each is a
+free tier at several services (healthchecks.io, Uptime Kuma on another machine, UptimeRobot and
+others: tando needs only a URL, and none of them is required).
+
+| What | Catches | Set with |
+|---|---|---|
+| **Heartbeat**: the server calls a URL every `heartbeat_every` minutes | the server is down, frozen or cut off; the checks stopped; no notifier can deliver | `tando alerts heartbeat` |
+| **Backup ping**: the server calls a URL once after the daily backups, when all of them worked | a backup that failed, did not run, or did not reach the offsite bucket | `tando alerts backup-ping` |
+| **An HTTP monitor of your public link** | DNS, the firewall, the provider's network, an expired domain or certificate: what a visitor sees | at the outside service, nothing in tando |
+
+- **Heartbeat.** Until one is set on a server that has apps, `tando doctor` shows a warning row
+  (`heartbeat`, not a failure) and `tando alerts` says so in its header. Create a check at the
+  outside service with a period of `heartbeat_every` (5) minutes and a grace of a few minutes, then
+  `tando alerts heartbeat` and paste its URL. `tando alerts heartbeat off` removes it.
+- **Backup ping.** `tando alerts backup-ping` stores a second URL (a secret, like the heartbeat's:
+  `/opt/tando/alerts.d/backup-ping`, root 600). It is requested once per run of the daily backups,
+  and only when the run was whole: every app with daily backups made one since the last request,
+  none failed, and, when offsite copies are on, each of them is in the bucket. A failure sends
+  nothing: the outside service notices the missing call. Give its check a period of 1 day and a
+  grace of a few hours (uploads of large backups take time). The request is a plain GET of the URL
+  as you gave it (nothing is added: no app name, no result), with a 10 s limit. It is made by
+  tando-watch's minute run, not by the backup, so a slow or dead receiver cannot delay or fail a
+  backup; a failed request is tried again every 5 minutes. `tando alerts` shows the last request (`backups`), or
+  why none is sent now (`the last daily backup of <app> failed`); `tando doctor` warns while the
+  request itself fails. Only daily backups count (`tando backup now` and pre-deploy backups do
+  not); it needs `tando alerts enable` (on after `host setup`). `tando alerts backup-ping off`
+  removes it.
+- **A monitor of the public link.** Point any outside HTTP monitor at an app's public URL (its
+  health path is a good target: `https://<your domain>/<health path>`), every 1 to 5 minutes, with
+  a keyword or status check. It needs no access to the server. It is the only one of the three
+  that sees what a visitor sees.
+
 Other blind spots, stated plainly:
 
 - **From outside**: the health probe goes through the local Caddy (connected to 127.0.0.1).
@@ -511,6 +546,7 @@ once delivered). A day with 20 transitions writes well under 100 KB.
 /opt/tando/alerts.conf                      settings (644)
 /opt/tando/alerts.d/notify-<name>           notifier secrets (root 600, dir 700)
 /opt/tando/alerts.d/heartbeat               heartbeat URL (root 600)
+/opt/tando/alerts.d/backup-ping             backup ping URL (root 600)
 /var/lib/tando/watch/state                  alert state, key=value, temp file + rename, only on change (root 600)
 /var/lib/tando/watch/history.tsv            transitions; trimmed to 1000 lines past 2000 (root 600)
 /var/lib/tando/watch/out/<name>/            queued messages (root 700; no secrets)
@@ -530,6 +566,7 @@ once delivered). A day with 20 transitions writes well under 100 KB.
 Server verbs (`/opt/tando/bin/tando-watch <verb>`): `run` (timer), `install`, `uninstall`,
 `show`, `history [n]`, `doctor` and `brief [app]` (no root; rows for `tando doctor` and
 `tando status`: alerts, and as root the `pg` row of one app's database), `health [app]` (rows for `tando health`), `set`, `notifier-add`, `notifier-rm`, `heartbeat` (stdin), `silence`, `test`,
+`tando status`), `health [app]` (rows for `tando health`), `set`, `notifier-add`, `notifier-rm`, `heartbeat` (stdin), `backup-ping` (stdin), `silence`, `test`,
 `forget <app>` (drops an app's alert state at once; `tando destroy` calls it), `version`. The
 program is Go (`srv/watch`, structure in srv/README.md); the shell original is
 `server/legacy/tando-watch`.

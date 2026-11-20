@@ -40,6 +40,18 @@ first, grouped by area.
   limit is read from the server), host `postgres` when the server does not answer or its slots
   are 80% taken. The database's size counts as the app's disk use (`disk`, `app_max_mb`) and is
   shown with the connections by `tando status <app>` and `tando health <app>`.
+- Added: `tando alerts backup-ping [off]`: a URL that is requested once after the daily backups,
+  only when every app's backup worked (and, with offsite copies on, reached the bucket). An outside
+  service notices the day it is missing. `tando alerts` shows the last request or why none is sent.
+- Changed: `tando doctor` warns (no failure) while a server with apps has no outside heartbeat,
+  with the command to set one. docs/MONITORING.md has a section "From outside".
+- Added: `tando backup offsite test` and `set` report whether the bucket's key can replace or
+  delete an object it wrote (`overwrite`, `delete` rows; `status` shows the last result).
+- Changed: a key that may not delete, or a bucket with a lock, no longer fails `backup offsite
+  set` and `test`: it is the safer setup. tando then prunes nothing in the bucket and says so
+  (`sync`, `status`, `doctor`); docs/BACKUP.md, "Backups the server cannot erase", has the setup
+  with a lifecycle rule for R2 and S3 (from the providers' documentation, not verified on a real
+  bucket).
 - Tests: tiers (`test/all.sh --tier check|quick|full|nightly|weekly`), `test/check.sh`, suite selection
   by changed files (`test/suites.map`), fault scenarios in shards; the full tier takes about 16 minutes
   on the reference laptop (was about 2 hours). AGENTS.md says what to run when.

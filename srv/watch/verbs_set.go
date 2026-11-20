@@ -337,29 +337,7 @@ func (w Watch) NotifierRm(o *out.Writer, args []string) error {
 
 // Heartbeat is the verb `heartbeat`: "url=<url>" on stdin (a secret), or "off".
 func (w Watch) Heartbeat(o *out.Writer, stdin io.Reader) error {
-	if err := needRoot(w.Env); err != nil {
-		return err
-	}
-	in, err := stdinLines(stdin)
-	if err != nil {
-		return err
-	}
-	kv := arg(in, 0)
-	f := filepath.Join(w.Sec, "heartbeat")
-	if kv == "off" {
-		os.Remove(f)
-		o.KV("ok", "1")
-		return nil
-	}
-	if !heartbeatRe.MatchString(kv) || hasCtl(kv) {
-		return errf("the heartbeat must be an http(s) URL")
-	}
-	mkdir700(w.Sec)
-	if err := atomicfile.Write(f, []byte(kv+"\n"), atomicfile.Mode(0o600)); err != nil {
-		return err
-	}
-	o.KV("ok", "1")
-	return nil
+	return w.setPingURL(o, stdin, filepath.Join(w.Sec, "heartbeat"), "heartbeat")
 }
 
 // Silence is the verb `silence <app|all> <seconds>`; 0 lifts the silence.

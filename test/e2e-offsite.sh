@@ -1,8 +1,8 @@
 #!/bin/bash
 # test/e2e-offsite.sh: offsite backups end to end (docs/BACKUP.md): set/test/status, every backup
 # uploaded and encrypted, an offsite-only restore and pull, retention, a failed upload retried and
-# its state for the alerts, wrong and revoked credentials, a 300 MB backup in parts, an upload
-# killed mid-way, and the disaster recovery of a PostgreSQL app onto a second, fresh server.
+# its state for the alerts, a key that may not delete (the test's rows, retention), wrong and
+# revoked credentials, a 300 MB backup in parts, an upload killed mid-way, and the disaster recovery of a PostgreSQL app onto a second, fresh server.
 #
 # The S3 target: MinIO's image could not be pulled where this suite was written, so the suite runs
 # srv/offsite/testdata/fakes3 (a small S3 server of our own, standard library only, which checks
@@ -88,6 +88,31 @@ check "o5b the secret is in no log, state or unit file ($(tr '\n' ' ' < "$E/leak
 check "o6 a second set shows no key (it is shown once)" eval '! grep -q "tando-key-" "$E/set2.out"'
 "$R" backup offsite test > "$E/test.out" 2>&1; rc=$?
 check "o7 backup offsite test passes (rc=$rc)" eval '[ $rc = 0 ] && grep -q "delete" "$E/test.out"'
+cat "$E/test.out" >&2
+hid=$(srv "sed -n 's/^host_id=//p' /opt/tando/offsite.id")
+flat() { tr -d '│\n' < "$1" | tr -s ' '; }
+check "o7a a key that may delete: the test says so in a row (not a failure) and leaves nothing in the bucket" \
+  eval 'grep -q "overwrite .*allowed" "$E/test.out" && grep -q "delete .*allowed" "$E/test.out" &&
+        flat "$E/test.out" | grep -q "this key can delete the offsite backups" && ! ctl list | grep -q "tando-key-test"'
+# the same key without the permission to delete (the fake S3 refuses DeleteObject with 403)
+ctl "deny?mode=delete" > /dev/null
+"$R" backup offsite test > "$E/test-nodel.out" 2>&1; rc=$?; cat "$E/test-nodel.out" >&2
+"$R" backup offsite test > "$E/test-nodel2.out" 2>&1; rc2=$?
+ctl list | grep "tando-key-test" > "$E/probe.objs"; cat "$E/probe.objs" >&2
+check "o7b a key that may not delete: the test passes and says refused (rc=$rc, again rc=$rc2)" \
+  eval '[ $rc = 0 ] && [ $rc2 = 0 ] && grep -q "delete .*refused" "$E/test-nodel.out" &&
+        flat "$E/test-nodel.out" | grep -q "cannot erase the offsite backups" && grep -q "this key cannot delete from it" "$E/test-nodel2.out"'
+check "o7c two tests left one tiny, plainly named object, used again ($(awk '{ print $2 }' "$E/probe.objs" | tr '\n' ' ')bytes)" \
+  eval '[ "$(wc -l < "$E/probe.objs" | tr -d " ")" = 1 ] &&
+        grep -q "^tando/$hid/.tando-key-test/can-this-key-delete-or-overwrite.txt " "$E/probe.objs" && [ "$(awk "{ print \$2 }" "$E/probe.objs")" -lt 512 ]'
+COLUMNS=120 "$R" backup offsite status > "$E/status-nodel.out" 2>&1
+check "o7d status shows what the last test found" grep -q "this key .*cannot delete" "$E/status-nodel.out"
+ctl "deny?mode=lock" > /dev/null
+"$R" backup offsite test > "$E/test-lock.out" 2>&1; rc=$?; cat "$E/test-lock.out" >&2
+check "o7e a bucket lock (replace and delete refused with 409): the test passes on the object left before (rc=$rc)" \
+  eval '[ $rc = 0 ] && grep -q "overwrite .*refused" "$E/test-lock.out" && grep -q "delete .*refused" "$E/test-lock.out" &&
+        [ "$(ctl list | grep -c "tando-key-test")" = 1 ]'
+ctl "deny?mode=off" > /dev/null
 COLUMNS=120 "$R" backup offsite status > "$E/status.out" 2>&1; cat "$E/status.out" >&2
 check "o8 status: bucket, encryption on with a key not yet saved, the timer active" \
   eval 'grep -q "bucket $BUCKET" "$E/status.out" && grep -q "not confirmed saved" "$E/status.out" && ! grep -q "not active" "$E/status.out"'
@@ -167,6 +192,26 @@ for i in 1 2 3; do "$R" backup now > /dev/null 2>&1; sleep 1; done
 ctl list > "$E/objs2"
 n=$(grep -c "^tando/$hid/notes/.*-manual.rbk " "$E/objs2")
 check "o24 retention keeps 2 manual backups offsite (keep_other=2) while 5 stay local ($n offsite)" test "$n" = 2
+# the same with a key that may not delete: uploads go on, nothing is pruned, and it is said
+ctl "deny?mode=delete" > /dev/null
+# shellcheck disable=SC2034 # nid is read by the evals of the checks
+for i in 1 2; do nid=$("$R" backup now 2>&1 | sed -n 's/^backed up [a-z0-9-]*: \([^ ]*\).*/\1/p'); sleep 1; done
+t_until 60 eval '[ "$(ost "$nid")" = uploaded ]'
+"$R" backup offsite sync > "$E/sync-nodel.out" 2>&1; rc=$?; cat "$E/sync-nodel.out" >&2
+nm=$(ctl list | grep -c "^tando/$hid/notes/.*-manual.rbk ")
+"$R" doctor > "$E/doc-nodel.out" 2>&1; COLUMNS=120 "$R" backup offsite status > "$E/status-prune.out" 2>&1
+check "o24a a key that may not delete: backups still upload, sync fails nothing and says who must prune (rc=$rc, $nm offsite)" \
+  eval '[ $rc = 0 ] && [ "$(ost "$nid")" = uploaded ] && [ "$nm" = 4 ] && grep -q "0 old ones deleted" "$E/sync-nodel.out" &&
+        tr -d "\n" < "$E/sync-nodel.out" | grep -q "retention skipped: the storage refuses this key.s deletes.*lifecycle rule of the bucket"'
+check "o24b doctor and status say it too, without a failure" \
+  eval 'grep -q "offsite retention .*ok" "$E/doc-nodel.out" && flat "$E/doc-nodel.out" | grep -q "lifecycle rule" &&
+        grep -q "pruning .*not done by tando" "$E/status-prune.out" && ! grep -q "offsite.*credentials fail" "$E/doc-nodel.out"'
+ctl "deny?mode=off" > /dev/null
+"$R" backup offsite sync > "$E/sync-del.out" 2>&1
+nm=$(ctl list | grep -c "^tando/$hid/notes/.*-manual.rbk ")
+"$R" doctor > "$E/doc-del.out" 2>&1
+check "o24c with the permission back the next sync prunes and the message goes ($nm offsite)" \
+  eval '[ "$nm" = 2 ] && ! grep -q "retention skipped" "$E/sync-del.out" && ! grep -q "offsite retention" "$E/doc-del.out"'
 
 # ---- 300 MB in parts; an upload killed mid-way ------------------------------------------------------
 srv "sudo -u tando-notes head -c 300M /dev/urandom | sudo -u tando-notes tee /opt/tando/apps/notes/shared/data/big.bin > /dev/null"

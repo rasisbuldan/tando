@@ -358,11 +358,11 @@ key that can deploy only this app and prints the CI secrets once; github writes
 
 @@ alerts
 flags: -a= -H= --watch= -n=
-subs: show=0 enable=0 disable=0 test=0-1 history=0-1 set=0+ silence=2 heartbeat=0-1 notifier=1+ notifiers=0+ default=show
+subs: show=0 enable=0 disable=0 test=0-1 history=0-1 set=0+ silence=2 heartbeat=0-1 backup-ping=0-1 notifier=1+ notifiers=0+ default=show
 usage: tando alerts [--watch N] | enable | disable | test [name] | history [app] [-n N]
 usage: tando alerts set [key=value ...] | silence <app|all> <30m|2h|1d|off>
 usage: tando alerts notifier add <name> webhook|slack|telegram|ntfy|email | rm <name> | ls
-usage: tando alerts heartbeat [off]
+usage: tando alerts heartbeat [off] | backup-ping [off]
 What is firing on the server, and where alerts are sent. Checks run every
 minute on the server (app down or unhealthy, 5xx answers, new errors after a
 deploy, restarts, memory, disk, certificates...). See docs/MONITORING.md.

@@ -191,8 +191,10 @@ data and a database dump) and refuses an existing file. `ls` heads its time colu
 `tando backup offsite [status|set|test|hosts|sync|off]` · `tando backup offsite key --show|--saved|--import|--rotate`:
 copies of every backup in Cloudflare R2 or any S3-compatible store, encrypted on the server with a
 recovery key shown once (docs/BACKUP.md). `set` asks for the account id or endpoint, bucket, access
-key id and secret (no echo; or key=value lines on stdin) and checks them by writing, reading,
-listing and deleting a test object before it saves anything. With offsite on, `ls` has a WHERE
+key id and secret (no echo; or key=value lines on stdin) and checks them by writing, reading and
+listing a test object before it saves anything. `test` repeats that check; its `overwrite` and
+`delete` rows say whether this key could replace or erase a backup (`delete refused` is the safe
+setup; pruning is then left to a lifecycle rule of the bucket). With offsite on, `ls` has a WHERE
 column (`local`, `local + offsite`, `offsite only`, `local, uploading`, `local, upload failed`), and
 `restore` and `pull` fetch an offsite-only backup first (verified).
 Example: `tando backup pull 20261113-171815-manual backup.tar`
@@ -224,6 +226,8 @@ the apps (down, health, memory, disk, failed jobs as `job.<name>`, database conn
 `db_conns`, ...) and the host (disk, memory, Caddy, `postgres`, ...). `set` without arguments lists
 every setting; `job=off`, `db_conns=off`, `postgres=off` turn the newest checks off, `db_conn_pct`
 (80) and `db_conn_for` (5) are the connection threshold and its samples.
+`heartbeat [off]` · `backup-ping [off]`. Flags: `-a -H --watch -n`. Default subcommand: show.
+What is firing on the server and where alerts go; checks run every minute (docs/MONITORING.md).
 Secrets are read without echo. `notifiers` = `notifier` (mismatch 9).
 Example: `tando alerts notifier add phone ntfy`
 

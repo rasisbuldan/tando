@@ -282,18 +282,8 @@ func TestSetErrors(t *testing.T) {
 			}
 		})
 	}
-	h := newHost(t)
-	h.f.fault = func(w http.ResponseWriter, r *http.Request, n int) bool {
-		if r.Method == "DELETE" {
-			s3err(w, 403, "AccessDenied")
-			return true
-		}
-		return false
-	}
-	_, err := h.set()
-	if err == nil || !strings.Contains(err.Error(), "delete failed") || !strings.Contains(err.Error(), "permission") {
-		t.Fatalf("no delete permission: %v", err)
-	}
+	// (a key that may not delete used to fail set; it is now the safer setup and passes:
+	// TestProbeKeyThatCannotDelete in keyprobe_test.go)
 }
 
 func errString(err error) string {

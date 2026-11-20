@@ -87,7 +87,7 @@ _tando() {
     unlock) subs="" flags="$flags -H -a" args="apps";;
     recipes) subs="" flags="$flags " args="";;
     ci) subs="setup rotate ls revoke github hook" flags="$flags -a -H --ref --repo --branch --node --env --force --remove" args="";;
-    alerts) subs="enable disable test history set silence notifier rm ls heartbeat show notifiers" flags="$flags --watch -n -a -H" args="apps";;
+    alerts) subs="enable disable test history set silence notifier rm ls heartbeat backup-ping show notifiers" flags="$flags --watch -n -a -H" args="apps";;
     health) subs="" flags="$flags --json -a -H --forget" args="apps";;
     errors) subs="" flags="$flags --since -n --json -a -H --last" args="apps";;
     requests) subs="tail errors summary" flags="$flags --since -a -H --last -n -f --4xx" args="apps";;

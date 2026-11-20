@@ -49,7 +49,8 @@ os_arg_ok() {
   case $1 in *[!A-Za-z0-9_.:/=+-]*) die "bad characters in ${1%%=*}";; esac
 }
 
-# os_steps file: the server's step=<name> ok|fail <detail> lines as box steps
+# os_steps file: the server's step=<name> ok|warn|fail <detail> lines as box steps (warn: the step
+# passed and found something the owner should know: said whole, in colour, under the step)
 os_steps() {
   local n=0 total l name st d
   total=$(grep -c '^step=' "$1")
@@ -57,7 +58,11 @@ os_steps() {
     case $l in step=*) ;; *) continue;; esac
     l=${l#step=}; name=${l%% *}; l=${l#"$name"}; l=${l# }; st=${l%% *}; d=${l#"$st"}; d=${d# }
     n=$((n + 1))
-    ui_step "$n" "$total" "$name" "$st" "$d"
+    case $name:$st in
+      overwrite:ok|delete:ok) ui_step "$n" "$total" "$name" ok "${d%%:*}"; ui_box_wrap "${UI_DIM}${d#*: }${UI_NC}";;
+      *:warn) ui_step "$n" "$total" "$name" ok "${d%%:*}"; ui_box_wrap "${UI_YELLOW}${d#*: }${UI_NC}";;
+      *) ui_step "$n" "$total" "$name" "$st" "$d";;
+    esac
   done < "$1"
 }
 
@@ -124,7 +129,8 @@ offsite_status() {
   local r a p fl lu op e n=0
   offsite_do sudo status > "$TMPD/o"
   kv_read "$TMPD/o" configured endpoint provider bucket prefix region access_key_id host_id hostname encrypt \
-    key_id key_saved keys alert_hours keep creds creds_error creds_since checked timer
+    key_id key_saved keys alert_hours keep creds creds_error creds_since checked timer \
+    key_overwrite key_delete key_checked prune_refused
   ui_box_open "offsite backups" "$HOST"
   if [ "$K_configured" != 1 ]; then
     ui_box_line "Off: backups stay on $HOST only, and go with it if the server is lost."
@@ -145,7 +151,15 @@ offsite_status() {
     *) ui_kv credentials "not checked yet";;
   esac
   [ "$K_timer" = active ] || ui_kv timer "${UI_RED}tando-offsite.timer is not active${UI_NC}: tando backup offsite set installs it"
+  # what the last test (or set) found this key may do to an object it wrote
+  case $K_key_delete in
+    refused) ui_kv "this key" "$(ui_badge ok "cannot delete") what it wrote$([ "$K_key_overwrite" = refused ] && echo " or replace it"), checked $(ago "$K_key_checked")";;
+    allowed) ui_kv_wrap "this key" "${UI_YELLOW}can delete the backups in the bucket${UI_NC} (checked $(ago "$K_key_checked")): a break-in on $HOST could erase them; docs/BACKUP.md, Backups the server cannot erase";;
+    versions) ui_kv_wrap "this key" "the bucket keeps versions; whether this key may delete a version is not tested (docs/BACKUP.md)";;
+  esac
   ui_kv_wrap keeps "$K_keep"
+  [ "${K_prune_refused:-0}" -gt 0 ] 2> /dev/null &&
+    ui_kv_wrap pruning "${UI_YELLOW}not done by tando${UI_NC} since $(ago "$K_prune_refused"): the storage refuses this key's deletes. Old copies stay until a lifecycle rule of the bucket expires them (docs/BACKUP.md)"
   ui_kv alert "a backup not offsite after $K_alert_hours h"
   {
     printf 'APP\tWAITING\tFAILED\tLAST UPLOAD\n'
@@ -232,8 +246,10 @@ cmd_backup_offsite() {
     test)
       offsite_raw sudo test > "$TMPD/o"; a=$?
       ui_box_open "offsite test" "$HOST"; os_steps "$TMPD/o"
-      if [ "$a" = 0 ]; then ui_box_close "the bucket takes, gives back, lists and deletes objects"
-      else ui_box_close "fix it with tando backup offsite set"; exit 1; fi;;
+      if [ "$a" != 0 ]; then ui_box_close "fix it with tando backup offsite set"; exit 1; fi
+      if grep -q '^step=delete ok refused' "$TMPD/o"; then ui_box_close "the bucket works; this key cannot delete from it"
+      elif grep -q '^step=delete warn allowed' "$TMPD/o"; then ui_box_close "the bucket takes, gives back, lists and deletes objects"
+      else ui_box_close "the bucket takes, gives back and lists objects"; fi;;
     off)
       confirm "This stops copying backups of $HOST offsite (what is in the bucket stays, and so does the recovery key)." "$HOST"
       offsite_do sudo off > /dev/null

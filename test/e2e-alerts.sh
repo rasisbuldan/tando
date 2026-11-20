@@ -659,6 +659,64 @@ srv 'sudo systemctl start postgresql'; until_ 30 srv 'pg_isready -q -h 127.0.0.1
 wruns 2
 check "31m started again: resolved once" eq "$(st _host.postgres.st)/$(nev resolved host postgres)" ok/1
 aset db_conn_for=
+# ---- 32. from outside: the heartbeat finding, the backup ping (docs/MONITORING.md) ----
+"$R" alerts heartbeat off > /dev/null 2>&1
+"$R" doctor > "$E/doctor-nohb.out" 2>&1; cat "$E/doctor-nohb.out" >&2
+check "32b no heartbeat on a server with apps: doctor warns, says why and gives the command" \
+  sh -c "grep -q 'heartbeat .*warn' '$E/doctor-nohb.out' && tr -d '│\n' < '$E/doctor-nohb.out' | tr -s ' ' |
+    grep -q 'if this server goes down, nothing tells you.*tando alerts heartbeat'"
+printf 'http://127.0.0.1:9999/hb/S3CR3Thb1\n' | "$R" alerts heartbeat > /dev/null 2>&1
+"$R" doctor > "$E/doctor-hb.out" 2>&1
+check "32c with a heartbeat the warning is gone" not grep -q 'heartbeat .*warn' "$E/doctor-hb.out"
+
+nbp() { srv "sudo grep -c '\"path\":\"/$1/' /root/recv.log" | tr -d ' '; }
+dailies=$(srv "sudo grep -l '^backup=daily' /opt/tando/apps/*/app.conf" | sed 's,/app.conf$,,; s,.*/,,' | tr '\n' ' ')
+# the daily backups, as their timers start them; prints the units that failed
+run_dailies() { local a bad=""; for a in $dailies; do srv "sudo systemctl start tando-$a-backup.service" > /dev/null 2>&1 || bad="$bad $a"; done; echo "$bad"; }
+log "apps with daily backups: $dailies"
+printf 'http://127.0.0.1:9999/bping/S3CR3Tbp1\n' | "$R" alerts backup-ping > "$E/bp-set.out" 2>&1
+wruns 2
+"$R" alerts > "$E/bp-alerts0.out" 2>&1
+check "32d backup ping set, no daily backup has run since: nothing is requested, tando alerts says not sent yet" \
+  sh -c "[ '$(nbp bping)' = 0 ] && tr -d '│\n' < '$E/bp-alerts0.out' | tr -s ' ' |
+    grep -q 'backups ping not sent yet: waiting for the next daily backup of hog (http://127.0.0.1:9999/…)'"
+bad=$(run_dailies); wrun
+check "32e every daily backup worked (failed:${bad:- none}; apps: $dailies): one request to the URL as given" \
+  sh -c "[ -n '$dailies' ] && [ -z '$bad' ] && [ '$(nbp bping)' = 1 ]"
+check "32f the request is the owner's URL, nothing added (no app name, no query)" \
+  srv 'sudo grep "\"path\":\"/bping/" /root/recv.log | grep -q "\"path\":\"/bping/<S>\""'
+wruns 3
+"$R" alerts > "$E/bp-alerts1.out" 2>&1
+check "32g no second request for the same run; tando alerts shows it as sent" \
+  sh -c "[ '$(nbp bping)' = 1 ] && grep -q 'backups .*ping .*ok.*sent after the last daily backups' '$E/bp-alerts1.out'"
+# hog's backup fails (its data directory is a symbolic link: the agent refuses it), the others work
+srv 'sudo sh -c "cd /opt/tando/apps/hog/shared && mv data data.real && ln -s data.real data"'
+bad=$(run_dailies); wruns 2
+"$R" alerts > "$E/bp-alerts2.out" 2>&1
+check "32h a daily backup failed (failed:$bad): no request, and tando alerts says which app" \
+  sh -c "[ '$bad' = ' hog' ] && [ '$(nbp bping)' = 1 ] && grep -q 'backups .*ping not sent now: the last daily backup of hog failed' '$E/bp-alerts2.out'"
+srv 'sudo sh -c "cd /opt/tando/apps/hog/shared && rm data && mv data.real data"'
+bad=$(run_dailies); wrun
+check "32i the backups work again: the next run is whole and requests the URL once more" \
+  sh -c "[ -z '$bad' ] && [ '$(nbp bping)' = 2 ]"
+# a receiver that never answers: the backups neither wait for it nor fail
+srv 'curl -s http://127.0.0.1:9999/ctl/fail/slowbp > /dev/null'
+printf 'http://127.0.0.1:9999/slowbp/S3CR3Tbp2\n' | "$R" alerts backup-ping > /dev/null 2>&1
+n0=$(srv 'sudo ls /var/backups/tando/hog | grep -c daily')
+bad=$(run_dailies)
+n1=$(srv 'sudo ls /var/backups/tando/hog | grep -c daily')
+check "32j the receiver hangs: the daily backups succeed, done before the URL is ever requested (failed:${bad:- none}, hog $n0 -> $n1)" \
+  sh -c "[ -z '$bad' ] && [ $n1 -gt $n0 ] && [ '$(nbp slowbp)' = 0 ]"
+wrun
+"$R" alerts > "$E/bp-alerts3.out" 2>&1; "$R" doctor > "$E/bp-doctor.out" 2>&1
+check "32k the request was tried and timed out: tando alerts and doctor show it failing ($(st _bp.why))" \
+  sh -c "[ '$(nbp slowbp)' = 1 ] && [ '$(st _bp.why)' = 'timed out' ] && grep -q 'backups .*ping .*failing.*timed out' '$E/bp-alerts3.out' &&
+    grep -q 'backup ping .*warn' '$E/bp-doctor.out'"
+check "32l the URL's secret is in no output" not grep -qs S3CR3T "$E"/bp-*.out "$E"/doctor-*.out
+"$R" alerts backup-ping off > /dev/null 2>&1; srv 'curl -s http://127.0.0.1:9999/ctl/ok/slowbp > /dev/null'
+"$R" alerts > "$E/bp-alerts4.out" 2>&1
+check "32m backup-ping off: the row is gone, the URL file too" \
+  sh -c "! grep -q 'backups .*ping' '$E/bp-alerts4.out' && ! $SSHX 'sudo test -e /opt/tando/alerts.d/backup-ping'"
 
 # ---- 29 (tandod), 27h, 27i (the dead man's check in a local time zone): test/e2e-alerts-daemon.sh ----
 srv 'sudo systemctl start tando-watch.timer'

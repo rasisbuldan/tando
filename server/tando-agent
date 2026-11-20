@@ -2645,7 +2645,13 @@ cmd_backup_run() { # app kind: the timer (daily), `tando backup now` (manual)
   has_backup_data || die "$A has no data or database to back up"
   lock 3600
   load "$D/state" S
-  id=$(backup_take "$kind") || die "backup failed"
+  # (the daily run's outcome, for the backup ping of tando-watch: docs/MONITORING.md, "From
+  # outside". backup_take ran in a subshell and wrote the state there: read it again first)
+  if ! id=$(backup_take "$kind"); then
+    [[ $kind == daily ]] && { load "$D/state" S; st backup_daily_failed "$(now)"; }
+    die "backup failed"
+  fi
+  [[ $kind == daily ]] && { load "$D/state" S; st backup_daily_ok "$(now)" backup_daily_id "$id"; }
   echo "id=$id"
 }
 
