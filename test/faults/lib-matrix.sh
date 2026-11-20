@@ -40,8 +40,11 @@ mx_trace_off() { dxs "cat $MX_T/trace 2> /dev/null; rm -f $MX_T/trace"; }
 # Odd versions: health /hc-odd, start "node server.js"; even ones: /hc-even, "node ./server.js".
 # A rollback or a recovery that leaves app.conf with the other version's lines is seen by the
 # checker (the live release would answer 404 at that health path; its start command differs).
-mx_health_of() { if [ $(($1 % 2)) = 1 ]; then echo /hc-odd; else echo /hc-even; fi; }
+# (MX_SAMECONF=1: every version has the odd one's: to look past those two checks)
+mx_health_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo /hc-odd; else echo /hc-even; fi; }
 mx_start_of() {
+  local n=$1; [ -n "${MX_SAMECONF:-}" ] && n=1
+  set -- "$n"
   case $KIND in
     python) if [ $(($1 % 2)) = 1 ]; then echo "python3 app.py"; else echo "python3 ./app.py"; fi;;
     static|container) echo "";;
@@ -102,7 +105,10 @@ mx_note_id() { [ -n "$1" ] && echo "$1 $2" >> "$W/ids"; }
 mx_ver_of() { awk -v i="$1" '$1 == i { v = $2 } END { print v }' "$W/ids" 2> /dev/null; }
 # mx_deploy [behaviour]: a deploy of the next version, no fault (a step around the cases)
 mx_deploy() {
-  MXV=$((MXV + 1)); mx_version "$MXV" "${1:-ok}"
+  local cur; cur=$(dxs "readlink /opt/tando/apps/$A/current" 2> /dev/null); cur=${cur##*/}
+  MXV=$((MXV + 1))
+  [ -n "$cur" ] && [ -n "$(mx_ver_of "$cur")" ] && [ $(( (MXV - $(mx_ver_of "$cur")) % 2 )) = 0 ] && MXV=$((MXV + 1))
+  mx_version "$MXV" "${1:-ok}"
   mx_client "$W/d$MXV.out" deploy; local rc=$MXRC
   mx_note_id "$(mx_rid "$W/d$MXV.out")" "$MXV"
   return $rc
@@ -237,7 +243,7 @@ mx_inv() {
   # 4. history: one line for the operation, its result; nothing left running
   nh=$(grep -c '^hist=' "$W/facts")
   case $MX_OP in
-    deploy*|rollback)
+    deploy*|rollback|recover)
       local kind=deploy; [ "$MX_OP" = rollback ] && kind=rollback
       if [ -z "$MX_NEW" ]; then
         [ "$nh" = 0 ] || mx_bad 4 "history: $nh lines, but the operation never got a release: $(grep '^hist=' "$W/facts" | tr '\n' ' ')"
@@ -271,7 +277,11 @@ mx_inv() {
     [ "$rel" != "$want" ] && case $(fv "rel_$rel") in verified|rolledback) ok=1;; esac
   done
   [ "$ok" = 1 ] || mx_bad 7 "rollback target: no other verified release on disk ($(mx_releases))"
-  # 8. stopped stays stopped: in MX_RUN (1) and the unit (2); here: a stopped app has no process
+  # 8. stopped stays stopped: in MX_RUN (1) and the unit (2); here: a stopped app has no process,
+  # and a deploy to a stopped app that did not go live leaves it stopped
+  if [ "$MX_OP" = deploy-stopped ] && [ "$want" != "$MX_NEW" ] && [ "$stopped" = 0 ]; then
+    mx_bad 8 "stopped: a deploy to the stopped app did not go live, and the app runs"
+  fi
   if [ "$stopped" = 1 ] && [ "$KIND" != static ]; then
     [ "$(fv u_active)" != active ] || mx_bad 8 "stopped: the state says stopped, the unit runs"
   fi
@@ -282,9 +292,11 @@ mx_inv() {
   if [ "${MX_LOOPOK:-0}" = 1 ] && [ -s "$W/loop" ]; then
     # (a reboot: requests fail while the server is down; from the first 200 after it, none may)
     local badn
-    badn=$(awk -v t="${MX_REBOOT_T:-0}" -v a="${MX_LOOP503:-0}" '
+    # (the server is down from MX_REBOOT_T until it answers ssh again, MX_UP_T; Caddy may still
+    # answer while it shuts down: the first 200 that counts is one after MX_UP_T)
+    badn=$(awk -v t="${MX_REBOOT_T:-0}" -v u="${MX_UP_T:-0}" -v a="${MX_LOOP503:-0}" '
       { if (t > 0 && s == 0 && $3 >= t) s = 1
-        if (s == 1) { if ($1 == 200) s = 2; else next }
+        if (s == 1) { if ($1 == 200 && $3 > u) s = 2; else next }
         if ($1 != 200 && !(a == 1 && $1 == 503)) n++ }
       END { print n + 0 }' "$W/loop")
     [ "$badn" = 0 ] || mx_bad 10 "requests: $badn of $MX_REQ failed ($(awk '{ print $1 }' "$W/loop" | sort | uniq -c | tr -s ' \n' ' '))"
@@ -300,7 +312,9 @@ mx_settled() {
 }
 mx_wait_settled() { T_UNTIL_STEP=0.5 t_until "${1:-240}" mx_settled; }
 # what tando-watch's minute does (srv/watch/pretick.go recoverNeeded): recover-all when an app is
-# in a phase other than idle with its lock free, its link and state disagree, or it is down
+# in a phase other than idle with its lock free, its link and state disagree, it is down, a
+# release is reserved by an activation whose unit has no process, or an operation's end was not
+# written out (outcome)
 mx_watcher() {
   dxs "D=/opt/tando/apps/$A; g() { sed -n \"s/^\$1=//p\" \$D/state | head -1; }
     ph=\$(g phase); cur=\$(g current); l=\$(readlink \$D/current); l=\${l##*/}
@@ -308,7 +322,12 @@ mx_watcher() {
     if [ \"\${ph:-idle}\" != idle ]; then flock -n \$D/lock true && need=1
     elif [ -n \"\$cur\" ] && [ \"\$l\" != \"\$cur\" ] && [ -d \$D/releases/\$cur ]; then need=1
     elif [ -z \"\$cur\" ] && [ -n \"\$l\" ] && [ -d \$D/releases/\$l ]; then need=1
-    elif [ -n \"\$(g down)\" ] && [ -z \"\$(g stopped)\" ] && [ -n \"\$cur\" ]; then need=1; fi
+    elif [ -n \"\$(g down)\" ] && [ -z \"\$(g stopped)\" ] && [ -n \"\$cur\" ]; then need=1
+    elif [ -n \"\$(g outcome)\" ] && [ \"\$(g outcome)\" != \"\$(g outcome_done)\" ]; then need=1
+    else
+      for r in \$D/releases/*; do i=\${r##*/}; [ -d \"\$r\" ] && [ -z \"\$(g status_\$i)\" ] && [ \"\$i\" != \"\$cur\" ] || continue
+        grep -qs 'populated 1' /sys/fs/cgroup/system.slice/tando-$A-act-\$i.service/cgroup.events || need=1; done
+    fi
     [ \$need = 1 ] && /opt/tando/bin/tando-agent recover-all; exit 0" >> "$W/case.log" 2>&1
 }
 # the server restarts (clean: systemd stops everything, the boot runs recover-all)

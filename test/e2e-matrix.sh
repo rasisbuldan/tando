@@ -66,6 +66,7 @@ t_host_add > /dev/null 2>&1
 setup_args="public_port=$T_HTTP_PORT"
 [ "$KIND" = data ] && setup_args="$setup_args postgres=yes"
 [ "$KIND" = container ] && setup_args="$setup_args podman=yes"
+[ "$KIND" = python ] && setup_args="$setup_args python=yes"
 "$R" host setup test $setup_args > "$E/setup.out" 2>&1 || { cat "$E/setup.out" >&2; fail "0 host setup"; t_done; }
 
 # ---- the app's baseline: two verified releases, data, rows ------------------------------------
@@ -88,6 +89,8 @@ mx_fresh() {
 mx_fresh || { fail "0 the baseline app could not be deployed"; t_done; }
 
 # ---- one cell --------------------------------------------------------------------------------
+# mx_killtree pid: the process and everything it started (a client left polling)
+mx_killtree() { local c; for c in $(pgrep -P "$1" 2> /dev/null); do mx_killtree "$c"; done; kill "$1" 2> /dev/null; }
 # the state an operation starts from, set up without a fault
 mx_pre() {
   local st; mx_facts > /dev/null 2>&1; st=$(fv s_stopped)
@@ -102,7 +105,7 @@ mx_pre() {
 # the operation itself (the client, as a user runs it): version MXV+1, env value e<MXE+1>
 MXE=0
 mx_go() {
-  local v=$((MXV + 1))
+  local v=$MXN
   case $1 in
     deploy|deploy-stopped|recover) mx_version "$v";;
     deploy-rel) MX_RELEASE="sleep 1" mx_version "$v";;
@@ -138,6 +141,7 @@ mx_expect() { # op phase action
       [ "$ph" = after ] && MX_WANT=new
       [ "$act" = fail ] && [ "$ph" != none ] && MX_WANT=any;;
     deploy-stopped)
+      MX_LOOP503=1
       if [ "$ph" = after ]; then MX_WANT=new; else MX_RUN=stopped; fi
       [ "$act" = fail ] && MX_WANT=any MX_RUN=any;;
     stop|start)
@@ -160,20 +164,25 @@ mx_reset() {
 # mx_cell <op> <verb> <point> <nth> <action> <phase> [second point for recover]: run one cell
 NFAIL=0 NPASS=0 NSKIP=0
 mx_cell() {
-  local op=$1 verb=$2 pt=$3 nth=$4 act=$5 ph=$6 p2=${7:-} id rel before t0
+  local op=$1 verb=$2 pt=$3 nth=$4 act=$5 ph=$6 p2=${7:-} id rel before t0 ov
   id="$KIND/$op/$verb/$pt#$nth/$act${p2:+/$p2}"
   [ "$pt" = - ] && id="$KIND/$op/trace"
   t0=$(date +%s)
   echo "==== $id" >> "$W/case.log"
   mx_spec_clear
   mx_pre "$op" >> "$W/case.log" 2>&1 || { fail "$id: could not prepare the operation (a deploy without a fault failed)"; mx_reset; return; }
+  [ "${MX_TRACE:-0}" = 1 ] && mx_trace_on      # (the trace: the operation's own points, not its preparation's)
   mx_facts > /dev/null 2>&1
   MX_OLD=$(fv s_current) MX_H0=$(fv hist_n) MX_DATA0=$(fv data_sum) MX_DB0=$(fv db_rows) MX_ENV0=$(fv env_val)
   [ -n "$MX_ENV0" ] || MX_ENV0=""
-  before=$(mx_releases) MX_NEW="" MX_OP=$op MX_REBOOT_T=0
+  before=$(mx_releases) MX_NEW="" MX_OP=$op MX_REBOOT_T=0 MX_UP_T=0
   if [ "$op" = rollback ]; then   # the newest verified release older than the current one
     MX_NEW=$(sed -n 's/^rel_\([^=]*\)=verified$/\1/p' "$W/facts" | grep -vx "$MX_OLD" | sort | tail -1)
   fi
+  # the next version: its parity differs from the live one's (another health path and start
+  # command), so a check or a restart that reaches the wrong release cannot pass by chance
+  MXN=$((MXV + 1)) ov=$(mx_ver_of "$MX_OLD")
+  [ -n "$ov" ] && [ $(( (MXN - ov) % 2 )) = 0 ] && MXN=$((MXN + 1))
   mx_expect "$op" "$ph" "$act"
   if [ "$pt" != - ]; then
     local a=$act; [ "$act" = reboot ] && a=hang
@@ -189,19 +198,22 @@ mx_cell() {
     if dxs "test -e $MX_T/reached" 2> /dev/null; then
       MX_REBOOT_T=$(date +%s)
       mx_reboot || { fail "$id: the server did not come back after the restart"; mx_loop_stop; return; }
+      MX_UP_T=$(date +%s)
     fi
   fi
   i=0; while kill -0 $cl 2> /dev/null && [ $i -lt 1200 ]; do sleep 0.5; i=$((i + 1)); done
-  kill $cl 2> /dev/null; wait $cl 2> /dev/null
+  mx_killtree $cl; wait $cl 2> /dev/null
   [ "$op" = env ] && MXE=$((MXE + 1))
-  case $op in deploy*|recover) MXV=$((MXV + 1));; esac
+  case $op in deploy*|recover) MXV=$MXN;; esac
   mx_wait_settled 240 || echo "  (not settled after 240 s)" >> "$W/case.log"
   mx_watcher
   mx_wait_settled 240
   mx_loop_stop
   cat "$W/op.out" >> "$W/case.log" 2> /dev/null
   local fired=1
-  if [ "$pt" != - ]; then mx_fired || fired=0; fi
+  # (a reboot clears /run: there, reaching the point is what counts)
+  if [ "$act" = reboot ]; then [ "$MX_REBOOT_T" != 0 ] || fired=0
+  elif [ "$pt" != - ]; then mx_fired || fired=0; fi
   mx_spec_clear
   # the operation's release: what the client printed, else one that appeared on disk or in history
   case $op in
@@ -280,11 +292,11 @@ fi
 # ---- the cells -----------------------------------------------------------------------------------
 # quick: the places the audits ranked highest (around the switch, the end of a verify, the
 # rollback, recovery's own writes, the env and stop/start commits)
-QRE='link\.|ra\.restart|fin\.(verify|soak|hist)|bad\.|rb\.switch|sw\.backup|run\.locked|imp\.cp|pre\.stop|env\.(saved|verify)|svc\.|rec/(finish|switch|pre_stop)|act\.spawn|fail\.hist'
+QRE='link\.|ra\.restart|fin\.(verify|soak)|bad\.|(deploy|rollback)\.hist|rb\.switch|sw\.backup|run\.locked|imp\.cp|pre\.stop|env\.(saved|verify)|svc\.|rec/(finish|switch|pre_stop)|act\.spawn'
 points_of() { # op: trace it (a cell without a fault), write "verb point nth phase" per point passed
   local op=$1 c
-  mx_spec_clear; mx_trace_on
-  mx_cell "$op" - - 0 none after
+  mx_spec_clear
+  MX_TRACE=1 mx_cell "$op" - - 0 none after
   mx_trace_off | awk -v a="$A" '$2 == a { k = $1 " " $3; n[k]++; if ($3 ~ /fin\.soak$/ && n[k] > 1) next; print $1, $3, n[k] }' > "$W/trace.$op"
   c=$(mx_commit "$op")
   awk -v c="$c" 'BEGIN { ph = "before" } c != "none" && ($1 " " $2) == c && !seen { ph = "after"; seen = 1 }
@@ -296,34 +308,38 @@ for op in $OPS; do
     # first faults: a kill in each phase of a deploy; second: each point of the recovery that follows
     for first in "run-activation imp.cp" "run-activation pre.stop" "run-activation link.moved" "run-activation fin.verify" "run-activation fin.soak"; do
       ph=before; case ${first#* } in link.moved|fin.*) ph=after;; esac
-      mx_spec_clear; mx_trace_on
-      mx_cell deploy "${first%% *}" "${first#* }" 1 kill "$ph"
+      mx_spec_clear
+      MX_TRACE=1 mx_cell deploy "${first%% *}" "${first#* }" 1 kill "$ph"
       mx_trace_off | awk -v a="$A" '$2 == a && $1 == "recover" { k = $1 " " $3; n[k]++; if (n[k] == 1) print $1, $3 }' > "$W/trace.rec"
-      while read -r v p; do
+      while read -r v p <&3; do
         for act2 in kill fail; do
           N=$((N + 1)); [ "$SK" = 0 ] || [ $(( (N - 1) % SK + 1 )) = "$SI" ] || continue
           [ -z "$PTS" ] || printf '%s\n' "$p" | grep -Eq "$PTS" || continue
           [ "$QUICK" = 0 ] || printf '%s\n' "$p" | grep -Eq "$QRE" || continue
           if [ "$LIST" = 1 ]; then echo "recover: ${first#* } then $v $p $act2"; continue; fi
-          MX_ACT2=$act2 mx_cell recover "${first%% *}" "${first#* }" 1 kill "$ph" "$v $p"
+          MX_ACT2=$act2 mx_cell recover "${first%% *}" "${first#* }" 1 kill "$ph" "$v $p" < /dev/null
         done
-      done < "$W/trace.rec"
+      done 3< "$W/trace.rec"
     done
     continue
   fi
   points_of "$op"
   log "$op: $(grep -c . "$W/points.$op") points"
-  while read -r v p n ph; do
+  # (the list on fd 3: a cell's docker exec -i reads stdin)
+  while read -r v p n ph <&3; do
     for act in $ACTIONS; do
       N=$((N + 1)); [ "$SK" = 0 ] || [ $(( (N - 1) % SK + 1 )) = "$SI" ] || continue
       [ -z "$PTS" ] || printf '%s\n' "$p" | grep -Eq "$PTS" || continue
       [ "$QUICK" = 0 ] || printf '%s\n' "$p" | grep -Eq "$QRE" || continue
-      # a reboot of the points a reboot can tell apart from a kill: the state writes and the switch
+      # a fail at a post: point is a no-op (the write is done); a reboot (a kill, then the boot's
+      # recovery) at the state writes and the named points, not at the progress file's or a lease's
+      case $act:$p in fail:post:*|fail:*/post:*) continue;; esac
+      case $act:$p in reboot:*pre:activation|reboot:*post:activation|reboot:*:upload|reboot:*:app.conf) continue;; esac
       if [ "$act" = reboot ] && [ "$QUICK" = 1 ]; then printf '%s\n' "$p" | grep -Eq 'link\.|post:state|fin\.soak' || continue; fi
       if [ "$LIST" = 1 ]; then echo "$op $v $p#$n $act ($ph)"; continue; fi
-      mx_cell "$op" "$v" "$p" "$n" "$act" "$ph"
+      mx_cell "$op" "$v" "$p" "$n" "$act" "$ph" < /dev/null
     done
-  done < "$W/points.$op"
+  done 3< "$W/points.$op"
 done
 [ "$LIST" = 1 ] && exit 0
 # a plain deploy at the end: the last cell left a state the next deploy works on
