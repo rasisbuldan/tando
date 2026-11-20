@@ -202,7 +202,12 @@ checks the invariants and names the one that broke: one intended release serves;
 app.conf's start and health agree with it; its status; one history line with the right result and
 nothing "running"; idle and the lock free; no leftover unit, lease, temp file or reservation; a
 rollback target exists; stopped stays stopped; data and database untouched; no failed visitor
-request. The node and static apps ship a fingerprinted file per version
+request. The operations `restore` (of a backup taken before the data and rows changed) and
+`destroy` have their own: 13, a restore's data and rows are all the backup's or all as before,
+anything else recorded in the state (`restore_cut`) and named by `tando doctor`; 14, after a
+destroy nothing of the app is left (directory, unit files and units with its timers, workers and
+slice, Caddy site, journal settings, user and groups, firewall rules of its uid, database and role)
+and its final backup is there, once and complete. The node and static apps ship a fingerprinted file per version
 (`assets = assets`; docs/ARCHITECTURE.md "Assets"): invariant 12 is that the serving
 release's file answers through Caddy with its bytes and the immutable header, and that no half-made
 link or list is left in the shared directory (the cells `k` kill the activation just before and just
@@ -221,13 +226,14 @@ none when the app is stopped (`--selftest` breaks it twice: a worker stopped beh
 a stray worker unit).
 
 `test/e2e-matrix-quick.sh` (full and quick tiers, about 8 minutes) runs `--cells`: one cell for
-each defect fixed in milestone 1, 2a and 2b (the list `CELLS` in the driver: two clients' settings, nothing of a deploy that does not go live reaching the live app, job units that could not be written, a queue that gave up, a site file that was not replaced, a rollback cut before its first state write, an upload lease left by a killed begin or activate),
+each defect fixed in milestone 1, 2a and 2b (the list `CELLS` in the driver: two clients' settings, nothing of a deploy that does not go live reaching the live app, job units that could not be written, a queue that gave up, a site file that was not replaced, a rollback cut before its first state write, an upload lease left by a killed begin or activate, a destroy killed after its units went and before its Caddy site),
 node; two cells of
 the container recipe (the switch failure, a kill at its spawn) and two of a static site (a kill at
 Caddy's file site, after the link moved), and for the kind `worker` a kill in the middle of the
 workers' switch (`wk.start`) and a failed start of the old workers when a bad release goes back
 (`bad.workers`), and for the kind `data` (PostgreSQL) a deploy refused in the pre-flight, which
-must leave the role's limits and the domains as the live release has them. `test/e2e-matrix-weekly.sh` (nightly and weekly tiers,
+must leave the role's limits and the domains as the live release has them, and a restore killed
+just before pg_restore (the app runs again, `tando doctor` names the cut). `test/e2e-matrix-weekly.sh` (nightly and weekly tiers,
 about 15 minutes) runs `--weekly` for static, container, python and next: the cells of each kind's
 `WEEKLY_CELLS`, the points where its path differs from node's. Everything else only by name:
 `test/e2e-matrix.sh --ops deploy,rollback --actions kill --points '(^|/)(pre|post):'` (a kill at
