@@ -455,8 +455,8 @@ printf 'build/Release/node_fake.node\telf-glibc238\n' | mktgz dl/fakesqlite-v2.0
 newcase glibc1
 pi_pkg "$S/node_modules/fakesqlite" "${BIN//HOST/$(dlurl)}" 2.0.0
 TANDO_NATIVE_TEST_ALLOW_LOCAL=1 runfix
-check "10e glibc unknown (agent info does not report it yet): a clear warning, deploy goes on (rc=$RC)" \
-  eval '[ "$RC" = 0 ] && has "needs glibc 2.38 or newer: tando cannot read the server.s glibc yet"'
+check "10e glibc unknown (a server whose tando does not report it): a clear warning, deploy goes on (rc=$RC)" \
+  eval '[ "$RC" = 0 ] && has "needs glibc 2.38 or newer: the server.s tando does not report its glibc"'
 newcase glibc2; pi_pkg "$S/node_modules/fakesqlite" "${BIN//HOST/$(dlurl)}" 2.0.0
 RUN_GLIBC=2.36 TANDO_NATIVE_TEST_ALLOW_LOCAL=1 runfix
 check "10f glibc 2.36 on the server: refused, naming both (rc=$RC)" \
