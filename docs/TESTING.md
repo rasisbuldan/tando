@@ -192,10 +192,7 @@ machine and, inside `save`, before and after every write of a state file (`pre:s
 `/run/tando-test/fault`; on a real server it costs one builtin test. Actions: kill (SIGKILL of the
 agent there), fail (that action fails, as on a full disk), reboot (the agent waits there, then
 `docker restart`), race (the agent waits there while a second client configures the app with
-the next version's tando.conf, then goes on), queue (the agent waits there holding the app's lock
-while a second client deploys the next version; once that one is queued, the first activation is
-killed: its recovery fails it, and the waiter must end live and verified with its own settings).
-A trace of the operation without a fault lists its
+the next version's tando.conf, then goes on)). A trace of the operation without a fault lists its
 points. After the fault,
 recovery runs as on a server (ExecStopPost, then what tando-watch's minute does) and `mx_inv`
 checks ten invariants and names the one that broke: one intended release serves; link, state and
@@ -214,8 +211,8 @@ none when the app is stopped (`--selftest` breaks it twice: a worker stopped beh
 a stray worker unit).
 
 `test/e2e-matrix-quick.sh` (full and quick tiers, about 8 minutes) runs `--cells`: one cell for
-each defect fixed in milestone 1, 2a and 2b (the list `CELLS` in the driver: two clients' settings, nothing of a deploy that does not go live reaching the live app, job units that could not be written, a queue that gave up, a site file that was not replaced, a rollback cut before its first state write, an upload lease left by a killed begin or activate,
-a deploy queued behind one that is killed), node; two cells of
+each defect fixed in milestone 1, 2a and 2b (the list `CELLS` in the driver: two clients' settings, nothing of a deploy that does not go live reaching the live app, job units that could not be written, a queue that gave up, a site file that was not replaced, a rollback cut before its first state write, an upload lease left by a killed begin or activate),
+node; two cells of
 the container recipe (the switch failure, a kill at its spawn) and two of a static site (a kill at
 Caddy's file site, after the link moved), and for the kind `worker` a kill in the middle of the
 workers' switch (`wk.start`) and a failed start of the old workers when a bad release goes back
