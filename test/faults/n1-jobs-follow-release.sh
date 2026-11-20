@@ -13,7 +13,9 @@ deploy $A 3 exit
 ok "the release with the job fails (rc=$DRC)" test "$DRC" != 0
 ok "no job timer after the failed release" notimer
 deploy $A 4 ok
-ok "the next release (verified) has the job timer" timer
+# (a poll: the timers are written when the activation ends, which may be just after the client
+# returned; seen 1 run in 3 under load)
+ok "the next release (verified) has the job timer" until_ 30 timer
 m0=$(srv "stat -c %Y /etc/systemd/system/tando-${A}_job-tick.service /etc/systemd/system/tando-${A}_job-tick.timer")
 sleep 1.1; deploy $A 5 ok
 ok "a deploy with the same job does not rewrite its units" test "$m0" = "$(srv "stat -c %Y /etc/systemd/system/tando-${A}_job-tick.service /etc/systemd/system/tando-${A}_job-tick.timer")"

@@ -565,6 +565,9 @@ func TestServeEndsOnEOFAndEnd(t *testing.T) {
 					}
 				}()
 				s.life.idle = time.Minute
+				// (the clock below jumps two minutes between two of those heartbeats: without this
+				// the 45 s heartbeat rule could win the race and the reason be "heartbeat")
+				s.life.hb = time.Hour
 			}
 			mu.Lock()
 			now = now.Add(2 * time.Minute)
