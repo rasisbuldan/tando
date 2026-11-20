@@ -48,6 +48,14 @@ func (c *Collector) DeployStatus(ctx context.Context, w io.Writer, name, id stri
 		a.state = loadKV(filepath.Join(a.dir, "state"))
 		P = loadKV(actFile)
 	}
+	// reserved but its activation unit is gone (activate cut off, the unit killed or the server
+	// restarted while it was queued): recover gives it up, so it is not "queued" for ever
+	if P.get("id") != id && a.state.get("status_"+id) == "" && c.Env.EUID == 0 &&
+		fsinfo.DirFollow(filepath.Join(a.dir, "releases", id)) && !c.activationAlive(ctx, name, id) {
+		c.recover(ctx, name)
+		a.state = loadKV(filepath.Join(a.dir, "state"))
+		P = loadKV(actFile)
+	}
 	S := a.state
 	s := newSink()
 	lnk := link(name, a.conf, H)
