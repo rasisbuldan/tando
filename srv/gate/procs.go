@@ -70,7 +70,7 @@ func (g *Gate) stopRx(app string) {
 	// the ticket first: a receiver whose unit systemd is still creating finds it gone and does
 	// not start (receive.go, ticket)
 	os.Remove(g.ticket(app))
-	p := rxPatterns(app) // (systemctl matches the patterns against the units it has loaded)
+	p := g.rxPatterns(app) // (systemctl matches the patterns against the units it has loaded)
 	g.quiet(30*time.Second, append([]string{"systemctl", "kill", "--signal=KILL", "--"}, p...)...)
 	g.quiet(30*time.Second, append([]string{"systemctl", "stop", "--"}, p...)...)
 	g.quiet(30*time.Second, append([]string{"systemctl", "reset-failed", "--"}, p...)...)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -186,6 +187,32 @@ func TestKeyModeArgv(t *testing.T) {
 	g.Caller.UID, g.Caller.EUID = 0, 0
 	if err := g.Key([]string{dashC, g.P.Gate + " key 0123456789ab"}); err == nil || err.Error() != "key mode never runs as root" {
 		t.Errorf("root: %v", err)
+	}
+}
+
+// An app named rx-alpha has the receivers' old fixed name tando-rx-alpha.service as its own
+// service: alpha's uploads neither wait for it nor stop it.
+func TestRxOldNameOfAnotherApp(t *testing.T) {
+	g, f := deployGate(t, "")
+	write(t, filepath.Join(g.appDir("rx-alpha"), "app.conf"), "recipe=node\n")
+	f.out = func(argv []string) ([]byte, error) {
+		if argv[1] != "list-units" {
+			return nil, nil
+		}
+		return []byte("tando-rx-alpha.service loaded active running x\n"), nil
+	}
+	if err := g.rxFree("alpha"); err != nil {
+		t.Fatalf("app rx-alpha's service counted as an upload of alpha: %v", err)
+	}
+	f.calls = nil
+	g.stopRx("alpha")
+	for _, c := range f.calls {
+		if slices.Contains(c, "tando-rx-alpha.service") {
+			t.Fatalf("stopRx names app rx-alpha's service: %v", c)
+		}
+	}
+	if len(f.calls) == 0 || !slices.Contains(f.calls[0], "tando-rx-alpha@*.service") {
+		t.Fatalf("stopRx: %v", f.calls)
 	}
 }
 

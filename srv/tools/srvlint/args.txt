@@ -14,12 +14,12 @@ gate/procs.go evictUser	ipcrm	ipcrm <one of -m|-q|-s> <valid:f[1]>
 gate/procs.go evictUser	ipcs	ipcs <one of -m|-q|-s>
 gate/procs.go evictUser	loginctl	loginctl terminate-user -- tando-d-<..>
 gate/procs.go evictUser	systemctl	systemctl stop -- user@<..>
-gate/procs.go stopRx	systemctl	systemctl kill --signal=KILL -- <after--:rxPatterns(app)>
-gate/procs.go stopRx	systemctl	systemctl reset-failed -- <after--:rxPatterns(app)>
-gate/procs.go stopRx	systemctl	systemctl stop -- <after--:rxPatterns(app)>
+gate/procs.go stopRx	systemctl	systemctl kill --signal=KILL -- <after--:g.rxPatterns(app)>
+gate/procs.go stopRx	systemctl	systemctl reset-failed -- <after--:g.rxPatterns(app)>
+gate/procs.go stopRx	systemctl	systemctl stop -- <after--:g.rxPatterns(app)>
 gate/receive.go receiveConfined	systemd-run	systemd-run --quiet --pipe --wait --collect --unit=<..> -p User=<..> -p Group=<..> -p UMask=0022 -p Environment=LC_ALL=C -p ProtectSystem=strict -p ReadWritePaths=<..> -p ProtectHome=yes -p PrivateTmp=yes -p PrivateDevices=yes -p PrivateNetwork=yes -p IPAddressDeny=any -p InaccessiblePaths=-/run/user -p NoNewPrivileges=yes -p RestrictSUIDSGID=yes -p CapabilityBoundingSet= -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p ProtectProc=invisible -p RestrictNamespaces=yes -p LockPersonality=yes -p MemoryMax=512M -p TasksMax=16 -p LimitFSIZE=<..> -p RuntimeMaxSec=<..> -- tando-gate rx <after--:app> <after--:nonce> <after--:req.Rsync>
 gate/receive.go rxFree	systemctl	systemctl reset-failed -- <after--:n>
-gate/receive.go rxUnits	systemctl	systemctl list-units --all --plain --no-legend --full -- <after--:rxPatterns(app)...>
+gate/receive.go rxUnits	systemctl	systemctl list-units --all --plain --no-legend --full -- <after--:g.rxPatterns(app)...>
 gate/rootmode.go agent	tando-agent	tando-agent activate <valid:app> <valid:p.Token> <valid:p.Build> <valid:p.Upload>
 gate/rootmode.go agent	tando-agent	tando-agent begin <valid:app> <param who: callers pass constants or validated values>
 gate/rootmode.go agent	tando-agent	tando-agent end <valid:app> <valid:l.Token>

@@ -781,7 +781,7 @@ conf_set "$W/broke-2/tando.conf" app broke-2
 before=$(traces | wc -l | tr -d ' ')
 echo broke | "$R" destroy --purge > "$E/d-ok.out" 2>&1; rc=$?; cat "$E/d-ok.out" >&2
 check "19l destroy broke leaves broke-2 alone: its unit, job timer and link" \
-  eval 'srv "systemctl -q is-active tando-broke-2 && systemctl -q is-enabled tando-broke-2-job-tick.timer" &&
+  eval 'srv "systemctl -q is-active tando-broke-2 && systemctl -q is-enabled tando-broke-2_job-tick.timer" &&
         get broke-2 | grep -q "hello v"'
 (cd "$W/broke-2" && echo broke-2 | "$R" destroy --purge > /dev/null 2>&1)
 traces > "$E/left"

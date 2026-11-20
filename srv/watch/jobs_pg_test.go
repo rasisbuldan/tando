@@ -47,8 +47,8 @@ func TestJobNeverRanOrRunningIsNoFailure(t *testing.T) {
 		t.Errorf("%d sent, state %q; want nothing", n, f.st("hog.job.nightly.st"))
 	}
 	// the job units are asked in the run's one systemctl call
-	if c := f.called("systemctl show"); len(c) == 0 || !slices.Contains(c[len(c)-1], "tando-hog-job-nightly.service") ||
-		!slices.Contains(c[len(c)-1], "tando-hog-job-other.service") {
+	if c := f.called("systemctl show"); len(c) == 0 || !slices.Contains(c[len(c)-1], "tando-hog_job-nightly.service") ||
+		!slices.Contains(c[len(c)-1], "tando-hog_job-other.service") {
 		t.Errorf("job units not asked: %v", c)
 	}
 	f.reset()
@@ -110,6 +110,34 @@ func TestJobFailureFiresOncePerFailedRunAndResolvesOnSuccess(t *testing.T) {
 		if strings.HasPrefix(k, "hog.job.other.") {
 			t.Errorf("state for a job that never ran: %s", k)
 		}
+	}
+}
+
+// Apps alpha (job job-x) and alpha-job (job x): the units of the form before were the same,
+// tando-alpha-job-job-x... and tando-alpha-job-x was both alpha's job x and app alpha-job-x's
+// service. Each job's alert follows its own unit only.
+func TestJobUnitsOfSimilarAppsAreTheirOwn(t *testing.T) {
+	f := newFakeHost(t)
+	f.app("alpha", "job.job-x=daily | true", "job.x=daily | true")
+	f.app("alpha-job", "job.x=daily | true")
+	f.notifier("hook", "type=webhook\nurl=http://127.0.0.1:9/hook\n")
+	seen := map[string]bool{}
+	for _, u := range []string{jobUnit("alpha", "job-x"), jobUnit("alpha", "x"), jobUnit("alpha-job", "x"),
+		"tando-alpha.service", "tando-alpha-job.service", "tando-alpha-job-x.service"} {
+		if seen[u] {
+			t.Fatalf("two units named %s", u)
+		}
+		seen[u] = true
+	}
+	f.ticks(2)
+	f.jobRan("alpha-job", "x", "failed", "timeout", "2", "15", 60)
+	f.tick()
+	if f.st("alpha-job.job.x.st") != "firing" || f.st("alpha.job.x.st") != "" || f.st("alpha.job.job-x.st") != "" {
+		t.Fatalf("alpha-job's failed job x: alpha-job %q, alpha x %q, alpha job-x %q", f.st("alpha-job.job.x.st"),
+			f.st("alpha.job.x.st"), f.st("alpha.job.job-x.st"))
+	}
+	if d := f.st("alpha-job.job.x.det"); !strings.Contains(d, "killed by its timeout") {
+		t.Errorf("detail %q", d)
 	}
 }
 

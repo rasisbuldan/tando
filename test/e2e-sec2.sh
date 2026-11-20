@@ -65,4 +65,7 @@ check "N11 probe header root 600, site files root:caddy 640" \
 # (not $SRC: shell.sh uses SRC for the exit status of its commands)
 # lint: allow RL03 ROOT is this checkout
 . "$ROOT/test/sec2/sec3.sh"
+# L, J: the upload lease and the job units of similar app names (test/sec2/lease-jobs.sh)
+# lint: allow RL03 ROOT is this checkout
+. "$ROOT/test/sec2/lease-jobs.sh"
 t_done

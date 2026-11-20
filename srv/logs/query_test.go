@@ -82,7 +82,7 @@ func TestQuery(t *testing.T) {
 	}
 	es = append(es, entry(7, "tando-other.service", "not ours"), `not json`,
 		`{"__CURSOR":"s=a;i=8","__REALTIME_TIMESTAMP":"1794580008000000","MESSAGE":"Started x","PRIORITY":"6","_PID":"1","UNIT":"tando-filt.service"}`,
-		entry(9, "tando-filt-job-backup.service", "ERROR job \u001b failed"))
+		entry(9, "tando-filt_job-backup.service", "ERROR job \u001b failed"))
 	h.journal(es...)
 	o, err := h.query("n=3\nsince=@1794580000\nuntil=-60\ngrep=alpha\ntz=+0700\n")
 	if err != nil {
@@ -93,7 +93,7 @@ func TestQuery(t *testing.T) {
 		t.Fatalf("got\n%s", o)
 	}
 	jc := h.argvs("journalctl")[0]
-	for _, s := range []string{"--namespace=+tando-filt", "-u tando-filt.service -u systemd-journald@tando-filt.service -u tando-filt-job-backup.service ",
+	for _, s := range []string{"--namespace=+tando-filt", "-u tando-filt.service -u systemd-journald@tando-filt.service -u tando-filt_job-backup.service ",
 		"--since=@1794580000", "--until=@1794589940", "--grep=alpha --case-sensitive=yes", " -r"} {
 		if !strings.Contains(jc+" ", s) {
 			t.Fatalf("%q not in %s", s, jc)
