@@ -1,0 +1,148 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Hash Join",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Join Type": "Left",
+      "Startup Cost": 34.68,
+      "Total Cost": 77.53,
+      "Plan Rows": 115,
+      "Plan Width": 608,
+      "Output": ["(current_database())::information_schema.sql_identifier", "(nc.nspname)::information_schema.sql_identifier", "(c.relname)::information_schema.sql_identifier", "(CASE WHEN (nc.oid = pg_my_temp_schema()) THEN 'LOCAL TEMPORARY'::text WHEN (c.relkind = ANY ('{r,p}'::\"char\"[])) THEN 'BASE TABLE'::text WHEN (c.relkind = 'v'::\"char\") THEN 'VIEW'::text WHEN (c.relkind = 'f'::\"char\") THEN 'FOREIGN'::text ELSE NULL::text END)::information_schema.character_data", "NULL::information_schema.sql_identifier", "NULL::information_schema.character_data", "(CASE WHEN (t.typname IS NOT NULL) THEN current_database() ELSE NULL::name END)::information_schema.sql_identifier", "(nt.nspname)::information_schema.sql_identifier", "(t.typname)::information_schema.sql_identifier", "(CASE WHEN ((c.relkind = ANY ('{r,p}'::\"char\"[])) OR ((c.relkind = ANY ('{v,f}'::\"char\"[])) AND ((pg_relation_is_updatable((c.oid)::regclass, false) & 8) = 8))) THEN 'YES'::text ELSE 'NO'::text END)::information_schema.yes_or_no", "(CASE WHEN (t.typname IS NOT NULL) THEN 'YES'::text ELSE 'NO'::text END)::information_schema.yes_or_no", "NULL::information_schema.character_data"],
+      "Inner Unique": false,
+      "Hash Cond": "(c.reloftype = t.oid)",
+      "Plans": [
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Startup Cost": 1.09,
+          "Total Cost": 35.17,
+          "Plan Rows": 115,
+          "Plan Width": 141,
+          "Output": ["nc.nspname", "nc.oid", "c.relname", "c.relkind", "c.oid", "c.reloftype"],
+          "Inner Unique": true,
+          "Hash Cond": "(c.relnamespace = nc.oid)",
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Relation Name": "pg_class",
+              "Schema": "pg_catalog",
+              "Alias": "c",
+              "Startup Cost": 0.00,
+              "Total Cost": 33.26,
+              "Plan Rows": 153,
+              "Plan Width": 77,
+              "Output": ["c.oid", "c.relname", "c.relnamespace", "c.reltype", "c.reloftype", "c.relowner", "c.relam", "c.relfilenode", "c.reltablespace", "c.relpages", "c.reltuples", "c.relallvisible", "c.reltoastrelid", "c.relhasindex", "c.relisshared", "c.relpersistence", "c.relkind", "c.relnatts", "c.relchecks", "c.relhasrules", "c.relhastriggers", "c.relhassubclass", "c.relrowsecurity", "c.relforcerowsecurity", "c.relispopulated", "c.relreplident", "c.relispartition", "c.relrewrite", "c.relfrozenxid", "c.relminmxid", "c.relacl", "c.reloptions", "c.relpartbound"],
+              "Filter": "((c.relkind = ANY ('{r,v,f,p}'::\"char\"[])) AND (pg_has_role(c.relowner, 'USAGE'::text) OR has_table_privilege(c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'::text) OR has_any_column_privilege(c.oid, 'SELECT, INSERT, UPDATE, REFERENCES'::text)))"
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Startup Cost": 1.05,
+              "Total Cost": 1.05,
+              "Plan Rows": 3,
+              "Plan Width": 68,
+              "Output": ["nc.nspname", "nc.oid"],
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "pg_namespace",
+                  "Schema": "pg_catalog",
+                  "Alias": "nc",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 1.05,
+                  "Plan Rows": 3,
+                  "Plan Width": 68,
+                  "Output": ["nc.nspname", "nc.oid"],
+                  "Filter": "(NOT pg_is_other_temp_schema(nc.oid))"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "Node Type": "Hash",
+          "Parent Relationship": "Inner",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 25.75,
+          "Total Cost": 25.75,
+          "Plan Rows": 627,
+          "Plan Width": 132,
+          "Output": ["t.typname", "t.oid", "nt.nspname"],
+          "Plans": [
+            {
+              "Node Type": "Hash Join",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Join Type": "Inner",
+              "Startup Cost": 1.09,
+              "Total Cost": 25.75,
+              "Plan Rows": 627,
+              "Plan Width": 132,
+              "Output": ["t.typname", "t.oid", "nt.nspname"],
+              "Inner Unique": true,
+              "Hash Cond": "(t.typnamespace = nt.oid)",
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Relation Name": "pg_type",
+                  "Schema": "pg_catalog",
+                  "Alias": "t",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 21.27,
+                  "Plan Rows": 627,
+                  "Plan Width": 72,
+                  "Output": ["t.oid", "t.typname", "t.typnamespace", "t.typowner", "t.typlen", "t.typbyval", "t.typtype", "t.typcategory", "t.typispreferred", "t.typisdefined", "t.typdelim", "t.typrelid", "t.typsubscript", "t.typelem", "t.typarray", "t.typinput", "t.typoutput", "t.typreceive", "t.typsend", "t.typmodin", "t.typmodout", "t.typanalyze", "t.typalign", "t.typstorage", "t.typnotnull", "t.typbasetype", "t.typtypmod", "t.typndims", "t.typcollation", "t.typdefaultbin", "t.typdefault", "t.typacl"]
+                },
+                {
+                  "Node Type": "Hash",
+                  "Parent Relationship": "Inner",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1.04,
+                  "Total Cost": 1.04,
+                  "Plan Rows": 4,
+                  "Plan Width": 68,
+                  "Output": ["nt.nspname", "nt.oid"],
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "pg_namespace",
+                      "Schema": "pg_catalog",
+                      "Alias": "nt",
+                      "Startup Cost": 0.00,
+                      "Total Cost": 1.04,
+                      "Plan Rows": 4,
+                      "Plan Width": 68,
+                      "Output": ["nt.nspname", "nt.oid"]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

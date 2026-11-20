@@ -148,7 +148,7 @@ const KIND = { r: 'T', p: 'P', v: 'V', m: 'M', f: 'F' }, KINDW = { r: 'table', p
 let tables = [];
 async function loadTables() {
   try {
-    const j = await api('/api/tables' + ($('sys').checked ? '?system=1' : ''));
+    const j = await api('/api/tables');
     tables = j.tables;
     $('sidenote').textContent = j.more ? 'Only the first 2,000 are listed: filter to find others.' : tables.length ? '' : 'No tables yet.';
     drawTree();
@@ -365,7 +365,6 @@ function wire() {
   $('s-rows').onclick = () => sub('rows'); $('s-struct').onclick = () => sub('struct');
   $('b-insql').onclick = openInSQL;
   $('filter').oninput = drawTree;
-  $('sys').onchange = loadTables;
   $('psize').onchange = () => { if (S.t) { S.t.offset = 0; loadRows(); } };
   const page = d => () => { const t = S.t; if (!t) return; const n = +$('psize').value; t.offset = d === 0 ? 0 : Math.max(0, t.offset + d * n); loadRows(); };
   $('pg-first').onclick = page(0); $('pg-prev').onclick = page(-1); $('pg-next').onclick = page(1);

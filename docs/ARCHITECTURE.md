@@ -25,7 +25,7 @@ calls: work happens in commands, transient units and one per-minute timer.
 | `srv/` (Go): `cmd/tando-logs`, `logs/` | journald namespaces, Caddy request logs, log queries and stats, the per-minute error and request scan, audit file (docs/LOGGING.md, srv/README.md) |
 | `srv/` (Go): `cmd/tando-status`, `status/` | the agent's read-only verbs `status`, `deploy-status`, `releases`, `history`, `busy`, `info`: tando-agent execs it for them (srv/README.md) |
 | `srv/` (Go): `cmd/tando-offsite`, `offsite/` | offsite backups: S3 API by hand (SigV4), streaming AES-256-GCM encryption, upload after each backup (the agent starts `push` in a unit of its own), `tando-offsite.timer` retries and prunes, fetch for restore, disaster recovery verbs (docs/BACKUP.md, srv/README.md) |
-| `srv/` (Go): `cmd/tando-studio`, `studio/` | `tando db studio`: a read-only web UI and SQL editor for an app's database, on a unix socket forwarded by the admin's ssh; its own PostgreSQL wire client (`studio/pgwire`), statement splitter (`studio/sqlsplit`) and page (`studio/ui`); `lib/studio.sh` is its client (docs/COMMANDS.md, srv/README.md) |
+| `srv/` (Go): `cmd/tando-studio`, `studio/` | `tando db studio`: a read-only web UI and SQL editor for an app's database, on a unix socket forwarded by the admin's ssh; its own PostgreSQL wire client (`studio/pgwire`), statement splitter and name checks (`studio/sqlsplit`), the scope guard's plan check (`studio/scope.go`) and page (`studio/ui`); `lib/studio.sh` is its client (docs/COMMANDS.md, srv/README.md) |
 | `lib/offsite.sh`, `lib/cmd-restore.sh` | `tando backup offsite ...` and `tando restore [--from-host]`, their client side |
 | `srv/` (Go): `cmd/tando-host`, `hostcare/` | host care: the server itself (updates, security, health), its summary for the alerts, care mode (unattended-upgrades, the safe reboot); `lib/hostcare.sh` is its client (docs/HOSTCARE.md) |
 | `scripts/build-server.sh` | builds the Go server programs into `dist/server/linux-{amd64,arm64}/` |
@@ -268,7 +268,49 @@ switches in, with no site rewrite and no reload.
     `pg_terminate_backend` (the role may signal the app's own sessions), `pg_logical_emit_message`,
     and the ones that run SQL given as text (`query_to_xml` and kin, `ts_stat`, `ts_rewrite`); so is
     any `U&"..."` identifier (its escapes could spell those names). The studio's
-    own clock cancels a statement at 30 s and closes the connection 5 s later. One connection, at
+    own clock cancels a statement at 30 s and closes the connection 5 s later.
+  - **Scope: the app's own tables only.** The table list, structure and rows never list or serve
+    a relation of pg_catalog, information_schema, pg_toast or any pg_* schema (the studio's own
+    catalog queries filter them; a request for one is the 404 of an unknown table; no request
+    field carries SQL into those queries); a view's rows get the editor's plan check (2) first,
+    so a view of the app's over a system table is refused there too (403). In the editor, a guard refuses (42501, "the studio only
+    reads this app's own tables: pg_catalog.pg_authid is a system table") any statement that
+    reaches a system relation, in two halves, both before the statement runs:
+    (1) on the text of every statement of the batch, before anything runs (srv/studio/sqlsplit
+    scope.go): an identifier, quoted or not, any case, that is a system schema
+    (`pg_catalog`, `information_schema`, `pg_toast`, `pg_temp`) or starts with `pg_` (except a
+    short list that reads no catalog: `pg_sleep*`, `pg_typeof`, `pg_size_pretty`,
+    `pg_size_bytes`, `pg_column_size`, `pg_input_*`, the advisory locks); the reg* lookups
+    (`regclass` and its kin as a cast in any form, an array or a function, `to_regclass` ...);
+    catalog-reading functions without the prefix (`current_setting`, `has_*_privilege`,
+    `obj_description`, `col_description`, `shobj_description`, `format_type`,
+    `current_schemas`, `row_security_active`, `acldefault`, `aclexplode`, `txid_*`, `lo_*`,
+    `table_to_xml` / `schema_to_xml` / `database_to_xml` and kin, which take a table by name);
+    and `SHOW ALL`; `SET standard_conforming_strings` / `backslash_quote` are refused, so the
+    server reads a string where this scan does. (2) In the request's read-only transaction, right before each SELECT, WITH,
+    VALUES or TABLE (and the statement a user's EXPLAIN [ANALYZE] explains), the server is asked
+    for its plan, `EXPLAIN (VERBOSE, FORMAT JSON)` (never ANALYZE; nothing runs), after the
+    batch's own SETs: PostgreSQL resolves the names as it will run them (search_path, quoting,
+    views expanded to their base relations, CTEs, subplans), so every relation with its schema
+    must be outside the system schemas, every function scan and every expression the plan
+    prints (a view's included) must pass the name check of (1). Fail closed: no plan, a plan
+    over 1 MB, an unknown node type or a relation without a schema refuse the statement.
+    EXPLAIN's own error (a syntax error, an unknown table) is the statement's, at its position.
+    SHOW one setting, SET and RESET have no plan; their text gets (1). Allowed on purpose, as
+    they read no table: `version()`, `current_user`, `current_database()`, `SHOW <setting>`
+    (what the role may see of it), a text search configuration by name (`to_tsvector('english',
+    ...)`, a lookup PostgreSQL does for the function); `current_setting()` is refused with the
+    catalog functions (`SHOW` is the one way to a setting). Another app's tables are
+    in another database: a name with a database (`other.public.t`) is PostgreSQL's 0A000, and
+    the role cannot connect to any other (below). Cost: one planning round trip per statement,
+    about 0.3 ms (bench/RESULTS.md "db studio"). Why not a parser library: the real one
+    (libpg_query) needs cgo and several MB, against srv/'s no-dependency static builds; the
+    server's own plan resolves names exactly as it will run them, which no tokenizer can.
+    It is a guard that keeps the studio to the app's tables, not a sandbox: a function the app
+    itself defined that reads a catalog in its body is called by its own name and is not seen
+    (as for set_config); a type or domain of the app's over regclass the same; it refuses by
+    name, so an app column or table called `pg_x` or `lo_x` is refused too (`tando db psql`
+    reads them). One connection, at
     most 2 studios per host. CI deploy keys cannot start it: the client, the gate's grammar, their
     sudo rule and sshd's DisableForwarding refuse, and the agent refuses SUDO_USER tando-d-*.
   - **One app.** The app comes only from the root agent verb's argument; the credential file
@@ -277,7 +319,8 @@ switches in, with no site rewrite and no reload.
     every deploy and host setup, so an older or hand-made grant is undone); no extension that
     reaches another database (dblink, postgres_fdw) is installed, and the role cannot create one.
     Residual: PostgreSQL's shared catalogs show any role the names of databases and roles and that
-    other sessions exist; queries and client addresses of other roles stay hidden.
+    other sessions exist (queries and client addresses of other roles stay hidden); the studio's
+    scope guard refuses those catalogs, `tando db psql` as the role still reads them.
   - **Resources** (bench/RESULTS.md "db studio"). The bound comes from settings, never from the
     OOM killer: a backend killed by it makes the postmaster restart every session of every app.
     The settings bound sorts and hashes only: one value a query builds (`repeat`, `string_agg`)
@@ -295,9 +338,10 @@ switches in, with no site rewrite and no reload.
     waits for a studio query at most that long. Nothing is held between requests (ROLLBACK, no
     snapshot, `idle_in_transaction_session_timeout=60s` behind it); the connection closes after 60 s
     unused and is opened only when the role keeps 2 connections free for the app.
-  - **Residual** (documented in docs/COMMANDS.md): what the app's role can read, 30 s of CPU and
+  - **Residual** (documented in docs/COMMANDS.md): the app's tables the role can read, 30 s of CPU and
     I/O per statement, an ACCESS SHARE lock for that long, advisory locks for the request,
-    pg_cancel_backend of the app's own sessions. The SQL history is in the browser's
+    whatever a function the app defined does inside (set_config, pg_cancel_backend, a catalog
+    read). The SQL history is in the browser's
     localStorage, AES-GCM encrypted with a key derived from the role's password (HMAC), so a later
     local page on the same port cannot read it.
 

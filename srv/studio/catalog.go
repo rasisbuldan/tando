@@ -14,20 +14,23 @@ import (
 // Table browsing. The SQL the studio builds names only what the catalog returned: a request's
 // schema, table and column are first looked up with bind parameters (unknown: 404) and only the
 // names found are put into SQL, quoted by quoteIdent. Values (LIMIT, OFFSET) are parameters.
+// The system schemas (pg_catalog, information_schema, pg_toast, any pg_*) are neither listed
+// nor found: a request for one of their tables gets the 404 of an unknown table (the scope
+// guard, scope.go). These queries are the studio's own; no request field carries SQL into them.
 
 const tablesSQL = `SELECT n.nspname, c.relname, c.relkind::text, c.reltuples::int8,
   CASE WHEN c.relkind IN ('r','m','p') THEN pg_total_relation_size(c.oid) ELSE 0 END,
   coalesce(obj_description(c.oid, 'pg_class'), ''), has_table_privilege(c.oid, 'SELECT')
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind IN ('r','p','v','m','f') AND n.nspname !~ '^pg_(toast|temp_|toast_temp_)'
-  AND ($1::bool OR n.nspname NOT IN ('pg_catalog', 'information_schema'))
+WHERE c.relkind IN ('r','p','v','m','f') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
 ORDER BY n.nspname <> 'public', n.nspname, c.relname LIMIT 2001`
 
 const relSQL = `SELECT c.oid::int8, c.relkind::text, c.reltuples::int8,
   CASE WHEN c.relkind IN ('r','m','p') THEN pg_total_relation_size(c.oid) ELSE 0 END,
   coalesce(obj_description(c.oid, 'pg_class'), '')
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','v','m','f')`
+WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','v','m','f')
+  AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'`
 
 // colsSQL: pk is the column's place in the primary key, 1-based (indkey, an int2vector, counts from 0)
 const colsSQL = `SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.atttypid::int8, t.typlen::int,
@@ -120,13 +123,9 @@ func (x *txn) lookup(schema, name string) (*relation, error) {
 
 func (s *Studio) tables(w http.ResponseWriter, r *http.Request) {
 	var rows [][]*string
-	sys := "false"
-	if r.URL.Query().Get("system") == "1" {
-		sys = "true"
-	}
 	err := s.ro(r.Context(), "", s.browseLimit(), func(x *txn) error {
 		var err error
-		rows, err = x.query(7, tablesSQL, sys)
+		rows, err = x.query(7, tablesSQL)
 		return err
 	})
 	if err != nil {
@@ -277,6 +276,15 @@ func (s *Studio) rows(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		if rel.Kind == "v" { // a view of the app's may read a system table: the editor's plan check
+			perr, err := x.planCheck("TABLE " + quoteIdent(rel.Schema) + "." + quoteIdent(rel.Name))
+			if err != nil {
+				return err
+			}
+			if perr != nil {
+				return scopeRefusal(perr.Message)
+			}
+		}
 		sql, params, bytea, err := buildRows(rel, q)
 		if err != nil {
 			return err
@@ -310,6 +318,11 @@ func (s *Studio) rows(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if !started {
+		var sr scopeRefusal
+		if errors.As(err, &sr) {
+			apiErr(w, 403, "scope", string(sr))
+			return
+		}
 		if err != nil && strings.Contains(err.Error(), "out of range") {
 			apiErr(w, 400, "bad_request", err.Error())
 			return
