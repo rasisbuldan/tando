@@ -395,8 +395,8 @@ mx_wait_settled() { T_UNTIL_STEP=0.5 t_until "${1:-240}" mx_settled; }
 # what tando-watch's minute does (srv/watch/pretick.go recoverNeeded): recover-all when an app is
 # in a phase other than idle with its lock free, its link and state disagree, it is down, a
 # release is reserved by an activation whose unit has no process, a rollback cut before its first
-# state write (activation says kind=rollback result=running, lock free) or an operation's end was not
-# written out (outcome)
+# state write (activation says kind=rollback result=running, lock free), an operation's end was not
+# written out (outcome), or an upload lease without a release id has lost its holder (lease_orphaned)
 mx_watcher() {
   dxs "D=/opt/tando/apps/$A; g() { sed -n \"s/^\$1=//p\" \$D/state | head -1; }
     ph=\$(g phase); cur=\$(g current); l=\$(readlink \$D/current); l=\${l##*/}
@@ -407,6 +407,12 @@ mx_watcher() {
     elif [ -n \"\$(g down)\" ] && [ -z \"\$(g stopped)\" ] && [ -n \"\$cur\" ]; then need=1
     elif grep -qx kind=rollback \$D/activation 2>/dev/null && grep -qx result=running \$D/activation && flock -n \$D/lock true; then need=1
     elif [ -n \"\$(g outcome)\" ] && [ \"\$(g outcome)\" != \"\$(g outcome_done)\" ]; then need=1
+    elif [ -f \$D/upload ] && ! grep -q '^id=' \$D/upload && grep -q '^token=.' \$D/upload && {
+         { b=\$(sed -n 's/^boot=//p' \$D/upload); [ -n \"\$b\" ] &&
+           [ \"\$b\" != \"\$(cat /proc/sys/kernel/random/boot_id)\" ]; } ||
+         { h=\$(sed -n 's/^holder=//p' \$D/upload); [ -n \"\$h\" ] &&
+           [ \"\$(awk '{ sub(/.*\\) /, \"\"); print \$20 }' /proc/\${h%% *}/stat 2> /dev/null)\" != \"\${h#* }\" ]; }; }
+    then need=1
     else
       for r in \$D/releases/*; do i=\${r##*/}; [ -d \"\$r\" ] && [ -z \"\$(g status_\$i)\" ] && [ \"\$i\" != \"\$cur\" ] || continue
         grep -qs 'populated 1' /sys/fs/cgroup/system.slice/tando-$A-act-\$i.service/cgroup.events || need=1; done

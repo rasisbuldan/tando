@@ -178,16 +178,7 @@ mx_reset() {
 # prints as SKIP "KNOWN ..." (it is counted, listed at the end, and the baseline is rebuilt); one that
 # passes FAILS ("remove it from MX_KNOWN"); one that breaks anything else FAILS as any cell does.
 # Lines: <glob of kind/op/verb/point#n/action> <broken invariants, e.g. " 6"> <reason>
-# lease with no activation id: an agent killed after it took the upload lease and before it wrote the
-# release id into it leaves the lease; it is stale after 30 s (5 s for the same user@machine
-# asking again: the next begin takes it over) and `tando unlock` clears it; recovery does not.
-MX_KNOWN="
-*/begin/post:upload#1/kill| 6|a lease without a release id outlives a kill of begin or activate; the next deploy takes it over (30 s, 5 s for the same machine), tando unlock clears it, recovery does not
-*/activate/rec/enter#1/kill| 6|same: a kill at the start of activate, before the lease gets its release id
-*/activate/rec/enter#1/reboot| 6|same, with a reboot
-*/activate/act.mkdir#1/kill| 6|same: a kill before the release id is reserved
-*/activate/act.mkdir#1/reboot| 6|same, with a reboot
-*/activate/pre:upload#1/kill| 6|same: a kill before the lease is written with its release id"
+MX_KNOWN=""
 # mx_known <id>: the reason when the cell is listed, with its invariants in MX_KINV
 mx_known() {
   local l g
@@ -391,7 +382,9 @@ k deploy run-activation imp.assets 1 kill before
 k deploy run-activation imp.assets2 1 kill before
 e deploy run-activation run.queue 1 fail before
 j stop stop caddy.mv 1 fail after
-k rollback rollback post:activation 1 kill before"
+k rollback rollback post:activation 1 kill before
+l deploy begin post:upload 1 kill before
+l deploy activate act.mkdir 1 kill before"
 # k: a rollback killed after its progress file (result=running) and before its first state write: tando-watch's recover-all
 # (srv/watch/pretick.go rollbackCut) ends it; nothing did before
 # the other kinds: one or two cells where their path differs from node's (a static site has no

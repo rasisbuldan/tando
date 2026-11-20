@@ -6,6 +6,12 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: a deploy whose server side was killed (or whose server restarted) after it took the
+  upload lease and before the release got its id left the lease behind: the next deploy waited
+  30 s for it or needed `tando unlock`. The client now gives the lease back when begin or activate
+  fails, and recovery (tando-watch's minute, the boot, a queued deploy) clears a lease with no
+  release id whose holder is gone: one taken before the server restarted, or whose activate no
+  longer runs. A lease an upload is still writing into is never cleared.
 - Added: fingerprinted assets of the last releases stay reachable. After a deploy, a browser still
   holding a page of the old release (or a CDN, or a slow client mid-load) asked for the old
   release's hashed files (`/_next/static/<build>/...`, `/assets/index-<hash>.js`) and got a 404,
