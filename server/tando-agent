@@ -4407,20 +4407,27 @@ cmd_db_psql() { # interactive, over ssh -t; runs as the app user with the app's 
 # client's heartbeat through ssh (EOF or 45 s of silence end it); stdout the "ready" and
 # "stopped" lines. At most STUDIO_MAX at once on the host, counted and started under a lock. The
 # last arguments are for test/e2e-studio.sh (shorter heartbeat, idle time and statement limit).
-# units_unload unit...: wait (3 s at most) until these units, ended, are no longer loaded. systemd
+# units_unload unit...: wait until these units have ended (60 s at most) and are no longer loaded
+# (3 s more); systemd
 # unloads a unit nothing references on its next garbage collection pass; seen on systemd 259: a
 # transient unit stopped while a `systemd-run --wait` held a reference stayed "loaded inactive
 # dead" with no reference, job, process or cgroup (its transient file kept), through a stop,
 # until a daemon-reload, whose pass unloaded it at once. So: a reload when one is still there.
 units_unload() {
   local i
+  # first until they have ended (60 s at most: a studio whose laptop went away ends within its
+  # heartbeat; a unit still running then is not ours to unload), then 3 s for systemd to unload
+  # them by itself, then one reload
+  for ((i = 0; i < 300; i++)); do
+    [[ -z $(systemctl list-units --all --plain --no-legend --state=active,activating,deactivating,reloading "$@" 2> /dev/null) ]] && break
+    sleep 0.2
+  done
+  ((i < 300)) || return 0
   for ((i = 0; i < 15; i++)); do
     [[ -z $(systemctl list-units --all --plain --no-legend "$@" 2> /dev/null) ]] && return 0
     sleep 0.2
   done
-  # (only units that have ended: a running one is not ours to unload)
-  [[ -n $(systemctl list-units --all --plain --no-legend --state=active,activating,deactivating,reloading "$@" 2> /dev/null) ]] ||
-    systemctl daemon-reload
+  systemctl daemon-reload
 }
 STUDIO=$R/bin/tando-studio STUDIO_RUN=/run/tando-studio STUDIO_CRED=/run/tando/studio STUDIO_MAX=2
 studio_units() { systemctl list-units --plain --no-legend --state=active,activating 'tando-*-studio-*' 2> /dev/null | awk '{ print $1 }'; }
@@ -6026,10 +6033,16 @@ esac
 # next write to the closed connection would otherwise kill the agent half-way (an app stopped
 # for a restore and never started again, a new env never checked). Their output then goes
 # nowhere. (A handler, not an ignored signal: the commands they run keep the default.)
+# db-studio too: its session ends when the laptop goes (Ctrl-C drops the ssh session), and the
+# agent must live to see its unit end and unload it (units_unload) and remove its directories.
 case $verb in
-  configure|rollback|env-set|env-unset|start|stop|restart|destroy|backup-restore|domain-add|domain-rm)
+  configure|rollback|env-set|env-unset|start|stop|restart|destroy|backup-restore|domain-add|domain-rm|db-studio)
     trap 'exec > /dev/null 2>&1' PIPE HUP;;
 esac
+# (and a Ctrl-C at the laptop, which ssh may pass on as SIGINT, does not end the studio's relay
+# before it has unloaded the session's unit: the studio ends by itself when the laptop is gone.
+# A handler, not an ignored signal, so systemd-run and the studio keep the default)
+[[ $verb == db-studio ]] && trap ':' INT
 case $verb in
   info) cmd_info;;
   setup) cmd_setup "$@";;
