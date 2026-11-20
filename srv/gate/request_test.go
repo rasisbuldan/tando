@@ -100,6 +100,8 @@ func TestParseRequestRefuses(t *testing.T) {
 		// verbs of the admin
 		{"sudo -n " + tAgent + " configure alpha", "not allowed with a deploy key: configure"},
 		{tAgent + " env-ls alpha", "not allowed with a deploy key: env-ls"},
+		{tAgent + " env-log alpha", "not allowed with a deploy key: env-log"},
+		{tAgent + " env-log alpha 1", "not allowed with a deploy key: env-log"},
 		{tAgent + " rollback alpha 20260101-000000", "not allowed with a deploy key: rollback"},
 		{tAgent + " destroy alpha", "not allowed with a deploy key: destroy"},
 		{tAgent + " setup", "not allowed with a deploy key: setup"},

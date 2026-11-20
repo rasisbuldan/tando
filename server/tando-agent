@@ -110,7 +110,7 @@ now() { printf '%(%s)T' -1; }
 # refused when that fails, except the recovery verbs, which must run to bring the apps back.
 if [[ -e $R/bin/.install.pending ]]; then
   case ${1:-} in
-    status|deploy-status|releases|history|busy|info|jobs|domain-ls|domain-check|env-ls|logs|log-stats|\
+    status|deploy-status|releases|history|busy|info|jobs|domain-ls|domain-check|env-ls|env-log|logs|log-stats|\
     log-doctor|req-summary|req-tail|req-errors|audit-read|errors|doctor|"")
       [[ ${1:-} == doctor ]] ||
         echo "tando-agent: warning: an install on <host> was cut off between files, so some programs may be old and some new: tando host setup <host> finishes or undoes it" >&2;;
@@ -2411,6 +2411,8 @@ cmd_configure() {
     # values set with tando env set before the app existed (env_staged) become its env
     staged_lock
     if [[ -f $R/staged/$A/env && ! -L $R/staged/$A/env ]]; then
+      # (its changelog goes with it: the app's log starts with what was set before it existed)
+      [[ -f $R/staged/$A/env.log && ! -L $R/staged/$A/env.log ]] && install -m 600 -o root -g root "$R/staged/$A/env.log" "$D/env.log"
       cat "$R/staged/$A/env" > "$D/env" && rm -rf "${R:?}/staged/$A"
     fi
     : > "$D/history.tsv"
@@ -3091,7 +3093,7 @@ rec_idle() {
     "tando-$A-pre-*" "tando-$A-rel-*" "tando-$A-venv-*" "tando-$A-envcheck-*" 2> /dev/null | awk '{ print $1 }' |
     grep -E "^tando-$A-(pre|rel|venv|envcheck)-[0-9]")
   if ((${#units[@]})); then systemctl stop "${units[@]}" 2> /dev/null; systemctl reset-failed "${units[@]}" 2> /dev/null; fi
-  rm -f "$D/.env.check" "$D/env.prev" "$D/env.next" "$D/current.tmp" "$D/copy.err" "$D"/.env.?????? "$D"/jobs/*.tmp "$D"/start/*.tmp
+  rm -f "$D/.env.check" "$D/env.prev" "$D/env.next" "$D/env.entry" "$D/current.tmp" "$D/copy.err" "$D"/.env.?????? "$D"/.envlog.?????? "$D"/jobs/*.tmp "$D"/start/*.tmp
   for f in "$D"/state.tmp.* "$D"/app.conf.tmp.* "$D"/activation.tmp.*; do
     [[ -e $f && ! -d /proc/${f##*.} ]] && rm -f "$f"
   done
@@ -3750,8 +3752,10 @@ db_ensure() {
   fi
   pgsql -c "REVOKE ALL ON DATABASE $r FROM PUBLIC" -c "GRANT CONNECT, TEMPORARY ON DATABASE $r TO $r" ||
     die "could not restrict database $r"
+  local had=${E[DATABASE_URL]+x}
   E[DATABASE_URL]="postgres://$r:$pw@127.0.0.1:5432/$r"
   env_save E || die "could not write the env file of $A (disk full?)"
+  if [[ -n $had ]]; then ENV_NOTE="" envlog_put database "" DATABASE_URL ""; else ENV_NOTE="" envlog_put database DATABASE_URL "" ""; fi
   db_limits "$r" || die "could not set the limits of role $r"
 }
 # db_limit role: one app holds at most DB_CONN_LIMIT of the server's connections (max_connections
@@ -4348,6 +4352,95 @@ mask_url() { # postgres://role:secret@host/db -> postgres://role:****@host/db
   echo "${pre%:*}:****@$post"
 }
 
+# ---- the env changelog: $D/env.log (root 600), one line per change of the app's env, newest last,
+# the newest 200 kept. NAMES only (added, changed, removed): never a value, a length or a hash.
+# Fields (tab-separated, "-" for none): epoch, who, verb (set unset import database), note,
+# added, changed, removed (key names, comma-separated, sorted). ----
+ENVLOG_MAX=200
+# envlog_args args after the app (env-set/env-unset): note64=<base64 of the note>, via=import
+envlog_args() {
+  local a n
+  ENV_NOTE="" ENV_VIA=""
+  for a; do
+    case $a in
+      note64=*)
+        n=$(printf '%s' "${a#note64=}" | base64 -d 2> /dev/null; echo x) || die "bad note"
+        n=${n%x}
+        no_ctrl "$n" || die "the note has control characters (one line of plain text)"
+        ((${#n} <= 200)) || die "the note is over 200 characters"
+        san_v "$n"; ENV_NOTE=$SAN;;
+      via=import) ENV_VIA=import;;
+      *) die "env: unknown argument";;
+    esac
+  done
+}
+# envlog_diff old new verb: ENV_LINE, the entry for the change from old to new (key names only)
+envlog_diff() {
+  local -n _o=$1 _n=$2
+  local k add="" chg="" rem="" v=$3
+  [[ $v == set && ${ENV_VIA:-} == import ]] && v=import
+  for k in "${!_n[@]}"; do
+    if [[ -z ${_o[$k]+x} ]]; then add+="$k"$'\n'; elif [[ ${_o[$k]} != "${_n[$k]}" ]]; then chg+="$k"$'\n'; fi
+  done
+  for k in "${!_o[@]}"; do [[ -n ${_n[$k]+x} ]] || rem+="$k"$'\n'; done
+  envlog_line "$v" "$add" "$chg" "$rem"
+}
+# envlog_line verb added changed removed (newline-separated names): ENV_LINE
+envlog_line() {
+  local who=${SUDO_USER:-${TANDO_AUDIT_WHO:-root}} f out="" l
+  san_v "$who"; who=${SAN:0:32}
+  for f in "$2" "$3" "$4"; do
+    l=$(printf '%s' "$f" | sort | paste -sd, -)
+    out+=$'\t'${l:--}
+  done
+  ENV_LINE="$(now)"$'\t'"${who:--}"$'\t'"$1"$'\t'"${ENV_NOTE:--}$out"
+}
+# envlog_put verb added changed removed: one entry at once (tando's own changes; names, space-separated)
+envlog_put() { envlog_line "$1" "${2// /$'\n'}" "${3// /$'\n'}" "${4// /$'\n'}"; envlog_append <<< "$ENV_LINE"; }
+# envlog_append: the entry on stdin added to the log, the newest 200 kept; written whole to a temp
+# file, flushed, renamed (the way env_save writes). A log that cannot be written never fails the
+# change itself: it warns.
+envlog_append() {
+  local f=$D/env.log tmp
+  tmp=$(mktemp "$D/.envlog.XXXXXX") && chmod 600 "$tmp" &&
+    { { [[ ! -f $f || -L $f ]] || tail -n $((ENVLOG_MAX - 1)) "$f"; cat; } > "$tmp" && sync "$tmp" && mv -f "$tmp" "$f"; } && return 0
+  [[ -n ${tmp:-} ]] && rm -f "$tmp"
+  echo "tando-agent: warning: could not write the env changelog of $A (disk full?)" >&2
+  return 0
+}
+# envlog_commit: the entry of a change that stayed (env.entry, written beside env.next) goes into the log
+envlog_commit() {
+  [[ -f $D/env.entry ]] || return 0
+  envlog_append < "$D/env.entry"
+  rm -f "$D/env.entry"
+}
+# env-log <app> [n]: the changelog, newest first, as rows
+#   envlog <n> <epoch> <who> <verb> <note> <added> <changed> <removed>   (n: 1 is the newest)
+# A change without a note gets a generated one ("set 2 keys", "removed 1 key"). Names only.
+cmd_env_log() {
+  need_root
+  local f n=${2:-}
+  valid_app "${1:-}" || die "invalid app name"
+  [[ -z $n || $n =~ ^[1-9][0-9]{0,3}$ ]] || die "env log: the entry number is a positive number"
+  if [[ -d $R/apps/$1 ]]; then f=$R/apps/$1/env.log
+  elif [[ -d $R/staged/$1 ]]; then f=$R/staged/$1/env.log
+  else die "no such app: $1"; fi
+  [[ -f $f && ! -L $f ]] || { echo count=0; return 0; }
+  tac "$f" | awk -F '\t' -v want="$n" '
+    function cnt(s,   a) { return s == "-" ? 0 : split(s, a, ",") }
+    function keys(c) { return c " " (c == 1 ? "key" : "keys") }
+    NF == 7 && (want == "" || NR == want) {
+      note = $4
+      if (note == "-") {
+        if ($3 == "unset") note = "removed " keys(cnt($7))
+        else if ($3 == "database") note = "database set up"
+        else note = ($3 == "import" ? "imported " : "set ") keys(cnt($5) + cnt($6))
+      }
+      printf "envlog\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", NR, $1, $2, $3, note, $5, $6, $7
+    }
+    END { }'
+}
+
 # env set|unset|ls <app>: set reads KEY=VALUE lines, unset reads KEY lines, from stdin.
 # Output: changed=0|1, restarted=0|1 and, when not restarted, why=<nothing-deployed|stopped|static>.
 # For an app that does not exist yet the values are staged ($R/staged/<app>/env, root 600; staged=1)
@@ -4356,6 +4449,7 @@ cmd_env() {
   need_root
   local op=$1 line k
   declare -A E
+  envlog_args "${@:3}"
   if valid_app "${2:-}" && [[ ! -e $R/apps/$2 ]] && [[ $op != ls || -f $R/staged/$2/env ]]; then
     staged_lock
     # (looked at again under the lock: a first configure may have created the app meanwhile)
@@ -4373,9 +4467,11 @@ cmd_env() {
     for k in "${!E[@]}"; do [[ -n ${OLD[$k]+x} && ${OLD[$k]} == "${E[$k]}" ]] || { same=0; break; }; done
     ((same)) && { echo changed=0; echo healthy=1; return 0; }
   fi
+  envlog_diff OLD E "$op"   # (names only: ENV_LINE)
   # nothing runs on the env now (static, nothing deployed, stopped): it is only saved
   if ! has_unit || [[ -z ${S[current]:-} || -n ${S[stopped]:-} ]]; then
     { fp env.save && env_save E; } || die "could not write the env file (disk full?); nothing changed"
+    envlog_append <<< "$ENV_LINE"
     echo changed=1; echo restarted=0
     if ! has_unit; then echo why=static; elif [[ -z ${S[current]:-} ]]; then echo why=nothing-deployed; else echo why=stopped; fi
     echo healthy=1; return
@@ -4386,7 +4482,7 @@ cmd_env() {
   # the change is recorded first (phase env): a crash from here on ends in recover, which cleans
   # up a pre-flight cut short, or finishes the change once the new env is written (env.next)
   st phase env env_revert "$was_up" || die "could not save the state (disk full?); nothing changed"
-  env_gone() { rm -f "$D/.env.check" "$D/env.prev" "$D/env.next"; st phase idle env_revert ""; die "$1"; }
+  env_gone() { rm -f "$D/.env.check" "$D/env.prev" "$D/env.next" "$D/env.entry"; st phase idle env_revert ""; die "$1"; }
   # a running app is first started with the new env beside the live one (on the pre-flight port,
   # like a deploy): an env it does not start with is refused before anything restarts
   if [[ ${C[recipe]:-node} != container ]] && systemctl -q is-active "tando-$A"; then
@@ -4403,6 +4499,8 @@ cmd_env() {
   # the change (the new env in place, restart, check, the old one back if it breaks the app)
   { fp env.save && env_save OLD "$D/env.prev" && env_save E "$D/env.next"; } ||
     env_gone "could not write the env file (disk full?); nothing changed"
+  # (the entry last: a crash before it loses the entry, never writes one for a change not made)
+  printf '%s\n' "$ENV_LINE" > "$D/env.entry" && chmod 600 "$D/env.entry"
   fp env.saved
   echo changed=1
   echo restarted=1
@@ -4427,7 +4525,7 @@ env_finish() {
   [[ -f $D/env.next ]] && mv -f "$D/env.next" "$D/env"
   # (a restart that failed leaves the old process answering: its answer says nothing of the env)
   if restart_app && fp env.verify && via_caddy "$(app_unit)"; then
-    rm -f "$D/env.prev"; st phase idle env_revert ""; return 0
+    envlog_commit; rm -f "$D/env.prev"; st phase idle env_revert ""; return 0
   fi
   ENV_WHY=${PROBE_WHY:-the app could not be restarted (${WC_WHY:-systemctl restart failed})}
   if [[ ${S[env_revert]:-} == 1 && -f $D/env.prev ]]; then
@@ -4436,6 +4534,8 @@ env_finish() {
       if via_caddy "$(app_unit)"; then ENV_RES=reverted; else ENV_RES=broken; fi
     else ENV_RES=norevert; fi
   else ENV_RES=kept; fi
+  # (a change that was put back is not a change of the env; one that stayed is logged)
+  case $ENV_RES in reverted|broken) rm -f "$D/env.entry";; *) envlog_commit;; esac
   rm -f "$D/env.prev"
   st phase idle env_revert ""
 }
@@ -4467,13 +4567,16 @@ staged_lock() {
 }
 env_staged() {
   [[ -f $R/host.conf ]] || die "host not set up (tando host setup)"
+  local k
   A=$2 D=$R/staged/$2 AU=root
   local -A C=()   # (no database yet: DATABASE_URL may be staged; tando's own value wins later)
   declare -A E=()
   [[ -f $D/env ]] && env_load E
   [[ $1 == ls ]] || install -d -m 700 -o root -g root "$R/staged" "$D"
+  declare -A OLD=(); for k in "${!E[@]}"; do OLD[$k]=${E[$k]}; done
   env_edit "$1" || return 0
-  if ((${#E[@]})); then env_save E; chmod 600 "$D/env"; else rm -rf "${D:?}"; fi
+  envlog_diff OLD E "$1"
+  if ((${#E[@]})); then env_save E; chmod 600 "$D/env"; envlog_append <<< "$ENV_LINE"; else rm -rf "${D:?}"; fi
   echo changed=1; echo staged=1; echo restarted=0; echo why=not-created; echo healthy=1
 }
 
@@ -4887,6 +4990,7 @@ case $verb in
   env-set) cmd_env set "$@";;
   env-unset) cmd_env unset "$@";;
   env-ls) cmd_env ls "$@";;
+  env-log) cmd_env_log "$@";;
   start|stop|restart) cmd_svc "$verb" "$@";;
   logs|log-stats|log-doctor|req-summary|req-tail|req-errors|audit-read|errors)
     if [[ $verb == logs ]] && valid_app "${1:-}" &&

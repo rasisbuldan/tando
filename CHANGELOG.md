@@ -19,6 +19,16 @@ first, grouped by area.
   statement); no new dependency. Limits: a function the app defined that reads a catalog inside
   is not seen; an app column or table named `pg_...` is refused too (docs/COMMANDS.md).
 
+- Added: `tando env log` (an env changelog). Every `env set`, `env unset` and `env import` (and the
+  `DATABASE_URL` tando writes for `database = postgres`) adds one entry on the server: when, who
+  (the audit log's identity), the verb, an optional `--note "text"` (one line, 200 characters) and
+  three lists of key NAMES: added, changed, removed. Never a value, a length or a hash; a change
+  that alters nothing writes nothing; a change the app's health check put back is not logged. The
+  log is `env.log` in the app's directory (root 600, written whole and renamed like the env file,
+  the newest 200 kept, removed with the app). `tando env log` prints `[time] [note] >` per entry,
+  newest first (at a terminal you pick one and its page opens; piped it only prints), `env log 3`
+  opens entry 3, `--json` gives names only. Read with the admin's login like `env ls`; a CI deploy
+  key is refused (the gate lets a key run only deploy verbs, so the new verb needed no change).
 - Fixed: between an app's site being set up and its first release going live (a first `tando up`
   still running, or one that failed and left nothing live), a request to its address waited 15 s
   and got an empty 502 (and scanners that find a new certificate in the public logs filled the

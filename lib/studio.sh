@@ -87,10 +87,8 @@ studio_pick() {
       else printf '  %s%s%-26s no database%s\n' "$UI_DIM" "$( [ -n "$tty" ] && printf '    ' )" "$a" "$UI_NC"; fi
     done < "$TMPD/apps"; } >&2
   [ -n "$tty" ] || exit 2
-  printf 'Open which? [1-%s] ' "$n" >&2
-  IFS= read -r pick || pick=""
-  { is_num "$pick" && [ "$pick" -ge 1 ] && [ "$pick" -le $n ]; } || die "no app number $pick; nothing opened"
-  i=0; for a in $cands; do i=$((i + 1)); [ "$i" = "$pick" ] && APP=$a; done
+  pick_num "$n" app
+  i=0; for a in $cands; do i=$((i + 1)); [ "$i" = "$PICK" ] && APP=$a; done
   valid_app "$APP" || die "bad app name"
 }
 

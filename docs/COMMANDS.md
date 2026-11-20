@@ -135,8 +135,9 @@ Example: `tando top --read-only`
 
 ### env
 `tando env ls [app] [--show]` · `tando env set KEY=VALUE ...` · `tando env set KEY` · `tando env unset KEY ...` ·
-`tando env import [.env]`. Flags: `-a -H --show`. Subcommands: ls (default, 0-1: the app), set (1+), unset (1+),
-import (0-1). `ls` hides the values (`******** (N characters)`); `--show` prints them.
+`tando env import [.env]` · `tando env log [n]`; `--note "text"` on set, unset and import. Flags:
+`-a -H --show --note --json`. Subcommands: ls (default, 0-1: the app), set (1+), unset (1+),
+import (0-1), log (0-1). `ls` hides the values (`******** (N characters)`); `--show` prints them.
 Stored on the server (root, 640), never in the release. Before the first `tando up` the values are
 staged on the server and applied when the app is created ("staged for <app>"). After a change the
 app restarts once; a stopped app gets them at `tando start`, an app with nothing deployed at the
@@ -148,6 +149,24 @@ previous env is put back and the app restarted on it (exit 1). An app that was n
 keeps the new values (exit 1). `set`/`unset` restart the app once;
 `set KEY` alone reads the value without echo (or from stdin). tando sets `PORT`, `HOME`,
 `TANDO_DATA_DIR` (and `DATABASE_URL` with `database =`).
+
+`env log`: the env changelog, key names only. Every change adds one entry to
+`/opt/tando/apps/<app>/env.log` on the server (root 600, written whole and renamed like the env
+file; the newest 200 are kept; `tando destroy` removes it): time, who (as in the audit log), verb
+(`set`, `unset`, `import`, `database`), the note, and the names added, changed and removed. It never
+holds a value, a length or a hash of one. A change that alters nothing, and one the health check
+put back, write nothing. `--note "text"` is one line of at most 200 characters (control characters
+are refused); without it the list shows "set 2 keys" or "removed 1 key". `tando env log` prints one
+row per entry, newest first: `[2026-11-20 14:02] [the note] >` (UTC). At a terminal the rows are
+numbered, you give a number (Enter alone: the newest) and the entry's page opens, as `tando db
+studio` picks an app; piped, it only prints. `tando env log 3` opens entry 3 (1 is the newest, so
+the number changes as entries are added). `--json` prints the entries (names only). Whoever may
+`env ls` may read it (the admin's login); a CI deploy key is refused by the gate.
+```
+tando env log
+[2026-11-20 14:02] [removed 1 key] >
+[2026-11-19 09:30] [rotated the payment keys] >
+```
 Example: `tando env set STRIPE_KEY`
 
 ### jobs
