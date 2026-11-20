@@ -13,6 +13,7 @@ var Programs = []string{
 	"crontab",
 	"dpkg",
 	"du",
+	"getconf",
 	"getent",
 	"groupdel",
 	"ipcrm",

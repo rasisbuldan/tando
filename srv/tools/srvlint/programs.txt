@@ -36,6 +36,7 @@ logs	logger
 logs	systemctl
 offsite	systemctl
 status	caddy
+status	getconf
 status	node
 status	python3
 status	tando-agent
