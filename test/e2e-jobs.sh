@@ -7,7 +7,7 @@
 #   J4  the history: bounded, no output in it; failing jobs show in ls and status
 #   J5  spread and missed run: what the timer says
 #   J6  a job follows its release: code, env, a failed deploy, rollback, removal
-#   J7  a run still going on is not started twice (a real timer fires here)
+#   J7  a run still going on is not started twice, nor at once when it ends (a real timer fires here)
 #   J8  pause and resume: across a deploy and a restart of the host, no run made up on resume
 # Usage: test/e2e-jobs.sh   (server: TANDO_TEST_NAME, TANDO_TEST_SSH_PORT, TANDO_TEST_HTTP_PORT)
 # bash 3.2 compatible. Takes about 4 minutes.
@@ -135,8 +135,13 @@ check "J1c a job deployed from a cron schedule: its timer has the OnCalendar tex
 cat "$E/jobs0.out" >&2
 check "J3b tando jobs before any run: never, the next three runs by the server's clock and its zone" \
   eval 'grep -q "next runs, server time (" "$E/jobs0.out" && grep -Eq "^│   q  [0-9-]+ [0-9:]+, [0-9:]+, [0-9:]+" "$E/jobs0.out" &&
-        grep -q "^│ a  *yearly  *in\|^│ a  *yearly  *[0-9][0-9]-" "$E/jobs0.out" && grep -q "^│ a .* never " "$E/jobs0.out"'
+        grep -q "^│ a  *yearly  *in\|^│ a  *yearly  *\([0-9]\{4\}-\)\?[0-9][0-9]-" "$E/jobs0.out" && grep -q "^│ a .* never " "$E/jobs0.out"'
 check "J3c the server's zone is named (the time zone of every schedule)" grep -Eq 'server time \((UTC|[A-Z]{3,4})' "$E/jobs0.out"
+check "J3c2 one word for the zone: GMT in the header as in the NEXT column, never UTC beside it" \
+  eval 'grep -q "server time (GMT)" "$E/jobs0.out" && ! grep -q UTC "$E/jobs0.out"'
+ny=$(($(date -u +%Y) + 1))
+check "J3b2 a next run in another year shows its year (a yearly job: $ny-01-01), in the table and in the next runs" \
+  eval 'grep -q "^│ a  *yearly  *$ny-01-01 00:00 GMT" "$E/jobs0.out" && grep -q "^│   a  $ny-01-01 00:00, $((ny + 1))-01-01 00:00" "$E/jobs0.out"'
 
 # runs: a three times, z twice, f, flip, slow, hog
 for i in 1 2 3; do J jobs run a > "$E/run-a$i.out" 2>&1; done
@@ -229,22 +234,35 @@ check "J6f rollback to v1 (rc=$rc): the older release's jobs and code are back (
 
 # ---- J7. a job still running is not started twice; a real timer fires ---------------------------------------
 marker two
+# (long has no history yet: v2's runs of a job of that name are not this one's. A run of v2's that
+# was still going on at the rollback finishes first, and writes its line)
+t_until 15 eval '! srv "test -e /etc/systemd/system/tando-jb_job-long.service"'
+srv "sudo rm -f $AD/jobhist/long $AD/jobhist/long.*"
 conf 'job.show = yearly | echo new-$(cat marker.txt)-${JOBENV:-none}' \
-  'job.long = *:*:0/4 | d=$TANDO_DATA_DIR; if [ -e $d/busy4 ]; then echo overlap >> $d/bad4; fi; touch $d/busy4; echo s >> $d/starts4; sleep 7; rm -f $d/busy4' \
-  'job.pz = *:*:0/10 | echo pz' 'job_spread = 0'
+  'job.long = *:*:0/4 | d=$TANDO_DATA_DIR; if [ -e $d/busy4 ]; then echo overlap >> $d/bad4; fi; touch $d/busy4; date +%s.%N >> $d/starts4; sleep 5; date +%s.%N >> $d/ends4; rm -f $d/busy4' \
+  'job.pz = *:*:0/10 | echo pz' 'job.rm = yearly | sleep 45; echo done >> $TANDO_DATA_DIR/rmdone' 'job_spread = 0'
 up v4; rc=$?
-check "J7a deploy v4 with a job every 4 s that takes 7 s (rc=$rc)" t_eq "$rc" 0
+check "J7a deploy v4 with a job every 4 s that takes 5 s (rc=$rc)" t_eq "$rc" 0
 t_until 20 srv "sudo test -s $AD/shared/data/starts4"
 t0=$SECONDS
+J jobs > "$E/jobs7.out" 2>&1; cat "$E/jobs7.out" >&2
 check "J7b the timer started it by itself (no run by hand): a run is going on and tando jobs says running" \
-  eval 'J jobs 2>&1 | grep "^│ long " | grep -q "running"'
+  eval 'grep "^│ long " "$E/jobs7.out" | grep -q "running"'
+check "J7b2 before its first run has ended: LAST never, RESULT running (not ok)" \
+  eval 'grep "^│ long " "$E/jobs7.out" | grep -q " never  *● running" && ! grep "^│ long " "$E/jobs7.out" | grep -q "● ok"'
 sleep 22   # (a wait that proves something did not happen: no second copy over the next five timer times)
 starts4=$(srv "sudo cat $AD/shared/data/starts4 | wc -l")
-span=$((SECONDS - t0)); most=$((span / 7 + 1))
-check "J7c in $span s the timer fired every 4 s, the job takes 7 s: it started $starts4 times (at most $most one after the other, 2 at least), never two at once" \
-  eval '[ "$starts4" -ge 2 ] && [ "$starts4" -le "$most" ] && ! srv "sudo test -e $AD/shared/data/bad4"'
-check "J7d the runs are in the history with their duration (7 s)" \
-  eval 'J jobs 2>&1 | grep "^│ long " | grep -Eq "● ok +[0-9]+ ?s|7\.[0-9]s"'
+# the shortest time from the end of a run to the start of the next: a time of the timer that passed
+# during a run is skipped, so the next run waits for the next time (about 3 s here), never 0 s
+gap=$(srv "sudo cat $AD/shared/data/starts4; echo; sudo cat $AD/shared/data/ends4" |
+  awk 'NF == 0 { e = 1; next } !e { s[n++] = $1; next } { f[m++] = $1 }
+       END { g = 99; for (i = 0; i + 1 < n && i < m; i++) if (s[i + 1] - f[i] < g) g = s[i + 1] - f[i]; printf "%.1f", g }')
+# (t0 is taken once the first start was seen, up to a few seconds after it: those count too)
+span=$((SECONDS - t0)); most=$(((span + 4) / 8 + 1))
+check "J7c in $span s the timer fired every 4 s, the job takes 5 s: it started $starts4 times (at most $most, at its times, 2 at least), never two at once, never at once after a run (at least ${gap} s between)" \
+  eval '[ "$starts4" -ge 2 ] && [ "$starts4" -le "$most" ] && ! srv "sudo test -e $AD/shared/data/bad4" && awk -v g="$gap" "BEGIN { exit !(g >= 1) }"'
+check "J7d the runs are in the history with their duration (5 s)" \
+  eval 'J jobs 2>&1 | grep "^│ long " | grep -Eq "● ok +[0-9]+ ?s|5\.[0-9]s"'
 
 # ---- J8. pause and resume ----------------------------------------------------------------------------------------
 J jobs pause pz > "$E/pause.out" 2>&1; rc=$?
@@ -277,9 +295,24 @@ if [ "${TANDO_TEST_OWNED:-0}" = 1 ]; then
     eval '[ "$(srv "systemctl is-enabled tando-jb_job-pz.timer" 2>&1)" = disabled ] && ! srv "systemctl -q is-active tando-jb_job-pz.timer" &&
           J jobs 2>&1 | grep "^│ pz " | grep -q paused'
 else skip "J8g host restart: $T_NAME is not ours to restart"; fi
-# removal: a job taken out of tando.conf loses its timer and its pause
+# removal: a job taken out of tando.conf loses its timer and its pause; a run of it going on finishes
+srv "sudo systemctl start --no-block tando-jb_job-rm.service"
+t_until 10 eval '[ "$(srv "systemctl show -P ActiveState tando-jb_job-rm.service")" = activating ]'
 conf 'job.show = yearly | true'
 up v6
+# (the job units follow the release once it is verified, after its short soak)
+t_until 20 eval '! have rm'
+rmst=$(srv "systemctl show -P ActiveState tando-jb_job-rm.service; ls /etc/systemd/system | grep -c tando-jb_job-rm.timer" | tr '\n' ' ')
+check "J6h a job removed while a run of it goes on: its timer goes with the release, the run goes on (state, timers: $rmst)" \
+  eval '[ "$rmst" = "activating 0 " ]'
+t_until 90 eval 'srv "sudo test -e $AD/shared/data/rmdone && ! test -e /etc/systemd/system/tando-jb_job-rm.service"'
+t_until 20 eval '[ -z "$(srv "systemctl list-units --all --no-legend tando-jb_job-rm.service")" ]'
+check "J6i that run finished (not killed) and is in the history (ok); then its unit went: no file, not listed, not failed" \
+  eval 'srv "sudo test -e $AD/shared/data/rmdone" && srv "sudo tail -1 $AD/jobhist/rm" | grep -q "	success	" &&
+        ! srv "test -e /etc/systemd/system/tando-jb_job-rm.service" &&
+        [ -z "$(srv "systemctl list-units --all --no-legend tando-jb_job-rm.service; systemctl --failed --no-legend | grep tando-jb_job")" ]'
+# (a run of long going on at the deploy keeps its unit file until it ends: at most 5 s)
+t_until 15 eval '! srv "ls /etc/systemd/system/ | grep -q tando-jb_job-long"'
 check "J6g jobs removed from tando.conf: their units and timers are gone, the pause with them" \
   eval '! have long && ! have pz && ! srv "ls /etc/systemd/system/ | grep -q tando-jb_job-long" && ! srv "sudo test -e $AD/jobpaused" &&
         [ "$(J jobs 2>&1 | grep -c "^│ \\(long\\|pz\\) ")" = 0 ] && J jobs 2>&1 | grep -q "^│ show "'

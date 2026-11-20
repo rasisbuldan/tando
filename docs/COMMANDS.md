@@ -218,7 +218,11 @@ machine's.
 
 How runs behave.
 - A job still running when its next time comes is not started a second time: systemd starts a
-  oneshot unit only once at a time, and the time that was missed is simply not run (`e2e-jobs` J8).
+  oneshot unit only once at a time, and the time that was missed is simply not run, not even when
+  that run ends (the job's start condition skips a time that passed during its last run; it needs
+  systemd 250 or later, as on Ubuntu 24.04; `e2e-jobs` J7).
+- A job removed from tando.conf (or gone with a rollback) loses its timer at once; a run of it still
+  going on finishes within its timeout, then its unit is removed.
 - A run the server missed because it was off or down is made up once when it is back
   (`job_missed = run`, the default: systemd's `Persistent=`); `job_missed = skip` waits for the
   next time. A deploy does not make up a run, and neither does `tando jobs resume`.

@@ -834,7 +834,18 @@ write_caddy() {
       # serves about.html) and the project's 404.html as the page of a missing file; a single-page
       # app (spa=true) gets its index.html for every path that is not a file (its router's routes)
       echo "	root * $D/current"
-      if [[ ${C[spa]:-} == true ]]; then echo "	try_files {path} {path}.html /index.html"
+      if [[ ${C[spa]:-} == true && -n $mounts ]]; then
+        # (try_files is a rewrite: it runs before the assets handle. A path under an assets prefix
+        # is left alone, so an older release's file is the shared one and a missing one is a 404,
+        # never index.html: a browser must not get HTML for a missing script)
+        echo "	@tandospa {"
+        echo "		not path$mounts"
+        echo "		file {"
+        echo "			try_files {path} {path}.html /index.html"
+        echo "		}"
+        echo "	}"
+        echo "	rewrite @tandospa {http.matchers.file.relative}"
+      elif [[ ${C[spa]:-} == true ]]; then echo "	try_files {path} {path}.html /index.html"
       else echo "	try_files {path} {path}.html"; fi
       echo "	file_server"
       echo "	handle_errors {"
@@ -2631,7 +2642,7 @@ cmd_configure() {
       job_spread) [[ $v =~ ^[0-9]{1,4}$ ]] && ((v <= 3600)) || die "bad job_spread: $v (seconds, 0 to 3600)";;
       job_missed) [[ $v == run || $v == skip ]] || die "bad job_missed: $v (run or skip)";;
       job.*.timeout|job.*.spread|job.*.missed|job.*.cron) x=${k#job.}; x=${x%.*}
-             [[ $x =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "bad job: $k"
+             [[ $x =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "bad job name in $k: $x (lower case letters, digits and dashes, starting with a letter, at most 21 characters)"
              case ${k##*.} in
                timeout) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] && ((v <= 86400)) || die "bad $k: $v (seconds, 1 to 86400)";;
                spread) [[ $v =~ ^[0-9]{1,4}$ ]] && ((v <= 3600)) || die "bad $k: $v (seconds, 0 to 3600)";;
@@ -2639,7 +2650,8 @@ cmd_configure() {
                cron) [[ $v =~ ^[-0-9A-Za-z@*/,\ ]{1,100}$ ]] || die "bad $k";;   # (what was written: the client translated it)
              esac
              jobs+=("$k");;
-      job.*) [[ ${k#job.} =~ ^[a-z][a-z0-9-]{0,20}$ && $v == *'|'* ]] || die "bad job: $k"
+      job.*) [[ ${k#job.} =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "bad job name: ${k#job.} (lower case letters, digits and dashes, starting with a letter, at most 21 characters)"
+             [[ $v == *'|'* ]] || die "bad job: $k (a schedule, |, then the command)"
              systemd-analyze calendar "$(trim "${v%%|*}")" &> /dev/null || die "bad schedule for job ${k#job.}: $(trim "${v%%|*}") (a cron schedule like */15 * * * * or a systemd one like daily or Mon..Fri 09:00: tando help jobs)"
              jobs+=("$k");;
       # workers (workers_follow): a command each, its memory and the time it gets to stop
@@ -5538,6 +5550,9 @@ job_names() {
 # timers of app foo-job (sync_jobs of foo deleted them). Units of that form are this app's only by
 # their runner line (old_job_owner), and sync_jobs replaces them with the new ones.
 job_unit() { echo "tando-${A}_job-$1"; }   # name -> unit name without .service/.timer
+# job_busy unit: a run of the job is going on (a oneshot is "activating" while it runs, and
+# "deactivating" while its job-end hook runs: is-active says neither)
+job_busy() { case $(systemctl show -P ActiveState "$1" 2> /dev/null) in activ*|deactivating|reloading) return 0;; esac; return 1; }
 JOB_SPREAD=15      # seconds a job's start is spread over (RandomizedDelaySec), unless job_spread says otherwise
 JOB_TIMEOUT=3600   # seconds a job may run unless job_timeout or job.<name>.timeout says otherwise
 # old_job_owner unit: the app a unit of the form before belongs to, from the line its service file
@@ -5582,6 +5597,9 @@ sync_jobs() {
              # the run's start and end are recorded by the agent as root (a hook that fails changes
              # nothing: "-"; "+": outside the job's sandbox): the history and the log of the run
              printf 'ExecStartPre=-+%s job-begin %s %s\nExecStopPost=-+%s job-end %s %s\n' "$AGENT" "$A" "$n" "$AGENT" "$A" "$n"
+             # a time of the timer that passed while a run was still going on is skipped, not run
+             # at once when that run ends (job-due: systemd would start the job right away)
+             printf 'ExecCondition=+%s job-due %s %s\n' "$AGENT" "$A" "$n"
              props - job
              echo "# end"
            } > "$f.service.new" && [[ $(tail -1 "$f.service.new") == "# end" ]] &&
@@ -5619,8 +5637,21 @@ sync_jobs() {
     b=${f##*/}; b=${b%.timer}; n=${b#tando-"$A"_job-}
     [[ $want == *" $n "* ]] && continue
     systemctl disable -q --now "$b.timer"
-    rm -f "$f" "${f%.timer}.service"; changed=1
+    rm -f "$f"; changed=1
+    # a run still going on finishes within its own timeout (a data job is never cut off half-way):
+    # its unit file stays until it ends, then its job-end hook removes it (job_gone). Removed
+    # now, systemd would end the run after 90 s and keep a "not-found failed" unit
+    if job_busy "$b.service"; then
+      echo "tando-agent: job $n of $A is no longer in tando.conf; its run in progress finishes first" >&2
+    else rm -f "${f%.timer}.service"; systemctl reset-failed "$b.service" 2> /dev/null; fi
     [[ $paused == *" $n "* ]] && job_unpause "$n"   # (added again later, a job is not paused)
+  done
+  # the unit of a removed job whose last run has ended since (its job-end hook did not get to it)
+  for f in /etc/systemd/system/tando-"$A"_job-*.service; do
+    [[ -f $f && ! -f ${f%.service}.timer ]] || continue
+    b=${f##*/}; b=${b%.service}
+    job_busy "$b.service" && continue
+    rm -f "$f"; systemctl reset-failed "$b.service" 2> /dev/null; changed=1
   done
   ((changed)) && systemctl daemon-reload
   # the timers not yet enabled and running, in one call (200 jobs: one systemctl, not 200)
@@ -5683,8 +5714,13 @@ cmd_job_end() {
   need_root; app "$1"
   local n=${2:-} f t0="" cur="" t1 res=${SERVICE_RESULT:-} st=${EXIT_STATUS:-} lines
   [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ ]] || return 0
+  # a time skipped by job-due is no run: nothing in the history
+  [[ $res == exec-condition ]] && return 0
   job_hist_dir || return 0
   f=$D/jobhist/$n; t1=$(ds)
+  echo "$t1" > "$f.end"   # (when this run ended, in tenths of a second: job-due)
+  # a job removed from tando.conf while this run went on: its unit goes once the run has ended
+  [[ -f /etc/systemd/system/$(job_unit "$n").timer ]] || job_gone "$n"
   [[ -f $f.run ]] && { { read -r t0; read -r cur; } < "$f.run"; }
   [[ $t0 =~ ^[0-9]+$ ]] || t0=$t1
   [[ $res =~ ^[a-z-]{1,20}$ ]] || res=unknown
@@ -5695,6 +5731,56 @@ cmd_job_end() {
   # (at most 50 runs: cut back to 50 when it has 70, so that most runs only append)
   lines=$(wc -l < "$f")
   if ((lines > 70)); then tail -n 50 "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"; fi
+  return 0
+}
+
+# job_gone name: the unit of a job removed from tando.conf, once its last run has ended. Called by
+# that run's own job-end (ExecStopPost: the unit is still deactivating then), so the removal waits
+# in a unit of its own (job-gone) for the run's unit to be inactive or failed.
+job_gone() {
+  systemd-run --quiet --no-block --collect --unit="tando-${A}_jobgone-$1" "$AGENT" job-gone "$A" "$1" > /dev/null 2>&1 ||
+    echo "tando-agent: the unit of removed job $1 stays until the next deploy removes it" >&2
+}
+cmd_job_gone() {
+  need_root; app "$1"
+  local n=${2:-} u i
+  [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ ]] || return 0
+  u=$(job_unit "$n")
+  [[ -f /etc/systemd/system/$u.timer ]] && return 0   # (added again since)
+  for ((i = 0; i < 600; i++)); do   # (at most a minute: ExecStopPost ends within its own timeout)
+    case $(systemctl show -P ActiveState "$u.service") in inactive|failed) break;; esac
+    sleep 0.1
+  done
+  lock 60
+  [[ -f /etc/systemd/system/$u.timer ]] && return 0
+  rm -f "/etc/systemd/system/$u.service" "$D/jobhist/$n.end"
+  systemctl daemon-reload
+  systemctl reset-failed "$u.service" 2> /dev/null
+  return 0
+}
+# job-due <app> <name>: the job's ExecCondition (as root). A timer whose time passed while the
+# job's previous run was still going on starts the job again as soon as that run ends (systemd
+# counts the next time from the last one it fired at). That time is skipped (COMMANDS.md: the time
+# that was missed is not run): the job starts only when a time of its schedule came after the end
+# of its last run. A run by hand (job-run: $D/jobhist/<name>.now) always starts; so does every run
+# when the end of the last one or the next time is not known (an older systemd: no --base-time).
+cmd_job_due() {
+  need_root; app "$1"
+  local n=${2:-} cal e nx now
+  [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ ]] || return 0
+  [[ -f $D/jobhist/$n.now ]] && { rm -f "$D/jobhist/$n.now"; return 0; }
+  read -r e 2> /dev/null < "$D/jobhist/$n.end" || return 0
+  [[ $e =~ ^[0-9]{10,12}$ ]] || return 0
+  cal=$(sed -n 's/^OnCalendar=//p' "/etc/systemd/system/$(job_unit "$n").timer" 2> /dev/null)
+  [[ -n $cal ]] || return 0
+  # (the time in UTC: "(in UTC): ..." when the server's zone is another, else "Next elapse: ...")
+  nx=$(systemd-analyze calendar --base-time="@$((e / 10))" "$cal" 2> /dev/null |
+    sed -n 's/^ *\(Next elapse\|(in UTC)\): [A-Za-z]* \([0-9-]* [0-9:]*\) UTC$/\2/p' | tail -1)
+  [[ -n $nx ]] && nx=$(date -u -d "$nx" +%s 2> /dev/null) || return 0
+  now=$(ds)
+  # (silent: a line here would be in the journal between two runs, read as the last run's output.
+  # systemd notes the skip itself. Exit 1: ExecCondition skips; the dispatcher would make a return 0)
+  ((now >= nx * 10)) || exit 1
   return 0
 }
 
@@ -5724,7 +5810,10 @@ cmd_job_run() {
   # (a run by hand is never refused by systemd's start limit, which a job that failed a few times
   # in a row would have reached: the old result would then be printed as this run's)
   systemctl reset-failed "$u" 2> /dev/null
+  # (a run by hand is not a time of the schedule: job-due lets it start)
+  job_hist_dir && : > "$D/jobhist/$n.now"
   systemctl start "$u" < /dev/null 2> /dev/null   # (a oneshot: returns when the job has ended)
+  rm -f "$D/jobhist/$n.now"   # (a run the timer had started was waited for: no flag is left)
   inv=$(systemctl show -P InvocationID "$u")
   if [[ $inv =~ ^[0-9a-f]{32}$ ]]; then
     # journald may still be writing the last lines: wait up to 3 s for them
@@ -5768,6 +5857,11 @@ cmd_jobs() {
       [[ $hs =~ ^[0-9]+$ ]] && last=$hs
     fi
     state=on; [[ ${U[ActiveState]:-} == activ* ]] && state=running
+    # no run has ended yet (no history; systemd says success until one has): never, or running
+    # while the first goes on. A time job-due skipped is no run either (its unit has no start)
+    if [[ -z $hs && ( $state == running || ! ${U[ExecMainStartTimestamp]#@} =~ ^[1-9][0-9]*$ ) ]]; then
+      last="" hc=""; if [[ $state == running ]]; then hr=running; else hr=""; fi
+    fi
     [[ $paused == *" $n "* ]] && state=paused
     nx=("" "" "")
     if [[ ${2:-} == full && $state != paused ]]; then
@@ -6130,7 +6224,7 @@ case $verb in
   shell-put) cmd_shell_put "$@";;
   busy) cmd_busy "$@";;
   job-run) cmd_job_run "$@";;
-  job-begin) cmd_job_begin "$@";; job-end) cmd_job_end "$@";; job-pause) cmd_job_pause "$@";; job-log) cmd_job_log "$@";;
+  job-begin) cmd_job_begin "$@";; job-end) cmd_job_end "$@";; job-due) cmd_job_due "$@";; job-gone) cmd_job_gone "$@";; job-pause) cmd_job_pause "$@";; job-log) cmd_job_log "$@";;
   host)   # host care (docs/HOSTCARE.md): the server itself, answered by tando-host (Go, srv/hostcare)
     need_root
     [[ -x $R/bin/tando-host ]] || die "host care is not installed on <host>: tando host setup <host> installs it"

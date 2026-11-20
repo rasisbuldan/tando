@@ -1012,6 +1012,22 @@ echo "x" > "$W/plain/assets/app.js"; echo "x" > "$W/plain/assets/logo-large.png"
 check "AS6 a directory whose names are not all hashed is not shared and gets no caching header" \
   eval '! ah plain /assets/app.js | grep -qi "^cache-control" && [ "$(get plain /assets/app.js)" = x ] &&
         [ -z "$(srv "sudo ls /opt/tando/apps/plain/assetlog 2> /dev/null")" ] && ! srv "sudo grep -q tandoassets /etc/caddy/tando/plain.caddy"'
+# a single-page app (spa = true): its router's fallback (index.html for a path that is no file) is a
+# rewrite, which Caddy runs before the assets handle: it must never answer under an assets prefix
+mkdir -p "$W/spa"; printf 'app = spa\nrecipe = static\nspa = true\n' > "$W/spa/tando.conf"
+cd "$W/spa" || exit 2
+site_release "$W/spa" 1
+# shellcheck disable=SC2034  # read in the eval of a check below
+SP1=$AS_H
+"$R" up > "$E/spa1.out" 2>&1; rc=$?
+site_release "$W/spa" 2; "$R" deploy > "$E/spa2.out" 2>&1; rc2=$?
+check "AS8 spa = true (rc=$rc/$rc2): an older release's hashed file answers with its own bytes as JavaScript, not index.html" \
+  eval '[ "$(curl -s "http://spa.localhost:$HP/assets/index-$SP1.js" | cksum)" = "$(cksum < "$E/ref/rel1.js")" ] &&
+        ah spa "/assets/index-$SP1.js" | grep -qi "^content-type: text/javascript"'
+check "AS8b spa = true: a hashed file that is in no release is a 404, never index.html" \
+  eval 'ah spa /assets/index-99999999.js | head -1 | grep -q " 404" && ! curl -s "http://spa.localhost:$HP/assets/index-99999999.js" | grep -q "<h1>release"'
+check "AS8c spa = true: a deep link of the router is still the live index.html" \
+  eval 'get spa /orders/42 | grep -q "<h1>release 2" && get spa / | grep -q "<h1>release 2"'
 # a node app: assets = <dir>, <url prefix>; its own Cache-Control stays
 mkdir -p "$W/skewn/public/build"; cd "$W/skewn" || exit 2
 cat > server.js <<'JS'
@@ -1065,7 +1081,7 @@ check "HL5 every file the new release shares with another is root's with mode 64
   eval '[ -z "$(srv "sudo find $RA/$hl4 ! -type d ! -type l -links +1 ! -path \"*/public/build/*\" \\( ! -user root -o ! \\( -perm 640 -o -perm 750 \\) \\) -print")" ]'
 cd "$W" || exit 2
 
-for a in skew plain skewn; do "$R" destroy "$a" --purge --yes > /dev/null 2>&1; done   # (section 20 counts the host's apps)
+for a in skew plain spa skewn; do "$R" destroy "$a" --purge --yes > /dev/null 2>&1; done   # (section 20 counts the host's apps)
 # 20. several hosts: the same container under two names plus one that does not answer
 "$R" host add test2 vmadmin@127.0.0.1 --port $SP --key "$ROOT/test/server/id_test" --insecure-test >&2  # the one insecure entry
 "$R" host add dead vmadmin@127.0.0.1 --port 2299 --key "$ROOT/test/server/id_test" --no-check >&2

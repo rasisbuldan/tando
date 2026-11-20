@@ -4,21 +4,25 @@
 TAB='	'
 
 # Times are GMT (UTC), like release ids: TIME (GMT) columns ("11-14 17:01", ui_utc); elsewhere a
-# time within a day reads as an age ("3m ago", "in 4m"), an older one as "11-12 17:42 GMT".
+# time within a day reads as an age ("3m ago", "in 4m"), an older one as "11-12 17:42 GMT" (with
+# its year, "2028-02-29 23:59 GMT", when that is not this year).
 # id_epoch turns a release id into a time.
 local_time() { date -r "$1" "$2" 2> /dev/null || date -d "@$1" "$2" 2> /dev/null || printf -- -; }
+ago_date() { # epoch -> "11-12 17:42 GMT", with the year when it is not NOW's
+  local y; ui_utc_v "$NOW"; y=$UI_YEAR; ui_utc_v "$1"; [ "$UI_YEAR" = "$y" ] || ui_utc_v "$1" y; printf '%s GMT' "$UI_RET"
+}
 ago() { # epoch -> "just now", "45s ago", "3m ago", "5h ago", else "11-12 17:42 GMT"
   ui_int "$1" || { printf -- '-'; return; }
   local d=$((NOW - $1))
   if [ $d -lt 0 ]; then d=$((-d))
     if [ $d -lt 60 ]; then printf 'in %ss' "$d"; elif [ $d -lt 3600 ]; then printf 'in %sm' $((d / 60))
-    elif [ $d -lt 86400 ]; then printf 'in %sh %sm' $((d / 3600)) $((d % 3600 / 60)); else ui_utc "$1"; printf ' GMT'; fi
+    elif [ $d -lt 86400 ]; then printf 'in %sh %sm' $((d / 3600)) $((d % 3600 / 60)); else ago_date "$1"; fi
     return
   fi
   if [ $d -lt 10 ]; then printf 'just now'; elif [ $d -lt 60 ]; then printf '%ss ago' "$d"
   elif [ $d -lt 3600 ]; then printf '%sm ago' $((d / 60))
   elif [ $d -lt 86400 ]; then printf '%sh %sm ago' $((d / 3600)) $((d % 3600 / 60))
-  else ui_utc "$1"; printf ' GMT'; fi
+  else ago_date "$1"; fi
 }
 when() { if ui_int "$1"; then ago "$1"; else printf -- '-'; fi; }
 id_epoch() { # release id (YYYYMMDD-HHMMSS, UTC) -> epoch, by the civil-from-days formula
@@ -518,7 +522,7 @@ job_result_word() {
   esac
 }
 # job_when_v "2026-11-20 14:00:00 UTC" -> JOB_WHEN "11-20 14:00" (the server's own clock); the
-# year too when it is not that of JOB_YEAR (set by the caller from the first time)
+# year too when it is not JOB_YEAR (set by the caller: this year)
 job_when_v() {
   local d=${1%% *} t=${1#* }
   t=${t%% *}; t=${t%:*}
@@ -585,7 +589,9 @@ cmd_jobs() {
         [ "$r" = jobx ] && [ "$tw" = "$n" ] && break
         st=on dur=- n1=- n2=- n3=-
       done < "$TMPD/st"
-      if [ "$last" = - ]; then lastw=never resw=-
+      # (no run has ended yet: never, and running while the first one goes on)
+      if [ "$res" = running ] || [ "$st" = running ] && [ "$last" = - ]; then lastw=never resw=$(ui_badge running running)
+      elif [ "$last" = - ]; then lastw=never resw=-
       else
         lastw=$(ago "$last")
         job_result_word "$res" "$code"
@@ -613,12 +619,14 @@ cmd_jobs() {
     while IFS=$TAB read -r r n st; do [ "$r" = zone ] && { zone=$n; zname=$st; }; done < "$TMPD/st"
     ui_box_line ""
     [ "$zname" = - ] && zname=""
+    # (the word every other time of tando says for this zone: GMT)
+    case $zone in UTC|GMT|UCT) zone=GMT; case $zname in UTC|Etc/UTC|Etc/GMT|GMT|UCT|Etc/UCT) zname="";; esac;; esac
     ui_box_line "next runs, server time (${zone:-?}${zname:+, $zname}):"
     while IFS=$TAB read -r r n st dur n1 n2 n3; do
       [ "$r" = jobx ] || continue
       [ "$st" = paused ] && { ui_box_line "  $n  paused (tando jobs resume $n)"; continue; }
       [ "$n1" = - ] && { ui_box_line "  $n  never (the schedule matches no time)"; continue; }
-      JOB_YEAR=${n1%%-*}; job_when_v "$n1"; tw=$JOB_WHEN; pd=${n1%% *}
+      ui_utc_v "$NOW"; JOB_YEAR=$UI_YEAR; job_when_v "$n1"; tw=$JOB_WHEN; pd=${n1%% *}
       # (a later time on the same day is shown without the date)
       for x in "$n2" "$n3"; do
         [ "$x" = - ] && continue
