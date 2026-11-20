@@ -40,6 +40,9 @@ kv listen_own "$own"; kv listen_foreign "$foreign"
 kv listen_pre "$(ss -Hltn "sport = :$pre" 2> /dev/null | grep -c .)"
 # Caddy's site for the app: proxy, static, stopped or down
 f=/etc/caddy/tando/$A.caddy
+kv u_mem "$(sed -n 's/^MemoryMax=//p' "/etc/systemd/system/$u" 2> /dev/null | head -1)"
+kv job_cal "$(sed -n 's/^OnCalendar=//p' "/etc/systemd/system/tando-${A}_job-tick.timer" 2> /dev/null | head -1)"
+kv site_mc "$(awk '$1 == "max_conns_per_host" { print $2; exit }' "$f" 2> /dev/null)"
 if grep -q "is stopped" "$f" 2> /dev/null; then kv site stopped
 elif grep -q "is unavailable" "$f" 2> /dev/null; then kv site down
 elif grep -q reverse_proxy "$f" 2> /dev/null; then kv site proxy
