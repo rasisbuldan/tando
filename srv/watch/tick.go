@@ -32,6 +32,7 @@ type tick struct {
 	caddyUp  bool
 	names    []string            // every app (with or without a release)
 	jobs     map[string][]string // app -> the scheduled jobs of its live release (check_jobs.go)
+	workers  map[string][]string // app -> the workers of its live release (check_workers.go)
 	again    map[string]bool     // firing checks that failed anew this run: told again (a job's next failed run)
 	pg       *pgFacts            // what PostgreSQL answered this run (nil: not asked, or no answer)
 	oomUnits map[string]bool     // units the journal names for this run's OOM kills
@@ -118,6 +119,7 @@ func (w *Watch) newTick(ctx context.Context) *tick {
 		appUnits: map[string]bool{},
 		oomUnits: map[string]bool{},
 		jobs:     map[string][]string{},
+		workers:  map[string][]string{},
 		again:    map[string]bool{},
 		resolved: map[string]string{},
 		recover:  map[string]int64{},
@@ -188,6 +190,12 @@ func (t *tick) findApps() []string {
 		for _, j := range t.jobs[a] {
 			withUnit = append(withUnit, jobUnit(a, j))
 			units = append(units, jobUnit(a, j))
+		}
+		// and its workers' units (keyed by the unit's name)
+		t.workers[a] = t.w.workersOf(a)
+		for _, n := range t.workers[a] {
+			withUnit = append(withUnit, workerUnit(a, n))
+			units = append(units, workerUnit(a, n))
 		}
 	}
 	withUnit = append(withUnit, "_caddy")

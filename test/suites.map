@@ -34,7 +34,7 @@ test/server/*            ALL
 
 # ---- laptop side
 lib/ui.sh                lint ui-test e2e-cli e2e-ease e2e-top e2e-status
-lib/views.sh             lint ui-test e2e-cli e2e-status e2e-data e2e e2e-alerts e2e-host e2e-logs
+lib/views.sh             lint ui-test e2e-cli e2e-status e2e-data e2e e2e-alerts e2e-host e2e-logs e2e-workers
 lib/help.txt             lint ui-test e2e-cli install-test
 lib/help-conf.txt        lint ui-test e2e-cli install-test
 docs/CONFIG.md           lint ui-test
@@ -49,7 +49,7 @@ lib/cmd-domain.sh        lint ui-test e2e-cli e2e-ease e2e
 lib/cmd-errors.sh        lint ui-test e2e-cli e2e-logs
 lib/cmd-go.sh            lint ui-test e2e-cli e2e-ease e2e-bootstrap e2e-trial
 lib/cmd-link.sh          lint ui-test e2e-cli e2e-ease
-lib/cmd-logx.sh          lint ui-test e2e-cli e2e-logs
+lib/cmd-logx.sh          lint ui-test e2e-cli e2e-logs e2e-workers
 lib/cmd-next.sh          lint ui-test e2e-cli e2e-ease
 lib/cmd-open.sh          lint ui-test e2e-cli e2e-ease
 lib/cmd-requests.sh      lint ui-test e2e-cli e2e-logs
@@ -64,9 +64,9 @@ lib/studio.sh            lint ui-test e2e-cli e2e-studio
 server/tando-adopt       lint ui-test e2e-ci e2e-status e2e-adopt
 server/legacy/*          lint install-test e2e-status @alerts
 srv/watch/*              go @alerts e2e-status e2e-host e2e-faults-q4
-srv/logs/*               go e2e-logs e2e e2e-ci @alerts
+srv/logs/*               go e2e-logs e2e e2e-ci @alerts e2e-workers
 srv/offsite/*            go e2e-offsite e2e-data
-srv/status/*             go e2e-status e2e-top e2e-cli
+srv/status/*             go e2e-status e2e-top e2e-cli e2e-workers
 srv/metrics/*            go e2e-status e2e-top e2e-sec2 @alerts
 srv/gate/*               go e2e-ci e2e-sec2
 srv/hostcare/*           go e2e-host @alerts
@@ -107,6 +107,7 @@ test/alerts-lib.sh       @alerts lint
 test/e2e-alerts*         @alerts lint
 test/e2e-faults*         @faults lint
 test/e2e-matrix*         e2e-matrix-quick lint
+test/e2e-workers.sh      e2e-workers lint
 test/faults/*            @faults e2e-matrix-quick lint
 test/sec2/*              e2e-sec2 lint
 test/sec3/*              e2e-sec2 lint

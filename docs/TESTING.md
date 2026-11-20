@@ -131,6 +131,7 @@ side and two people (or agents) never break each other's runs:
 |---|---|---|
 | `e2e-cli` | none (ssh/rsync are stubs; all.sh still gives it a server name) | `--help`/`--bogus`/extra arguments for every command of lib/help.txt, typos with the suggested command, the error messages a newcomer meets (E*), `domain add --wait` polling, global flags, `strip`, host setup under /bin/bash 3.2 |
 | `e2e-bootstrap` | the bare image (`TANDO_TEST_BARE=1`), needs `TANDO_TEST_OWNED=1` | empty VM → host setup → up of a static site, hello and Next.js → domains (tls internal, `TANDO_TEST_RESOLVE` fake DNS) → setup again changes nothing → doctor green; prints the empty-VM-to-live-link time |
+| `e2e-workers` | own | workers (`worker.<name>` in tando.conf): one and two workers run the new release as the app's user with its env; a second deploy replaces them (no older process left, the old worker's 5 s graceful stop ends before the new one starts, the worker is its unit's main process); a worker that crashes at start fails the deploy and the old workers run again; rollback (a worker the older release lacks goes); stop, start; env set; status, `logs --worker`; memory and stop_timeout on the unit and in the slice; a removed worker's unit goes; a worker that keeps crashing is restarted and reported while the web process serves; names, settings and recipes refused (client and server); destroy leaves no unit, link or process. About 3 minutes |
 | `e2e-sec2` | own | the attacks of docs/SECURITY-REVIEW-2.md (test/sec2) plus N8/N9/N11/N13 checks, the third review (test/sec2/sec3.sh), and L/J (test/sec2/lease-jobs.sh): an upload found by its receiver, never by a command line; job units of apps alpha, alpha-job, alpha-job-tick kept apart, renamed from the old form by host setup |
 | `e2e-faults` | own, `--memory 2g --cpus 1` | the fault scenarios of docs/FAULT-REVIEW.md (test/faults); the 27 that failed there and the baseline by default, plus m1-m6, a21 (the activation killed while the release command runs; a22, the restart, with `--all`) and n1-n5 (jobs follow the verified release, env revert, same-user upload lease, concurrent domain add, idempotent re-runs and resumed interrupted up/destroy), `--all` for all (about two hours) |
 | `e2e-offsite` | param + a second server (`TANDO_TEST_NAME2`) + an S3 container | offsite backups (docs/BACKUP.md): set/test/status, wrong and revoked credentials, a key that may not delete and a bucket lock (the test's rows, retention left to the bucket), every backup uploaded and encrypted (no plaintext in the bucket), offsite-only restore and pull, a failed upload retried and the alert state file, retention, a 300 MB backup in parts and a push killed mid-way, and the disaster recovery of a PostgreSQL app onto the second server. The S3 target is `srv/offsite/testdata/fakes3` (our own, std lib, it checks every SigV4 signature) in an `ubuntu:24.04` container with TLS, because MinIO's image could not be pulled where it was written; it needs npm (examples/notes) and apt for PostgreSQL. `test/offsite-r2-check.sh` runs the provider subset against a real R2 bucket |
@@ -204,11 +205,18 @@ Versions alternate their health path, start command, memory, `max_conns` and a j
 (odd and even), so a unit file, Caddy site, job timer or app.conf left with the other version's
 settings is named (inv2).
 
-`test/e2e-matrix-quick.sh` (full and quick tiers, about 6 minutes) runs `--cells`: one cell for
+`--kind worker` gives the app workers (odd versions `a` and `b`, even ones `a` only) and adds
+invariant 11: the workers that run are exactly the serving release's, each running it, enabled;
+none when the app is stopped (`--selftest` breaks it twice: a worker stopped behind tando's back,
+a stray worker unit).
+
+`test/e2e-matrix-quick.sh` (full and quick tiers, about 8 minutes) runs `--cells`: one cell for
 each defect fixed in milestone 1 and 2a (the list `CELLS` in the driver: two clients' settings,
 nothing of a deploy that does not go live reaching the live app, job units that could not be
 written, a queue that gave up, a site file that was not replaced), node and the container
-recipe's switch failure. The rest only by name: `test/e2e-matrix.sh --ops deploy,rollback
+recipe's switch failure, and for the kind `worker` a kill in the middle of the workers' switch
+(`wk.start`) and a failed start of the old workers when a bad release goes back (`bad.workers`).
+The rest only by name: `test/e2e-matrix.sh --ops deploy,rollback
 --actions kill --points '(^|/)(pre|post):'` (a kill at every state write of a deploy and a
 rollback), or any `--ops`, `--actions`, `--kind`, `--quick`. Not covered: a real power cut (a
 container keeps the page cache) and a real reboot.

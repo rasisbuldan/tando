@@ -101,25 +101,30 @@ Example: `tando history -n 10`
 One app in detail: state, release, memory, cpu, last 16 minutes, logs, alerts, its database
 (`database  postgres  412 MB, 3 of 10 connections`: the size and the connections of its role
 against the role's limit, as the alert checks last read them), backups, releases,
-recent deploys. Outside a project without an app it shows `tando ls`. `--watch N` repaints.
+recent deploys. Each worker (`worker.<name>` in tando.conf) has a line: `worker  queue  running
+restarts 0  memory 41 MB of 256 MB`; `restarting` when it exited and waits to be started again.
+Outside a project without an app it shows `tando ls`. `--watch N` repaints.
 Example: `tando status --watch 2`
 
 ### logs
-`tando logs [app] [-f] [-n N] [--since T] [--until T] [--grep TEXT [-i] [--regex|-E]] [--level L] [--json]`
+`tando logs [app] [-f] [-n N] [--since T] [--until T] [--grep TEXT [-i] [--regex|-E]] [--level L] [--worker NAME] [--json]`
 `tando logs --release ID | --deploy ID`
 `tando logs pull <file> [--since T] [--until T]`
-Flags: `-a -H -f -n --since --until --grep --regex -E -i --level --release --deploy --json`.
+Flags: `-a -H -f -n --since --until --grep --regex -E -i --level --release --deploy --worker --json`.
 Arguments: 0-2 (`pull <file>`).
 The app's stdout/stderr from its own journal namespace. `-n` defaults to 100. `--level
 err|warning|notice|info|debug`. `--release ID`: lines from the time that release was live (for one
-that never was: its deploy log). `--deploy ID`: that deploy's log and its start test. `pull` writes
+that never was: its deploy log). `--deploy ID`: that deploy's log and its start test. The app's
+output includes its jobs' and workers'; `--worker NAME` shows one worker's only. `pull` writes
 to a local file. Note: `--until`, `--json` and `-E` are not in the usage lines (docs/DEV-NOTES.md, mismatch 6).
 Example: `tando logs -f --grep error -i`
 
 ### start, stop, restart
 `tando start|stop|restart [app] [-H host]`. Arguments: 0-1 (the app).
 `start` starts a stopped app; `restart` restarts it; requests are held meanwhile. `stop` stops it:
-visitors get 503 "<app> is stopped" until `start`; jobs stop too; nothing is removed.
+visitors get 503 "<app> is stopped" until `start`; jobs and workers stop too (a worker gets its
+`worker.<name>.stop_timeout` to finish); nothing is removed. `start` and `restart` start the
+workers again, and so does `tando env set` (with the new env).
 Before an app's first release is live (a first `up` still running, or one that failed and left
 nothing live) its address answers 503 "<app> is being deployed" with `Retry-After: 10`, not 502.
 Example: `tando restart -a shop`
@@ -320,7 +325,8 @@ Example: `tando restore --from-host 3f9a01c2b7de --all -H newvps`
 ### ls
 `tando ls [-H host] [--all] [--watch N] [--json]`. Arguments: none. `-a` is refused.
 The apps of a server: state, deploy age, memory, cpu, uptime, link (never cut: other columns are
-dropped first at 80 columns). `--all`: every registered server, with `--watch` and `--json`.
+dropped first at 80 columns). `--all`: every registered server, with `--watch` and `--json`. A
+worker that does not run while its app does gets a line under the table.
 Example: `tando ls --all`
 
 ### alerts
@@ -329,7 +335,8 @@ Example: `tando ls --all`
 `notifier add <name> webhook|slack|telegram|ntfy|email` · `notifier rm <name>` · `notifier ls` ·
 `heartbeat [off]`. Flags: `-a -H --watch -n`. Default subcommand: show.
 What is firing on the server and where alerts go; checks run every minute (docs/MONITORING.md):
-the apps (down, health, memory, disk, failed jobs as `job.<name>`, database connections as
+the apps (down, health, memory, disk, failed jobs as `job.<name>`, a worker that keeps exiting as
+`worker.<name>` (new restarts in two checks in a row; `worker=off` turns it off), database connections as
 `db_conns`, ...) and the host (disk, memory, Caddy, `postgres`, ...). `set` without arguments lists
 every setting; `job=off`, `db_conns=off`, `postgres=off` turn the newest checks off, `db_conn_pct`
 (80) and `db_conn_for` (5) are the connection threshold and its samples.

@@ -2,7 +2,7 @@
 # test/e2e-matrix.sh: the fault matrix (docs/TESTING.md "Fault matrix"; test/faults/lib-matrix.sh).
 # For each operation, a trace of it without a fault lists the agent's fault points it passes;
 # then, for each point and action, the operation runs with that one fault, recovery runs as on a
-# server, and one checker asserts the ten invariants. One PASS/FAIL line per cell:
+# server, and one checker asserts the invariants (eleven: the workers' with --kind worker). One PASS/FAIL line per cell:
 #   <kind>/<op>/<verb>/<point>#<n>/<action>  [broken invariants]
 #
 #   test/e2e-matrix.sh                         node, every operation, kill fail reboot
@@ -44,7 +44,7 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-case $KIND in node|next|python|static|container|data) ;; *) echo "e2e-matrix: --kind node|next|python|static|container|data" >&2; exit 2;; esac
+case $KIND in node|next|python|static|container|data|worker) ;; *) echo "e2e-matrix: --kind node|next|python|static|container|data|worker" >&2; exit 2;; esac
 SI=0 SK=0
 case $SHARD in "") ;; *[!0-9/]*|*/*/*|/*|*/) echo "e2e-matrix: --shard i/K" >&2; exit 2;;
   */*) SI=$((10#${SHARD%/*})) SK=$((10#${SHARD#*/})); [ "$SI" -ge 1 ] && [ "$SI" -le "$SK" ] || exit 2;; esac
@@ -55,6 +55,7 @@ if [ -z "$OPS" ]; then
     node) OPS="deploy deploy-rel deploy-bad deploy-pre deploy-stopped rollback restart stop start env env-bad recover";;
     static) OPS="deploy deploy-pre rollback";;
     container) OPS="deploy deploy-bad rollback restart";;
+    worker) OPS="deploy deploy-bad deploy-pre rollback restart stop start env recover";;
     *) OPS="deploy deploy-bad rollback restart";;
   esac
 fi
@@ -304,6 +305,13 @@ if [ "$SELFTEST" = 1 ]; then
   st_case 9 "the data sentinel changed" \
     "cp -p $D/shared/data/sentinel /root/mxsent; echo changed >> $D/shared/data/sentinel" "cp -p /root/mxsent $D/shared/data/sentinel"
   st_case 10 "a visitor got a 502" ":" ":"
+  if [ "$KIND" = worker ]; then
+    st_case 11 "a worker of the live release is stopped behind tando's back" \
+      "systemctl stop tando-${A}_worker-a" "systemctl start tando-${A}_worker-a; sleep 1"
+    st_case 11 "a worker the live release does not have runs" \
+      "sed 's/^Description=.*/Description=stray/' /etc/systemd/system/tando-${A}_worker-a.service > /etc/systemd/system/tando-${A}_worker-z.service; systemctl daemon-reload; systemctl start tando-${A}_worker-z" \
+      "systemctl stop tando-${A}_worker-z; rm -f /etc/systemd/system/tando-${A}_worker-z.service; systemctl daemon-reload; systemctl reset-failed tando-${A}_worker-z 2> /dev/null; true"
+  fi
   t_done
 fi
 
@@ -337,6 +345,11 @@ i deploy run-activation jobs.write 1 fail after
 e deploy run-activation run.queue 1 fail before
 j stop stop caddy.mv 1 fail after"
 [ "$KIND" = container ] && CELLS="a deploy run-activation ra.restart 1 fail after"
+# workers (kind worker): a kill when the web process passed its check and the workers are about to
+# follow; going back after a failed check, the old workers could not be started at once (recovery)
+[ "$KIND" = worker ] && CELLS="
+k deploy run-activation wk.start 1 kill after
+k deploy-bad run-activation bad.workers 1 fail after"
 CELLS=${MX_CELLS:-$CELLS}     # (another list: MX_CELLS, same columns)
 if [ "$CELLSONLY" = 1 ]; then
   while read -r d op v p n act ph <&3; do

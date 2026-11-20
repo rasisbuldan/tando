@@ -96,6 +96,9 @@ func (c *Collector) Status(ctx context.Context, w io.Writer, name string) error 
 			f.Unit = shown[i]
 		}
 		s.row(AppRow(f, H, upt)...)
+		for _, r := range c.workerRows(ctx, a.name, a.conf, a.state) {
+			s.row(r...)
+		}
 	}
 	if one != nil {
 		if lc != nil {
