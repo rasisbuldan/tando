@@ -633,5 +633,31 @@ pkg "$S/node_modules/left-pad" left-pad 1.0.0 - - "" -
 runfix
 check "15c no Prisma: no note (rc=$RC)" eval '[ "$RC" = 0 ] && ! has "Prisma"'
 
+# ---- 16. the one-process stage scan gives what the separate scans give ------------------------------
+# (a prebuilds package with other platforms' files: fix has prune work, so level 2; after the prune,
+# level 3 with the same excused list as the separate command)
+NJS="node $LIB/lib/native.js"
+newcase stage1
+prebuilds_pkg "$S/node_modules/bcryptfix" bcryptfix 6.0.0
+pkg "$S/node_modules/left-pad" left-pad 1.0.0 - - "" -
+mkdir -p "$C/ns"
+stlvl=$($NJS stage "$S" arm64 glibc . "$S" "$C/ns" plan)
+check "16a stage: a package with foreign prebuilds has work to do: level 2 ($stlvl)" test "$stlvl" = 2
+check "16b stage: its plan and fix files equal the separate plan and fix commands" \
+  eval '[ "$($NJS plan "$S" arm64 glibc .)" = "$(cat "$C/ns/plan")" ] && [ "$($NJS fix "$S" arm64 glibc "$S")" = "$(cat "$C/ns/fix")" ] && [ -s "$C/ns/fix" ]'
+rm -rf "${S:?}/node_modules/bcryptfix/prebuilds/darwin-arm64" "${S:?}/node_modules/bcryptfix/prebuilds/win32-x64" "${S:?}/node_modules/bcryptfix/prebuilds/linux-x64"
+rm -f "$C/ns/"*
+stlvl=$($NJS stage "$S" arm64 glibc . "$S" "$C/ns" plan)
+check "16c stage: nothing left to do: level 3, excused equals the separate command ($stlvl)" \
+  eval '[ "$stlvl" = 3 ] && [ "$($NJS excused "$S" arm64 glibc)" = "$(cat "$C/ns/excused")" ] && [ "$($NJS fix "$S" arm64 glibc "$S")" = "$(cat "$C/ns/fix")" ]'
+mkdir -p "$S/node_modules/@img/sharp-darwin-arm64/lib"
+printf '{ "name": "@img/sharp-darwin-arm64", "version": "0.34.5", "os": ["darwin"], "cpu": ["arm64"] }\n' > "$S/node_modules/@img/sharp-darwin-arm64/package.json"
+rm -f "$C/ns/"*
+stlvl=$($NJS stage "$S" arm64 glibc . "$S" "$C/ns" plan)
+check "16d stage: a swap is due: level 1, only the plan is written ($stlvl)" \
+  eval '[ "$stlvl" = 1 ] && [ -s "$C/ns/plan" ] && [ ! -e "$C/ns/fix" ]'
+stlvl=$($NJS stage "$S" arm64 glibc . "$S" "$C/ns" noplan)
+check "16e stage noplan: skips the plan, writes fix ($stlvl)" eval '[ -f "$C/ns/fix" ] && [ "$stlvl" -ge 2 ]'
+
 echo "native: $n checks, $nf failed"
 [ "$nf" = 0 ]

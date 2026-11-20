@@ -6,6 +6,15 @@ first, grouped by area.
 
 ## Unreleased
 
+- Faster: three measured speedups, each against the previous tree on the same test server (Next.js
+  bench app, interleaved runs, 5 each; stage 10 each). The stage step runs one `node lib/native.js`
+  process instead of four or five (plan, fix and the guard's excused list in one walk of the staged
+  tree; a tree that needs swaps or fixes still takes the separate steps, so decisions and messages
+  are the same): 0.95 s to 0.75 s median. The pre-flight polls the app's health at 0.05, 0.1,
+  0.2 s, then every 0.5 s (same timeout, same messages): 0.7 s to 0.6 s median. The 30 s soak asks
+  systemd once per second for the restart count and the state together (`systemctl show -p NRestarts
+  -p ActiveState`) instead of two or three calls: server CPU in system.slice over a soak 600 ms to
+  485 ms (whole container 994 ms to 742 ms); the poll stays at 1 s.
 - Faster: every tando command starts about 0.3 s sooner (0.36 s to 0.06 s for `tando help`;
   `tando ls` and `tando status` from about 0.55 s to about 0.25 s): the help index no longer
   starts two processes per line of the help text.
