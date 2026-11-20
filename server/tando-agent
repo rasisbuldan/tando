@@ -5148,8 +5148,7 @@ conf_key() {
     recipe|image|container_port|build_memory|start|start_shell|release|release_shell|release_timeout|\
     health|path|data|writable|backup|database|db_statement_timeout|db_idle_tx_timeout|db_temp_limit|\
     memory|health_timeout|soak|cpu|tasks|max_conns|max_requests|stop_timeout|hold|log_max|log_keep|\
-    log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|assets|job.*) return 0;;
-    log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|job.*|worker.*) return 0;;
+    log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|assets|job.*|worker.*) return 0;;
   esac
   return 1
 }
