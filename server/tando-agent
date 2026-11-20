@@ -2275,7 +2275,7 @@ cmd_configure() {
     # and so are its settings (start, health, memory, path...): a deploy that does not go live must
     # not change how the live one starts, is checked or runs (a file from before has only four)
     if valid_id "${S[current]:-}" && ! grepq -x conf=1 "$D/start/${S[current]}" 2> /dev/null; then
-      start_snap "${S[current]}" || die "could not record the live release's settings (disk full?)"
+      start_snap "${S[current]}" || die "could not record the live release's settings - disk full?"
     fi
   else
     # a user of that name is only taken over when an earlier configure of this app made it and was
@@ -2291,7 +2291,7 @@ cmd_configure() {
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" \
-    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]"
+    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[job_spread]" "C[job_missed]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -2338,14 +2338,22 @@ cmd_configure() {
       health_expect) [[ $v =~ ^([1-5]([0-9]{2}|xx))?( ?[\ -~]{1,100})?$ && -n $v && $v != *[\"\\]* ]] ||
                        die "bad health_expect: $v (like 200, 2xx or 200 ok)";;
       health_fails|health_recover) [[ $v =~ ^[1-9][0-9]?$ ]] || die "bad $k: $v (1 to 99)";;
-      # how long a job may run (sync_jobs), for all of the app's jobs or for one
+      # how a job runs (sync_jobs), for all of the app's jobs or for one: its time limit, the spread of
+      # its start (RandomizedDelaySec) and whether a run missed while the server was off is made up
       job_timeout) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] && ((v <= 86400)) || die "bad job_timeout: $v (seconds, 1 to 86400)";;
-      job.*.timeout) x=${k#job.}; x=${x%.timeout}
+      job_spread) [[ $v =~ ^[0-9]{1,4}$ ]] && ((v <= 3600)) || die "bad job_spread: $v (seconds, 0 to 3600)";;
+      job_missed) [[ $v == run || $v == skip ]] || die "bad job_missed: $v (run or skip)";;
+      job.*.timeout|job.*.spread|job.*.missed|job.*.cron) x=${k#job.}; x=${x%.*}
              [[ $x =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "bad job: $k"
-             [[ $v =~ ^[1-9][0-9]{0,4}$ ]] && ((v <= 86400)) || die "bad $k: $v (seconds, 1 to 86400)"
+             case ${k##*.} in
+               timeout) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] && ((v <= 86400)) || die "bad $k: $v (seconds, 1 to 86400)";;
+               spread) [[ $v =~ ^[0-9]{1,4}$ ]] && ((v <= 3600)) || die "bad $k: $v (seconds, 0 to 3600)";;
+               missed) [[ $v == run || $v == skip ]] || die "bad $k: $v (run or skip)";;
+               cron) [[ $v =~ ^[-0-9A-Za-z@*/,\ ]{1,100}$ ]] || die "bad $k";;   # (what was written: the client translated it)
+             esac
              jobs+=("$k");;
       job.*) [[ ${k#job.} =~ ^[a-z][a-z0-9-]{0,20}$ && $v == *'|'* ]] || die "bad job: $k"
-             systemd-analyze calendar "$(trim "${v%%|*}")" &> /dev/null || die "bad schedule for job ${k#job.}: $(trim "${v%%|*}")"
+             systemd-analyze calendar "$(trim "${v%%|*}")" &> /dev/null || die "bad schedule for job ${k#job.}: $(trim "${v%%|*}") (a cron schedule like */15 * * * * or a systemd one like daily or Mon..Fri 09:00: tando help jobs)"
              jobs+=("$k");;
       # check=1: only validate and say whether the app exists (before a build); origin: where the
       # client deploys from (user@machine:directory), force=1: deploy although it differs
@@ -2365,8 +2373,8 @@ cmd_configure() {
     C[$k]=$v
   done <<< "$input"
   release_ok
-  for k in "${jobs[@]}"; do   # a timeout is for a job of this tando.conf
-    [[ $k != *.timeout || " ${jobs[*]} " == *" ${k%.timeout} "* ]] || die "$k is set but there is no ${k%.timeout}"
+  for k in "${jobs[@]}"; do   # a job setting is for a job of this tando.conf
+    [[ $k != job.*.* || " ${jobs[*]} " == *" ${k%.*} "* ]] || die "$k is set but there is no ${k%.*}"
   done
   if [[ -n $origin && -n ${C[origin]:-} && ${C[origin]} != "$origin" ]] && ((!force)); then
     die "$A on <host> was last deployed from ${C[origin]}, not from here ($origin). Deploy from here anyway: tando deploy --force (or tando up --force)"
@@ -4886,7 +4894,7 @@ conf_key() {
     recipe|image|container_port|build_memory|start|start_shell|release|release_shell|release_timeout|\
     health|path|data|writable|backup|database|db_statement_timeout|db_idle_tx_timeout|db_temp_limit|\
     memory|health_timeout|soak|cpu|tasks|max_conns|max_requests|stop_timeout|hold|log_max|log_keep|\
-    log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|job.*) return 0;;
+    log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|job_spread|job_missed|job.*) return 0;;
   esac
   return 1
 }
@@ -4931,16 +4939,22 @@ conf_put() {
   return 0
 }
 # shellcheck disable=SC2034  # J is read by sync_jobs through its nameref
-jobs_follow() { # the job units become those of the current release (none without one)
+jobs_load() { # array: the jobs of the current release (none without one)
+  local -n _jl=$1
   local id=${S[current]:-} k
+  _jl=()
+  if [[ -n $id && -f $D/jobs/$id ]]; then load "$D/jobs/$id" _jl
+  elif [[ -n $id ]]; then for k in "${!C[@]}"; do ! job_key "$k" || _jl[$k]=${C[$k]}; done; fi
+  return 0
+}
+jobs_follow() { # the job units become those of the current release (none without one)
   local -A J=()
-  if [[ -n $id && -f $D/jobs/$id ]]; then load "$D/jobs/$id" J
-  elif [[ -n $id ]]; then for k in "${!C[@]}"; do ! job_key "$k" || J[$k]=${C[$k]}; done; fi
+  jobs_load J
   sync_jobs J
 }
 # job_key key: a setting that belongs to the jobs (and goes with a release): job.<name>,
 # job.<name>.timeout, job_timeout
-job_key() { [[ $1 == job.* || $1 == job_timeout ]]; }
+job_key() { [[ $1 == job.* || $1 == job_timeout || $1 == job_spread || $1 == job_missed ]]; }
 # job_names [array]: the names of the jobs in app.conf (or the array), sorted
 job_names() {
   local -n _jn=${1:-C}
@@ -4953,6 +4967,7 @@ job_names() {
 # timers of app foo-job (sync_jobs of foo deleted them). Units of that form are this app's only by
 # their runner line (old_job_owner), and sync_jobs replaces them with the new ones.
 job_unit() { echo "tando-${A}_job-$1"; }   # name -> unit name without .service/.timer
+JOB_SPREAD=15      # seconds a job's start is spread over (RandomizedDelaySec), unless job_spread says otherwise
 JOB_TIMEOUT=3600   # seconds a job may run unless job_timeout or job.<name>.timeout says otherwise
 # old_job_owner unit: the app a unit of the form before belongs to, from the line its service file
 # was written with (ExecStart=<agent> run-job <app> <name>, which no other app's unit has); fails
@@ -4973,7 +4988,8 @@ old_job_owner() {
 # enabled (a full disk): the caller does not count it done (op_trailer: recovery syncs them again)
 sync_jobs() {
   local -n _jobs=${1:-C}
-  local k n f x cal to b st want=" " changed=0 new=() rc=0
+  local k n f x cal to b st want=" " changed=0 new=() rc=0 sp ms per paused=" "
+  [[ -f $D/jobpaused ]] && paused=" $(tr '\n' ' ' < "$D/jobpaused")"
   for n in $(job_names "${1:-C}"); do
     k=job.$n
     cal=$(trim "${_jobs[$k]%%|*}")
@@ -4982,6 +4998,9 @@ sync_jobs() {
     fi
     to=${_jobs[$k.timeout]:-${_jobs[job_timeout]:-$JOB_TIMEOUT}}
     [[ $to =~ ^[1-9][0-9]{0,4}$ ]] || to=$JOB_TIMEOUT
+    sp=${_jobs[$k.spread]:-${_jobs[job_spread]:-$JOB_SPREAD}}
+    [[ $sp =~ ^[0-9]{1,4}$ ]] || sp=$JOB_SPREAD
+    ms=${_jobs[$k.missed]:-${_jobs[job_missed]:-run}}; per=true; [[ $ms == skip ]] && per=false
     want+="$n "
     b=$(job_unit "$n"); f=/etc/systemd/system/$b
     [[ -f $f.service && -f $f.timer ]] || changed=1
@@ -4989,11 +5008,16 @@ sync_jobs() {
     if ! { fp jobs.write &&
            { printf '[Unit]\nDescription=tando job %s %s\n\n[Service]\nType=oneshot\n' "$A" "$n"
              printf 'ExecStart=%s run-job %s %s\nWorkingDirectory=%s\nTimeoutStartSec=%s\n' "$AGENT" "$A" "$n" "$(job_dir)" "$to"
+             # the run's start and end are recorded by the agent as root (a hook that fails changes
+             # nothing: "-"; "+": outside the job's sandbox): the history and the log of the run
+             printf 'ExecStartPre=-+%s job-begin %s %s\nExecStopPost=-+%s job-end %s %s\n' "$AGENT" "$A" "$n" "$AGENT" "$A" "$n"
              props - job
              echo "# end"
            } > "$f.service.new" && [[ $(tail -1 "$f.service.new") == "# end" ]] &&
-           printf '[Unit]\nDescription=tando job timer %s %s\n\n[Timer]\nOnCalendar=%s\nAccuracySec=1s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' \
-             "$A" "$n" "$cal" > "$f.timer.new" && [[ $(tail -1 "$f.timer.new") == WantedBy=timers.target ]]; }; then
+           { printf '[Unit]\nDescription=tando job timer %s %s\n\n[Timer]\nOnCalendar=%s\nAccuracySec=1s\nPersistent=%s\n' "$A" "$n" "$cal" "$per"
+             ((sp > 0)) && printf 'RandomizedDelaySec=%s\n' "$sp"
+             printf '\n[Install]\nWantedBy=timers.target\n'
+           } > "$f.timer.new" && [[ $(tail -1 "$f.timer.new") == WantedBy=timers.target ]]; }; then
       rm -f "$f.service.new" "$f.timer.new"
       echo "tando-agent: could not write the units of job $n (disk full?)" >&2; rc=1; continue
     fi
@@ -5025,14 +5049,21 @@ sync_jobs() {
     [[ $want == *" $n "* ]] && continue
     systemctl disable -q --now "$b.timer"
     rm -f "$f" "${f%.timer}.service"; changed=1
+    [[ $paused == *" $n "* ]] && job_unpause "$n"   # (added again later, a job is not paused)
   done
   ((changed)) && systemctl daemon-reload
   # the timers not yet enabled and running, in one call (200 jobs: one systemctl, not 200)
-  local todo=()
+  local todo=() off=()
   for k in ${new[@]+"${new[@]}"}; do
+    x=${k#"tando-${A}_job-"}
+    if [[ $paused == *" ${x%.timer} "* ]]; then   # paused: the timer is off and stays off (tando jobs resume)
+      systemctl -q is-enabled "$k" 2> /dev/null || systemctl -q is-active "$k" && off+=("$k")
+      continue
+    fi
     systemctl -q is-enabled "$k" 2> /dev/null && systemctl -q is-active "$k" && continue
     todo+=("$k")
   done
+  ((${#off[@]})) && systemctl disable -q --now "${off[@]}" 2> /dev/null
   ((${#todo[@]})) && { systemctl enable -q --now "${todo[@]}" || rc=1; }
   return $rc
 }
@@ -5046,6 +5077,54 @@ cmd_run_job() { # app name (as the app user)
   [[ -n $cmd ]] || die "no such job"
   cd "$(job_dir)" || die "no release"
   exec /bin/bash -c "${cmd#*|}"
+}
+
+# The journal side of a job's runs, shared by job-run, the run hooks and job-log. A run's lines are
+# those its unit wrote after a cursor taken before it started (the comment in cmd_job_run says why
+# not its invocation id or a time window): the unit's stdout/stderr, in its app's journal namespace
+# (or the system journal when it has none).
+job_jq() { JQ=(journalctl --namespace='*' "_SYSTEMD_UNIT=$1" _TRANSPORT=stdout -o cat --no-pager); }
+job_jsync() { journalctl --sync 2> /dev/null; [[ -n $(jns) ]] && journalctl "$(jns)" --sync 2> /dev/null; return 0; }
+job_cursor() { # unit: the cursor of the last line it wrote (empty: none yet)
+  local JQ; job_jq "$1"
+  "${JQ[@]}" -n 1 --show-cursor 2> /dev/null | sed -n 's/^-- cursor: //p'
+}
+job_hist_dir() { [[ -d $D/jobhist ]] || { mkdir -m 700 "$D/jobhist" && chown root:root "$D/jobhist"; } 2> /dev/null; [[ -d $D/jobhist ]]; }
+job_unpause() { # name: the job is no longer paused
+  [[ -f $D/jobpaused ]] || return 0
+  grep -vx -- "$1" "$D/jobpaused" > "$D/jobpaused.tmp"; mv -f "$D/jobpaused.tmp" "$D/jobpaused"
+  [[ -s $D/jobpaused ]] || rm -f "$D/jobpaused"
+}
+# job-begin / job-end <app> <name>: run by the job's unit as root (ExecStartPre, ExecStopPost; a
+# failing hook never changes the job's result). They keep the history of the job: one line per run
+# in $D/jobhist/<name> (start, seconds, result, exit status, the journal cursor its output started
+# after; never the output itself), the last 50 runs, whatever the journal has rotated away.
+cmd_job_begin() {
+  need_root; app "$1"
+  local n=${2:-} cur
+  [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ ]] || return 0
+  job_jsync
+  cur=$(job_cursor "$(job_unit "$n").service")
+  job_hist_dir || return 0
+  printf '%s\n%s\n' "$(ds)" "$cur" > "$D/jobhist/$n.run.tmp" && mv -f "$D/jobhist/$n.run.tmp" "$D/jobhist/$n.run"
+}
+cmd_job_end() {
+  need_root; app "$1"
+  local n=${2:-} f t0="" cur="" t1 res=${SERVICE_RESULT:-} st=${EXIT_STATUS:-} lines
+  [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ ]] || return 0
+  job_hist_dir || return 0
+  f=$D/jobhist/$n; t1=$(ds)
+  [[ -f $f.run ]] && { { read -r t0; read -r cur; } < "$f.run"; }
+  [[ $t0 =~ ^[0-9]+$ ]] || t0=$t1
+  [[ $res =~ ^[a-z-]{1,20}$ ]] || res=unknown
+  [[ $res == success ]] && st=0
+  [[ $st =~ ^[A-Za-z0-9_-]{1,12}$ ]] || st=-
+  printf '%s\t%s.%s\t%s\t%s\t%s\n' "$((t0 / 10))" "$(((t1 - t0) / 10))" "$(((t1 - t0) % 10))" "$res" "$st" "$cur" >> "$f"
+  rm -f "$f.run"
+  # (at most 50 runs: cut back to 50 when it has 70, so that most runs only append)
+  lines=$(wc -l < "$f")
+  if ((lines > 70)); then tail -n 50 "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"; fi
+  return 0
 }
 
 # job-run <app> <name>: run a scheduled job now, in its own unit (tando-<app>_job-<name>.service:
@@ -5068,9 +5147,9 @@ cmd_job_run() {
   # clock a command reads and journald's stamps were seen half a second apart on a virtual machine.
   # A unit runs one job at a time, so every line of it after the cursor is this run's.
   local i out cur="" jq=(journalctl --namespace='*' "_SYSTEMD_UNIT=$u" _TRANSPORT=stdout -o cat --no-pager)
-  jsync() { journalctl --sync 2> /dev/null; [[ -n $(jns) ]] && journalctl "$(jns)" --sync 2> /dev/null; }
+  jsync() { job_jsync; }
   jsync
-  cur=$("${jq[@]}" -n 1 --show-cursor 2> /dev/null | sed -n 's/^-- cursor: //p')
+  cur=$(job_cursor "$u")
   # (a run by hand is never refused by systemd's start limit, which a job that failed a few times
   # in a row would have reached: the old result would then be printed as this run's)
   systemctl reset-failed "$u" 2> /dev/null
@@ -5095,21 +5174,109 @@ cmd_job_run() {
   return 0
 }
 
+# jobs <app> [full]: one `job` row per job (name, schedule, next, last run, result, exit status,
+# command), then `jobx` (name, on|paused|running, duration of the last run, the next 3 run times as
+# the server writes them: "full" only, it starts systemd-analyze once per job) and `zone`. The last
+# run is the last line of the job's history (job-end); a job from before it has systemd's memory.
 cmd_jobs() {
   app "$1"
-  local k n line last x
+  local k n line last x hs hd hr hc nx nxt state paused=" " lq u
   declare -A U
+  [[ -f $D/jobpaused ]] && paused=" $(tr '\n' ' ' < "$D/jobpaused")"
   for n in $(job_names); do
-    k=job.$n; U=()
+    k=job.$n; U=(); u=$(job_unit "$n")
     while IFS= read -r line; do U[${line%%=*}]=${line#*=}; done < <(
-      systemctl show --timestamp=unix -p NextElapseUSecRealtime,LastTriggerUSec "$(job_unit "$n").timer"
-      systemctl show --timestamp=unix -p Result,ExecMainStatus,ExecMainStartTimestamp "$(job_unit "$n").service")
+      systemctl show --timestamp=unix -p NextElapseUSecRealtime,LastTriggerUSec "$u.timer"
+      systemctl show --timestamp=unix -p Result,ExecMainStatus,ExecMainStartTimestamp,ActiveState "$u.service")
     # the last run: the timer's, or a later one by hand (tando jobs run) or as its timer does
     last=${U[LastTriggerUSec]#@} x=${U[ExecMainStartTimestamp]#@}
     [[ $x =~ ^[0-9]+$ ]] && { [[ ! $last =~ ^[0-9]+$ ]] || ((x > last)); } && last=$x
-    row job "$n" "$(trim "${C[$k]%%|*}")" "${U[NextElapseUSecRealtime]#@}" "$last" \
-      "${U[Result]:-}" "${U[ExecMainStatus]:-}" "$(trim "${C[$k]#*|}")"
+    hs="" hd=- hr=${U[Result]:-} hc=${U[ExecMainStatus]:-}
+    if [[ -f $D/jobhist/$n ]]; then
+      while IFS=$'\t' read -r x line lq nxt _; do hs=$x hd=$line hr=$lq hc=$nxt; done < "$D/jobhist/$n"
+      [[ $hs =~ ^[0-9]+$ ]] && last=$hs
+    fi
+    state=on; [[ ${U[ActiveState]:-} == activ* ]] && state=running
+    [[ $paused == *" $n "* ]] && state=paused
+    nx=("" "" "")
+    if [[ ${2:-} == full && $state != paused ]]; then
+      local i=0
+      while IFS= read -r line; do
+        [[ $line =~ ^[[:space:]]*(Next\ elapse|Iteration\ \#[0-9]+):\ [A-Za-z]{3}\ ([0-9-]+\ [0-9:]+\ [A-Za-z0-9+:/_-]+)$ ]] || continue
+        nx[i++]=${BASH_REMATCH[2]}
+      done < <(systemd-analyze calendar --iterations=3 "$(trim "${C[$k]%%|*}")" 2> /dev/null)
+    fi
+    row job "$n" "${C[$k.cron]:-$(trim "${C[$k]%%|*}")}" "${U[NextElapseUSecRealtime]#@}" "$last" "$hr" "$hc" "$(trim "${C[$k]#*|}")"
+    row jobx "$n" "$state" "$hd" "${nx[0]}" "${nx[1]}" "${nx[2]}"
   done
+  x=$(readlink /etc/localtime 2> /dev/null); row zone "$(date +%Z)" "${x#*zoneinfo/}"
+}
+
+# job-pause <app> <name> pause|resume: switch a job's timer off and on again without touching
+# tando.conf. The name goes into $D/jobpaused, which sync_jobs reads: a paused job's timer is never
+# enabled, so a deploy, a recovery or a reboot leaves it off. A run in progress finishes; a run by
+# hand (tando jobs run) still works.
+cmd_job_pause() {
+  need_root; app "$1"
+  local n=${2:-} how=${3:-}
+  [[ $how == pause || $how == resume ]] || die "job-pause: pause or resume"
+  lock 30
+  local -A J=(); jobs_load J
+  [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ && -n ${J[job.$n]:-} ]] || die "$A has no job ${n//[^A-Za-z0-9_-]/?} (tando jobs lists them)"
+  AUDIT_NOTE="job $n $how"
+  if [[ $how == pause ]]; then
+    { [[ -f $D/jobpaused ]] && grep -vx -- "$n" "$D/jobpaused"; echo "$n"; } | sort > "$D/jobpaused.tmp" &&
+      mv -f "$D/jobpaused.tmp" "$D/jobpaused" || die "could not record the pause (disk full?)"
+    chmod 600 "$D/jobpaused"
+  else
+    job_unpause "$n"
+    # (a Persistent timer made up what it missed while it was off: a resume would start the job at
+    # once. The time of its last run is the stamp's: now, so that the next run is the next time.)
+    touch "/var/lib/systemd/timers/stamp-$(job_unit "$n").timer" 2> /dev/null
+  fi
+  sync_jobs J || die "could not update the timer of job $n (disk full?)"
+  echo "job=$n"; echo "state=$([[ $how == pause ]] && echo paused || echo on)"
+}
+
+# job-log <app> <name> [count]: the output of the last runs (default 3, at most 50), newest last.
+# A run's lines are those after the journal cursor its history line holds, up to the cursor of the
+# next run (the run in progress, or the end): counted, never by time or invocation id. A run whose
+# lines the journal has rotated away says so (gone=1). Rows: run (start, seconds, result, status),
+# then log=<line> (the last 200 lines of the run), or gone=1.
+cmd_job_log() {
+  need_root; app "$1"
+  local n=${2:-} cnt=${3:-3} u f i t s d r c cu l ta tb out; local -a H=() JQ
+  [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ && -n ${C[job.$n]:-} ]] || die "$A has no job ${n//[^A-Za-z0-9_-]/?} (tando jobs lists them)"
+  [[ $cnt =~ ^[0-9]{1,2}$ ]] && ((cnt >= 1 && cnt <= 50)) || die "how many runs: 1 to 50"
+  f=$D/jobhist/$n; u=$(job_unit "$n").service
+  [[ -s $f ]] || { echo "runs=0"; return 0; }
+  job_jsync; job_jq "$u"
+  mapfile -t H < "$f"
+  local end=""   # the cursor the newest run's lines end at: a run in progress starts there
+  [[ -f $f.run ]] && end=$(sed -n 2p "$f.run")
+  local first=$((${#H[@]} - cnt)); ((first < 0)) && first=0
+  for ((i = first; i < ${#H[@]}; i++)); do
+    IFS=$'\t' read -r t d r s c <<< "${H[i]}"
+    row run "$t" "$d" "$r" "$s"
+    # the end of this run: the start of the next (its history line), or of the one in progress
+    cu=$end
+    ((i + 1 < ${#H[@]})) && { IFS=$'\t' read -r _ _ _ _ cu <<< "${H[i + 1]}"; }
+    # (the last line before the run is still in the journal, or the run's own lines may be cut)
+    if [[ -n $c ]] && (($("${JQ[@]}" --cursor="$c" -n 1 2> /dev/null | wc -l) == 0)); then echo "gone=1"; continue; fi
+    if [[ -n $c ]]; then ta=$("${JQ[@]}" --after-cursor="$c" 2> /dev/null | wc -l); else ta=$("${JQ[@]}" 2> /dev/null | wc -l); fi
+    tb=0
+    if [[ -n $cu ]]; then tb=$("${JQ[@]}" --after-cursor="$cu" 2> /dev/null | wc -l)
+    elif ((i + 1 < ${#H[@]})); then tb=$ta; fi   # (the next run's cursor is empty: it started on an empty journal)
+    ((ta -= tb)); ((ta < 0)) && ta=0
+    out=""
+    if ((ta > 0)); then
+      if [[ -n $c ]]; then out=$("${JQ[@]}" --after-cursor="$c" 2> /dev/null | head -n "$ta" | tail -n 200)
+      else out=$("${JQ[@]}" 2> /dev/null | head -n "$ta" | tail -n 200); fi
+    fi
+    [[ -n $out ]] && while IFS= read -r l; do san_v "$l"; echo "log=$SAN"; done <<< "$out"
+  done
+  [[ -f $f.run && $(systemctl show -P ActiveState "$u") == activ* ]] && echo "running=1"
+  return 0
 }
 
 # ---- dispatch ------------------------------------------------------------------------------
@@ -5123,7 +5290,7 @@ case $verb in
   domain-add|domain-rm) audit "$verb" "${1:-}";;
   activate|run-activation) audit deploy "${1:-}";;
   configure|rollback|env-set|env-unset|env-ls|start|stop|restart|unlock|destroy|backup-run|\
-  backup-restore|backup-cat|db-url|db-psql|shell|job-run) audit "$verb" "${1:-}";;
+  backup-restore|backup-cat|db-url|db-psql|shell|job-run|job-pause) audit "$verb" "${1:-}";;
   db-studio|db-studio-stop) audit "$verb" "${1:-}";;
 esac
 # Verbs that change an app run to their end when the ssh session that started them drops: the
@@ -5190,6 +5357,7 @@ case $verb in
   shell-put) cmd_shell_put "$@";;
   busy) cmd_busy "$@";;
   job-run) cmd_job_run "$@";;
+  job-begin) cmd_job_begin "$@";; job-end) cmd_job_end "$@";; job-pause) cmd_job_pause "$@";; job-log) cmd_job_log "$@";;
   host)   # host care (docs/HOSTCARE.md): the server itself, answered by tando-host (Go, srv/hostcare)
     need_root
     [[ -x $R/bin/tando-host ]] || die "host care is not installed on <host>: tando host setup <host> installs it"

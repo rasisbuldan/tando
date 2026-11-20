@@ -107,9 +107,13 @@ Runs on the server once per deploy, before the switch (migrations). Not for `sta
 
 | Key | Type | Default | Unit | Meaning | Example |
 |---|---|---|---|---|---|
-| `job.<name>` | text | none | | A scheduled job: `<schedule> \| <command>`. The schedule is a systemd calendar expression (`daily`, `*-*-* 03:00`, `hourly`); the name is lower case letters, digits and `-`. One line per job. | `job.nightly = daily \| node scripts/nightly.js` |
+| `job.<name>` | text | none | | A scheduled job: `<schedule> \| <command>`. The schedule is cron (`*/15 * * * *`, `0 9 * * mon-fri`, `@daily`: five fields, lists, ranges, steps, month and weekday names) or a systemd calendar expression (`daily`, `*-*-* 03:00`, `Mon..Fri 09:00`); either is checked before anything is deployed. Times are the server's time zone (`tando jobs` says which). The name is lower case letters, digits and `-`. One line per job. | `job.nightly = daily \| node scripts/nightly.js` |
 | `job_timeout` | number | `3600` | seconds | Longest any of the app's jobs may run, 1 to 86400; past it the job is stopped and its result is `timeout`. | `job_timeout = 600` |
 | `job.<name>.timeout` | number | `job_timeout` | seconds | The same for one job, 1 to 86400. | `job.nightly.timeout = 7200` |
+| `job_spread` | number | `15` | seconds | A job starts at a random moment up to this long after its time, so the hourly jobs of 20 apps do not all start in the same second. 0 to 3600; 0 starts them exactly on time. | `job_spread = 0` |
+| `job.<name>.spread` | number | `job_spread` | seconds | The same for one job. | `job.report.spread = 300` |
+| `job_missed` | `run` or `skip` | `run` | | What a run the server missed while it was off or down becomes: `run` makes it up once when the server is back (a nightly backup), `skip` waits for the next time (a morning digest that would arrive at night). | `job_missed = skip` |
+| `job.<name>.missed` | `run` or `skip` | `job_missed` | | The same for one job. | `job.digest.missed = skip` |
 
 ## Domains
 

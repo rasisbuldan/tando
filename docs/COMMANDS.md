@@ -170,29 +170,76 @@ tando env log
 Example: `tando env set STRIPE_KEY`
 
 ### jobs
-`tando jobs [ls [app]] [-H host]` · `tando jobs run <name> [-a app]`. Subcommands: ls (default,
-0-1: the app), run (1: the job).
-The app's scheduled jobs (`job.<name> = <schedule> | <command>` in tando.conf): schedule, next run,
-last run and result. Not retried. `run` runs one now, as the app's user: its output, then
-`job <name>: ok in Ns` or `failed (<result>, exit N)`; tando exits with the job's status (124
-when it timed out).
-A run may take at most its timeout: `job_timeout = <seconds>` for all of the app's jobs (1 to
+`tando jobs [ls [app]] [-H host]` · `tando jobs run <name> [-a app]` · `tando jobs log <name> [-n N]` ·
+`tando jobs pause <name>` · `tando jobs resume <name>`. Subcommands: ls (default, 0-1: the app),
+run, log, pause, resume (1: the job; the app with `-a`).
+The app's scheduled jobs (`job.<name> = <schedule> | <command>` in tando.conf). `ls` shows per job
+the schedule (as written), the next run, the last run and how it ended (`ok`, `exit 3`, `timed
+out`, `killed (memory)`, `killed (SEGV)`), how long it took, and the command; under the table the
+next three run times of each job by the server's clock, with its time zone, so a wrong schedule
+shows before it has missed anything. A paused job shows `paused`. Not retried (see below).
+`run` runs one now, as the app's user: its output, then `job <name>: ok in Ns` or `failed
+(<result>, exit N)`; tando exits with the job's status (124 when it timed out).
+`log` shows the output of the last N runs (default 3, at most 50), each under its time, result and
+duration, the last 200 lines of each. A run's lines are found in the journal by a cursor taken
+before it started, never by time or by systemd's invocation id; a run the journal has already
+rotated away says so. Job output is not copied anywhere else.
+`pause` switches the job's timer off and `resume` on, without editing tando.conf or deploying. The
+pause is kept on the server, so a deploy, a rollback, a recovery and a reboot leave the job off; a
+run already going on finishes, `tando jobs run` still works, and a resume does not run what was missed
+while it was paused (the next run is the next time). A job removed from tando.conf
+loses its pause (added again, it runs). CI deploy keys cannot run `jobs`, `log`, `pause` or
+`resume` (the gate allows its few read verbs and the deploy; nothing was added).
+
+Schedules. Either cron or systemd:
+- cron: five fields (minute hour day-of-month month weekday) with `*`, lists (`1,15`), ranges
+  (`mon-fri`, `9-17`), steps (`*/15`, `10-50/10`), month names (`jan`) and weekday names (`mon`;
+  0 and 7 are Sunday), or `@hourly @daily @midnight @weekly @monthly @yearly @annually`. It is
+  translated to systemd's calendar text on your machine before anything is sent
+  (`*/15 * * * *` is `*-*-* *:00/15:00`), only when both mean exactly the same; `tando jobs` shows
+  what you wrote. Refused, with what to write instead: both day of month and weekday set (cron
+  runs on either, systemd only when both match: use two jobs), `5/15` (write `5-59/15`), ranges
+  that wrap (`22-3`: write `22-23,0-3`), `@reboot`, the `?` `L` `W` `#` of other schedulers, a
+  sixth field (seconds, year) and values out of range. A weekday-only or day-only schedule with a
+  `*/n` in the other field keeps cron's meaning (both must match).
+- systemd: `daily`, `hourly`, `*-*-* 03:00`, `Mon..Fri 09:00`, `*:0/10`; `man systemd.time`.
+  Checked by the server before the deploy starts (`tando up`, `deploy --dry-run` and `configure
+  check` all refuse a bad one, naming the job). A zone can be written in it (`*-*-* 03:00 UTC`).
+All times are the server's time zone (`tando jobs` names it; most servers use UTC), whatever your
+machine's.
+
+How runs behave.
+- A job still running when its next time comes is not started a second time: systemd starts a
+  oneshot unit only once at a time, and the time that was missed is simply not run (`e2e-jobs` J8).
+- A run the server missed because it was off or down is made up once when it is back
+  (`job_missed = run`, the default: systemd's `Persistent=`); `job_missed = skip` waits for the
+  next time. A deploy does not make up a run, and neither does `tando jobs resume`.
+- A job's start is spread over `job_spread` seconds (default 15; `RandomizedDelaySec=`), so the
+  hourly jobs of many apps do not start together; `job_spread = 0` starts them on the second. A
+  job's `job.<name>.spread` and `.missed` set one job.
+- The last 50 runs of each job (start, result, duration, exit status; never output) are kept on the
+  server (`jobhist/` in the app's directory, root only), so `ls` answers after the journal has
+  rotated or the host has restarted.
+A run is stopped after its timeout: `job_timeout = <seconds>` for all of the app's jobs (1 to
 86400; default 3600, one hour) or `job.<name>.timeout = <seconds>` for one. Past it systemd stops
 the job (SIGTERM, SIGKILL 90 s later) and records the result `timeout`: `tando jobs` shows it,
 `run` says `timed out`, and the alert fires like for any failed run. A job that hangs therefore
-ends and is alerted instead of running for ever.
+ends and is alerted instead of running for ever. A job killed at the app's memory limit shows
+`killed (memory)`.
 Each job runs in its own units, `tando-<app>_job-<name>.service` and `.timer` (`_` is in no app or
 job name, so the name is exactly this app's job; before this change they were `tando-<app>-job-<name>`,
 which app `foo-job` shared with app `foo`: `tando host setup` renames them, keeping each timer's
 last run).
 A run that fails is alerted, by its timer or by hand alike: check `job.<name>`, one message per
 failed run, resolved by the job's next success (so `tando jobs run <name>` after a fix clears it);
-a job removed from tando.conf takes its alert with it (docs/MONITORING.md, "Scheduled jobs").
+a job removed from tando.conf takes its alert with it (docs/MONITORING.md, "Scheduled jobs"). A
+failing job also shows in `tando ls` (alerts firing) and `tando status` (the alert row).
 Jobs belong to a release: each release keeps the `job.` lines it was deployed with, and the
-scheduled jobs are always those of the live release. A job added in a deploy is scheduled once
-that release is verified (after its soak; `tando jobs` lists it from tando.conf before that, with
-no next run), never when the release fails, and a rollback brings back the previous release's jobs.
-Example: `tando jobs run nightly`
+scheduled jobs are always those of the live release (its code, its settings and env). A job added in
+a deploy is scheduled once that release is verified (after its soak; `tando jobs` lists it from
+tando.conf before that, with no next run), never when the release fails, and a rollback brings back
+the previous release's jobs. Not done: a retry of a failed run (`retries =`).
+Example: `tando jobs run nightly` · `tando jobs log nightly -n 5` · `tando jobs pause nightly`
 
 ### db
 `tando db [info] [app]` · `tando db psql [app]` · `tando db url [app] --show` ·

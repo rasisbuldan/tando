@@ -35,7 +35,7 @@ _tando() {
     'restart:Restart the app (requests are held meanwhile, so none is dropped).'
     'top:A live full-screen dashboard of every registered server - apps, graphs, logs'
     'env:The apps environment variables, stored on the server (root, 640), never in'
-    'jobs:run <name> runs a scheduled job now and shows its output and exit code.'
+    'jobs:The apps scheduled jobs (job.<name> = <schedule> | <command> in tando.conf) - schedule, next'
     'db:The apps PostgreSQL database (database = postgres in tando.conf). Without a'
     'backup:Backups of the apps data directory and database (daily when the app has one).'
     'restore:Put a backup back - the same as tando backup restore, and a backup that is only'
@@ -91,7 +91,7 @@ _tando() {
         restart) subs="" flags="-H -a" args="apps" ;;
         top) subs="" flags="--watch --read-only -H" args="hosts" ;;
         env) subs="ls set unset import log" flags="--show -a -H --note --json" args="apps" ;;
-        jobs) subs="run ls" flags="-H -a" args="apps" ;;
+        jobs) subs="run log pause resume ls" flags="-H -a -n" args="apps" ;;
         db) subs="psql url studio info" flags="-a -H --show --no-open --idle --stop" args="apps" ;;
         backup) subs="ls now restore pull offsite" flags="-a -H --yes --show --saved --import --rotate" args="apps" ;;
         restore) subs="" flags="-a --yes -H --from-host --all" args="" ;;

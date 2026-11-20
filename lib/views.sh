@@ -455,32 +455,130 @@ jobs_run() {
   return 1
 }
 
+# job_result_word result status -> JOB_WORD: how a run ended, in words ("exit 3", "timed out")
+job_result_word() {
+  case $1 in
+    success) JOB_WORD=ok;;
+    exit-code) JOB_WORD="exit ${2:--}";;
+    timeout) JOB_WORD="timed out";;
+    oom-kill) JOB_WORD="killed (memory)";;
+    signal|core-dump) JOB_WORD="killed (${2:--})";;
+    "") JOB_WORD=-;;
+    *) JOB_WORD=$1;;
+  esac
+}
+# job_when_v "2026-11-20 14:00:00 UTC" -> JOB_WHEN "11-20 14:00" (the server's own clock); the
+# year too when it is not that of JOB_YEAR (set by the caller from the first time)
+job_when_v() {
+  local d=${1%% *} t=${1#* }
+  t=${t%% *}; t=${t%:*}
+  if [ "${d%%-*}" = "${JOB_YEAR:-}" ]; then JOB_WHEN="${d#*-} $t"; else JOB_WHEN="$d $t"; fi
+}
+
+# jobs_log name: the output of the last runs of a job (-n N, default 3), each under its time and result
+jobs_log() {
+  local name=$1 cnt=$NLINES r t d res st l
+  case $name in ""|*[!A-Za-z0-9_-]*) usage_err "bad job name: $name (tando jobs lists them)" jobs;; esac
+  [ "$cnt" = 100 ] && cnt=3   # (-n has no value of its own here: 100 is its default for logs)
+  ui_int "$cnt" && [ "$cnt" -ge 1 ] && [ "$cnt" -le 50 ] || usage_err "-n is 1 to 50 runs (got $cnt)" jobs
+  agent_raw sudo job-log "$APP" "$name" "$cnt" < /dev/null > "$TMPD/jl" || exit 1
+  NOW=$(now)
+  if grep -qx 'runs=0' "$TMPD/jl" || ! grep -q "^run$TAB" "$TMPD/jl"; then
+    note "job $name has not run yet (tando jobs run $name runs it now)"; return 0
+  fi
+  while IFS=$TAB read -r r t d res st; do
+    case $r in
+      run)
+        job_result_word "$res" "$st"
+        printf '\n'
+        if [ "$res" = success ]; then st=$(ui_badge ok "$JOB_WORD"); else st=$(ui_badge failed "$JOB_WORD"); fi
+        printf '%s  %s, %ss\n' "$(ago "$t")" "$st" "$d";;
+      log=*) printf '  %s\n' "${r#log=}";;
+      gone=1) printf '  (its output is no longer in the journal)\n';;
+      running=1) printf '\n  (a run is going on now)\n';;
+    esac
+  done < "$TMPD/jl"
+  printf '\n'
+}
+
+# jobs_pause pause|resume name
+jobs_pause() {
+  local how=$1 name=$2
+  case $name in ""|*[!A-Za-z0-9_-]*) usage_err "bad job name: $name (tando jobs lists them)" jobs;; esac
+  agent sudo job-pause "$APP" "$name" "$how" < /dev/null > "$TMPD/jp"
+  kv_read "$TMPD/jp" job state
+  if [ "$how" = pause ]; then
+    note "job $name paused on $HOST: its timer is off, also after a deploy or a reboot; tando jobs resume $name starts it again"
+    note "  (a run going on now finishes; tando jobs run $name still runs it by hand)"
+  else
+    note "job $name resumed on $HOST; tando jobs shows its next run"
+  fi
+}
+
 cmd_jobs() {
   resolve 1
-  [ "${ARGS[1]:-ls}" = run ] && { jobs_run "${ARGS[2]:-}"; return; }
-  local r n cal next last res code cmd lastw resw
-  agent_raw sudo jobs "$APP" > "$TMPD/st" || exit 1
+  case "${ARGS[1]:-ls}" in
+    run) jobs_run "${ARGS[2]:-}"; return;;
+    log) jobs_log "${ARGS[2]:-}"; return;;
+    pause|resume) jobs_pause "${ARGS[1]}" "${ARGS[2]:-}"; return;;
+  esac
+  local r n cal next last res code cmd lastw resw st dur n1 n2 n3 nextw tw zone zname x pd
+  agent_raw sudo jobs "$APP" full > "$TMPD/st" || exit 1
   NOW=$(now)
   {
-    printf 'JOB\tSCHEDULE\tNEXT\tLAST\tRESULT\tCOMMAND\n'
+    printf 'JOB\tSCHEDULE\tNEXT\tLAST\tRESULT\tTOOK\tCOMMAND\n'
     while IFS=$TAB read -r r n cal next last res code cmd; do
       [ "$r" = job ] || continue
+      # the second row of the job (state, duration, the next runs); an agent from before has none
+      st=on dur=- n1=- n2=- n3=-
+      while IFS=$TAB read -r r tw st dur n1 n2 n3; do
+        [ "$r" = jobx ] && [ "$tw" = "$n" ] && break
+        st=on dur=- n1=- n2=- n3=-
+      done < "$TMPD/st"
       if [ "$last" = - ]; then lastw=never resw=-
       else
         lastw=$(ago "$last")
-        if [ "$res" = success ]; then resw=$(ui_badge ok); else resw=$(ui_badge failed "$res"); fi
+        job_result_word "$res" "$code"
+        if [ "$res" = success ]; then resw=$(ui_badge ok); else resw=$(ui_badge failed "$JOB_WORD"); fi
       fi
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$cal" "$(when "$next")" "$lastw" "$resw" "$cmd"
+      case $st in
+        paused) nextw=$(ui_badge stopped paused);;
+        running) nextw=$(ui_badge running running);;
+        *) nextw=$(when "$next");;
+      esac
+      [ "$dur" = - ] && dur= || { ui_dur_v "$dur"; dur=$UI_RET; }
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$cal" "$nextw" "$lastw" "$resw" "${dur:--}" "$cmd"
     done < "$TMPD/st"
   } > "$TMPD/rows"
   ui_box_open "jobs $APP" "$HOST"
   if [ "$(wc -l < "$TMPD/rows")" -le 1 ]; then
     ui_box_line "No jobs. Add a line to tando.conf, then tando up:"
     ui_box_line "  job.nightly = daily | node scripts/nightly.js"
-    ui_box_close "job.<name> = <OnCalendar> | <command> in tando.conf, then tando up"
+    ui_box_line "  job.sync = */15 * * * * | node scripts/sync.js      (cron syntax works too)"
+    ui_box_close "job.<name> = <schedule> | <command> in tando.conf, then tando up"
   else
-    ui_table "l,l,l!2,l!3,l,l:8-!1" < "$TMPD/rows"
-    ui_box_close "run one now: tando jobs run <name>"
+    ui_table "l,l,l!4,l!3,l,l!5,l:8-!1" < "$TMPD/rows"
+    # the next three runs of each job, as the server's clock says them: a wrong schedule shows here
+    zone="" zname=""
+    while IFS=$TAB read -r r n st; do [ "$r" = zone ] && { zone=$n; zname=$st; }; done < "$TMPD/st"
+    ui_box_line ""
+    [ "$zname" = - ] && zname=""
+    ui_box_line "next runs, server time (${zone:-?}${zname:+, $zname}):"
+    while IFS=$TAB read -r r n st dur n1 n2 n3; do
+      [ "$r" = jobx ] || continue
+      [ "$st" = paused ] && { ui_box_line "  $n  paused (tando jobs resume $n)"; continue; }
+      [ "$n1" = - ] && { ui_box_line "  $n  never (the schedule matches no time)"; continue; }
+      JOB_YEAR=${n1%%-*}; job_when_v "$n1"; tw=$JOB_WHEN; pd=${n1%% *}
+      # (a later time on the same day is shown without the date)
+      for x in "$n2" "$n3"; do
+        [ "$x" = - ] && continue
+        job_when_v "$x"
+        if [ "${x%% *}" = "$pd" ]; then tw="$tw, ${JOB_WHEN#* }"; else tw="$tw, $JOB_WHEN"; fi
+        pd=${x%% *}
+      done
+      ui_box_line "  $n  $tw"
+    done < "$TMPD/st"
+    ui_box_close "run now: tando jobs run <name> · output: tando jobs log <name> · off: tando jobs pause <name>"
   fi
 }
 

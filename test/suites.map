@@ -34,7 +34,7 @@ test/server/*            ALL
 
 # ---- laptop side
 lib/ui.sh                lint ui-test e2e-cli e2e-ease e2e-top e2e-status
-lib/views.sh             lint ui-test e2e-cli e2e-status e2e-data e2e e2e-alerts e2e-host e2e-logs
+lib/views.sh             lint ui-test e2e-cli e2e-status e2e-data e2e e2e-alerts e2e-host e2e-logs  e2e-jobs
 lib/help.txt             lint ui-test e2e-cli install-test
 lib/help-conf.txt        lint ui-test e2e-cli install-test
 docs/CONFIG.md           lint ui-test
@@ -106,6 +106,8 @@ test/ui-demo.sh          lint
 test/alerts-lib.sh       @alerts lint
 test/e2e-alerts*         @alerts lint
 test/e2e-faults*         @faults lint
+test/e2e-jobs.sh         e2e-jobs lint
+test/cron-ref.py         e2e-jobs lint
 test/e2e-matrix*         e2e-matrix-quick lint
 test/faults/*            @faults e2e-matrix-quick lint
 test/sec2/*              e2e-sec2 lint

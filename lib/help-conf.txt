@@ -45,9 +45,14 @@ Release command (not static, not container)
   release_shell   true: run it with sh -c (default false)
   release_timeout seconds, 1-3600 (default 300)
 Jobs
-  job.<name>      <schedule> | <command>, like daily | node nightly.js
+  job.<name>      <schedule> | <command>, like daily | node nightly.js or */15 * * * * | node sync.js
+                  (cron or systemd calendar syntax, the server's time zone)
   job_timeout     seconds any job may run, 1-86400 (default 3600)
+  job_spread      seconds a job's start is spread over, 0-3600 (default 15)
+  job_missed      run (default): a run missed while the server was off is made up once; skip
   job.<name>.timeout  seconds for one job
+  job.<name>.spread   the same, for one job
+  job.<name>.missed   the same, for one job
 Domains
   domain          domains, separated by spaces or commas
   www             redirect | serve | off (by name; domain add says why)
