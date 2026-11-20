@@ -45,7 +45,8 @@ offsite/                domain: S3 client, encryption, push/fetch/sync/retention
 cmd/tando-studio/       main: serve (flags, the credential file, the socket, signals) and version
 studio/                 domain: tando db studio: the HTTP API on a unix socket, the read-only rules (below)
   pgwire/     its PostgreSQL client: protocol 3.0, SCRAM-SHA-256, simple and extended query, cancel
-  sqlsplit/   the editor's statements (quotes, dollar quotes, nested comments), the read-only allowlist
+  sqlsplit/   the editor's statements (quotes, dollar quotes, nested comments), the read-only allowlist,
+              the scope guard's name checks
   ui/         the page: index.html, s.css, s.js (embedded; no framework, no outside request)
 internal/               platform: everything at least two programs need; never imports a domain package
   run/        start a program: argv, timeout, explicit env; never a shell. The only os/exec user
@@ -375,13 +376,17 @@ message is length-checked (8 MB) except DataRow, which is read as a stream: a ce
 cap and the rest discarded from the socket. COPY is answered (CopyFail, or the out data drained)
 and refused; `Cancel` sends a CancelRequest on a connection of its own. `sqlsplit` splits the
 editor's text (code-point offsets for error positions) and reads the first words: `ReadOnly` is
-the allowlist. `studio` itself: `studio.go` (Config, New, the session's life: heartbeat, idle,
+the allowlist; `Scope` the scope guard's names (system schemas, pg_* names, reg* lookups,
+catalog-reading functions, SHOW ALL) and `ExplainTarget` the statement an EXPLAIN explains. `studio` itself: `studio.go` (Config, New, the session's life: heartbeat, idle,
 EOF; Serve and its shutdown order; the unix socket), `http.go` (the checks every request passes:
 Host with the port, Origin, Sec-Fetch-Site, the content type, the bearer token; the one-time code;
 the headers), `db.go` (the one connection and `ro`: `BEGIN READ ONLY; SELECT 1`, the statements,
 `ROLLBACK`, `DISCARD ALL` and the resource settings again; the studio's own clock per statement;
-cancel; the connection closed when idle), `query.go` (the editor: the allowlist before anything
-runs, then statement by statement, streamed), `catalog.go` (tables, structure, rows: names from
+cancel; the connection closed when idle), `query.go` (the editor: the allowlist and the scope guard's names before anything
+runs, then statement by statement, each first planned and checked by `scope.go`, streamed),
+`scope.go` (the scope guard's plan half: EXPLAIN (VERBOSE, FORMAT JSON) of the statement in the
+same transaction, every relation's schema, function scan and printed expression checked; fail
+closed), `catalog.go` (tables, structure, rows: names from
 the catalog only, quoted; values as parameters), `sink.go` (a result as streamed JSON, the row,
 cell and answer caps), `jsonw.go` (the JSON writer: < > & U+2028/9 escaped, bad UTF-8 as U+FFFD),
 `args.go` (the command line and the credential file), `ui.go` (the embedded page, gzip).
@@ -392,7 +397,11 @@ fields, a notice mid-stream, a cut cell keeping the stream in sync, PortalSuspen
 answered with CopyFail and Sync, CopyOut drained, the cancel packet, short reads, an oversized
 message); `FuzzReadMessage`, `FuzzDataRow`; `live_test.go` the same client against a real
 PostgreSQL (PGWIRE_LIVE; test/e2e-studio.sh S11 runs it on the test server). `sqlsplit_test.go`
-the table of quotes and comments, code-point offsets, the allowlist; `FuzzSplit`.
+the table of quotes and comments, code-point offsets, the allowlist; `FuzzSplit`; `scope_test.go`
+every way to write a system name, the names that stay, EXPLAIN's forms; `FuzzScope`.
+`studio/scope_test.go` the plan walker on plans PostgreSQL printed (testdata/plans), failing
+closed on every malformed plan, the plan check in a batch; `live_test.go` `TestLiveScope` the
+attack list against a real PostgreSQL.
 `studio_test.go` with a fake DB that records every call: the exact sequence of a batch, a
 transaction ended mid-batch, every known bypass refused before anything runs, absolute error
 positions, row and byte caps, the studio's clock (cancel, then the connection closed), cancel and

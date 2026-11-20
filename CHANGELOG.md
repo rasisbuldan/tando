@@ -6,6 +6,19 @@ first, grouped by area.
 
 ## Unreleased
 
+- Changed: `tando db studio` reads only the app's own tables. The sidebar no longer has "system
+  schemas"; the table list, structure and rows never show or serve pg_catalog,
+  information_schema or pg_toast (a request for one of their tables is a 404). In the SQL
+  editor a statement that reaches a system table or view (`pg_roles`, `pg_stat_activity`,
+  `information_schema.tables`, ...) by any route (quoted, in a CTE or subquery, through a view of
+  the app's, after `SET search_path`, inside `EXPLAIN`), a catalog-reading function (`pg_*`,
+  `current_setting`, `has_table_privilege`, `obj_description`, `txid_*`, `lo_*`, ...), a
+  `regclass` cast or `SHOW ALL` is refused before it runs, with a message that names it. It is
+  checked by name in the statement's text and by the server's own plan of the statement
+  (`EXPLAIN (VERBOSE, FORMAT JSON)` in the same read-only transaction, about 0.3 ms per
+  statement); no new dependency. Limits: a function the app defined that reads a catalog inside
+  is not seen; an app column or table named `pg_...` is refused too (docs/COMMANDS.md).
+
 - Fixed: between an app's site being set up and its first release going live (a first `tando up`
   still running, or one that failed and left nothing live), a request to its address waited 15 s
   and got an empty 502 (and scanners that find a new certificate in the public logs filled the

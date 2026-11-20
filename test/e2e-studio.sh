@@ -19,7 +19,9 @@
 #       journal, the audit log or a process list; S11 pgwire and the studio against this server's
 #       PostgreSQL (Go tests built for its CPU); S12 doctor; S13 the backend's scoping (settings,
 #       priority, a heavy query's memory, a migration's lock wait, no snapshot between requests);
-#       S9s/t/i connection slots and the idle connection; S14 isolation of two apps; S15 the picker
+#       S9s/t/i connection slots and the idle connection; S14 isolation of two apps; S15 the picker;
+#       S16 scope: the app's own tables only (no system schema listed or served, every way to a
+#       system relation refused in the editor, the demo's tables and everyday SQL still work)
 # shellcheck disable=SC2034 # (values set here are read inside the eval strings of checks)
 set -u
 . "$(cd "$(dirname "$0")" && pwd -P)/lib.sh"
@@ -394,6 +396,108 @@ api /api/rows '{"schema":"public","name":"wide","offset":0,"limit":5}'
 check "S6i browsing a 20 MB cell: 16,384 characters, marked cut" \
   eval '[ "$(jx "length %->{result}{rows}[0][1]")" = 16384 ] && [ "$(jx "%->{result}{trunc}[0][1]")" = 1 ]'
 
+# ---- S16 scope: the app's own tables only, never the system catalogs -----------------------------
+log "S16 scope"
+# the demo's relations (customers, items, orders, the view big_orders) and three of the app's
+# objects that reach a catalog from inside: a view over pg_roles, a view calling current_setting,
+# a function reading pg_roles (the documented limit). Dropped at the end of the section.
+pgsu tando_shop > "$E/s16seed.out" <<'SQL'
+CREATE TABLE customers (id int PRIMARY KEY, name text); CREATE TABLE orders (id int PRIMARY KEY, customer_id int REFERENCES customers, item_id bigint REFERENCES items, qty int);
+INSERT INTO customers SELECT i, 'customer ' || i FROM generate_series(1, 200) i;
+INSERT INTO orders SELECT i, 1 + i % 200, 1 + i % 1000, i % 7 FROM generate_series(1, 20000) i;
+CREATE VIEW big_orders AS SELECT * FROM orders WHERE qty > 4;
+CREATE VIEW sys_v AS SELECT rolname FROM pg_roles; CREATE VIEW set_v AS SELECT current_setting('work_mem') AS w;
+CREATE FUNCTION roles_f() RETURNS SETOF text LANGUAGE sql AS 'SELECT rolname::text FROM pg_roles';
+ALTER TABLE customers OWNER TO tando_shop; ALTER TABLE orders OWNER TO tando_shop; ALTER VIEW big_orders OWNER TO tando_shop;
+ALTER VIEW sys_v OWNER TO tando_shop; ALTER VIEW set_v OWNER TO tando_shop; ALTER FUNCTION roles_f() OWNER TO tando_shop; ANALYZE customers, orders;
+SQL
+check "S16 seeded: customers, orders, the view big_orders; views over pg_roles and current_setting" eval '! grep -q ERROR "$E/s16seed.out"'
+# the table list and browsing: no system schema, whatever is asked (a system table is a 404)
+for p in /api/tables "/api/tables?system=1"; do
+  api "$p"; sys=$(jx 'scalar grep { $_->{schema} =~ /^pg_|^information_schema$/ } @{%->{tables}}')
+  names=$(jx 'join ",", sort map { $_->{name} } grep { $_->{name} =~ /^(customers|items|orders|big_orders)$/ } @{%->{tables}}')
+  check "S16a $p: no table of a system schema ($sys), the app's are there ($names)" eval '[ "$sys" = 0 ] && [ "$names" = big_orders,customers,items,orders ]'
+done
+for sn in pg_catalog/pg_class pg_catalog/pg_authid information_schema/tables pg_toast/pg_toast_1259 pg_catalog/pg_roles; do
+  api "/api/table?schema=${sn%/*}&name=${sn#*/}"; c1=$CODE
+  api /api/rows "{\"schema\":\"${sn%/*}\",\"name\":\"${sn#*/}\",\"offset\":0,\"limit\":5}"; c2=$CODE
+  check "S16b ${sn%/*}.${sn#*/}: structure $c1, rows $c2 (404: as an unknown table)" eval '[ "$c1" = 404 ] && [ "$c2" = 404 ]'
+done
+# browsing a view of the app's that reads pg_roles: the editor's plan check, 403; the demo's view is browsed
+api /api/rows '{"schema":"public","name":"sys_v","offset":0,"limit":5}'; c1=$CODE m1=$(jx '%->{error}{message}')
+api /api/rows '{"schema":"public","name":"big_orders","offset":0,"limit":5}'; c2=$CODE n2=$(jx 'scalar @{%->{result}{rows}}')
+check "S16b2 the rows of a view over pg_roles: $c1 ($m1); of big_orders: $c2, $n2 rows" \
+  eval '[ "$c1" = 403 ] && case $m1 in *"pg_catalog.pg_authid is a system table") true;; *) false;; esac && [ "$c2" = 200 ] && [ "$n2" = 5 ]'
+# the editor: every way to a system relation is refused before it runs (42501, the message names it)
+scope_no() { # id sql [sqlstate (42501)]: refused with that code; with 42501 the guard's message
+  local want=${3:-42501} e m
+  q "$2"; e=$(qerr); m=$(jx '%->{error}{message}')
+  check "$1 refused ($e: $m): $2" eval '[ "$e" = "$want" ] && { [ "$want" != 42501 ] || case $m in "the studio only reads this app'"'"'s own tables: "*" is "*) true;; *) false;; esac; }'
+}
+scope_no S16c1 "SELECT * FROM pg_class"
+scope_no S16c2 'SELECT * FROM "pg_class"'
+scope_no S16c3 "SELECT * FROM PG_CATALOG.pg_class"
+scope_no S16c4 "SELECT * FROM pg_catalog /* x */ .
+  -- y
+  pg_class"
+scope_no S16c5 'SELECT * FROM U&"pg\005fclass"' 25006
+scope_no S16c6 "WITH x AS (SELECT * FROM pg_roles) SELECT * FROM x"
+scope_no S16c7 "SELECT * FROM (SELECT rolname FROM pg_roles) s"
+scope_no S16c8 "SELECT * FROM items i, LATERAL (SELECT rolname FROM pg_roles LIMIT 1) r"
+scope_no S16c9 "SELECT name FROM customers UNION SELECT rolname FROM pg_roles"
+scope_no S16d1 "SELECT 1 WHERE EXISTS (SELECT 1 FROM pg_stat_activity)"
+scope_no S16d2 "TABLE pg_roles"
+scope_no S16d3 "SELECT * FROM information_schema.tables"
+scope_no S16d4 "SELECT (SELECT rolname FROM pg_roles LIMIT 1)"
+for f in "pg_get_userbyid(10)" "current_setting('work_mem')" "has_table_privilege('items', 'select')" "to_regclass('pg_authid')" \
+    "pg_database_size(current_database())" "obj_description(1259)" "pg_relation_size('items')" "pg_ls_dir('.')" "txid_current()" \
+    "lo_get(1)" "'pg_authid'::regclass::oid" "CAST('x' AS regclass)" "1 OPERATOR(pg_catalog.+) 1" "table_to_xml('pg_authid', true, false, '')" \
+    "tableoid::regclass FROM items LIMIT 1"; do
+  scope_no S16e "SELECT $f"
+done
+scope_no S16f1 "SELECT * FROM sys_v"   # the app's view over pg_roles: the plan shows pg_catalog.pg_authid
+check "S16f1b ... and names the system table: $(jx '%->{error}{message}')" \
+  eval 'jx "%->{error}{message}" | grep -q "pg_catalog.pg_authid is a system table"'
+scope_no S16f2 "SELECT * FROM set_v"   # the app's view calling current_setting: the plan's Output
+scope_no S16f3 "SELECT o.* FROM big_orders o JOIN sys_v ON true"
+scope_no S16g1 "SET LOCAL search_path = pg_catalog; SELECT * FROM pg_class"
+scope_no S16g2 "SET LOCAL search_path = 'information_schema'; SELECT * FROM tables"
+check "S16g2b ... the first statement ran, the second was refused by its plan: stmt $(jx '%->{error}{stmt}'), $(jx 'scalar @{%->{results}}') result" \
+  eval '[ "$(jx "%->{error}{stmt}")" = 1 ] && [ "$(jx "scalar @{%->{results}}")" = 1 ]'
+scope_no S16g3 "SELECT * FROM pg_temp.x"
+scope_no S16h1 "EXPLAIN SELECT * FROM pg_class"
+scope_no S16h2 "EXPLAIN SELECT * FROM sys_v"
+scope_no S16h3 "EXPLAIN (ANALYZE) SELECT * FROM sys_v"
+scope_no S16h4 "EXPLAIN ANALYZE VERBOSE (SELECT * FROM sys_v)"
+scope_no S16i1 "VALUES ((SELECT count(*) FROM pg_class))"
+scope_no S16i2 "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r, sys_v"
+scope_no S16i3 "SELECT * FROM items, pg_class"
+scope_no S16i4 '\d' 25006
+scope_no S16i5 "SHOW ALL"
+scope_no S16i6 "SELECT * FROM tando_other.public.other_secret" 0A000   # another app's database: PostgreSQL's refusal
+# what stays: the demo's relations, joins, aggregates, the view, EXPLAIN, everyday functions, SHOW
+scope_ok() { # id sql [max rows] -> no error; R1 = the first cell, N = the rows of the last result
+  q "$2" "${3:-1000}"; local e; e=$(qerr); R1=$(jx '%->{results}[-1]{rows}[0][0]'); N=$(jx 'scalar @{%->{results}[-1]{rows}}')
+  check "$1 runs ($R1, $N rows${e:+; error $e $(jx '%->{error}{message}')}): $2" test -z "$e"
+}
+scope_ok S16j1 "SELECT count(*) FROM orders"
+check "S16j1b count(*) = $R1" test "$R1" = 20000
+scope_ok S16j2 "SELECT c.name, sum(o.qty) FROM orders o JOIN customers c ON c.id = o.customer_id JOIN items i ON i.id = o.item_id GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
+scope_ok S16j3 "SELECT count(*) FROM big_orders"
+scope_ok S16j4 "EXPLAIN SELECT * FROM big_orders b JOIN customers c ON c.id = b.customer_id"
+scope_ok S16j5 "EXPLAIN ANALYZE SELECT count(*) FROM orders"
+scope_ok S16j6 "SELECT * FROM orders ORDER BY id" 10000
+check "S16j6b a CSV-sized result: 10,000 rows ($N)" test "$N" = 10000
+scope_ok S16j7 "SELECT now(), current_user, current_database(), version(), pg_typeof(1), upper(name), to_char(now(), 'YYYY'), jsonb_build_object('a', 1) FROM customers LIMIT 1"
+scope_ok S16j8 "SELECT g, x.name FROM generate_series(1, 3) g, LATERAL (SELECT name FROM customers WHERE id = g) x"
+scope_ok S16j9 "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT count(*) FROM r"
+scope_ok S16k1 "SELECT 'pg_class', \$\$pg_authid\$\$ -- pg_roles"
+scope_ok S16k2 "SHOW work_mem"
+scope_ok S16k3 "SET LOCAL search_path = public; SELECT count(*) FROM customers"
+scope_ok S16l "SELECT * FROM roles_f()"   # the documented limit: a function of the app's is called by its name
+echo "DROP FUNCTION roles_f(); DROP VIEW sys_v, set_v, big_orders; DROP TABLE orders, customers" | pgsu tando_shop > /dev/null
+check "S16m the section's objects are gone, the data is what it was" test "$(datasum)" = "$SUM0"
+
 # ---- S10 secrets (while a session is open) ----------------------------------------------------
 log "S10 secrets"
 q "SELECT v FROM secrets WHERE id = 1"
@@ -552,15 +656,19 @@ api /api/rows '{"schema":"public","name":"other_secret","offset":0,"limit":5}'; 
 api /api/rows '{"schema":"public","name":"items","offset":0,"limit":5,"database":"tando_other"}'; GOT=$CODE; iso S14g 400 "a database in the request"
 api /api/query '{"id":"x","sql":"select 1","db":"tando_other","role":"tando_other"}'; GOT=$CODE; iso S14h 400 "a database or role in a query"
 q "SELECT dblink('dbname=tando_other', 'SELECT v FROM other_secret')"; GOT=$(qerr); iso S14i 42883 "dblink (not installed)"
-api "/api/tables?system=1"; GOT=$(jx 'scalar grep { $_->{name} eq "other_secret" } @{%->{tables}}'); iso S14j 0 "the table list, system schemas included"
-# the other app runs a statement that carries its canary; shop's studio looks at pg_stat_activity
+api "/api/tables?system=1"; GOT=$(jx 'scalar grep { $_->{name} eq "other_secret" } @{%->{tables}}'); iso S14j 0 "the table list (asked for system schemas too)"
+# the other app runs a statement that carries its canary. Shop's studio may not read
+# pg_stat_activity at all (the scope guard); what the role itself would see there, and the
+# database names it can read in pg_database, are shown by the role's own psql on the server
 srv "read -r PGPASSWORD; export PGPASSWORD; setsid nohup psql -X -At -h 127.0.0.1 -U tando_other -d tando_other -c \"SELECT pg_sleep(8), '$OCANARY'\" > /dev/null 2>&1 < /dev/null &" <<< "$PW2"
 T_UNTIL_STEP=0.2 t_until 10 eval '[ "$(echo "SELECT count(*) FROM pg_stat_activity WHERE usename = '"'"'tando_other'"'"' AND state = '"'"'active'"'"'" | pgsu postgres)" = 1 ]'
 q "SELECT usename, datname, query, client_addr::text FROM pg_stat_activity WHERE usename = 'tando_other'"
-GOT=$(jx 'my @u; for my $x (map { join ",", map { defined $_ ? $_ : "NULL" } @$_ } @{%->{results}[0]{rows}}) { push @u, $x unless grep { $_ eq $x } @u } join "|", sort @u')
-iso S14k "tando_other,tando_other,<insufficient privilege>,NULL" "the other app's sessions in pg_stat_activity (every row)"
-q "SELECT string_agg(datname, ',') FROM pg_database"; dbs=$(jx '%->{results}[0]{rows}[0][0]')
-check "S14l none of shop's studio answers holds other's canary; database names are visible to the role (documented): $dbs" \
+GOT=$(qerr); iso S14k 42501 "the other app's sessions in pg_stat_activity (refused: a system view)"
+GOT=$(srv "read -r PGPASSWORD; export PGPASSWORD; psql -X -At -F, -h 127.0.0.1 -U tando_shop -d tando_shop -c \"SELECT DISTINCT usename, datname, query, coalesce(client_addr::text, 'NULL') FROM pg_stat_activity WHERE usename = 'tando_other'\"" <<< "$PW" | sort -u | tr '\n' '|')
+check "S14k2 the role's own psql: the other app's sessions show no query or address: $GOT" test "$GOT" = "tando_other,tando_other,<insufficient privilege>,NULL|"
+q "SELECT string_agg(datname, ',') FROM pg_database"; GOT=$(qerr); iso S14k3 42501 "pg_database (refused: a system table)"
+dbs=$(srv "read -r PGPASSWORD; export PGPASSWORD; psql -X -At -h 127.0.0.1 -U tando_shop -d tando_shop -c \"SELECT string_agg(datname, ',') FROM pg_database\"" <<< "$PW")
+check "S14l none of shop's studio answers holds other's canary; database names are visible to the role's psql (documented), not to the studio: $dbs" \
   eval '! grep -q "$OCANARY" "$E/iso.all" && case ",$dbs," in *,tando_other,*) true;; *) false;; esac'
 # the role itself: its own database only
 for d in tando_other postgres template1; do
@@ -611,8 +719,8 @@ if command -v go > /dev/null 2>&1; then
       <<< "$PW" > "$E/live-$pkg.out" 2>&1 || ok=0
     srv "rm -rf ${rd:?}"   # lint: allow RL04 rd checked above
   done
-  check "S11a pgwire's and the studio's live tests pass against PostgreSQL $(srv 'psql --version' | awk '{ print $3 }') (as tando-shop)" \
-    eval '[ $ok = 1 ] && grep -q "^--- PASS: TestLive " "$E/live-pgwire.out" && grep -q "^--- PASS: TestLiveReadOnly " "$E/live-studio.out"'
+  check "S11a pgwire's and the studio's live tests (read-only, scope) pass against PostgreSQL $(srv 'psql --version' | awk '{ print $3 }') (as tando-shop)" \
+    eval '[ $ok = 1 ] && grep -q "^--- PASS: TestLive " "$E/live-pgwire.out" && grep -q "^--- PASS: TestLiveReadOnly " "$E/live-studio.out" && grep -q "^--- PASS: TestLiveScope " "$E/live-studio.out"'
   echo "DROP TABLE IF EXISTS studio_live; DROP SEQUENCE IF EXISTS studio_seq;" | pgsu tando_shop > /dev/null
 else skip "S11a Go is not installed here: the live pgwire tests need it"; fi
 

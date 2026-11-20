@@ -199,7 +199,10 @@ var refusedSettings = map[string]bool{"role": true, "session_authorization": tru
 	"work_mem": true, "hash_mem_multiplier": true, "max_parallel_workers_per_gather": true,
 	"max_parallel_workers": true, "temp_buffers": true, "jit": true, "lock_timeout": true,
 	"idle_in_transaction_session_timeout": true, "maintenance_work_mem": true,
-	"max_parallel_maintenance_workers": true, "logical_decoding_work_mem": true}
+	"max_parallel_maintenance_workers": true, "logical_decoding_work_mem": true,
+	// how a backslash in '...' is read: off, the server and this package's scans would disagree
+	// on where a string ends (the scope guard reads names outside strings)
+	"standard_conforming_strings": true, "backslash_quote": true}
 
 // refusedCalls: functions a statement may not call by name, though a read-only transaction
 // lets them run: set_config would change the settings above from inside a SELECT; the functions
@@ -211,11 +214,11 @@ var refusedCalls = map[string]bool{"set_config": true,
 	"cursor_to_xml": true, "cursor_to_xmlschema": true, "ts_stat": true, "ts_rewrite": true,
 	"pg_cancel_backend": true, "pg_terminate_backend": true, "pg_logical_emit_message": true}
 
-// Calls says whether stmt names one of the refused functions (an identifier outside quotes and
-// comments, quoted or not, any case, schema-qualified or not), or has a U&"..." identifier (its
-// escapes could spell any of them). A function the app defined that calls set_config is not
-// seen: the studio's settings are then a default, not a limit (documented).
-func calls(stmt string) bool {
+// idents calls fn with each identifier of stmt outside quotes and comments (a quoted one
+// unquoted, a plain one lowercased as PostgreSQL folds it) and its byte offset, until fn says
+// stop. It reports a U&"..." identifier as the word `u&"` (its escapes could spell any name).
+// An unterminated dollar quote ends the scan (the server refuses the statement).
+func idents(stmt string, fn func(word string, at int) bool) {
 	for i := 0; i < len(stmt); {
 		c := stmt[i]
 		switch {
@@ -232,7 +235,7 @@ func calls(stmt string) bool {
 			if tag, ok := dollarTag(stmt, i); ok {
 				j := strings.Index(stmt[i+len(tag):], tag)
 				if j < 0 {
-					return false
+					return
 				}
 				i += len(tag) + j + len(tag)
 			} else {
@@ -240,8 +243,8 @@ func calls(stmt string) bool {
 			}
 		case c == '"':
 			j := skipQuote(stmt, i+1, '"', false)
-			if refusedCalls[strings.ToLower(strings.ReplaceAll(strings.TrimSuffix(stmt[i+1:j], `"`), `""`, `"`))] {
-				return true
+			if !fn(strings.ReplaceAll(strings.TrimSuffix(stmt[i+1:j], `"`), `""`, `"`), i) {
+				return
 			}
 			i = j
 		case isIdent(c) && c != '$':
@@ -249,18 +252,31 @@ func calls(stmt string) bool {
 			for j < len(stmt) && isIdent(stmt[j]) {
 				j++
 			}
-			if refusedCalls[strings.ToLower(stmt[i:j])] {
-				return true
-			}
 			if j == i+1 && (c == 'u' || c == 'U') && strings.HasPrefix(stmt[j:], `&"`) {
-				return true // U&"\0073et_config": PostgreSQL decodes the escapes, this scan would not
+				if !fn(`u&"`, i) { // U&"\0073et_config": PostgreSQL decodes the escapes, this scan would not
+					return
+				}
+			} else if !fn(strings.ToLower(stmt[i:j]), i) {
+				return
 			}
 			i = j
 		default:
 			i++
 		}
 	}
-	return false
+}
+
+// calls says whether stmt names one of the refused functions (an identifier outside quotes and
+// comments, quoted or not, any case, schema-qualified or not), or has a U&"..." identifier (its
+// escapes could spell any of them). A function the app defined that calls set_config is not
+// seen: the studio's settings are then a default, not a limit (documented).
+func calls(stmt string) bool {
+	found := false
+	idents(stmt, func(w string, _ int) bool {
+		found = w == `u&"` || refusedCalls[strings.ToLower(w)]
+		return !found
+	})
+	return found
 }
 
 // ReadOnly says whether stmt may run in read-only mode. It is the accident guard (LOCK, REINDEX,

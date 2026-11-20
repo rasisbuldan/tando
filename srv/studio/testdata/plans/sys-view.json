@@ -1,0 +1,17 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Seq Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Relation Name": "pg_authid",
+      "Schema": "pg_catalog",
+      "Alias": "pg_authid",
+      "Startup Cost": 0.00,
+      "Total Cost": 1.15,
+      "Plan Rows": 15,
+      "Plan Width": 64,
+      "Output": ["pg_authid.rolname"]
+    }
+  }
+]
