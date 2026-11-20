@@ -28,7 +28,7 @@ ui_init
 . "$TANDO_HOME/lib/args.sh"
 
 # the flags every command shares (lib/args.sh has already refused the ones a command does not take)
-WATCH="" FOLLOW="" NLINES=100 ARGS=() ALL="" PURGE="" SHOW="" HELP="" JSON="" YES="" FORCE="" DRY_RUN="" VERBOSE=""
+WATCH="" FOLLOW="" NLINES=100 ARGS=() ALL="" PURGE="" SHOW="" NOTE="" HELP="" JSON="" YES="" FORCE="" DRY_RUN="" VERBOSE=""
 parse() {
   while [ $# -gt 0 ]; do
     case $1 in
@@ -40,6 +40,7 @@ parse() {
       --all) ALL=1; shift;;
       --purge) PURGE=1; shift;;
       --show) SHOW=1; shift;;
+      --note) NOTE=$2; shift 2;;   # env set|unset|import: the line for the env changelog
       --verbose) VERBOSE=1; shift;;   # doctor: every program on its own row
       --dry-run) DRY_RUN=1; shift;;   # deploy: build and stage, upload nothing (lib/deploy.sh)
       --json|--yes|--force|--wait)   # plugins read these from ARGS themselves
@@ -283,10 +284,19 @@ env_import() {
 
 cmd_env() {
   resolve 1
-  local op=${ARGS[1]:-ls} a v
+  local op=${ARGS[1]:-ls} a v via="" nargs=""
   case $op in
-    ls) cmd_env_ls; return;;
-    import) env_import "${ARGS[2]:-}" > "$TMPD/env"; op="set";;
+    ls) [ -z "$NOTE" ] || usage_err "--note goes with env set, unset or import" env; cmd_env_ls; return;;
+    log) [ -z "$NOTE" ] || usage_err "--note goes with env set, unset or import" env; cmd_env_log; return;;
+  esac
+  if [ -n "$NOTE" ]; then   # one line of plain text, at most 200 characters
+    case $NOTE in *[[:cntrl:]]*) die "the note must be one line of plain text (no control characters)";; esac
+    [ ${#NOTE} -le 200 ] || die "the note is ${#NOTE} characters; at most 200"
+    # (base64: the agent's arguments are plain words; it decodes and checks the note again)
+    nargs="note64=$(printf '%s' "$NOTE" | base64 | tr -d '\n')"
+  fi
+  case $op in
+    import) env_import "${ARGS[2]:-}" > "$TMPD/env"; op="set"; via=via=import;;
     set|unset)
       for a in ${ARGS[@]+"${ARGS[@]:2}"}; do
         case $a in *$'\n'*) die "values cannot contain newlines";; esac
@@ -303,7 +313,8 @@ cmd_env() {
       done > "$TMPD/env";;
   esac
   # agent_wait (lib/deploy.sh): says what it waits for while a deploy of the app soaks
-  agent_wait sudo "env-$op" "$APP" < "$TMPD/env" > "$TMPD/o" || bail 1
+  # shellcheck disable=SC2086 # (nargs and via are single plain words or empty)
+  agent_wait sudo "env-$op" "$APP" $nargs $via < "$TMPD/env" > "$TMPD/o" || bail 1
   kv_read "$TMPD/o" missing changed restarted why staged
   [ -n "$K_missing" ] && note "not set, nothing to remove: $K_missing"
   # before the first tando up: kept on the server, applied when the app is created

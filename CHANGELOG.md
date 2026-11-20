@@ -13,6 +13,65 @@ first, grouped by area.
 - Fixed: tando-watch's minute now recovers a rollback that died after it wrote its progress file
   and before its first state write: the progress said "running" for ever and the rollback had no
   history line until the next command that changes the app.
+- Changed: `tando db studio` reads only the app's own tables. The sidebar no longer has "system
+  schemas"; the table list, structure and rows never show or serve pg_catalog,
+  information_schema or pg_toast (a request for one of their tables is a 404). In the SQL
+  editor a statement that reaches a system table or view (`pg_roles`, `pg_stat_activity`,
+  `information_schema.tables`, ...) by any route (quoted, in a CTE or subquery, through a view of
+  the app's, after `SET search_path`, inside `EXPLAIN`), a catalog-reading function (`pg_*`,
+  `current_setting`, `has_table_privilege`, `obj_description`, `txid_*`, `lo_*`, ...), a
+  `regclass` cast or `SHOW ALL` is refused before it runs, with a message that names it. It is
+  checked by name in the statement's text and by the server's own plan of the statement
+  (`EXPLAIN (VERBOSE, FORMAT JSON)` in the same read-only transaction, about 0.3 ms per
+  statement); no new dependency. Limits: a function the app defined that reads a catalog inside
+  is not seen; an app column or table named `pg_...` is refused too (docs/COMMANDS.md).
+
+- Added: `tando env log` (an env changelog). Every `env set`, `env unset` and `env import` (and the
+  `DATABASE_URL` tando writes for `database = postgres`) adds one entry on the server: when, who
+  (the audit log's identity), the verb, an optional `--note "text"` (one line, 200 characters) and
+  three lists of key NAMES: added, changed, removed. Never a value, a length or a hash; a change
+  that alters nothing writes nothing; a change the app's health check put back is not logged. The
+  log is `env.log` in the app's directory (root 600, written whole and renamed like the env file,
+  the newest 200 kept, removed with the app). `tando env log` prints `[time] [note] >` per entry,
+  newest first (at a terminal you pick one and its page opens; piped it only prints), `env log 3`
+  opens entry 3, `--json` gives names only. Read with the admin's login like `env ls`; a CI deploy
+  key is refused (the gate lets a key run only deploy verbs, so the new verb needed no change).
+- Fixed: a deploy's tando.conf settings changed the live app before its release existed:
+  `configure` wrote the new memory, path, limits, hold and the like into the unit file and Caddy's
+  site at once, and a deploy refused in pre-flight (or cut off, or whose upload failed) left them
+  there, under the old release. They now wait on the server (`/opt/tando/apps/<app>/confs/<id>`,
+  the id printed by configure and handed to `activate` by the client) and are applied at the
+  switch; a deploy that does not go live leaves app.conf, the unit file, the site and the job units
+  exactly as they were. Every setting now belongs to its release (`start/<id>` holds all of them,
+  not only start and health): a rollback, and the automatic one after a failed check, bring back
+  the older release's memory, path, limits and jobs with its code. Domains in tando.conf and the
+  database's role settings still apply at configure.
+- Fixed: two clients deploying the same app with different tando.conf files: the second one's
+  configure, landing while the first was uploading, gave the first one's activation its start
+  command and health check (pre-flight then failed, or the wrong settings went live). Each
+  activation now runs with the settings its own configure staged, against what the one before it
+  left. An activation without a settings id (an older client, a deploy key) takes the last
+  configure's, as before.
+- Fixed: job units that could not be written (a full disk) were reported as done: the unit files
+  could be installed cut short, and a deploy's end was recorded with half its jobs old. Each file
+  must be complete before it is installed; a failure leaves the operation's end unfinished, and
+  recovery (tando-watch's minute, the next command) writes the jobs again.
+- Fixed: tando-watch and `tando status` tested an app's lock by taking it for an instant: a
+  command's own try at that moment waited, and two probes at once saw each other as "busy" (a
+  recovery skipped for a minute). They now read /proc/locks and take no lock (also the agent's
+  `busy` check).
+- Fixed: after the clock was set back, pre-deploy (and other) backups were pruned by name: backups
+  named from the future kept their place and each new one was deleted at the next backup. Backups
+  now carry their order (`seq` in meta) and are pruned by it.
+- Fixed: a deploy queued behind another operation for the server's hour gave up as "interrupted
+  before it started (activate was cut off, or its server restarted...)"; it now says it waited an
+  hour for what, and that nothing was changed. The client waits as long as the server reports the
+  release queued (its deadline counts from the end of the queue), instead of giving up after
+  about 17 minutes while the release could still go live later.
+- Tests: the fault matrix's versions alternate their memory, max_conns and a job's schedule too
+  (the checker compares the unit file, the site and the job timer with the serving release); a
+  `race` action (a second client's configure at the point); new cells g-j in `--cells`.
+
 - Fixed: between an app's site being set up and its first release going live (a first `tando up`
   still running, or one that failed and left nothing live), a request to its address waited 15 s
   and got an empty 502 (and scanners that find a new certificate in the public logs filled the

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"tando/srv/studio/pgwire"
 	"tando/srv/studio/sqlsplit"
@@ -66,14 +67,21 @@ func (s *Studio) query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t0 := time.Now()
-	// the accident guard, before anything runs: one refused statement and nothing of the batch runs
+	// the accident guard and the scope guard's names, before anything runs: one refused
+	// statement and nothing of the batch runs
 	for i, st := range stmts {
+		code, msg, pos := "", "", st.CP+1
 		if !sqlsplit.ReadOnly(st.Text) {
+			code, msg = "25006", readOnlyMsg
+		} else if name, why, at := sqlsplit.Scope(st.Text); name != "" {
+			code, msg, pos = scopeCode, scopeMsg(name, why), st.CP+utf8.RuneCountInString(st.Text[:at])+1
+		}
+		if code != "" {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			bw := bufio.NewWriter(w)
 			j := &jw{w: bw}
 			j.obj().k("id").s(q.ID).k("results").arr().aend().k("error").obj().k("stmt").i(int64(i)).
-				k("sqlstate").s("25006").k("message").s(readOnlyMsg).k("position").i(int64(st.CP + 1)).end().
+				k("sqlstate").s(code).k("message").s(msg).k("position").i(int64(pos)).end().
 				k("ms").i(0).k("tx").s("read_only").end()
 			bw.Flush()
 			return
@@ -96,6 +104,19 @@ func (s *Studio) query(w http.ResponseWriter, r *http.Request) {
 		for i, st := range stmts {
 			if x.db.TxStatus() != 'T' {
 				fail, failStmt = &pgwire.Error{Code: "25000", Message: errTxEnded.Error()}, i
+				break
+			}
+			// the scope guard's plan half, in this transaction (after the batch's own SETs)
+			perr, err := x.planCheck(st.Text)
+			if err != nil {
+				broken, failStmt = err, i
+				break
+			}
+			if perr != nil {
+				if perr.Position > 0 {
+					perr.Position += st.CP
+				}
+				fail, failStmt = perr, i
 				break
 			}
 			sink := &resultSink{s: s, j: j, stmt: i, offset: st.CP, max: q.MaxRows, budget: &budget, onStop: x.cancel, unknown: unknown}

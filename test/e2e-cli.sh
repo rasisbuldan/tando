@@ -221,8 +221,10 @@ m P13 "an app word that is not an app name" 'not an app name: Shop' -- logs Shop
 mkdir -p "$E/agentbin"
 cat > "$E/agentbin/ssh" <<'STUB'
 #!/bin/bash
+[ -n "${STUB_CALLS:-}" ] && echo "$*" >> "$STUB_CALLS"
 case "$*" in
-  *" env-set "*) cat > /dev/null; printf '%b' "$STUB_ENV";;
+  *" env-set "*|*" env-unset "*) cat > /dev/null; printf '%b' "$STUB_ENV";;
+  *" env-log "*) printf '%b' "$STUB_ELOG";;
   *" job-run "*) [ "$STUB_JOB" = pgdown ] && { echo 'pg_dump: error: connection to server at "127.0.0.1", port 5432 failed: Connection refused' >&2; exit 1; }
                  printf 'log=hello from tick\nresult=%s\nstatus=%s\nsecs=2\n' "$STUB_JOB" "$STUB_RC";;
   *" history "*) printf 'hist\thello\t1763000000\t20261113-021000\tdeploy\trolledback\t31\t1\t0\t0\t1\t0\t20\tit exited with status 1, 20 s after going live: rolled back to 20261112-090000\n'
@@ -257,6 +259,60 @@ out=$(COLUMNS=80 TZ=Asia/Jakarta sa history)
 check "S7b history: TIME (GMT) is the UTC time (11-13 02:13), not the laptop's (TZ=Asia/Jakarta) or an age" \
   eval 'printf "%s" "$out" | grep -q "TIME (GMT)" && printf "%s" "$out" | grep -q "11-13 02:13 " &&
         ! printf "%s" "$out" | grep -qE " ago|11-13 09:13"'
+# env log: what the agent sends is names only; the client's list, page, JSON and refusals
+# (the server side, with a real agent, is in test/e2e.sh 12h)
+STUB_ELOG='envlog\t1\t1795183320\tvmadmin\tunset\tremoved 1 key\t-\t-\tOLD_FLAG\nenvlog\t2\t1795080600\tvmadmin\tset\trotated the payment keys\tNEW_TOKEN\tAPI_BASE,SMTP_USER\t-\nenvlog\t3\t1772323500\tvmadmin\timport\timported 3 keys\tA_ONE,B_TWO,C_THREE\t-\t-\n'
+export STUB_ELOG
+out=$(sa env log)
+check "L1 env log, not at a terminal: one row per entry, [time] [note] >, newest first, nothing else" \
+  eval '[ "$out" = "[2026-11-20 14:02] [removed 1 key] >
+[2026-11-19 09:30] [rotated the payment keys] >
+[2026-03-01 00:05] [imported 3 keys] >" ]'
+out=$(COLUMNS=80 TANDO_ASCII=1 sa env log 2)
+check "L2 env log 2: the page has when, by, verb, note and the three lists of names, in 80 columns" \
+  eval 'printf "%s\n" "$out" | grep -q "2026-11-19 09:30 UTC" && printf "%s\n" "$out" | grep -q "vmadmin" && printf "%s\n" "$out" | grep -q "rotated the payment keys" &&
+        printf "%s\n" "$out" | grep -q "Added (1)" && printf "%s\n" "$out" | grep -q "NEW_TOKEN" && printf "%s\n" "$out" | grep -q "Changed (2)" &&
+        printf "%s\n" "$out" | grep -q "SMTP_USER" && printf "%s\n" "$out" | grep -q "Removed (0)" &&
+        [ "$(printf "%s\n" "$out" | awk "{ if (length(\$0) > m) m = length(\$0) } END { print m }")" -le 80 ]'
+out=$(sa env log 9)
+check "L3 env log 9: no such entry is said, not an empty page" eval 'printf "%s" "$out" | grep -q "no entry 9"'
+out=$(sa env log --json)
+check "L4 env log --json: names only, all three lists as arrays" \
+  eval 'printf "%s" "$out" | grep -q "\"added\":\[\"NEW_TOKEN\"\],\"changed\":\[\"API_BASE\",\"SMTP_USER\"\],\"removed\":\[\]" &&
+        printf "%s" "$out" | grep -q "\"time\":\"2026-11-19 09:30 UTC\""'
+out=$(STUB_ELOG='count=0\n' sa env log)
+check "L5 env log with no entries says so and prints no row" eval 'printf "%s" "$out" | grep -q "No changes logged" && ! printf "%s" "$out" | grep -q "^\["'
+# the terminal: a picker (db studio's), a number and Enter open the entry's page
+# (the answer is typed after the client has asked: input that arrives before the question is lost to
+# the terminal, and script(1) writes its file only at the end, so there is nothing to poll; the client
+# is a stub-backed bash start, well under 2 s)
+typed() { sleep 2; printf '%s\n' "$2"; sleep 1; }
+(cd "$E/w/hello" && typed "$E/elog.tty" 2 | PATH="$E/agentbin:$PATH" COLUMNS=80 "$ROOT/test/pty-run.sh" "$E/elog.tty" "$R" env log > /dev/null 2>&1)
+check "L6 env log at a terminal: the numbered list, then 2 and Enter open entry 2" \
+  eval 'grep -q "2) \[2026-11-19 09:30\] \[rotated the payment keys\] >" "$E/elog.tty" && grep -q "Open which" "$E/elog.tty" &&
+        grep -q "Added (1)" "$E/elog.tty" && grep -q "NEW_TOKEN" "$E/elog.tty"'
+(cd "$E/w/hello" && typed "$E/elog1.tty" "" | PATH="$E/agentbin:$PATH" COLUMNS=80 "$ROOT/test/pty-run.sh" "$E/elog1.tty" "$R" env log > /dev/null 2>&1)
+check "L7 Enter alone opens the newest entry" eval 'grep -q "OLD_FLAG" "$E/elog1.tty" && grep -q "Removed (1)" "$E/elog1.tty"'
+# --note: checked here, sent to the agent as one plain word
+: > "$E/acalls"
+out=$(STUB_CALLS=$E/acalls STUB_ENV='changed=1\nrestarted=0\nwhy=stopped\n' sa env set A=1 --note "rotate: the \"payment\" keys"); rc=$?
+# shellcheck disable=SC2034 # (read inside the eval string of the check)
+sent=$(sed -n 's/.*note64=\([A-Za-z0-9+/=]*\).*/\1/p' "$E/acalls" | head -1)
+check "L8 env set --note: the note reaches the agent base64 in one word and decodes to the text (rc=$rc)" \
+  eval '[ $rc = 0 ] && [ "$(printf "%s" "$sent" | base64 -d 2> /dev/null || printf "%s" "$sent" | base64 -D)" = "rotate: the \"payment\" keys" ]'
+: > "$E/acalls"
+out=$(STUB_CALLS=$E/acalls sa env set A=1 --note "$(printf 'a\tb')"); rc=$?
+check "L9 a note with a control character is refused before any call (rc=$rc, calls $(grep -c . "$E/acalls"))" \
+  eval '[ $rc != 0 ] && printf "%s" "$out" | grep -q "no control characters" && [ ! -s "$E/acalls" ]'
+out=$(STUB_CALLS=$E/acalls sa env unset A --note "$(printf 'x%.0s' $(seq 1 201))"); rc=$?
+check "L10 a note of 201 characters is refused (rc=$rc)" eval '[ $rc != 0 ] && printf "%s" "$out" | grep -q "at most 200" && [ ! -s "$E/acalls" ]'
+out=$(STUB_CALLS=$E/acalls STUB_ENV='changed=1\nrestarted=0\nwhy=stopped\n' sa env set A=1 --note "$(printf 'x%.0s' $(seq 1 200))"); rc=$?
+check "L11 a note of exactly 200 characters is accepted (rc=$rc)" test $rc = 0
+m L12 "--note on env ls is a usage error" '--note goes with env set' -- env ls --note x
+: > "$E/acalls"
+printf 'A=1\n' > "$E/imp.env"
+out=$(cd "$E/w/hello" && STUB_CALLS=$E/acalls STUB_ENV='changed=1\nrestarted=0\nwhy=stopped\n' PATH="$E/agentbin:$PATH" "$R" env import "$E/imp.env" < /dev/null 2>&1)
+check "L13 env import tells the agent it is an import" eval 'grep -q "env-set hello via=import" "$E/acalls"'
 # rsync splits -e on spaces: a TMPDIR with a space must not hold tando's work dir (ssh wrapper)
 mkdir -p "$E/tmp dir"
 out=$(TMPDIR="$E/tmp dir" sa history); rc=$?

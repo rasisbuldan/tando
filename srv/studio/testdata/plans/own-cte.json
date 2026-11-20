@@ -1,0 +1,181 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Result",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 4.67,
+      "Total Cost": 232.30,
+      "Plan Rows": 3100,
+      "Plan Width": 56,
+      "Output": ["r.n", "c.id", "c.name", "orders.id", "orders.customer_id", "orders.item_id", "orders.qty"],
+      "One-Time Filter": "$3",
+      "Plans": [
+        {
+          "Node Type": "Recursive Union",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "CTE r",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 0.00,
+          "Total Cost": 2.65,
+          "Plan Rows": 31,
+          "Plan Width": 4,
+          "Plans": [
+            {
+              "Node Type": "Result",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Startup Cost": 0.00,
+              "Total Cost": 0.01,
+              "Plan Rows": 1,
+              "Plan Width": 4,
+              "Output": ["1"]
+            },
+            {
+              "Node Type": "WorkTable Scan",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "CTE Name": "r",
+              "Alias": "r_1",
+              "Startup Cost": 0.00,
+              "Total Cost": 0.23,
+              "Plan Rows": 3,
+              "Plan Width": 4,
+              "Output": ["(r_1.n + 1)"],
+              "Filter": "(r_1.n < 3)"
+            }
+          ]
+        },
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "CTE c",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "customers",
+          "Schema": "public",
+          "Alias": "customers",
+          "Startup Cost": 0.00,
+          "Total Cost": 2.00,
+          "Plan Rows": 100,
+          "Plan Width": 7,
+          "Output": ["customers.id", "customers.name"]
+        },
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "InitPlan",
+          "Subplan Name": "InitPlan 3 (returns $3)",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Relation Name": "items",
+          "Schema": "public",
+          "Alias": "items",
+          "Startup Cost": 0.00,
+          "Total Cost": 1.50,
+          "Plan Rows": 50,
+          "Plan Width": 0
+        },
+        {
+          "Node Type": "Nested Loop",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Join Type": "Inner",
+          "Startup Cost": 4.67,
+          "Total Cost": 232.30,
+          "Plan Rows": 3100,
+          "Plan Width": 56,
+          "Output": ["r.n", "c.id", "c.name", "orders.id", "orders.customer_id", "orders.item_id", "orders.qty"],
+          "Inner Unique": false,
+          "Plans": [
+            {
+              "Node Type": "CTE Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "CTE Name": "r",
+              "Alias": "r",
+              "Startup Cost": 0.00,
+              "Total Cost": 0.62,
+              "Plan Rows": 31,
+              "Plan Width": 4,
+              "Output": ["r.n"]
+            },
+            {
+              "Node Type": "Materialize",
+              "Parent Relationship": "Inner",
+              "Parallel Aware": false,
+              "Async Capable": false,
+              "Startup Cost": 0.00,
+              "Total Cost": 188.50,
+              "Plan Rows": 100,
+              "Plan Width": 52,
+              "Output": ["c.id", "c.name", "orders.id", "orders.customer_id", "orders.item_id", "orders.qty"],
+              "Plans": [
+                {
+                  "Node Type": "Nested Loop",
+                  "Parent Relationship": "Outer",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Join Type": "Inner",
+                  "Startup Cost": 0.00,
+                  "Total Cost": 188.00,
+                  "Plan Rows": 100,
+                  "Plan Width": 52,
+                  "Output": ["c.id", "c.name", "orders.id", "orders.customer_id", "orders.item_id", "orders.qty"],
+                  "Inner Unique": false,
+                  "Plans": [
+                    {
+                      "Node Type": "CTE Scan",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "CTE Name": "c",
+                      "Alias": "c",
+                      "Startup Cost": 0.00,
+                      "Total Cost": 2.00,
+                      "Plan Rows": 100,
+                      "Plan Width": 36,
+                      "Output": ["c.id", "c.name"]
+                    },
+                    {
+                      "Node Type": "Limit",
+                      "Parent Relationship": "Inner",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 0.00,
+                      "Total Cost": 1.85,
+                      "Plan Rows": 1,
+                      "Plan Width": 16,
+                      "Output": ["orders.id", "orders.customer_id", "orders.item_id", "orders.qty"],
+                      "Plans": [
+                        {
+                          "Node Type": "Seq Scan",
+                          "Parent Relationship": "Outer",
+                          "Parallel Aware": false,
+                          "Async Capable": false,
+                          "Relation Name": "orders",
+                          "Schema": "public",
+                          "Alias": "orders",
+                          "Startup Cost": 0.00,
+                          "Total Cost": 18.50,
+                          "Plan Rows": 10,
+                          "Plan Width": 16,
+                          "Output": ["orders.id", "orders.customer_id", "orders.item_id", "orders.qty"],
+                          "Filter": "(orders.customer_id = c.id)"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

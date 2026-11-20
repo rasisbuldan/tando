@@ -36,6 +36,10 @@ type fakeDB struct {
 	killed  chan struct{}
 	cancels int
 	slots   []string // the answer to slotsSQL
+	// plan: the answer to the scope guard's EXPLAIN of a statement (default: a Result node);
+	// explains: the statements it was asked for (not in calls: the tests compare batches)
+	plan     func(stmt string) step
+	explains []string
 }
 
 func newFake(script func(string) step) *fakeDB {
@@ -74,10 +78,21 @@ func (f *fakeDB) Exec(sql string, params [][]byte, maxRows int32, cellCap, rowCa
 		sink.Row([][]byte{[]byte(row[0]), []byte(row[1]), []byte(row[2]), []byte(row[3])}, []int{-1, -1, -1, -1})
 		return pgwire.Result{Tag: "SELECT 1"}, nil
 	}
-	f.log("exec " + sql)
-	st := step{res: pgwire.Result{Tag: "SELECT 0"}}
-	if f.script != nil {
-		st = f.script(sql)
+	var st step
+	if inner, ok := strings.CutPrefix(sql, explainPrefix); ok {
+		f.mu.Lock()
+		f.explains = append(f.explains, inner)
+		f.mu.Unlock()
+		st = planStep(`[{"Plan": {"Node Type": "Result", "Output": ["1"]}}]`)
+		if f.plan != nil {
+			st = f.plan(inner)
+		}
+	} else {
+		f.log("exec " + sql)
+		st = step{res: pgwire.Result{Tag: "SELECT 0"}}
+		if f.script != nil {
+			st = f.script(sql)
+		}
 	}
 	if st.block != nil {
 		select {
@@ -126,6 +141,11 @@ func (f *fakeDB) Exec(sql string, params [][]byte, maxRows int32, cellCap, rowCa
 	}
 	f.mu.Unlock()
 	return st.res, nil
+}
+
+// planStep: EXPLAIN's answer, one text cell
+func planStep(js string) step {
+	return step{cols: []string{"QUERY PLAN"}, rows: [][]*string{{&js}}, res: pgwire.Result{Tag: "EXPLAIN"}}
 }
 
 func (f *fakeDB) TxStatus() byte { f.mu.Lock(); defer f.mu.Unlock(); return f.tx }

@@ -42,6 +42,14 @@ mx_trace_off() { dxs "cat $MX_T/trace 2> /dev/null; rm -f $MX_T/trace"; }
 # checker (the live release would answer 404 at that health path; its start command differs).
 # (MX_SAMECONF=1: every version has the odd one's: to look past those two checks)
 mx_health_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo /hc-odd; else echo /hc-even; fi; }
+# memory (the unit file) and max_conns (the Caddy site) differ by parity too: a unit or a site
+# left with the other version's settings (configure applying them before the release went live,
+# a revert that did not put them back) is seen by the checker
+mx_mem_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo 128M; else echo 144M; fi; }
+# and the job's schedule (node and data: the job units are the live release's)
+mx_job_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo '*:0/10'; else echo '*:0/20'; fi; }
+mx_has_job() { case $KIND in node|data) return 0;; esac; return 1; }
+mx_mc_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo 64; else echo 96; fi; }
 mx_start_of() {
   local n=$1; [ -n "${MX_SAMECONF:-}" ] && n=1
   set -- "$n"
@@ -69,10 +77,11 @@ mx_version() {
     echo "health = $h"
     echo "health_timeout = 10"
     echo "soak = ${MX_SOAK:-2}"
-    [ "$KIND" = static ] || echo "memory = 128M"
+    [ "$KIND" = static ] || { echo "memory = $(mx_mem_of "$n")"; echo "max_conns = $(mx_mc_of "$n")"; }
     case $KIND in
-      data) echo "data = data"; echo "database = postgres"; echo "job.tick = *:0/10 | true";;
+      data) echo "data = data"; echo "database = postgres";;
     esac
+    mx_has_job && echo "job.tick = $(mx_job_of "$n") | true"
     [ -n "${MX_RELEASE:-}" ] && echo "release = $MX_RELEASE"
   } > "$d/tando.conf"
   case $KIND in
@@ -98,6 +107,20 @@ mx_version() {
         'CMD ["/bin/sh", "-c", "exec httpd -f -v -p 0.0.0.0:${PORT:-8080} -h /www"]' > "$d/Dockerfile";;
     *) cp "$MX_DIR/mx-app/server.js" "$d/";;
   esac
+}
+# mx_settings <n>: what a client's configure sends for version n (the race action: a second client
+# configures the app with its own tando.conf while this one's deploy is in flight)
+mx_settings() {
+  local n=$1 r=node
+  case $KIND in static|python|next|container) r=$KIND;; esac
+  printf 'recipe=%s\n' "$r"
+  [ -n "$(mx_start_of "$n")" ] && printf 'start=%s\n' "$(mx_start_of "$n")"
+  printf 'health=%s\nhealth_timeout=10\nsoak=%s\n' "$(mx_health_of "$n")" "${MX_SOAK:-2}"
+  [ "$KIND" = static ] || printf 'memory=%s\nmax_conns=%s\n' "$(mx_mem_of "$n")" "$(mx_mc_of "$n")"
+  [ "$KIND" = container ] && printf 'container_port=8080\n'
+  [ "$KIND" = data ] && printf 'data=data\ndatabase=postgres\n'
+  mx_has_job && printf 'job.tick=%s | true\n' "$(mx_job_of "$n")"
+  return 0
 }
 # mx_client <out> <args...>: the CLI in the app's work dir; status in MXRC
 mx_client() { local o=$1; shift; (cd "$W/$A" && "$R" "$@" > "$o" 2>&1); MXRC=$?; return $MXRC; }
@@ -204,6 +227,15 @@ mx_inv() {
       fi
     fi
   fi
+  if [ -n "$want" ] && [ -n "$(mx_ver_of "$want")" ] && [ "$KIND" != static ]; then
+    local v2; v2=$(mx_ver_of "$want")
+    [ "$(fv u_mem)" = "$(mx_mem_of "$v2")" ] ||
+      mx_bad 2 "agree: the unit file has MemoryMax=$(fv u_mem), release $want (v$v2) is deployed with $(mx_mem_of "$v2")"
+    [ "$(fv site)" != proxy ] || [ "$(fv site_mc)" = "$(mx_mc_of "$v2")" ] ||
+      mx_bad 2 "agree: Caddy's site has max_conns $(fv site_mc), release $want (v$v2) is deployed with $(mx_mc_of "$v2")"
+    ! mx_has_job || [ "$(fv job_cal)" = "$(mx_job_of "$v2")" ] ||
+      mx_bad 2 "agree: the job timer says OnCalendar=$(fv job_cal), release $want (v$v2) is deployed with $(mx_job_of "$v2")"
+  fi
   case $stopped:$(fv site) in
     1:stopped|0:proxy|0:static) ;;
     *) mx_bad 2 "agree: state stopped=$(fv s_stopped) down=$(fv s_down), Caddy's site is $(fv site)";;
@@ -309,9 +341,10 @@ mx_inv() {
 }
 
 # ---- recovery as a server does it ----------------------------------------------------------------
-# settled: no activation unit of the app, the lock free (an ExecStopPost recover holds it)
+# settled: no activation unit of the app (also none still loaded after it ended: the checker's
+# leftover list counts those), the lock free (an ExecStopPost recover holds it)
 mx_settled() {
-  dxs "! systemctl list-units --plain --no-legend 'tando-$A-act-*' | grep -q . &&
+  dxs "! systemctl list-units --all --plain --no-legend 'tando-$A-act-*' | grep -q . &&
        { [ ! -f /opt/tando/apps/$A/lock ] || flock -n /opt/tando/apps/$A/lock true; }"
 }
 mx_wait_settled() { T_UNTIL_STEP=0.5 t_until "${1:-240}" mx_settled; }

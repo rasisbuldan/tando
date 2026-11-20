@@ -509,6 +509,20 @@ numbers move by about 30% between runs). Raw output: `bench/raw/studio/`.
 
 No budget missed. The binary is 7.2 MB (amd64) and 6.7 MB (arm64); the release grows by those two.
 
+**The scope guard's cost** (one `EXPLAIN (VERBOSE, FORMAT JSON)` per statement, 20 Nov 2026):
+the studio's API in process (Go test harness, not committed) against PostgreSQL 16 in Docker on
+the laptop, a demo database (customers 100, items 50, orders 1,000, a view); 20 runs each after 3
+warm-up runs, the median, four rounds alternating the build before and after (the laptop was
+shared: single runs move by up to 2x).
+
+| Request | Before: round medians (their median) | After | Difference |
+|---|---|---|---|
+| `SELECT 1` | 0.82-2.83 ms (1.16) | 1.15-5.14 ms (1.51) | +0.35 ms |
+| a 3-table join, 100 rows | 1.25-2.81 ms (1.91) | 1.91-3.64 ms (2.10) | +0.19 ms |
+| 10 statements in one run | 4.22-7.66 ms (5.03) | 6.55-9.12 ms (8.19) | +3.2 ms (0.3 ms per statement) |
+
+Within "a few ms per statement". The binary grew by 25 KB (amd64; arm64 unchanged, 6.7 MB).
+
 **App impact** (scoping): the app's own pgbench (2 clients; a point read, a range count and an
 update per transaction) and 20 s of the other app's HTTP, (a) alone, (b) with a CPU-bound studio
 query (`sum(hashtext(...))` over 400M generated rows) without the priority lowering (`prio=off`),

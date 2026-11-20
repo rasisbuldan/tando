@@ -393,6 +393,12 @@ check "21f during the first deploy the page is served" until_ 30 shop_503
 wait $shop_up
 shop_live() { [ "$(curl -s -m 5 http://shop.localhost:$HP/)" = "hello v1 greeting=" ]; }
 check "21f first release live: the page is gone and the app answers" until_ 30 shop_live
+# 21g. a release directory removed by hand while the app runs (fault g9): the link dangles, but the
+# app has a release by tando's records and its process answers: never the "being deployed" page
+srv "sudo sh -c 'rm -rf /opt/tando/apps/shop/releases/*'"
+rn=$(curl -s -o "$E/shop.dang" -w '%{http_code}' -m 5 http://shop.localhost:$HP/)
+check "21g releases emptied by hand, app still running: it answers 200, not the deploying page ($rn)" \
+  eval '[ "$rn" = 200 ] && ! grep -q "being deployed" "$E/shop.dang"'
 ( cd "$W/shop" && echo shop | "$R" destroy --purge >&2 )
 
 # 3f. healthy in pre-flight but failing after the switch: automatic rollback
@@ -447,6 +453,68 @@ check "12e env ls hides values (CRASH_VERSION's 9@$port), --show prints them" \
 check "12c env unset reaches the app" test "$(get hello)" = "hello v6 greeting="
 "$R" env ls > "$E/envls.out"; cat "$E/envls.out" >&2
 check "12d env ls no longer lists the unset keys" eval '! grep -qE "CRASH_VERSION|GREETING" "$E/envls.out"'
+# 12h. env log: every change of the env is one entry of key NAMES (added, changed, removed), never a value
+log "12h env log"
+canary=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48)
+elog_n() { "$R" env log --json | grep -o '"n":' | wc -l | tr -d ' '; }
+elog_e() { "$R" env log --json | sed -e "s/},{\"n\":$(($1 + 1)),.*/}/" -e 's/^.*"entries":\[//'; }   # entry n of the JSON
+e0=$(elog_n)
+check "12h1 the env unset above is entry 1: verb unset, removed CRASH_VERSION and GREETING, nothing added or changed" \
+  eval 'e=$(elog_e 1); case $e in "{\"n\":1,"*"\"verb\":\"unset\""*"\"added\":[]"*"\"changed\":[]"*"\"removed\":[\"CRASH_VERSION\",\"GREETING\"]"*) true;; *) echo "  $e" >&2; false;; esac'
+"$R" env set --note "first batch" ELOG_A=one ELOG_B=two >&2
+check "12h2 set with a note: added ELOG_A and ELOG_B, the note, nothing changed or removed" \
+  eval 'e=$(elog_e 1); case $e in *"\"verb\":\"set\""*"\"note\":\"first batch\""*"\"added\":[\"ELOG_A\",\"ELOG_B\"]"*"\"changed\":[]"*"\"removed\":[]"*) true;; *) echo "  $e" >&2; false;; esac'
+"$R" env set "ELOG_A=$canary" ELOG_C=three >&2
+check "12h3 set of one new and one existing key: ELOG_C added, ELOG_A changed; no note, so \"set 2 keys\"" \
+  eval 'e=$(elog_e 1); case $e in *"\"note\":\"set 2 keys\""*"\"added\":[\"ELOG_C\"]"*"\"changed\":[\"ELOG_A\"]"*"\"removed\":[]"*) true;; *) echo "  $e" >&2; false;; esac'
+n1=$(elog_n)
+"$R" env set "ELOG_A=$canary" > "$E/noop.out" 2>&1
+check "12h4 setting what is already set changes nothing and writes no entry ($n1 -> $(elog_n))" \
+  eval '[ "$(elog_n)" = "$n1" ] && [ "$n1" = $((e0 + 2)) ] && grep -q "nothing changed" "$E/noop.out"'
+"$R" env unset ELOG_B ELOG_C --note "drop two" >&2
+check "12h5 unset: both removed, the note" \
+  eval 'e=$(elog_e 1); case $e in *"\"verb\":\"unset\""*"\"note\":\"drop two\""*"\"added\":[]"*"\"changed\":[]"*"\"removed\":[\"ELOG_B\",\"ELOG_C\"]"*) true;; *) echo "  $e" >&2; false;; esac'
+printf '# a comment\nexport ELOG_D="four"\nELOG_A=other\n' > "$E/elog.env"
+"$R" env import "$E/elog.env" >&2
+check "12h6 import: verb import, ELOG_D added, ELOG_A changed, \"imported 2 keys\"" \
+  eval 'e=$(elog_e 1); case $e in *"\"verb\":\"import\""*"\"note\":\"imported 2 keys\""*"\"added\":[\"ELOG_D\"]"*"\"changed\":[\"ELOG_A\"]"*"\"removed\":[]"*) true;; *) echo "  $e" >&2; false;; esac'
+check "12h7 four entries since the start ($e0 -> $(elog_n))" test "$(elog_n)" = $((e0 + 4))
+# no value in any form anywhere the log goes: the file, the list, every page, the JSON
+# shellcheck disable=SC2034 # (read inside the eval string of the check)
+csha=$(printf '%s' "$canary" | openssl dgst -sha256 -r | cut -d' ' -f1)
+# shellcheck disable=SC2034
+cmd5=$(printf '%s' "$canary" | openssl dgst -md5 -r | cut -d' ' -f1)
+"$R" env log > "$E/elog.list" 2>&1; "$R" env log --json > "$E/elog.json" 2>&1
+: > "$E/elog.pages"; for i in $(seq 1 "$(elog_n)"); do "$R" env log "$i" >> "$E/elog.pages" 2>&1; done
+srv "sudo cat /opt/tando/apps/hello/env.log" > "$E/elog.file"
+check "12h8 the canary value, its sha256 and its md5 are nowhere in the log file, the list, the pages or the JSON (file $(wc -c < "$E/elog.file") bytes)" \
+  eval '[ -s "$E/elog.file" ] && [ -s "$E/elog.pages" ] && ! grep -qF -e "$canary" -e "$csha" -e "$cmd5" "$E/elog.file" "$E/elog.list" "$E/elog.pages" "$E/elog.json"'
+check "12h9 the log file is 600 root:root next to the app's other state" \
+  eval '[ "$(srv "sudo stat -c %a:%U:%G /opt/tando/apps/hello/env.log")" = "600:root:root" ]'
+check "12h10 list rows are [time] [note] >, newest first" \
+  eval 'head -1 "$E/elog.list" | grep -qE "^\[20[0-9]{2}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}\] \[imported 2 keys\] >$" &&
+        sed -n 2p "$E/elog.list" | grep -q "^\[.*\] \[drop two\] >$" && [ "$(grep -c . "$E/elog.list")" = "$(elog_n)" ]'
+check "12h11 the page of an entry names the keys under Added, Changed and Removed" \
+  eval '"$R" env log 4 > "$E/elog.p4" 2>&1; grep -q "Added (2)" "$E/elog.p4" && grep -q "ELOG_B" "$E/elog.p4" && grep -q "first batch" "$E/elog.p4" && grep -q "Removed (0)" "$E/elog.p4"'
+# refusals
+n1=$(elog_n)
+"$R" env set --note "$(printf 'a\tb')" ELOG_X=1 > "$E/ctl.out" 2>&1; rc1=$?
+"$R" env set --note "$(printf 'x%.0s' $(seq 1 201))" ELOG_X=1 > "$E/long.out" 2>&1; rc2=$?
+srv "printf 'ELOG_X=1\n' | sudo $AGENT env-set hello note64=$(printf 'x%.0s' $(seq 1 201) | base64 | tr -d '\n')" > "$E/slong.out" 2>&1; rc3=$?
+srv "printf 'ELOG_X=1\n' | sudo $AGENT env-set hello note64=$(printf 'a\tb' | base64)" > "$E/sctl.out" 2>&1; rc4=$?
+check "12h12 a note with a control character or over 200 characters is refused by the client and by the agent, and nothing is changed ($rc1 $rc2 $rc3 $rc4)" \
+  eval '[ $rc1 != 0 ] && [ $rc2 != 0 ] && [ $rc3 != 0 ] && [ $rc4 != 0 ] && [ "$(elog_n)" = "$n1" ] && ! "$R" env ls --show | grep -q ELOG_X &&
+        grep -q "control" "$E/ctl.out" && grep -q "at most 200" "$E/long.out" && grep -q "over 200" "$E/slong.out" && grep -q "control" "$E/sctl.out"'
+"$R" env set "UNHEALTHY_VERSION=$(ver)@$((port + 100))" > "$E/pf.out" 2>&1; rc=$?
+check "12h13 a change refused by the pre-flight is not logged (rc=$rc, $n1 -> $(elog_n))" \
+  eval '[ $rc != 0 ] && grep -q "nothing was changed" "$E/pf.out" && [ "$(elog_n)" = "$n1" ]'
+# the bound: an app that does not exist yet (its env is staged), 205 changes; the 200 newest stay
+srv "for i in \$(seq 1 205); do printf 'KEY%s=v\n' \$i | sudo $AGENT env-set elogapp > /dev/null || echo failed \$i; done"
+check "12h14 205 changes: the newest 200 are kept (KEY6 to KEY205)" \
+  eval '[ "$(srv "sudo cat /opt/tando/staged/elogapp/env.log" | grep -c .)" = 200 ] &&
+        srv "sudo head -1 /opt/tando/staged/elogapp/env.log" | grep -q "	KEY6	" && srv "sudo tail -1 /opt/tando/staged/elogapp/env.log" | grep -q "	KEY205	"'
+srv "sudo rm -rf /opt/tando/staged/elogapp"
+"$R" env unset ELOG_A ELOG_D >&2
 conf_set tando.conf health_timeout 15
 
 # 13. build step (summary on success, output on failure, seconds in history) and start_shell
@@ -705,7 +773,10 @@ conf_set tando.conf release_shell true
 rdeploy 6 ok r8
 check "22r release_shell = true runs it with sh -c (rc=$rc, $(rpage), $(srv "sudo cat $RD/shared/data/shellran"))" \
   eval '[ $rc = 0 ] && [ "$(rpage)" = "relc v6 schema=6" ] && [ "$(srv "sudo cat $RD/shared/data/shellran")" = "shell hola" ]'
+relc_log=$(srv "sudo stat -c %a:%U /opt/tando/apps/relc/env.log" 2>&1)
 echo relc | "$R" destroy --purge > "$E/relc-destroy.out" 2>&1
+check "22s destroy --purge removes the env log (it was $relc_log)" \
+  eval '[ "$relc_log" = "600:root" ] && srv "sudo test ! -e /opt/tando/apps/relc"'
 # <<< release-command
 
 # 9. second app: own user, port, link; cannot read hello's env
@@ -716,6 +787,12 @@ check "9s env set before the first up is staged" grep -q "staged for site (not o
 "$R" up > "$E/site.out" 2>&1; cat "$E/site.out" >&2
 "$R" env ls --show > "$E/stagedls.out" 2>&1
 check "9t the first up applied the staged env" grep -q "STAGED_X *early" "$E/stagedls.out"
+"$R" env log -a site --json > "$E/sitelog.json" 2>&1
+check "9t2 the change staged before the app existed is the first entry of its env log" \
+  eval 'grep -q "\"added\":\[\"STAGED_X\"\]" "$E/sitelog.json" && ! grep -q early "$E/sitelog.json"'
+"$R" env set SITE_Y=1 -a site >&2
+check "9t3 a static site (nothing restarts) logs a change too" \
+  eval '"$R" env log -a site --json | grep -q "\"added\":\[\"SITE_Y\"\]"'
 "$R" jobs run tick > "$E/jobrun.out" 2>&1; rc=$?; cat "$E/jobrun.out" >&2
 check "9u jobs run tick: its output and ok (rc=$rc)" \
   eval '[ $rc = 0 ] && grep -q "job tick: ok in" "$E/jobrun.out" && srv "sudo test -s /opt/tando/apps/site/shared/data/tick"'

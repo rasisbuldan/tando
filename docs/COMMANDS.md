@@ -135,8 +135,9 @@ Example: `tando top --read-only`
 
 ### env
 `tando env ls [app] [--show]` · `tando env set KEY=VALUE ...` · `tando env set KEY` · `tando env unset KEY ...` ·
-`tando env import [.env]`. Flags: `-a -H --show`. Subcommands: ls (default, 0-1: the app), set (1+), unset (1+),
-import (0-1). `ls` hides the values (`******** (N characters)`); `--show` prints them.
+`tando env import [.env]` · `tando env log [n]`; `--note "text"` on set, unset and import. Flags:
+`-a -H --show --note --json`. Subcommands: ls (default, 0-1: the app), set (1+), unset (1+),
+import (0-1), log (0-1). `ls` hides the values (`******** (N characters)`); `--show` prints them.
 Stored on the server (root, 640), never in the release. Before the first `tando up` the values are
 staged on the server and applied when the app is created ("staged for <app>"). After a change the
 app restarts once; a stopped app gets them at `tando start`, an app with nothing deployed at the
@@ -148,6 +149,24 @@ previous env is put back and the app restarted on it (exit 1). An app that was n
 keeps the new values (exit 1). `set`/`unset` restart the app once;
 `set KEY` alone reads the value without echo (or from stdin). tando sets `PORT`, `HOME`,
 `TANDO_DATA_DIR` (and `DATABASE_URL` with `database =`).
+
+`env log`: the env changelog, key names only. Every change adds one entry to
+`/opt/tando/apps/<app>/env.log` on the server (root 600, written whole and renamed like the env
+file; the newest 200 are kept; `tando destroy` removes it): time, who (as in the audit log), verb
+(`set`, `unset`, `import`, `database`), the note, and the names added, changed and removed. It never
+holds a value, a length or a hash of one. A change that alters nothing, and one the health check
+put back, write nothing. `--note "text"` is one line of at most 200 characters (control characters
+are refused); without it the list shows "set 2 keys" or "removed 1 key". `tando env log` prints one
+row per entry, newest first: `[2026-11-20 14:02] [the note] >` (UTC). At a terminal the rows are
+numbered, you give a number (Enter alone: the newest) and the entry's page opens, as `tando db
+studio` picks an app; piped, it only prints. `tando env log 3` opens entry 3 (1 is the newest, so
+the number changes as entries are added). `--json` prints the entries (names only). Whoever may
+`env ls` may read it (the admin's login); a CI deploy key is refused by the gate.
+```
+tando env log
+[2026-11-20 14:02] [removed 1 key] >
+[2026-11-19 09:30] [rotated the payment keys] >
+```
 Example: `tando env set STRIPE_KEY`
 
 ### jobs
@@ -199,11 +218,23 @@ statement, the error's position selected in the editor, notices, CSV download). 
   says which; without a terminal it prints the list with the command for each and exits 2. The page
   names the app, its database and the server in its top bar and title; there is no switch to
   another app in it (a studio holds one app's credentials): run `tando db studio <other app>`.
-  The sidebar lists this database's schemas (pg_catalog and information_schema only with "system
-  schemas"). PostgreSQL shows every role the *names* of the databases and roles and that other
-  sessions exist (`pg_database`, `pg_roles`, `pg_stat_activity`), never their queries or client
-  addresses; the studio's own lists show none of them. The app's role can connect to no database
-  but its own (no CONNECT for PUBLIC on any app database, set again at every deploy and host setup).
+  The sidebar lists this database's own schemas, never PostgreSQL's (pg_catalog,
+  information_schema, pg_toast). The app's role can connect to no database but its own (no CONNECT
+  for PUBLIC on any app database, set again at every deploy and host setup).
+- **Only the app's own tables.** A statement that reads a system table or view (`pg_class`,
+  `pg_roles`, `pg_stat_activity`, `pg_database`, `information_schema.tables`, ...) is refused
+  before it runs, by any route: written plainly or quoted, inside a CTE, subquery, `EXISTS`,
+  `UNION` or `LATERAL`, through a view of the app's, after `SET search_path`, or inside an
+  `EXPLAIN`; browsing such a view's rows is refused the same way. So are functions that read the catalogs or the server's state (`pg_*` ones,
+  `current_setting`, `has_table_privilege`, `obj_description`, `to_regclass`, `txid_*`, `lo_*`,
+  ...), casts to `regclass` and its kin (`tableoid::regclass` too), and `SHOW ALL` (`SHOW work_mem`
+  is fine). The message names what was refused: `the studio only reads this app's own tables:
+  pg_catalog.pg_authid is a system table`. Everyday functions stay: `now()`, `current_user`,
+  `version()`, aggregates, string, date and JSON functions, `generate_series`, `pg_typeof`,
+  `pg_size_pretty`, `pg_sleep`, the advisory locks, the app's own functions. It works by the
+  server's own plan of each statement (one extra round trip, about 0.3 ms) and by names: a
+  function the app defined that reads a catalog inside is not seen, and an app column or table
+  whose name starts with `pg_` is refused too. `tando db psql` reads everything the role can.
 
 - **Read-only.** Each run is one read-only transaction, opened with a snapshot before any of your
   statements (so `SET TRANSACTION READ WRITE` cannot turn it around) and always rolled back, then
@@ -230,10 +261,10 @@ statement, the error's position selected in the editor, notices, CSV download). 
   no snapshot); its connection closes after 60 s unused, and it does not connect when the app would
   have fewer than 2 of its role's connections left (or the server fewer than 2 of all). Numbers:
   bench/RESULTS.md "db studio".
-- **What it can still do** as the app's role: read everything the role can read; use CPU and disk
+- **What it can still do** as the app's role: read the app's tables and views; use CPU and disk
   for up to 30 s per statement; hold a lock that delays the app's migration for that long; take an
-  advisory lock (released when the run ends); cancel or end the app's own database sessions
-  (`pg_cancel_backend`). None of this is beyond `tando db psql`.
+  advisory lock (released when the run ends); call the app's own functions, whatever they do
+  inside. None of this is beyond `tando db psql`.
 - **How it is reached.** The server listens on no network port: the studio is a unix socket in
   `/run/tando-studio/<session>/`, a directory only your login and the app's group can enter, and
   this command's own ssh connection forwards `127.0.0.1:<port>` on your computer to it (a stable

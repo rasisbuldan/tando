@@ -79,6 +79,17 @@ valid_backup_id() {
   case ${1#*-*-} in daily|predeploy|manual|safety|final|adopt) return 0;; esac
   return 1
 }
+# pick_num count noun [default]: the terminal picker's question (a numbered list was just printed:
+# db studio's apps, env log's entries). Reads a number 1..count from stdin into PICK; an empty
+# answer takes the default when there is one; anything else is refused, nothing opened.
+pick_num() {
+  local p
+  printf 'Open which? [1-%s] ' "$1" >&2
+  IFS= read -r p || p=""
+  [ -z "$p" ] && p=${3:-}
+  { is_num "$p" && [ "$p" -ge 1 ] && [ "$p" -le "$1" ]; } || die "no $2 number $p; nothing opened"
+  PICK=$p
+}
 is_num() { case $1 in ""|*[!0-9]*) return 1;; esac; }
 
 # ---- host registry: $CFG/hosts/<name>, key=value lines we wrote ourselves ------------------
