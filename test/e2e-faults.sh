@@ -38,6 +38,7 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+[ "${TANDO_TIER:-}" = weekly ] && all=1     # (the weekly chain: every scenario file, --all)
 SI=0 SK=0
 case $shard in
   "") ;;

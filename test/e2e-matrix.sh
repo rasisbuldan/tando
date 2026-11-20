@@ -13,6 +13,10 @@
 #   test/e2e-matrix.sh --quick                 the points most likely to hide a defect only
 #   test/e2e-matrix.sh --points 'link|ra\.'    points matching this extended regex only
 #   test/e2e-matrix.sh --shard 2/4             every 4th cell from the 2nd (after the traces)
+#   test/e2e-matrix.sh --cells                 only the cells of the defects fixed in milestone 1
+#                                              (CELLS below; container: the switch failure)
+#   test/e2e-matrix.sh --ops deploy,rollback --actions kill --points '(^|/)(pre|post):'
+#                                              a kill at every state write of a deploy and a rollback
 #   test/e2e-matrix.sh --selftest              prove the checker: each invariant, broken on purpose
 #   test/e2e-matrix.sh --list                  trace and print the cells; run none
 # Operations: deploy, deploy-rel (a release command), deploy-bad (fails after the switch),
@@ -23,7 +27,7 @@
 set -u
 : "${TANDO_TEST_SSH_PORT:-2222}"   # the server comes from the environment (test/all.sh reads this line)
 . "$(cd "$(dirname "$0")" && pwd -P)/lib.sh"
-KIND=node OPS="" ACTIONS="kill fail reboot" QUICK=0 PTS="" SHARD="" SELFTEST=0 LIST=0
+KIND=node OPS="" ACTIONS="kill fail reboot" QUICK=0 PTS="" SHARD="" SELFTEST=0 LIST=0 CELLSONLY=0
 while [ $# -gt 0 ]; do
   case $1 in
     --kind) KIND=${2:-}; shift;;
@@ -33,6 +37,7 @@ while [ $# -gt 0 ]; do
     --points) PTS=${2:-}; shift;;
     --shard) SHARD=${2:-}; shift;;
     --selftest) SELFTEST=1;;
+    --cells) CELLSONLY=1;;
     --list) LIST=1;;
     *) echo "e2e-matrix: unknown argument \"$1\" (see the head of this file)" >&2; exit 2;;
   esac
@@ -286,6 +291,38 @@ if [ "$SELFTEST" = 1 ]; then
   st_case 9 "the data sentinel changed" \
     "cp -p $D/shared/data/sentinel /root/mxsent; echo changed >> $D/shared/data/sentinel" "cp -p /root/mxsent $D/shared/data/sentinel"
   st_case 10 "a visitor got a 502" ":" ":"
+  t_done
+fi
+
+# ---- the cells of milestone 1's defects (one each; docs/TESTING.md "The fault matrix") ------------
+# defect op verb point nth action phase. a: a failure after the link moved goes back; b: a crash
+# between the link swap and the state write; c: start and health of the serving release; d: a
+# stopped app stays stopped; e: a reservation that never ran; f: an operation's end cut short
+CELLS="
+a deploy run-activation ra.restart 1 fail after
+a rollback rollback ra.restart 1 fail after
+a deploy-bad run-activation ra.restart 2 fail after
+b deploy run-activation link.moved 1 kill after
+b deploy run-activation link.moved 1 reboot after
+b rollback rollback link.moved 1 kill after
+c rollback - - 0 none after
+c deploy configure post:app.conf 1 kill before
+c deploy run-activation imp.cp 1 kill before
+d deploy-stopped run-activation imp.cp 1 kill before
+e deploy activate act.spawn 1 kill before
+e deploy run-activation run.locked 1 kill before
+f deploy run-activation deploy.jobs 1 kill after
+f rollback rollback rollback.hist 1 fail after"
+[ "$KIND" = container ] && CELLS="a deploy run-activation ra.restart 1 fail after"
+CELLS=${MX_CELLS:-$CELLS}     # (another list: MX_CELLS, same columns)
+if [ "$CELLSONLY" = 1 ]; then
+  while read -r d op v p n act ph <&3; do
+    [ -n "$d" ] || continue
+    if [ "$LIST" = 1 ]; then echo "$d: $op $v $p#$n $act ($ph)"; continue; fi
+    if [ "$p" = - ]; then mx_cell "$op" - - 0 none after < /dev/null; else mx_cell "$op" "$v" "$p" "$n" "$act" "$ph" < /dev/null; fi
+  done 3<<< "$CELLS"
+  [ "$LIST" = 1 ] && exit 0
+  log "matrix $KIND cells: $NPASS passed, $NFAIL failed, $NSKIP not reached"
   t_done
 fi
 
