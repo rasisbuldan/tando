@@ -1998,6 +1998,9 @@ cmd_info() {
   local libc=glibc
   compgen -G '/lib/ld-musl-*' > /dev/null && libc=musl
   echo "version=$(cat "$R/VERSION" 2> /dev/null || echo unknown)"   # written by host setup
+  # the protocol between client and agent: raised when a client needs something an older agent
+  # lacks (0.1.1 printed none: 1). srv/status prints the same (agentProto); the client checks it
+  echo "proto=2"
   echo "arch=$(uname -m)"
   echo "libc=$libc"
   # (the client refuses a prebuilt native module that needs a newer glibc than this)
@@ -2456,7 +2459,8 @@ cmd_doctor() {
       [[ -d $D/releases ]] && [[ -z $(ls -A "$D/releases") && -n $cur ]] && msg="${msg:+$msg, }no releases on disk"
       [[ -n $cur && ${S[status_$cur]:-} != verified ]] && msg="current release $cur is ${S[status_$cur]:-unverified}"
       [[ ${S[phase]:-idle} != idle ]] && msg="activation in phase ${S[phase]}"
-      [[ -n $cur ]] && has_unit && ! systemctl -q is-active "tando-$a" && msg="${msg:+$msg, }unit not running"
+      # (an app stopped with tando stop is meant not to run: ls and status say stopped)
+      [[ -n $cur && -z ${S[stopped]:-} ]] && has_unit && ! systemctl -q is-active "tando-$a" && msg="${msg:+$msg, }unit not running"
       if [[ ${C[backup]:-off} == daily ]] && [[ ${S[last_backup]:-0} =~ ^[0-9]{1,12}$ ]] && (( $(now) - 10#${S[last_backup]:-0} > 2 * 86400 )); then
         msg="${msg:+$msg, }last backup older than 2 days"
       fi

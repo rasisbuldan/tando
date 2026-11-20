@@ -63,13 +63,13 @@ lib/studio.sh            lint ui-test e2e-cli e2e-studio
 # ---- server side
 server/tando-adopt       lint ui-test e2e-ci e2e-status e2e-adopt
 server/legacy/*          lint install-test e2e-status @alerts
-srv/watch/*              go @alerts e2e-status e2e-host e2e-faults-q4
-srv/logs/*               go e2e-logs e2e e2e-ci @alerts e2e-workers
-srv/offsite/*            go e2e-offsite e2e-data
-srv/status/*             go e2e-status e2e-top e2e-cli e2e-workers
-srv/metrics/*            go e2e-status e2e-top e2e-sec2 @alerts
-srv/gate/*               go e2e-ci e2e-sec2
-srv/hostcare/*           go e2e-host @alerts
+srv/watch/*              go @alerts e2e-status e2e-host e2e-faults-q4 e2e-upgrade
+srv/logs/*               go e2e-logs e2e e2e-ci @alerts e2e-workers e2e-upgrade
+srv/offsite/*            go e2e-offsite e2e-data e2e-upgrade
+srv/status/*             go e2e-status e2e-top e2e-cli e2e-workers e2e-upgrade
+srv/metrics/*            go e2e-status e2e-top e2e-sec2 @alerts e2e-upgrade
+srv/gate/*               go e2e-ci e2e-sec2 e2e-upgrade
+srv/hostcare/*           go e2e-host @alerts e2e-upgrade
 srv/studio/*             go e2e-studio
 srv/tools/*              go
 srv/README.md            lint
@@ -110,6 +110,7 @@ test/e2e-jobs.sh         e2e-jobs lint
 test/cron-ref.py         e2e-jobs lint
 test/test/e2e-matrix*         e2e-matrix-quick e2e-matrix-weekly lint
 test/e2e-workers.sh      e2e-workers lint
+test/e2e-upgrade.sh      e2e-upgrade lint
 test/faults/*            @faults e2e-matrix-quick e2e-matrix-weekly lint
 test/sec2/*              e2e-sec2 lint
 test/sec3/*              e2e-sec2 lint
