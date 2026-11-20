@@ -338,10 +338,17 @@ func TestDiskGuard(t *testing.T) {
 	}{
 		{"100", nil, false, false},
 		{"9000", []string{"disk_stop_pct=0"}, true, false},
-		{"9000", []string{"disk_stop_pct=1"}, true, true}, // (the temp file system is at least 1% full)
-		{"9000", []string{"disk_stop_pct=100"}, true, false},
+		{"9000", []string{"disk_stop_pct=1"}, true, true},    // (the temp file system is at least 1% full)
+		{"9000", []string{"disk_stop_pct=100"}, true, false}, // (unless the temp file system is itself full: below)
 	} {
 		f := hostWithHog(t)
+		// the guard reads the real file system the test's files are on: on a full disk (100%) the
+		// 100% threshold is reached too, so that case then expects the stop (the rule, not the disk)
+		if len(tt.settings) == 1 && tt.settings[0] == "disk_stop_pct=100" {
+			if u, ok := (Watch{}).df(f.path("opt"), nil); ok && u.pct == "100" {
+				tt.stopped = true
+			}
+		}
 		f.du = tt.du
 		f.settings(append([]string{"disk_every=0"}, tt.settings...)...)
 		f.tick()
