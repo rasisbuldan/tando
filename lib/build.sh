@@ -558,7 +558,7 @@ native_prebuilt() {
     have=${K_glibc:-}
     if [ -z "$have" ]; then
       case $glibc in 2.[0-9]|2.[0-2][0-9]|2.30|2.31) ;; *)
-        how="$how; needs glibc $glibc or newer: tando cannot read the server's glibc yet, check it (Debian 12 has 2.36, Ubuntu 24.04 2.39)";;
+        how="$how; needs glibc $glibc or newer: the server's tando does not report its glibc (tando host setup <host> updates it), so check it (Debian 12 has 2.36, Ubuntu 24.04 2.39)";;
       esac
     elif [ "$(printf '%s\n%s\n' "$glibc" "$have" | sort -t. -k1,1n -k2,2n | head -1)" != "$glibc" ]; then
       printf '  %s\n' "$rel needs glibc $glibc or newer, the server has $have" > "$TMPD/fix.msg"

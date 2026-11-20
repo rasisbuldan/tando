@@ -467,7 +467,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   # a fresh clone: before anything is asked of the server (tando up installs the dependencies)
   node_install
   agent info > "$TMPD/info"
-  kv_read "$TMPD/info" arch libc version
+  kv_read "$TMPD/info" arch libc version glibc
   version_notice "$K_version"
   if [ "$C_recipe" = container ] && [ -z "$C_image" ]; then
     ENGINE=$(command -v docker || command -v podman) ||

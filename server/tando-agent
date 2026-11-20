@@ -1503,6 +1503,8 @@ cmd_info() {
   echo "version=$(cat "$R/VERSION" 2> /dev/null || echo unknown)"   # written by host setup
   echo "arch=$(uname -m)"
   echo "libc=$libc"
+  # (the client refuses a prebuilt native module that needs a newer glibc than this)
+  [[ $libc == glibc ]] && echo "glibc=$(getconf GNU_LIBC_VERSION 2> /dev/null | awk '{print $2}')"
   echo "apps_domain=${H[apps_domain]:-}"
   echo "tls=${H[tls]:-}"
   echo "sum=$(cksum < "$AGENT" | cut -d' ' -f1)"
