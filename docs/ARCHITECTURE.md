@@ -152,8 +152,12 @@ idle → copy → preflight → switch → verify → idle      (verified, last_
          └────────┴──→ idle (bad; current untouched)
 ```
 
-copy: `cp -a` (no links followed) into a root-owned release, link shared dirs, make `writable`
-dirs app-owned. preflight: the same sandbox on port+100, health-checked; a Next.js release also has to load
+copy: `rsync -c --link-dest` of the upload (no links followed) into a root-owned release: a file
+with the same bytes as in the live release is a hard link to that file (root-owned, mode 640 or
+750, so the release's chown and chmod leave it unchanged); a shared file that is not, or that lies
+in a `writable`, `public_dirs` or assets directory, is copied (`unshare_release`), so nothing done
+to one release shows in another. Never a link to `incoming/` (the uploader writes there). Then
+link shared dirs, make `writable` dirs app-owned. preflight: the same sandbox on port+100, health-checked; a Next.js release also has to load
 its `sharp` module and answer for the pages' optimised images. switch: pre-deploy
 backup, atomic `current` swap, restart. verify: through Caddy. `recover` (boot and every mutating
 verb) reverts copy/preflight and finishes or reverts switch/verify/rollback.

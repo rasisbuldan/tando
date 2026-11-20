@@ -3313,17 +3313,26 @@ import_release() {
   local before after
   before=$(upload_sum)
   local after_inc; after_inc=$(inc_sum)
-  if ! { fp imp.cp && timeout 3600 cp -a --no-dereference "$D/incoming" "$rel" 2> "$D/copy.err"; }; then
-    # the cause in words: cp's own error, and what is left on the file system
+  [[ -d $D/incoming && ! -L $D/incoming ]] || { free_lease; fail "incoming/ is not a directory"; }
+  # a file with the same bytes as in the live release is a hard link to it, not a copy (rsync
+  # --link-dest -c; the modify window: whatever its time, as a build writes every file anew; it
+  # keeps the live file's time). -H -D: links and special files of the upload come along as with
+  # cp -a, so the checks below refuse them as before. Only a release of the same group: chown
+  # below must not change a file another release holds (unshare_release)
+  local prev=${S[current]:-} ld=()
+  valid_id "$prev" && [[ $prev != "$id" && -d $D/releases/$prev && ! -L $D/releases/$prev &&
+    $(stat -c %G "$D/releases/$prev") == "$group" ]] && ld=(--link-dest="$D/releases/$prev") || prev=""
+  if ! { fp imp.cp && timeout 3600 rsync -rltHD -c --modify-window=2000000000 ${ld[@]+"${ld[@]}"} "$D/incoming/" "$rel" 2> "$D/copy.err"; }; then
+    # the cause in words: rsync's own error, and what is left on the file system
     local why fb ifree
     why=$(grep -v '^$' "$D/copy.err" | tail -1 | cut -c1-200)
     fb=$(df -Pk "$D/releases" 2> /dev/null | awk 'NR == 2 { print int($4 / 1024) }')
     ifree=$(df -Pi "$D/releases" 2> /dev/null | awk 'NR == 2 { print ($2 > 0 ? $4 : "") }')
     rm -rf "$rel"
     if [[ $ifree =~ ^[0-9]+$ ]] && ((ifree < 1000)); then
-      fail "copy failed: no free inodes ($ifree left; the upload and the releases kept hold $(find "$D/incoming" "$D/releases" -xdev 2> /dev/null | wc -l) files): ${why:-cp failed}"
+      fail "copy failed: no free inodes ($ifree left; the upload and the releases kept hold $(find "$D/incoming" "$D/releases" -xdev 2> /dev/null | wc -l) files): ${why:-rsync failed}"
     fi
-    fail "copy failed: ${why:-cp failed} (${fb:-?} MB and ${ifree:-?} inodes free)"
+    fail "copy failed: ${why:-rsync failed} (${fb:-?} MB and ${ifree:-?} inodes free)"
   fi
   rm -f "$D/copy.err"
   after=$(upload_sum)
@@ -3332,6 +3341,20 @@ import_release() {
   st inc_id "$id" inc_sum "$after_inc" inc_applied "${CONF_ID:-}"   # (for an unchanged next deploy)
   fp imp.free_lease
   free_lease
+  # every hard link in the release is a file of the live release, under one name only (a hard
+  # link of the upload, to anything, is refused)
+  bad=$(find "$rel" ! -type d -links +1 -printf '%i\n' | sort | uniq -d | head -1)
+  [[ -z $bad ]] || fail "hardlink in release: $(find "$rel" -inum "$bad" -printf '%P\n' -quit)"
+  if [[ -n $prev ]]; then
+    bad=$(comm -23 <(find "$rel" ! -type d -links +1 -printf '%i\n' | sort -u) <(find "$D/releases/$prev" ! -type d -printf '%i\n' | sort -u) | head -1)
+  else
+    bad=$(find "$rel" ! -type d -links +1 -printf '%i\n' -quit)
+  fi
+  [[ -z $bad ]] || fail "hardlink in release: $(find "$rel" -inum "$bad" -printf '%P\n' -quit)"
+  # a file shared with the live release stays shared only when the owner and mode it already
+  # has are the ones chown and chmod below give it (they leave it as it is), and nothing writes
+  # to it or changes its mode after the import; any other is copied (unshare_release)
+  [[ -n $prev ]] && { fp imp.unshare; unshare_release "$rel" "$group" || fail "copy failed: could not copy a shared file"; }
   chown -RhP "root:$group" "$rel" && chmod -R a-st,u=rwX,g=rX,o= "$rel" || fail "chown failed"
   open_public "$rel"
   while IFS= read -r -d '' l; do
@@ -3342,12 +3365,31 @@ import_release() {
   [[ -z $bad ]] || fail "secret file in release: ${bad#"$rel"/}"
   bad=$(find "$rel" \( ! -type f ! -type d ! -type l \) -print -quit)
   [[ -z $bad ]] || fail "special file in release: ${bad#"$rel"/}"
-  bad=$(find "$rel" -type f -links +1 -print -quit)
-  [[ -z $bad ]] || fail "hardlink in release: ${bad#"$rel"/}"
   link_shared "$rel"
   make_writable "$rel"
   [[ ${C[recipe]:-node} == python ]] && build_venv
   return 0
+}
+
+# unshare_release rel group: copy (a new file under the same name) every file the release shares
+# with another one unless root owns it with the release's group and mode 640 or 750 (what chown
+# and chmod in import_release make, so they leave it unchanged), and every shared file in a
+# directory that is written, made readable to others or served by Caddy after the import
+# (writable, public_dirs, assets: make_writable, open_public, assets_link change files there)
+unshare_release() {
+  local rel=$1 group=$2 d f t dirs=() x=()
+  local w=${C[writable]:-} pd=${C[public_dirs]:-}
+  read -ra dirs <<< "${w//,/ } ${pd//,/ }"
+  while IFS=$'\t' read -r d _; do [[ -n $d ]] && dirs+=("$d"); done < <(assets_spec "$rel")
+  for d in ${dirs[@]+"${dirs[@]}"}; do
+    d=${d%/}
+    # (a name find could read as a pattern: every shared file is copied)
+    [[ $d =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ ]] || { x=(-o -true); break; }
+    x+=(-o -path "$rel/$d/*")
+  done
+  while IFS= read -r -d '' f; do
+    t=$(mktemp "${f%/*}/.tando-copy.XXXXXX") && cp -a --remove-destination "$f" "$t" && mv -f "$t" "$f" || return 1
+  done < <(find "$rel" ! -type d -links +1 \( ! -user root -o ! -group "$group" -o ! \( -perm 640 -o -perm 750 -o -type l \) ${x[@]+"${x[@]}"} \) -print0)
 }
 
 # container: load the uploaded image (or pull the named one) into root Podman's storage and tag
@@ -3707,7 +3749,7 @@ open_public() { # release dir
 }
 
 # Make the listed directories of a release (root-owned copy) writable by the app user. Nothing
-# is mounted: each release has its own copy, so writes never outlive the release.
+# is mounted: each release has its own copy (unshare_release), so writes never outlive the release.
 make_writable() { # release dir
   local rel=$1 d parts=()
   [[ -n ${C[writable]:-} ]] || return 0

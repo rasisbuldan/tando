@@ -1025,6 +1025,28 @@ check "AS7c a container app with assets is refused by the server" \
   eval 'agent_check container "assets=assets" | grep -q "assets is not supported for a container"'
 check "AS7d a bad assets value is refused (a path outside the release)" \
   eval 'agent_check node "assets=../etc" | grep -q "bad assets"'
+# HL. a release shares the live release's unchanged files by hard link (docs/ARCHITECTURE.md "copy"):
+# never a file of a writable or assets directory, never one the app can write, and no change to one
+# release shows in another
+mkdir -p lib cache; head -c 200000 /dev/urandom > lib/same.bin; echo seed > cache/seed.txt
+printf 'writable = cache\n' >> tando.conf
+echo 3 > VERSION; "$R" deploy > "$E/hl3.out" 2>&1; hl3=$(rid "$E/hl3.out")
+echo 4 > VERSION; "$R" deploy > "$E/hl4.out" 2>&1; rc=$?; hl4=$(rid "$E/hl4.out")
+RA=/opt/tando/apps/skewn/releases
+hl() { srv "sudo stat -c '%i %h %U %a' $RA/$1/$2" 2> /dev/null; }
+# shellcheck disable=SC2034  # read in the eval of a check below
+a3=$(hl "$hl3" lib/same.bin) a4=$(hl "$hl4" lib/same.bin)
+check "HL1 an unchanged file is one file in both releases, root's, mode 640 (rc=$rc; $a3 / $a4)" \
+  eval '[ $rc = 0 ] && [ -n "$a3" ] && [ "$a3" = "$a4" ] && [ "${a4#* }" = "2 root 640" ]'
+check "HL2 the app's user cannot write it" \
+  eval '! srv "sudo -u tando-skewn sh -c \"echo x >> $RA/$hl4/lib/same.bin\"" 2> /dev/null'
+check "HL3 a file of a writable directory is the release's own (the app's, one link)" \
+  eval '[ "$(hl "$hl4" cache/seed.txt | cut -d" " -f2,3)" = "1 tando-skewn" ] &&
+        [ "$(hl "$hl3" cache/seed.txt | cut -d" " -f1)" != "$(hl "$hl4" cache/seed.txt | cut -d" " -f1)" ]'
+check "HL4 a file of the assets directory is not shared with the other release (only with what Caddy serves)" \
+  eval '[ "$(hl "$hl3" public/build/app-b81d40e5.js | cut -d" " -f1)" != "$(hl "$hl4" public/build/app-b81d40e5.js | cut -d" " -f1)" ]'
+check "HL5 every file the new release shares with another is root's with mode 640 or 750" \
+  eval '[ -z "$(srv "sudo find $RA/$hl4 ! -type d ! -type l -links +1 ! -path \"*/public/build/*\" \\( ! -user root -o ! \\( -perm 640 -o -perm 750 \\) \\) -print")" ]'
 cd "$W" || exit 2
 
 for a in skew plain skewn; do "$R" destroy "$a" --purge --yes > /dev/null 2>&1; done   # (section 20 counts the host's apps)
