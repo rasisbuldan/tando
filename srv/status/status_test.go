@@ -357,3 +357,23 @@ func TestStatusHostcare(t *testing.T) {
 	got, _ = h.out(func(c *Collector, b *bytes.Buffer) error { return c.Status(context.Background(), b, "") })
 	eq(t, got, rows(hostRow))
 }
+
+// An app whose restore was cut off while it replaced the database has one restorecut row after its
+// app row: the backup to restore again, the safety backup, what was being replaced (the agent's
+// restore_cut_row); without restore_cut in its state there is none.
+func TestStatusRestoreCut(t *testing.T) {
+	h := newHost(t)
+	h.euid = 0
+	h.write("root/host.conf", "apps_domain=example.org\ntls=auto\n")
+	h.app("web", "port=4100\n", "current=20261114-170102\nstatus_20261114-170102=verified\n"+
+		"restore_cut=the restore stopped\nrestore_cut_id=20261114-180000-manual\nrestore_cut_safety=20261114-180100-safety\nrestore_cut_what=database\n")
+	h.app("other", "port=4101\n", "")
+	got, err := h.out(func(c *Collector, b *bytes.Buffer) error { return c.Status(context.Background(), b, "") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\nrestorecut\tweb\t20261114-180000-manual\t20261114-180100-safety\tdatabase\n") ||
+		strings.Count(got, "restorecut") != 1 {
+		t.Fatalf("want one restorecut row for web, got:\n%s", got)
+	}
+}

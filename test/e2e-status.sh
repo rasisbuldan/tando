@@ -78,6 +78,12 @@ printf 'id=20261103-000001\nresult=failed\nphase=done\nmessage=it went down\n' >
 printf 'log line one\n\033[31mred\033[0m\nunterminated' > $R/odd/activation.log
 chmod 600 $R/odd/activation.log
 install -d -m 755 $R/halfgone/releases
+# a restore cut off in its database step (rs_end records restore_cut and the three keys status shows)
+install -d -m 751 $R/cut $R/cut/releases/20261104-000000
+printf 'port=4193\nrecipe=node\n' > $R/cut/app.conf
+printf '%s\n' current=20261104-000000 last_good=20261104-000000 phase=idle seq_20261104-000000=1 status_20261104-000000=verified \
+  'restore_cut=the restore of backup 20261104-010101-manual stopped while the database was being replaced' \
+  restore_cut_id=20261104-010101-manual restore_cut_safety=20261104-020202-safety restore_cut_what=database > $R/cut/state
 EOF
 }
 
@@ -225,6 +231,13 @@ compare_all() {
       i=$((i + 1))
       cmp_case "2.$k.h$i" sudo deploy-status "$a" "$id"
     done
+  done
+  # a cut restore is one row, from the shell and from Go: the backup to restore again, the safety backup
+  local want="restorecut	cut	20261104-010101-manual	20261104-020202-safety	database" how2
+  for how2 in "/opt/tando/bin/tando-agent" "bash /var/tmp/tando-status-cmp/agent"; do
+    # lint: allow RL04 the agent paths are this suite's own words
+    check "2z status of an app whose restore was cut shows the restorecut row ($how2)" \
+      t_eq "$(srv "sudo $how2 status cut" | grep "^restorecut	")" "$want"
   done
   # errors: the same message and exit status
   cmp_case 3a sudo status Bad_Name

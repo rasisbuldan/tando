@@ -42,6 +42,9 @@ func (w Watch) ExecSample(ctx context.Context) {
 // with the state, an app systemd gave up on (down) that is not stopped, a release reserved by
 // an activation that will never run, or an operation whose end was not written out.
 func (w Watch) recoverNeeded() bool {
+	if w.goneDirLeft() {
+		return true
+	}
 	names, _ := apps.Names(w.Env.Root)
 	for _, a := range names {
 		s, _ := w.Cache.load(filepath.Join(w.appDir(a), "state"))
@@ -74,6 +77,24 @@ func (w Watch) recoverNeeded() bool {
 		case s["outcome"] != "" && s["outcome"] != s["outcome_done"]:
 			// an operation ended (its result committed) but what follows it was cut off: its
 			// history line, its progress file, the job units, a refused release's directory
+			return true
+		}
+	}
+	return false
+}
+
+// goneDirLeft: a destroy renames the app's directory to .gone-<app>.<pid> and then removes it; a
+// destroy cut off in between leaves it, and the agent's recover-all removes it (once the pid is
+// gone, as it checks too). A destroy that still runs is left alone.
+func (w Watch) goneDirLeft() bool {
+	ents, _ := os.ReadDir(filepath.Join(w.Env.Root, "apps"))
+	for _, e := range ents {
+		n := e.Name()
+		if !strings.HasPrefix(n, ".gone-") || !e.IsDir() {
+			continue
+		}
+		pid := n[strings.LastIndexByte(n, '.')+1:]
+		if _, err := os.Stat(filepath.Join(w.Env.Proc, pid)); err != nil {
 			return true
 		}
 	}

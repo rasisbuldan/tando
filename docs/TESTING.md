@@ -247,7 +247,7 @@ workers' switch (`wk.start`) and a failed start of the old workers when a bad re
 (`bad.workers`), and for the kind `data` (PostgreSQL) a deploy refused in the pre-flight, which
 must leave the role's limits and the domains as the live release has them, and a restore killed
 just before pg_restore (the app runs again, `tando doctor` names the cut). `test/e2e-matrix-weekly.sh` (nightly and weekly tiers,
-about 15 minutes) runs `--weekly` for static, container, python and next: the cells of each kind's
+about 15 minutes) runs `--weekly` for static, container, python, next and data (a `destroy --purge` killed at the database drop and at the user removal, and a restart at the drop): the cells of each kind's
 `WEEKLY_CELLS`, the points where its path differs from node's. Everything else only by name:
 `test/e2e-matrix.sh --ops deploy,rollback --actions kill --points '(^|/)(pre|post):'` (a kill at
 every state write of a deploy and a rollback), or any `--kind`, `--ops`, `--actions`, `--quick`.

@@ -3945,7 +3945,8 @@ cmd_backup_restore() {
   load "$D/state" S
   # on failure: start the app again and say where the data before the restore is
   rfail() { rs_end "$1"; die "$1 (the previous data is in backup $safety)"; }
-  st phase restore restore_id "$id" restore_step stop restore_safety "" restore_cut "" ||
+  st phase restore restore_id "$id" restore_step stop restore_safety "" restore_cut "" \
+    restore_cut_id "" restore_cut_safety "" restore_cut_what "" ||
     die "could not save the state (disk full?); nothing restored"
   # (its workers too: nothing of the app writes while its data is replaced)
   fp rs.stop
@@ -4000,7 +4001,7 @@ cmd_backup_restore() {
 # again, the database role has its limits, and the phase is idle. A step cut off half way (the
 # adopted data directory, the database) is recorded in restore_cut for tando doctor.
 rs_end() {
-  local step=${S[restore_step]:-} what="" why=${1:-} bid=${S[restore_id]:-?} o
+  local step=${S[restore_step]:-} what="" why=${1:-} bid=${S[restore_id]:-?} o part
   case $step in
     data) [[ -n ${C[data_dir]:-} || -f $BK/$A/$bid/db.dump ]] && what="data directory and database";;
     db) what=database;;
@@ -4012,8 +4013,15 @@ rs_end() {
   for o in "$D"/shared/.restore-* "$D"/shared/.replaced-*; do [[ -e $o || -L $o ]] && as_app rm -rf "$o"; done
   rm -rf "$BK/$A"/.*-safety.tmp 2> /dev/null
   if [[ $step == db ]] && db_creds && db_limits "$DB_ROLE"; then S[applied]=${S[restore_applied]:-}; fi
+  part=$what
   [[ -n $what ]] && what="the restore of backup $bid stopped while the $what was being replaced (${why:-cut off}), so it may be partly restored: tando backup restore $bid --yes runs it again; the data from before it is in backup ${S[restore_safety]:-(none: it was not taken)}"
-  st phase idle restore_step "" restore_applied "" restore_cut "$what" restore_id "" restore_safety ""
+  # (restore_cut_*: what tando status and ls show: the backup to restore again, the safety backup)
+  if [[ -n $what ]]; then
+    st phase idle restore_step "" restore_applied "" restore_cut "$what" restore_cut_id "$bid" \
+      restore_cut_safety "${S[restore_safety]:-}" restore_cut_what "$part" restore_id "" restore_safety ""
+  else
+    st phase idle restore_step "" restore_applied "" restore_cut "" restore_id "" restore_safety ""
+  fi
   if [[ -n ${S[current]:-} ]]; then
     restart_app
     workers_follow all || echo "tando-agent: $WF_WHY" >&2
@@ -4736,6 +4744,13 @@ app_row() { # name of the array with this unit's systemctl fields
     "${C[cpu]:--}" "${C[tasks]:-1024}" "${C[max_conns]:-256}" "${C[max_requests]:--}"
   # (LG: 4 words, split on purpose; the last four: the app's limits, cpu "-" = none)
 }
+# restore_cut_row: a restore cut off while it replaced the data (restore_cut in the state, until a
+# restore ends): one row for tando status and ls: the backup to restore again, the safety backup,
+# what was being replaced. srv/status prints the same row.
+restore_cut_row() {
+  [[ -n ${S[restore_cut]:-} ]] || return 0
+  row restorecut "$A" "${S[restore_cut_id]:--}" "${S[restore_cut_safety]:--}" "${S[restore_cut_what]:-data}"
+}
 app_domains() { local x o=""; for x in ${C[domains]:-}; do o+="${o:+,}${x%|*}"; done; echo "${o:--}"; }
 
 # status [app]: a host row and one row per app; with an app also its releases and history
@@ -4793,7 +4808,7 @@ cmd_status() {
   # one systemctl call for all apps; blocks are separated by empty lines
   while IFS= read -r l; do
     if [[ -n $l ]]; then U[${l%%=*}]=${l#*=}; continue; fi
-    ( A=${names[i]} D=$R/apps/${names[i]}; load "$D/app.conf" C; load "$D/state" S; app_row U; worker_rows )
+    ( A=${names[i]} D=$R/apps/${names[i]}; load "$D/app.conf" C; load "$D/state" S; app_row U; worker_rows; restore_cut_row )
     U=(); i=$((i + 1))
   done < <(systemctl show -p ActiveState,MemoryMax,CPUUsageNSec,NRestarts \
              -p ActiveEnterTimestampMonotonic "${units[@]}"; echo)

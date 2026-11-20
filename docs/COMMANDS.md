@@ -349,8 +349,8 @@ and `pull` work for a destroyed app's final backup. `pull` creates the file mode
 data and a database dump) and refuses an existing file. `ls` heads its time column `TIME (GMT)`.
 A restore cut off by a kill or a reboot is ended by the server's recovery: the app runs its release
 again. When the database (or an adopted app's data directory) was being replaced at that moment,
-it may be partly restored: `tando doctor` says so, with the backup to restore again and the safety
-backup that holds the data from before.
+it may be partly restored: `tando status <app>` and `tando doctor` say so, with the backup to restore
+again and the safety backup that holds the data from before (`tando ls` marks the app), until a restore ends.
 `tando backup offsite [status|set|test|hosts|sync|off]` · `tando backup offsite key --show|--saved|--import|--rotate`:
 copies of every backup in Cloudflare R2 or any S3-compatible store, encrypted on the server with a
 recovery key shown once (docs/BACKUP.md). `set` asks for the account id or endpoint, bucket, access
