@@ -190,7 +190,9 @@ machine and, inside `save`, before and after every write of a state file (`pre:s
 (made by the driver through `docker exec`, never by tando) and the one-shot spec
 `/run/tando-test/fault`; on a real server it costs one builtin test. Actions: kill (SIGKILL of the
 agent there), fail (that action fails, as on a full disk), reboot (the agent waits there, then
-`docker restart`). A trace of the operation without a fault lists its points. After the fault,
+`docker restart`), race (the agent waits there while a second client configures the app with
+the next version's tando.conf, then goes on). A trace of the operation without a fault lists its
+points. After the fault,
 recovery runs as on a server (ExecStopPost, then what tando-watch's minute does) and `mx_inv`
 checks ten invariants and names the one that broke: one intended release serves; link, state and
 app.conf's start and health agree with it; its status; one history line with the right result and
@@ -198,8 +200,14 @@ nothing "running"; idle and the lock free; no leftover unit, lease, temp file or
 rollback target exists; stopped stays stopped; data and database untouched; no failed visitor
 request. `--selftest` breaks each invariant on purpose and expects it named.
 
-`test/e2e-matrix-quick.sh` (full and quick tiers, about 5 minutes) runs `--cells`: one cell for
-each defect fixed in milestone 1 (the list `CELLS` in the driver), node and the container
+Versions alternate their health path, start command, memory, `max_conns` and a job's schedule
+(odd and even), so a unit file, Caddy site, job timer or app.conf left with the other version's
+settings is named (inv2).
+
+`test/e2e-matrix-quick.sh` (full and quick tiers, about 6 minutes) runs `--cells`: one cell for
+each defect fixed in milestone 1 and 2a (the list `CELLS` in the driver: two clients' settings,
+nothing of a deploy that does not go live reaching the live app, job units that could not be
+written, a queue that gave up, a site file that was not replaced), node and the container
 recipe's switch failure. The rest only by name: `test/e2e-matrix.sh --ops deploy,rollback
 --actions kill --points '(^|/)(pre|post):'` (a kill at every state write of a deploy and a
 rollback), or any `--ops`, `--actions`, `--kind`, `--quick`. Not covered: a real power cut (a

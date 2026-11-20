@@ -48,7 +48,7 @@ configure() {
   if [ "${1:-}" != check ] && [ -n "${BUSY_ID:-}" ]; then configure_wait
   else agent sudo configure "$APP" < "$TMPD/settings" > "$TMPD/cfg"; fi
   kv_read "$TMPD/cfg" link port created changed exists current needs node domains \
-    busy busy_phase busy_left busy_soak
+    busy busy_phase busy_left busy_soak conf
   # configure check: something holds the app now (a release soaking, a rollback, a backup); the
   # real configure waits for it, and configure_wait says so if it still does then
   if [ "${1:-}" = check ]; then
@@ -579,7 +579,9 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   phase_line 3 upload ok "$UPLOAD_SECS" "$(plural "${UPLOAD_FILES:-0}" file) changed, $(ui_bytes "${UPLOAD_BYTES:-0}") sent"
   local build_total
   build_total=$(awk -v a="$BUILD_SECS" -v b="$stage_secs" 'BEGIN { printf "%.1f", a + b }')
-  printf '%s\n' "$TOKEN" > "$TMPD/token"
+  # the lease token, then the id of this deploy's settings (configure staged them on the server:
+  # the activation runs with these, whatever another client configured meanwhile)
+  printf '%s\n%s\n' "$TOKEN" "${K_conf:-}" > "$TMPD/token"
   agent sudo activate "$APP" "$build_total" "$UPLOAD_SECS" < "$TMPD/token" > "$TMPD/act"
   kv_read "$TMPD/act" id same
   id=$K_id
@@ -599,7 +601,10 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   SHOWN="" SOAKING="" QUEUED_SAID=""
   # a deadline: an activation that neither ends nor dies is reported, not waited for forever
   local rto=0; [ -z "$C_release" ] || rto=${C_release_timeout:-300}
-  local deadline=$(( $(now) + 2 * ${C_timeout:-60} + ${C_soak:-${TANDO_SOAK:-30}} + rto + 900 ))
+  # (counted from the end of a queue: a queued activation waits for the app up to an hour on the
+  # server, then gives up by itself and says so; the client waits as long, not 17 minutes)
+  local dlen=$(( 2 * ${C_timeout:-60} + ${C_soak:-${TANDO_SOAK:-30}} + rto + 900 ))
+  local deadline=$(( $(now) + dlen ))
   while :; do
     if [ "$(now)" -gt "$deadline" ]; then
       ui_box_close "release $id: still activating after $(ui_dur $(( deadline - ${t0%.*} )))"
@@ -614,6 +619,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
     errs=0
     kv_read "$TMPD/ds" phase result message link venv t_copy t_preflight t_release t_switch t_verify soak \
       waiting_for waiting_phase waiting_left
+    [ "$K_phase" = queued ] && deadline=$(( $(now) + dlen ))
     # queued behind another activation (its soak, a rollback): say for what, once
     if [ "$K_phase" = queued ] && [ -n "$K_waiting_phase" ] && [ -z "${QUEUED_SAID:-}" ]; then
       QUEUED_SAID=1
