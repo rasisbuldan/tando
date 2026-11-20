@@ -220,6 +220,7 @@ render_ls() {
   if [ $n -gt 0 ]; then ui_table "l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"   # LINK whole: other columns go first
   else ui_box_line "No apps on $HOST yet. In your app's directory: tando up"; fi
   worker_hint
+  restore_hint
   hc_hint
   local na foot
   na=$(grep -c "^alert${TAB}[^${TAB}]*${TAB}[^${TAB}]*${TAB}firing" "$TMPD/st")
@@ -227,6 +228,20 @@ render_ls() {
   [ "$na" -gt 0 ] && foot="$foot  ${UI_RED}$(plural "$na" alert) firing: tando alerts${UI_NC}"
   [ $n -gt 0 ] && foot="$foot ${UI_G_MID} tando status <app> for details"
   ui_box_close "$foot ${UI_G_MID} $(watch_note)"
+}
+# restore_cut_text: the restorecut row (app, backup to restore again, safety backup, what was being
+# replaced) as one line: the restore was cut and the command to run (status adds the safety backup)
+restore_cut_text() {
+  printf 'the %s restore was cut: tando backup restore %s' "$4" "$2"
+}
+# restore_hint: in ls, one line per app whose restore was cut off (the way worker_hint marks a worker)
+restore_hint() {
+  local r ra rid rsf rwh
+  while IFS=$TAB read -r r ra rid rsf rwh _x; do
+    [ "$r" = restorecut ] || continue
+    ui_box_line "${UI_RED}$ra: the $rwh restore was cut: tando status $ra${UI_NC}"
+  done < "$TMPD/st"
+  return 0
 }
 # hc_hint: one line when host care has something to do (the hostcare row of status: tando-host's
 # hourly summary, a file read on the server; nothing extra runs)
@@ -311,6 +326,13 @@ render_status() {
   fi
   ui_kv cpu "$CPUP%"
   worker_lines
+  local rcid rcsf rcwh
+  while IFS=$TAB read -r r _x rcid rcsf rcwh _y; do
+    [ "$r" = restorecut ] || continue
+    ui_kv restore "${UI_RED}$(restore_cut_text "$a" "$rcid" "$rcsf" "$rcwh")${UI_NC}"
+    [ "$rcsf" = - ] && rcsf="none (it was not taken)"
+    ui_kv safety "the data from before it is in backup $rcsf"
+  done < "$TMPD/st"
   limits_line
   if [ -n "$WATCH" ]; then ui_kv trend "cpu $(ui_spark "$SPC" 16)  mem $(ui_spark "$SPM" 16)"
   elif [ -n "$hm" ]; then ui_kv "16 min" "cpu $(ui_spark "$hc" 16)  mem $(ui_spark "$hm" 16)"; fi

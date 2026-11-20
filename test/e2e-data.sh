@@ -285,6 +285,24 @@ check "B1 pg_dump and pg_restore ran in tando-notes.slice, oom_score_adj 500 ($(
         echo "$cg" | grep -q "^pg_restore 500 0::/tando.slice/tando-notes.slice/" &&
         ! echo "$cg" | grep -v "^pg_[a-z]* 500 0::/tando.slice/tando-notes.slice/" | grep -q .'
 
+# D9c. a restore whose database step fails (pg_restore stand-in: exit 1) is a cut restore: tando
+# status shows one line (the database restore was cut, the backup to restore again with its
+# command, the safety backup) and tando ls marks the app; a restore that ends clears both
+printf '#!/bin/sh\nexit 1\n' | srv 'sudo tee /usr/local/bin/pg_restore > /dev/null && sudo chmod 755 /usr/local/bin/pg_restore'
+"$R" backup restore "$id" --yes > "$E/restore-cut.out" 2>&1; rcc=$?; cat "$E/restore-cut.out" >&2
+check "D9c a restore whose database step fails ends with an error (rc=$rcc)" test "$rcc" != 0
+COLUMNS=220 "$R" status notes > "$E/cut-status.out" 2>&1; cat "$E/cut-status.out" >&2
+COLUMNS=220 "$R" ls > "$E/cut-ls.out" 2>&1; cat "$E/cut-ls.out" >&2
+check "D9d status shows the cut restore: the database, the backup to restore again, the safety backup" \
+  eval 'grep -q "restore.*database restore was cut: tando backup restore $id " "$E/cut-status.out" &&
+        grep -q "safety .*data from before it is in backup [0-9]*-[0-9]*-safety" "$E/cut-status.out"'
+check "D9e ls marks the app with a cut restore" eval 'grep -q "notes: the database restore was cut: tando status notes" "$E/cut-ls.out"'
+srv 'sudo rm -f /usr/local/bin/pg_restore'
+"$R" backup restore "$id" --yes > "$E/restore-again.out" 2>&1; rc=$?; cat "$E/restore-again.out" >&2
+COLUMNS=220 "$R" status notes > "$E/cut-status2.out" 2>&1; COLUMNS=220 "$R" ls > "$E/cut-ls2.out" 2>&1
+check "D9f restoring again works (rc=$rc, $(page)) and status and ls no longer show a cut restore" \
+  eval '[ $rc = 0 ] && [ "$(page)" = "notes v2 db=3 file=3" ] && ! grep -q "restore was cut" "$E/cut-status2.out" "$E/cut-ls2.out"'
+
 # D10. pull a backup to the laptop
 "$R" backup pull "$id" "$E/pulled.tar" > /dev/null 2>&1
 check "D10 backup pull: a tar with data.tar.gz and db.dump" \

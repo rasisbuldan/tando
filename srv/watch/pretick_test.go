@@ -103,3 +103,21 @@ func TestRecoverNeededLeaseOrphaned(t *testing.T) {
 		}
 	}
 }
+
+// recoverNeeded sees the directory a destroy renamed (.gone-<app>.<pid>) and was cut off before it
+// removed it, so the leftovers do not wait for a boot; one whose destroy still runs is left alone.
+func TestRecoverNeededGoneDir(t *testing.T) {
+	f := newFakeHost(t)
+	f.app("shop")
+	if f.watch().recoverNeeded() {
+		t.Fatal("no leftover: no recover")
+	}
+	os.MkdirAll(f.path("opt/apps/.gone-old.4242/releases"), 0o700)
+	if !f.watch().recoverNeeded() {
+		t.Fatal("a .gone-* directory whose destroy is gone must be recovered")
+	}
+	os.MkdirAll(f.path("proc/4242"), 0o700)
+	if f.watch().recoverNeeded() {
+		t.Fatal("a .gone-* directory whose destroy still runs is not a leftover yet")
+	}
+}

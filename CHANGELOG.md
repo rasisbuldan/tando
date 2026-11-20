@@ -25,6 +25,10 @@ first, grouped by area.
   systemd once per second for the restart count and the state together (`systemctl show -p NRestarts
   -p ActiveState`) instead of two or three calls: server CPU in system.slice over a soak 600 ms to
   485 ms (whole container 994 ms to 742 ms); the poll stays at 1 s.
+- Tests: the fault matrix proves a deploy queued behind another one (a deploy key's, which has no
+  configure step) ends right when the one ahead fails before its switch, is rolled back, or is
+  killed and recovered: it goes live with its own settings, and history has both lines in order
+  (`test/e2e-matrix.sh --queue`; one of these cells runs in the quick tier).
 - Faster: every tando command starts about 0.3 s sooner (0.36 s to 0.06 s for `tando help`;
   `tando ls` and `tando status` from about 0.55 s to about 0.25 s): the help index no longer
   starts two processes per line of the help text.
@@ -36,6 +40,16 @@ first, grouped by area.
   destroy again. Both are recorded operations now (`phase restore`, `phase destroy`): recovery
   finishes a destroy, and ends a restore with the app running its release; a database cut off
   half restored is reported by `tando doctor` with the backup to restore again and the safety backup.
+- Changed: `tando status <app>` shows a restore that was cut off while it replaced the database
+  (a `restore` line: the backup to restore again with its command, `tando backup restore <id>`,
+  and a `safety` line with the safety backup), and `tando ls` marks the app the same way it marks a worker that does
+  not run. Both come from the agent and from srv/status (`restorecut` row).
+- Fixed: a destroy cut off after it renamed the app's directory to `.gone-*` left that directory
+  until the next boot; tando-watch now runs recover-all within the minute when one exists (and its
+  destroy is no longer running).
+- Tests: the fault matrix has `destroy-purge` (data kind, weekly cells: killed at the database
+  drop and at the user removal, and a restart at the drop); invariant 14 also needs the database,
+  the role and the app's backups gone after `--purge`, and fails when psql cannot say.
 - Tests: the fault matrix has the operations `restore` and `destroy` (invariant 13: a restore's
   data is the backup's or the old, else recorded and reported; 14: nothing of a destroyed app is
   left), with cells in the quick set.

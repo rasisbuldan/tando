@@ -213,6 +213,19 @@ release's file answers through Caddy with its bytes and the immutable header, an
 link or list is left in the shared directory (the cells `k` kill the activation just before and just
 after the files are linked). `--selftest` breaks each invariant on purpose and expects it named.
 
+A deploy queued behind another (`--queue`, the cells `QUEUE_CELLS`: queue-fail and queue-kill at
+a point). A second admin client never queues on the server: its configure takes the app's lock
+and its begin follows at once, and the first deploy holds the upload lease from its begin until
+its copy ends, after it took the lock; so the second waits in configure (fault scenario m2) or is
+refused at begin (c1). A deploy key's deploy has no configure and does queue at run-activation's
+lock. The cell stages the second deploy's settings first (configure with the next version's,
+`conf=`), holds the first at its pre-flight's spawn (past the copy: the lease is free), then
+begins, uploads and activates the second with its own settings id until the agent reports it
+waiting for the lock (`busy_waiting=1`, `phase=queued`); then the first fails or is killed at the
+point. The queued release must serve with its own settings (inv2 names the first's left in
+app.conf, the unit or the site), and history must have the first's failed or rolled-back line
+followed by the queued one's ok line (inv4).
+
 Versions alternate their health path, start command, memory, `max_conns`, a job's schedule and
 (kind data) the role's `db_statement_timeout` (odd and even), so a unit file, Caddy site, job
 timer, role or app.conf left with the other version's settings is named (inv2). Each version also
@@ -226,7 +239,7 @@ none when the app is stopped (`--selftest` breaks it twice: a worker stopped beh
 a stray worker unit).
 
 `test/e2e-matrix-quick.sh` (full and quick tiers, about 8 minutes) runs `--cells`: one cell for
-each defect fixed in milestone 1, 2a and 2b (the list `CELLS` in the driver: two clients' settings, nothing of a deploy that does not go live reaching the live app, job units that could not be written, a queue that gave up, a site file that was not replaced, a rollback cut before its first state write, an upload lease left by a killed begin or activate, a destroy killed after its units went and before its Caddy site),
+each defect fixed in milestone 1, 2a and 2b (the list `CELLS` in the driver: two clients' settings, nothing of a deploy that does not go live reaching the live app, job units that could not be written, a queue that gave up, a site file that was not replaced, a rollback cut before its first state write, an upload lease left by a killed begin or activate, a destroy killed after its units went and before its Caddy site, a deploy queued behind one that is refused before its switch),
 node; two cells of
 the container recipe (the switch failure, a kill at its spawn) and two of a static site (a kill at
 Caddy's file site, after the link moved), and for the kind `worker` a kill in the middle of the
@@ -234,7 +247,7 @@ workers' switch (`wk.start`) and a failed start of the old workers when a bad re
 (`bad.workers`), and for the kind `data` (PostgreSQL) a deploy refused in the pre-flight, which
 must leave the role's limits and the domains as the live release has them, and a restore killed
 just before pg_restore (the app runs again, `tando doctor` names the cut). `test/e2e-matrix-weekly.sh` (nightly and weekly tiers,
-about 15 minutes) runs `--weekly` for static, container, python and next: the cells of each kind's
+about 15 minutes) runs `--weekly` for static, container, python, next and data (a `destroy --purge` killed at the database drop and at the user removal, and a restart at the drop): the cells of each kind's
 `WEEKLY_CELLS`, the points where its path differs from node's. Everything else only by name:
 `test/e2e-matrix.sh --ops deploy,rollback --actions kill --points '(^|/)(pre|post):'` (a kill at
 every state write of a deploy and a rollback), or any `--kind`, `--ops`, `--actions`, `--quick`.

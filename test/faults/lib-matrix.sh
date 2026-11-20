@@ -204,7 +204,7 @@ mx_loop_stop() {
 mx_bad() { MX_BROKEN="$MX_BROKEN $1"; echo "    inv$1 $2" >&2; echo "inv$1 $2" >> "$W/inv.out"; }
 mx_inv() {
   MX_BROKEN="" ; : > "$W/inv.out"
-  [ "${MX_OP:-}" = destroy ] && { mx_inv_gone; return; }
+  case ${MX_OP:-} in destroy|destroy-purge) mx_inv_gone; return;; esac
   mx_facts "$MX_NEW"
   local sid="" sv cur link st lg n h nh ok rel s
   sv=$(mx_served_ver)
@@ -227,6 +227,7 @@ mx_inv() {
       case $MX_WANT in
         old) [ "$sid" = "$MX_OLD" ] || mx_bad 1 "serving: $sid (v$sv) serves, the old release $MX_OLD must";;
         new) [ "$sid" = "$MX_NEW" ] || mx_bad 1 "serving: $sid (v$sv) serves, the new release ${MX_NEW:-?} must";;
+        queue) [ "$sid" = "${MX_Q:-}" ] || mx_bad 1 "serving: $sid (v$sv) serves, the queued release ${MX_Q:-?} must (it ran after $MX_NEW)";;
         any) [ "$sid" = "$MX_OLD" ] || [ "$sid" = "$MX_NEW" ] || mx_bad 1 "serving: $sid serves, neither old $MX_OLD nor new $MX_NEW";;
       esac
       if [ "$KIND" != static ]; then
@@ -345,7 +346,18 @@ mx_inv() {
   case $MX_OP in
     deploy*|rollback|recover)
       local kind=deploy; [ "$MX_OP" = rollback ] && kind=rollback
-      if [ -z "$MX_NEW" ]; then
+      if [ -n "${MX_Q:-}" ]; then
+        # a deploy queued behind this one (action queue-*): this one's line (failed or rolled
+        # back), then the queued one's, ok; exactly these two, in this order
+        h=$(grep '^hist=' "$W/facts" | tr '\n' ' ')
+        case $h in
+          "hist=$MX_NEW deploy failed hist=$MX_Q deploy ok "|"hist=$MX_NEW deploy rolledback hist=$MX_Q deploy ok ") ;;
+          *) mx_bad 4 "history: $MX_NEW's failed or rolled-back line, then the queued $MX_Q's ok line must be the new ones: $h";;
+        esac
+        h=$(dx /opt/tando/bin/tando-agent deploy-status "$A" "$MX_Q" < /dev/null 2> /dev/null | sed -n 's/^result=//p' | head -1)
+        case $h in verified|ok) ;; *) mx_bad 4 "history: deploy-status says result=$h for the queued $MX_Q";; esac
+        case $(fv ds_result) in running|"") mx_bad 4 "history: deploy-status says phase=$(fv ds_phase) result=$(fv ds_result) for $MX_NEW";; esac
+      elif [ -z "$MX_NEW" ]; then
         [ "$nh" = 0 ] || mx_bad 4 "history: $nh lines, but the operation never got a release: $(grep '^hist=' "$W/facts" | tr '\n' ' ')"
       elif [ "$MX_OP" = rollback ] && [ "$nh" = 0 ] && [ "$want" = "$MX_OLD" ] && [ "$(fv p_id)" != "$MX_NEW" ]; then
         :   # (a rollback cut before it wrote anything, its progress file included: it never began)
@@ -438,9 +450,12 @@ mx_inv() {
 # mx_inv_gone: after a destroy (invariant 14), nothing of the app is left: its directory, unit
 # files and loaded units (timers, workers, slice), Caddy site, journal settings, user and groups,
 # firewall rules of its uid, database and role; its final backup is there, complete (kind data:
-# the one with data to back up; no --purge)
+# the one with data to back up; with --purge (destroy-purge) there is none, and the app's backup
+# directory is gone too; kind data: psql must be there, so the database and role are really checked)
 mx_inv_gone() {
-  local left
+  local left want=0
+  { [ "$KIND" = data ] && [ "$MX_OP" != destroy-purge ]; } && want=1
+  [ "$MX_OP" != destroy-purge ] || [ "$KIND" = data ] || { mx_bad 14 "gone: destroy-purge is a cell of the data kind"; return 1; }
   left=$(dxs "A=$A; U=${MX_UID:-none}
     ls -d /opt/tando/apps/\$A /opt/tando/apps/.gone-\$A.* /etc/caddy/tando/\$A.caddy /etc/tmpfiles.d/tando-journal-\$A.conf \
       /etc/systemd/system/systemd-journald@tando-\$A.service.d /etc/systemd/system/tando-\$A.* /etc/systemd/system/tando-\$A-* \
@@ -451,11 +466,15 @@ mx_inv_gone() {
     getent group tando-m-\$A > /dev/null && echo 'group tando-m-'\$A
     nft list table inet tando 2> /dev/null | grep -q \"skuid \$U \" && echo \"firewall uid \$U\"
     if command -v psql > /dev/null; then
-      sudo -u postgres psql -X -At -c \"select 'role ' || rolname from pg_roles where rolname = 'tando_\$A' union all select 'database ' || datname from pg_database where datname = 'tando_\$A'\" 2> /dev/null
+      q=\$(sudo -u postgres psql -X -At -c \"select 'role ' || rolname from pg_roles where rolname = 'tando_\$A' union all select 'database ' || datname from pg_database where datname = 'tando_\$A'\" 2>&1) ||
+        echo \"psql failed, the database and role cannot be checked: \$q\" | tr '\\n' ' '
+      [ -z \"\$q\" ] || echo \"\$q\"
+    elif [ \"$KIND\" = data ]; then echo 'psql missing: the database and role cannot be checked'
     fi
+    [ \"$MX_OP\" = destroy-purge ] && ls -d /var/backups/tando/\$A 2> /dev/null | sed 's/^/purged-backups /'
     ls -d /var/backups/tando/\$A/.*.tmp 2> /dev/null | sed 's/^/backup-tmp /'
     n=0; for b in /var/backups/tando/\$A/*-final; do [ -f \"\$b/meta\" ] && n=\$((n + 1)); done
-    [ \$n = $([ "$KIND" = data ] && echo 1 || echo 0) ] || echo \"final-backups \$n\"
+    [ \$n = $want ] || echo \"final-backups \$n\"
     true" 2>> "$W/case.log")
   [ -z "$left" ] || mx_bad 14 "gone: $(printf '%s' "$left" | tr '\n' ';' | sed 's/;$//; s/;/, /g')"
   [ -z "$MX_BROKEN" ]
