@@ -6,6 +6,14 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: a version handshake between the client and the server. The agent's `info` says which
+  protocol it speaks (`proto=2`; 0.1.1 printed none). A deploy from this client to a server still
+  on 0.1.1 stops before it changes anything: "the server's tando is older than this client: run
+  tando host setup <host>". A newer server gets one line and the deploy carries on.
+- Fixed: `tando doctor` warned "unit not running" for an app stopped with `tando stop`.
+- Tests: `test/e2e-upgrade.sh`, the upgrade from 0.1.1 to this tree on a server with live apps
+  (`host setup` keeps every app serving and running; then every command on the apps 0.1.1
+  deployed; a 0.1.1 deploy cut off across the upgrade is recovered by the new agent).
 - Fixed: a deploy whose server side was killed (or whose server restarted) after it took the
   upload lease and before the release got its id left the lease behind: the next deploy waited
   30 s for it or needed `tando unlock`. The client now gives the lease back when begin or activate

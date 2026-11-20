@@ -997,6 +997,22 @@ ssh_explain() {
 }
 agent() { agent_raw "$@" || bail 1; }
 
+# The protocol between this client and the server's agent (the agent's info prints proto=; one
+# from 0.1.1 prints none, which counts as 1). PROTO_NEED: the oldest agent this client works
+# with; PROTO: the newest it knows. Raise PROTO_NEED when the client starts to need something an
+# older agent lacks (a verb, an argument, a state file), and PROTO in the agent with it.
+PROTO=2 PROTO_NEED=2
+# proto_check infofile: refuse an agent older than this client needs, before anything changes on
+# the server; a newer one gets one line and the client carries on (agents keep the old verbs)
+proto_check() {
+  local p; p=$(sed -n 's/^proto=//p' "$1" 2> /dev/null | head -1)
+  case $p in ""|*[!0-9]*) p=1;; esac
+  [ "$p" -ge "$PROTO_NEED" ] || die "the server's tando is older than this client: run tando host setup $HOST"
+  [ "$p" -le "$PROTO" ] ||
+    note "tando: the server's tando is newer than this client (protocol $p, this client $PROTO): update this client"
+  return 0
+}
+
 # kv_read file keys...: sets K_<key> for each whitelisted key found in key=value output
 kv_read() {
   local f=$1 k v w l
