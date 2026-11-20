@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"tando/srv/internal/bashread"
+	"tando/srv/internal/buildinfo"
 	"tando/srv/internal/out"
 	"tando/srv/internal/run"
 )
@@ -131,6 +132,9 @@ func (g *Gate) info() error {
 		return err
 	}
 	w := out.New(g.Stdout)
+	// (proto first, as the agent prints it: a deploy key's client checks it like an admin's;
+	// without it a client from after 0.1.1 took this server for 0.1.1 and refused every deploy)
+	w.KV("proto", buildinfo.Proto)
 	w.KV("arch", strings.TrimSpace(string(o)))
 	libc := "glibc"
 	if m, _ := filepath.Glob(g.P.Musl); len(m) > 0 {

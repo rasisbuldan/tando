@@ -12,6 +12,7 @@ import (
 
 	"tando/srv/internal/atomicfile"
 	"tando/srv/internal/bashread"
+	"tando/srv/internal/buildinfo"
 	"tando/srv/internal/cksum"
 	"tando/srv/internal/run"
 )
@@ -19,10 +20,6 @@ import (
 // SecurePath is the PATH the agent's commands had under sudo (Ubuntu's secure_path): node is in
 // /usr/local/bin.
 const SecurePath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
-
-// agentProto is the client/agent protocol number tando-agent's info prints (proto=): the same
-// here, since the agent answers info through this program when it is installed.
-const agentProto = "2"
 
 // toolTimeout bounds `python3 -c ...`, `node --version` and `caddy version`.
 const toolTimeout = 20 * time.Second
@@ -43,7 +40,7 @@ func (c *Collector) Info(ctx context.Context, w io.Writer) error {
 	}
 	s := newSink()
 	s.kv("version", c.version())
-	s.kv("proto", agentProto)
+	s.kv("proto", buildinfo.Proto) // (the agent answers info through this program when installed)
 	s.kv("arch", machine())
 	s.kv("libc", libc)
 	tools := c.loadTools()

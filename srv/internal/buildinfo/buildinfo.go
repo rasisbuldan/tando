@@ -7,3 +7,9 @@ package buildinfo
 
 // Version is X.Y.Z, the same string `tando version` and /opt/tando/VERSION hold.
 var Version = "unknown"
+
+// Proto is the client/agent protocol number the server's info answer carries (proto=): tando-agent
+// prints it, and so do tando-status (which answers info for the agent) and tando-gate (which
+// answers info for a deploy key). The client refuses a server below the number it needs
+// (lib/common.sh PROTO_NEED); raise it together with server/tando-agent's echo "proto=N".
+const Proto = "2"

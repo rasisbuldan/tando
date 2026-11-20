@@ -6,6 +6,9 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: a deploy through a deploy key (CI) was refused with "the server's tando is older than this
+  client": the deploy gate answered `info` without the protocol number. It prints it now, from the
+  same constant as tando-agent and tando-status (srv/internal/buildinfo.Proto).
 - Less disk: a new release hard-links every file whose bytes are the same as in the live release
   (`rsync -c --link-dest`) instead of copying the whole upload. A linked file stays root's and
   read-only to the app (only files that already have the release's owner and mode 640/750 are

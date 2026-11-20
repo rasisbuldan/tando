@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"tando/srv/internal/buildinfo"
 	"tando/srv/internal/run"
 )
 
@@ -293,7 +294,7 @@ func TestReadVerbsFilter(t *testing.T) {
 	g.Stdout.Seek(0, 0)
 	b := make([]byte, 100)
 	n, _ := g.Stdout.Read(b)
-	if string(b[:n]) != "arch=aarch64\nlibc=glibc\n" {
+	if string(b[:n]) != "proto="+buildinfo.Proto+"\narch=aarch64\nlibc=glibc\n" {
 		t.Errorf("info %q", b[:n])
 	}
 	// the agent fails: its status is ours, at most 2000 bytes of its stderr pass
