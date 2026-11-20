@@ -252,6 +252,32 @@ func TestEncryptOff(t *testing.T) {
 	}
 }
 
+// encrypt=off: a backup whose manifest is gone from the bucket is refused (its SHA-256 there is
+// the only check a plaintext object has); a tampered object with it would otherwise be restored
+func TestEncryptOffNoManifestRefused(t *testing.T) {
+	h := newHost(t)
+	m, err := h.set("encrypt=off")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := idAt(time.Now(), "manual")
+	h.backup("shop", id, map[string]string{"data.tar.gz": "CLEAR"})
+	if err := h.push("shop", id); err != nil {
+		t.Fatal(err)
+	}
+	h.f.mu.Lock()
+	delete(h.f.objs, "tando/"+m["host_id"]+"/shop/"+id+".manifest")
+	h.f.mu.Unlock()
+	os.RemoveAll(filepath.Join(h.o.Backups, "shop", id))
+	_, err = h.do(func(w *out.Writer) error { return h.o.Fetch(context.Background(), w, "shop", id, "") })
+	if err == nil || !strings.Contains(err.Error(), "no manifest") {
+		t.Fatalf("no manifest, encrypt=off: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(h.o.Backups, "shop", id)); err == nil {
+		t.Fatal("a refused fetch left a backup")
+	}
+}
+
 // Wrong credentials, wrong bucket, a skewed clock: set says which, saves nothing, never shows the secret.
 func TestSetErrors(t *testing.T) {
 	for _, tc := range []struct {

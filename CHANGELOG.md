@@ -6,6 +6,26 @@ first, grouped by area.
 
 ## Unreleased
 
+- Security (from an outside review): `domain =` in tando.conf gets the checks of `tando domain add`
+  on the server (not under the server's `apps_domain`, not another app's domain or its www twin),
+  and the client takes lowercase host names only (`tando.conf:N: not a domain name: ...`) before
+  anything is looked up or sent.
+- Security: with `tls=internal` and `domain_tls=auto` (or the other way round) an app's own domains
+  no longer get Caddy's local CA with its link: the site is a snippet imported by two site blocks,
+  each with its own TLS.
+- Security: pg_dump and pg_restore (backups, restores) run in a scope of the app's slice: the app's
+  memory limits, 512 MB at most, and oom_score_adj 500 like the app's units, instead of unbounded
+  beside the ssh session (about 8 ms more per dump or restore). The SQLite snapshot names its files
+  relative to the data directory instead of quoting the path into a sqlite3 command.
+- Security: apps cannot reach the cloud metadata address (169.254.169.254, fd00:ec2::254; refused
+  per app uid in table `inet tando`). An app that needs the instance's credentials cannot get them
+  this way any more.
+- Security: metrics samples are root's (/var/lib/tando/metrics 700, files 600; the directory is
+  closed again on the next sample): an app could read every other app's memory, CPU and restarts.
+  `tando top` reads them through sudo.
+- Security: offsite with `encrypt=off`: a backup whose manifest is missing from the bucket is
+  refused on fetch (the manifest's SHA-256 is the only check a plaintext object has).
+
 - Added: `tando db studio [app]`: a small web page in your browser for the app's PostgreSQL
   database: the tables (rows, sort, structure, a value in a side panel) and a SQL editor
   (Cmd/Ctrl+Enter, cancel, a result tab per statement, the error's position, CSV, an encrypted

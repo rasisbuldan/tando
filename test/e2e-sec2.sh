@@ -68,4 +68,37 @@ check "N11 probe header root 600, site files root:caddy 640" \
 # L, J: the upload lease and the job units of similar app names (test/sec2/lease-jobs.sh)
 # lint: allow RL03 ROOT is this checkout
 . "$ROOT/test/sec2/lease-jobs.sh"
+
+# H: an outside review's findings. Domains of tando.conf get the checks of tando domain add (not
+# another app's link, nor its domain's www twin); apps reach neither the cloud metadata address nor
+# other apps' metrics; a site whose link and domains differ in TLS gets each its own.
+srv "sudo $AG domain-add bravo shop.test off" > "$E/h3.out" 2>&1
+HR=TANDO_TEST_RESOLVE=bravo.localhost=127.0.0.1,www.shop.test=127.0.0.1,shop.test=127.0.0.1
+cp "$W/w/alpha/tando.conf" "$E/alpha.conf.keep"
+conf_set "$W/w/alpha/tando.conf" domain bravo.localhost
+(cd "$W/w/alpha" && env "$HR" "$R" deploy) > "$E/h3a.out" 2>&1; rc=$?
+check "H3a alpha's tando.conf cannot take bravo's link, domain = bravo.localhost (rc=$rc)" \
+  eval '[ $rc != 0 ] && grep -q "under the server.s apps_domain" "$E/h3a.out" &&
+        ! srv "sudo grep -q bravo.localhost /etc/caddy/tando/alpha.caddy"'
+conf_set "$W/w/alpha/tando.conf" domain www.shop.test
+(cd "$W/w/alpha" && env "$HR" "$R" deploy) > "$E/h3b.out" 2>&1; rc=$?
+cp "$E/alpha.conf.keep" "$W/w/alpha/tando.conf"
+check "H3b nor www.shop.test, whose www twin is bravo's shop.test (rc=$rc)" \
+  eval '[ $rc != 0 ] && grep -q "shop.test belongs to bravo" "$E/h3b.out" && get alpha | grep -q "alpha v"'
+o=$(XT=10 x 'timeout 5 bash -c "exec 3<>/dev/tcp/169.254.169.254/80" 2>&1; echo rc=$?')
+check "H5a alpha cannot reach the cloud metadata address, refused at once ($(echo $o | cut -c1-120))" \
+  eval 'echo "$o" | grep -q "refused" && echo "$o" | grep -qx "rc=1"'
+srv 'sudo /opt/tando/bin/tando-metrics sample' > /dev/null 2>&1
+o=$(x 'ls /var/lib/tando/metrics 2>&1; head -c 60 /var/lib/tando/metrics/bravo.tsv 2>&1; echo end')
+check "H5b alpha can neither list nor read the metrics of bravo ($(echo $o | cut -c1-120))" \
+  eval 'echo "$o" | grep -q "Permission denied" && ! echo "$o" | grep -qE "^(bravo|alpha|host)\.tsv|^[0-9]{10}" &&
+        srv "sudo test -s /var/lib/tando/metrics/bravo.tsv"'
+# (last: the host's TLS changes for every app) the link on Caddy's local CA, the domain public
+srv "sudo $AG setup tls=internal domain_tls=auto public_port=$HP" > "$E/h3c.out" 2>&1
+site=$(srv 'sudo cat /etc/caddy/tando/bravo.caddy')
+blk() { echo "$site" | awk -v h="$1 {" '$0 == h { on = 1; next } on && $0 == "}" { exit } on'; }
+check "H3c tls=internal, domain_tls=auto: bravo.localhost on tls internal, shop.test in a block without it" \
+  eval 'blk bravo.localhost | grep -q "tls internal" && blk shop.test | grep -q "import tando-site-bravo" &&
+        ! blk shop.test | grep -q "tls internal"'
+srv "sudo $AG setup tls=off public_port=$HP" > /dev/null 2>&1
 t_done

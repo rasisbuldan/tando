@@ -318,6 +318,8 @@ above (8 MiB parts up to 80 GB, 16 MiB up to 160 GB; one part in memory), each p
 and a signed SHA-256 payload hash, the ETags checked, the final size checked with HEAD. Downloads are
 streamed, resumed with a Range and If-Match after a broken connection, and the SHA-256 of object and
 plaintext compared with the manifest before the backup directory appears (whole or not at all).
+With `encrypt=off` a backup whose manifest is missing from the bucket is refused: the manifest's
+SHA-256 is the only check a plaintext object has (an encrypted one authenticates itself).
 
 ## Threat model
 

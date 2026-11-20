@@ -111,7 +111,9 @@ and the Caddy file above.
 
 TLS modes (`tls=`): `auto` is Let's Encrypt through Caddy. `internal` is Caddy's own CA (for a server the internet
 cannot reach; browsers do not trust it). `off` is plain http. `domain_tls=` sets the same for `tando domain add`
-names; it defaults to `auto` (to `internal` when `tls=internal`).
+names; it defaults to `auto` (to `internal` when `tls=internal`). When the two differ (`tls=internal`
+with `domain_tls=auto`, or the other way round), each gets its own: the app's link and its domains are
+then two site blocks sharing one snippet, so a public domain never gets Caddy's own CA.
 
 ## Check it worked
 

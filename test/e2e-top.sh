@@ -259,13 +259,13 @@ check "6c SIGTERM exits (143) and restores cursor and screen" sh -c "grep -q 'fi
 # ---- 7. metrics sampler ------------------------------------------------------------------------
 log "metrics"
 check "7a the metrics sampler runs from an enabled timer" metrics_timer
-check "7b read returns per-minute points for hello" sh -c "'$SSH' '/opt/tando/bin/tando-metrics read hello 5 60' | grep -q '^m	'"
-check "7c read refuses bad arguments" sh -c "! '$SSH' '/opt/tando/bin/tando-metrics read ../x 5 60' 2> /dev/null"
+check "7b read returns per-minute points for hello" sh -c "'$SSH' 'sudo -n /opt/tando/bin/tando-metrics read hello 5 60' | grep -q '^m	'"
+check "7c read refuses bad arguments" sh -c "! '$SSH' 'sudo -n /opt/tando/bin/tando-metrics read ../x 5 60' 2> /dev/null"
 rot=$("$SSH" 'set -e; d=$(mktemp -d); now=$(date +%s)
   printf "hello 0 %s 3\nsite 0 %s 5100\n.host 0 %s 1\n" $((now - 302401)) $now $now > $d/.state
   printf "1\t1\t1\t0\tr\n" | tee $d/hello.tsv > $d/site.tsv
   sudo -n env TANDO_METRICS_DIR=$d /opt/tando/bin/tando-metrics sample
-  echo "$(test -f $d/hello.tsv.1 && echo rotated) $(wc -l < $d/hello.tsv) $(test -f $d/site.tsv.1 && echo rotated) $(wc -l < $d/site.tsv)"
+  echo "$(test -f $d/hello.tsv.1 && echo rotated) $(sudo -n cat $d/hello.tsv | wc -l) $(test -f $d/site.tsv.1 && echo rotated) $(sudo -n cat $d/site.tsv | wc -l)"
   sudo rm -rf $d')
 check "7d files rotate after 3.5 days or 5100 lines (got: $rot)" test "$rot" = "rotated 1 rotated 1"
 cost=$("$SSH" 'TIMEFORMAT="%3U %3S"; { time sudo -n /opt/tando/bin/tando-metrics sample; } 2>&1; { time sudo -n true; } 2>&1')
@@ -274,8 +274,9 @@ check "7e one sample costs ${ms} ms CPU (under 20 ms, sudo excluded)" test "$ms"
 check "7f nothing keeps running after a sample" sh -c "! '$SSH' 'pgrep -f \"tando-metrics sample\"' > /dev/null"
 v=$("$SSH" '/opt/tando/bin/tando-metrics version' 2> /dev/null)
 check "7g tando-metrics version is the client's ($v)" t_eq "$v" "$(cat "$ROOT/VERSION")"
-modes=$("$SSH" 'stat -c "%a %U" /var/lib/tando/metrics /var/lib/tando/metrics/.state /var/lib/tando/metrics/hello.tsv' 2> /dev/null | sort -u | tr '\n' ' ')
-check "7h the metrics directory is 755 and its files 644, root's ($modes)" t_eq "$modes" "644 root 755 root "
+# (root's alone: an app must not read another app's samples; tando top reads them through sudo)
+modes=$("$SSH" 'sudo -n stat -c "%a %U" /var/lib/tando/metrics /var/lib/tando/metrics/.state /var/lib/tando/metrics/hello.tsv' 2> /dev/null | sort -u | tr '\n' ' ')
+check "7h the metrics directory is 700 and its files 600, root's ($modes)" t_eq "$modes" "600 root 700 root "
 
 # ---- 8. costs ---------------------------------------------------------------------------------
 log "costs"

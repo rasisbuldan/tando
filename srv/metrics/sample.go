@@ -25,6 +25,9 @@ func (m Metrics) Sample(ctx context.Context) error {
 	if err := os.MkdirAll(m.Dir, dirMode); err != nil {
 		return fmt.Errorf("cannot create %s: %w", m.Dir, err)
 	}
+	if err := os.Chmod(m.Dir, dirMode); err != nil {
+		return fmt.Errorf("cannot restrict %s: %w", m.Dir, err)
+	}
 	now := m.Env.Now().Unix()
 	statePath := filepath.Join(m.Dir, ".state")
 	prev, err := loadState(statePath)

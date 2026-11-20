@@ -172,8 +172,7 @@ status`; only then `tando host care on --updates`, and `--reboot` in a window yo
   requests/s at 50 connections, 4.1k at 5,000, 0 errors. Deploy, rollback and restart under
   about 2,500 requests/s: 0 failed. 10,000 open connections: 0 errors. With `max_requests` and
   `hold`, an overloaded app keeps answering at its capacity instead of timing out.
-- **Open after this round.** Metrics samples are world-readable. The pg_dump/restore helpers
-  run as the app's uid outside the sandbox. No real disk quota. No requests-per-second limit per
+- **Open after this round.** No real disk quota. No requests-per-second limit per
   app. A fast 503 needs `hold`. No alert when the per-client limit trips all the time. Quiet
   hours for alerts are not built. tando-watch's config and tando-gate's key list were not
   audited for read-before-lock.
