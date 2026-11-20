@@ -1345,12 +1345,10 @@ busy_info() {
   echo "busy_by=$(lock_holder)"
 }
 cmd_busy() { need_root; app "$1"; busy_info; }
-# lock_busy file: a process holds a flock on it. Read from /proc/locks (by inode: see lock.Held in
-# srv/internal/lock): the probe takes no lock, so it never delays a verb or makes recover skip
-lock_busy() {
-  local i; i=$(stat -c %i "$1" 2> /dev/null) || return 1
-  grepq -E "^[0-9]+: FLOCK +[A-Z]+ +[A-Z]+ +[0-9]+ +[0-9a-f]+:[0-9a-f]+:$i " /proc/locks
-}
+# lock_busy file: a process holds it exclusively. The probe takes a shared lock for an instant
+# (lock.Held in srv/internal/lock): probes never see each other as busy, and a verb's own try in
+# that instant only waits for it to drop. (/proc/locks leaves out locks taken through flock(1).)
+lock_busy() { [[ -f $1 && ! -L $1 ]] && ! flock -n -s "$1" true 2> /dev/null; }
 
 # ---- upload lease: one upload into incoming/ at a time ----------------------------------
 
