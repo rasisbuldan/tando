@@ -62,7 +62,7 @@ _tando() {
   case $cmd in
     init) subs="" flags="$flags -H --yes" args="";;
     up) subs="" flags="$flags -H --yes --force --wait" args="";;
-    deploy) subs="" flags="$flags -a -H --force --yes --wait" args="";;
+    deploy) subs="" flags="$flags -a -H --force --yes --wait --dry-run" args="";;
     rollback) subs="" flags="$flags -H -a" args="apps";;
     releases) subs="" flags="$flags -H --json -a" args="apps";;
     history) subs="" flags="$flags -n -H --json -a" args="apps";;

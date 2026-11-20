@@ -327,4 +327,93 @@ for a in "deploy --forse" "-n 5 history" "domain add" "host add" "host setup" "b
 done
 check "E13 wrong inputs under /bin/bash: no unbound variable, syntax error or bash line error" \
   eval '! grep -E "unbound variable|syntax error|command not found|line [0-9]+:" "$E/shellerr"'
+
+# ---- B. build-time output (lib/build.sh, lib/deploy.sh), against stubs: no server is reached ----
+# B1. a fresh clone (dependencies listed, no node_modules): deploy stops before anything else with
+#     the install command of the project's lockfile; nothing reaches the server
+mkdir -p "$E/w/fresh"
+printf '{ "name": "fresh", "dependencies": { "left-pad": "1.3.0" } }\n' > "$E/w/fresh/package.json"
+printf 'app = fresh\nhost = vps\nrecipe = node\nstart = node server.js\n' > "$E/w/fresh/tando.conf"
+rm -f "$E/calls"
+fresh() { (cd "$E/w/fresh" && rm -f package-lock.json pnpm-lock.yaml yarn.lock bun.lockb && { [ -z "$1" ] || : > "$1"; } &&
+  shift && "$R" deploy "$@" < /dev/null 2>&1); }
+out=$(fresh package-lock.json); rc=$?
+check "B1a fresh clone with package-lock.json: deploy stops before the build: run npm ci first (rc=$rc)" \
+  eval 'test $rc = 1 && printf "%s" "$out" | grep -q "node_modules is missing (a fresh clone?): run npm ci first, then tando deploy"'
+out=$(fresh pnpm-lock.yaml); rc=$?
+check "B1b ... with pnpm-lock.yaml: run pnpm install --frozen-lockfile first (rc=$rc)" \
+  eval 'test $rc = 1 && printf "%s" "$out" | grep -q "run pnpm install --frozen-lockfile first"'
+out=$(fresh bun.lockb); rc=$?
+check "B1c ... with bun.lockb: run bun install --frozen-lockfile first (rc=$rc)" \
+  eval 'test $rc = 1 && printf "%s" "$out" | grep -q "run bun install --frozen-lockfile first"'
+out=$(fresh yarn.lock --dry-run); rc=$?
+check "B1d ... deploy --dry-run as well (yarn.lock: yarn install --frozen-lockfile)" \
+  eval 'test $rc = 1 && printf "%s" "$out" | grep -q "run yarn install --frozen-lockfile first, then tando deploy --dry-run"'
+check "B1e none of the fresh-clone cases reached a server ($(calls))" test "$(calls)" = 0
+# B2. init --yes shows the lines it added to next.config
+mkdir -p "$E/w/cna"
+printf '{ "dependencies": { "next": "16.4.6" } }\n' > "$E/w/cna/package.json"
+printf 'import type { NextConfig } from "next";\n\nconst nextConfig: NextConfig = {\n  /* config options here */\n};\n\nexport default nextConfig;\n' \
+  > "$E/w/cna/next.config.ts"
+out=$(cd "$E/w/cna" && "$R" init --yes < /dev/null 2>&1); rc=$?
+check "B2 init --yes prints the lines it added to next.config.ts, with their numbers (rc=$rc)" \
+  eval 'test $rc = 0 && printf "%s\n" "$out" | grep -qx "added  output: \"standalone\"  to next.config.ts:" &&
+        printf "%s\n" "$out" | grep -qx "     3    const nextConfig: NextConfig = {" &&
+        printf "%s\n" "$out" | grep -qx "     4  +   output: \"standalone\"," &&
+        sed -n 4p "$E/w/cna/next.config.ts" | grep -qx "  output: \"standalone\","'
+# B3. deploy --dry-run against a stub agent that answers info and configure: it builds and stages,
+#     reports, and asks the server nothing else (no begin, activate, configure, rsync, runtime)
+mkdir -p "$E/drybin"
+cat > "$E/drybin/ssh" <<'STUB'
+#!/bin/bash
+# the agent's answers; every call (with check=1 when its settings say so) goes into $E/dcalls
+in=""; case "$*" in *" configure "*|*" begin "*|*" activate "*|*" end "*) in=$(cat);; esac
+c=${*: -1}; c=${c##*tando-agent }; case $in in *check=1*) c="$c check";; esac
+echo "$c" >> "$DCALLS"
+case "$*" in
+  *" info") printf 'version=0.0.0\narch=aarch64\nlibc=glibc\n';;
+  *" configure "*) case $in in *check=1*) printf 'exists=%s\ncurrent=\nneeds=%s\nnode=24.1.0\ndomains=\n' "${STUB_EXISTS:-1}" "${STUB_NEEDS:-}";;
+                   *) printf 'port=3100\ncreated=0\nlink=http://hello.localhost\n';; esac;;
+  *" begin "*) printf 'token=%s\n' "$STUB_TOKEN";;
+  *" end "*) ;;
+  *) echo "ssh: connect to host 127.0.0.1 port 9: Connection refused" >&2; exit 255;;
+esac
+STUB
+chmod +x "$E/drybin/ssh"
+# staging copies with the real rsync (the stub in $E/bin stands for an unreachable server)
+ln -sf "$(PATH=${PATH#"$E/bin:"} command -v rsync)" "$E/drybin/rsync"
+STUB_TOKEN=$(printf "%s-%s" abcd 0123)   # (an upload token is hex and dashes)
+export DCALLS=$E/dcalls STUB_TOKEN
+dry() { : > "$DCALLS"; rm -f "$E/calls"; rm -f "$E/w/hello/.tando/target"; (cd "$E/w/hello" && PATH="$E/drybin:$PATH" "$R" deploy "$@" < /dev/null 2>&1); }
+out=$(dry --dry-run); rc=$?
+printf '%s\n' "$out" >&2
+check "B3a deploy --dry-run: build and stage, file count, size, largest directories, nothing uploaded (rc=$rc)" \
+  eval 'test $rc = 0 && printf "%s" "$out" | grep -q "dry run: deploy hello" && printf "%s" "$out" | grep -q "2/7  stage" &&
+        printf "%s" "$out" | grep -qE "[0-9]+ files?, [0-9.]+ [KMG]?B in .tando/stage" &&
+        printf "%s" "$out" | grep -q "no platform packages to swap for aarch64" &&
+        printf "%s" "$out" | grep -q "dry run: nothing was uploaded"'
+check "B3b ... it only asked the server for its platform and the app (calls: $(tr '\n' ',' < "$DCALLS"); rsync/scp: $(calls))" \
+  eval 'test "$(calls)" = 0 && grep -qx "info" "$DCALLS" && grep -qx "configure hello check" "$DCALLS" && test "$(grep -c . "$DCALLS")" = 2'
+check "B3c ... and left the last deploy target of this directory alone" test ! -f "$E/w/hello/.tando/target"
+out=$(STUB_EXISTS=0 STUB_NEEDS=node dry --dry-run); rc=$?
+check "B3d an app that does not exist yet: staged all the same, nothing created or installed (rc=$rc; $(tr '\n' ',' < "$DCALLS"))" \
+  eval 'test $rc = 0 && printf "%s" "$out" | grep -q "hello is not on vps yet (tando up creates it)" &&
+        printf "%s" "$out" | grep -q "the deploy would install node on vps first" &&
+        printf "%s" "$out" | grep -q "dry run: nothing was uploaded" && test "$(grep -c . "$DCALLS")" = 2'
+# B4. a real deploy outside a terminal: a start line for each step before its result; a staged
+#     tree over 50 MB names its three largest directories (the stub's rsync fails the upload)
+mkdir -p "$E/w/hello/big/media" "$E/w/hello/small"
+dd if=/dev/zero of="$E/w/hello/big/media/video.bin" bs=1048576 count=52 2> /dev/null
+echo x > "$E/w/hello/small/x"
+out=$(dry); rc=$?
+printf '%s\n' "$out" >&2
+check "B4a outside a terminal, each step says when it starts: stage, then upload" \
+  eval 'printf "%s\n" "$out" | grep -q " stage: copying the release" && printf "%s\n" "$out" | grep -q " upload: sending the changes to vps"'
+check "B4b over 50 MB: the largest directories, once (big 52 MB first)" \
+  eval 'test "$(printf "%s\n" "$out" | grep -c "over 50 MB; largest:")" = 1 &&
+        printf "%s" "$out" | grep -qE "over 50 MB; largest: big 5[0-9.]* MB, small "'
+out=$(dry --dry-run); rc=$?
+check "B4c the dry run lists the largest directories with their sizes (rc=$rc)" \
+  eval 'test $rc = 0 && printf "%s" "$out" | grep -qE " 5[0-9.]* MB  big "'
+rm -rf "${E:?}/w/hello/big" "${E:?}/w/hello/small" "${E:?}/w/hello/.tando"
 t_done

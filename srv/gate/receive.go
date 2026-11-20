@@ -14,6 +14,7 @@ import (
 
 	"tando/srv/internal/atomicfile"
 	"tando/srv/internal/bashread"
+	"tando/srv/internal/fsinfo"
 	"tando/srv/internal/lock"
 	"tando/srv/internal/run"
 	"tando/srv/internal/valid"
@@ -151,15 +152,27 @@ func watchUpload(inc string, lim Limits, done <-chan error, result error, finish
 // unit runs or systemd-run has returned (waitActive). stopRx ends them all by pattern.
 
 // rxPatterns match the app's receiver units (the old fixed name too, for one started before an
-// update). App names have no "@", so alpha's patterns never match alpha-2's units.
-func rxPatterns(app string) []string {
+// update). App names have no "@", so alpha's patterns never match alpha-2's units. The old fixed
+// name tando-rx-<app>.service is also the service of an app named rx-<app> (the agent refuses that
+// name for a new app since): while such an app exists it is left out, so no upload of alpha stops
+// app rx-alpha or waits for it.
+func (g *Gate) rxPatterns(app string) []string {
+	if g.rxOldNameTaken(app) {
+		return []string{"tando-rx-" + app + "@*.service"}
+	}
 	return []string{"tando-rx-" + app + ".service", "tando-rx-" + app + "@*.service"}
+}
+
+// rxOldNameTaken: an app rx-<app> exists, whose service has the receivers' old fixed name.
+func (g *Gate) rxOldNameTaken(app string) bool {
+	return fsinfo.RegularFollow(filepath.Join(g.appDir("rx-"+app), "app.conf"))
 }
 
 // rxUnits lists the app's receiver units systemd has loaded, name -> active state. list-units
 // does not load a unit, asking for one by name does.
 func (g *Gate) rxUnits(app string) (map[string]string, error) {
-	argv := append([]string{"systemctl", "list-units", "--all", "--plain", "--no-legend", "--full", "--"}, rxPatterns(app)...)
+	argv := append([]string{"systemctl", "list-units", "--all", "--plain", "--no-legend", "--full", "--"}, g.rxPatterns(app)...)
+	old := !g.rxOldNameTaken(app)
 	o, err := g.quiet(30*time.Second, argv...)
 	m := map[string]string{}
 	for _, l := range bashread.LinesAll(o) {
@@ -167,7 +180,7 @@ func (g *Gate) rxUnits(app string) (map[string]string, error) {
 		if len(f) < 3 {
 			continue
 		}
-		if n := f[0]; n == "tando-rx-"+app+".service" ||
+		if n := f[0]; old && n == "tando-rx-"+app+".service" ||
 			strings.HasPrefix(n, "tando-rx-"+app+"@") && strings.HasSuffix(n, ".service") {
 			m[n] = f[2]
 		}

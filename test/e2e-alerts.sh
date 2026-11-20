@@ -565,14 +565,14 @@ check "28zc a check run costs under 0.5 s of CPU on average ($((cpu / 5)) ms)" t
 # timer starts one meanwhile: runs are started as the timer does (systemctl start) or by hand
 cp -R "$TREE/examples/hello" "$W/ops"
 printf '#!/bin/sh\n# exits with the status the suite wrote (0 without one)\nexit "$(cat /opt/tando/apps/ops/shared/code 2> /dev/null || echo 0)"\n' > "$W/ops/job.sh"
-printf 'app = ops\nrecipe = node\nstart = node server.js\nhealth = /health\nmemory = 128M\njob.flaky = yearly | sh job.sh\njob.gone = yearly | sh job.sh\n' > "$W/ops/tando.conf"
+printf 'app = ops\nrecipe = node\nstart = node server.js\nhealth = /health\nmemory = 128M\njob.flaky = yearly | sh job.sh\njob.gone = yearly | sh job.sh\njob.slow = yearly | sleep 60\njob.slow.timeout = 3\n' > "$W/ops/tando.conf"
 (cd "$W/ops" && "$R" up > "$E/up-ops.out" 2>&1) || { tail -5 "$E/up-ops.out" >&2; fail "30 up ops (an app with two jobs)"; }
 jcode() { srv "echo $1 | sudo tee /opt/tando/apps/ops/shared/code > /dev/null"; }
-jtimer() { srv "sudo systemctl start tando-ops-job-$1.service" > /dev/null 2>&1; true; }   # what its timer does
+jtimer() { srv "sudo systemctl start tando-ops_job-$1.service" > /dev/null 2>&1; true; }   # what its timer does
 jdet() { since_mark | grep -q "$1"; }
 mark; wruns 2
 check "30a jobs scheduled that never ran: no alert, no state" \
-  eq "$(srv 'systemctl is-active tando-ops-job-flaky.timer tando-ops-job-gone.timer' | tr '\n' ' ')$(nev firing ops job.flaky)/$(st ops.job.flaky.st)" "active active 0/"
+  eq "$(srv 'systemctl is-active tando-ops_job-flaky.timer tando-ops_job-gone.timer' | tr '\n' ' ')$(nev firing ops job.flaky)/$(st ops.job.flaky.st)" "active active 0/"
 jcode 3; (cd "$W/ops" && "$R" jobs run flaky > "$E/jobrun1.out" 2>&1); rc=$?
 check "30b tando jobs run of a failing job exits with its status (rc=$rc)" eq "$rc" 3
 wrun
@@ -599,9 +599,22 @@ grep -v '^job.gone' "$W/ops/tando.conf" > "$W/ops/tando.conf.new" && mv "$W/ops/
 wrun
 check "30k the job is removed from tando.conf and deployed: its alert resolves (no longer scheduled) and is dropped" \
   eval '[ "$(nev resolved ops job.gone)" = 1 ] && jdet "the job is no longer scheduled" && [ "$(st ops.job.gone.st)" != firing ] &&
-        [ -z "$(st ops.job.gone.det)$(st ops.job.gone.run)" ] && srv "! test -e /etc/systemd/system/tando-ops-job-gone.service"'
+        [ -z "$(st ops.job.gone.det)$(st ops.job.gone.run)" ] && srv "! test -e /etc/systemd/system/tando-ops_job-gone.service"'
 wruns 2
 check "30l nothing more about either job" eq "$(nev firing ops job.flaky)/$(nev firing ops job.gone)/$(nev resolved ops job.gone)" 2/1/1
+# a job that hangs: job.slow.timeout = 3 (job_timeout for all jobs): systemd ends it, it is reported
+# as timed out and alerted once
+t0=$SECONDS; (cd "$W/ops" && "$R" jobs run slow > "$E/jobrun-slow.out" 2>&1); rc=$?; dt=$((SECONDS - t0))
+check "30m tando jobs run of a job past its timeout: stopped after about 3 s, timed out (rc=$rc, ${dt}s)" \
+  eval '[ $rc = 124 ] && [ $dt -lt 30 ] && grep -q "job slow: timed out after .* (its limit: 3s" "$E/jobrun-slow.out" &&
+    srv "! pgrep -u tando-ops -x sleep" && [ "$(srv "systemctl show -P Result tando-ops_job-slow.service")" = timeout ]'
+"$R" jobs -a ops > "$E/jobs-slow.out" 2>&1
+check "30n tando jobs shows the run's result: timeout" grep -q 'slow.*timeout' "$E/jobs-slow.out"
+wrun
+check "30o the timed-out run fires job.slow once, saying it was killed by its timeout" \
+  eval '[ "$(nev firing ops job.slow)/$(st ops.job.slow.st)" = 1/firing ] && jdet "job slow failed at .* UTC: killed by its timeout"'
+wruns 2
+check "30p and only once" eq "$(nev firing ops job.slow)" 1
 
 # ---- 31. PostgreSQL (srv/watch check_postgres.go): connections of an app's role, the server down ----
 printf 'database = postgres\n' >> "$W/ops/tando.conf"

@@ -30,6 +30,98 @@ first, grouped by area.
   (deploy, rollback, stop, start, restart, env set, recovery itself), and one checker asserts ten
   invariants after recovery. `e2e-matrix-quick` in the full tier, `e2e-matrix-n1` to `n4` (all of
   it, every app kind) nightly.
+- Fixed: requests could get 502 at once while an app restarted, despite the request hold, after a
+  Caddy reload had failed: Caddy keeps the servers it had started of a configuration it could not
+  load, serving it without the hold, until it restarts (seen as A7e and A9e failing in
+  test/e2e-adopt.sh). tando now refuses a Caddyfile that listens on a port another program holds
+  before reloading (site changes and `tando adopt site`), restarts Caddy after a failed reload when
+  the previous file loads, and `tando doctor` reports a failed reload since Caddy started
+  (`caddy reload`) with the fix. A reload also ends the requests Caddy holds: tando's site changes
+  now wait while an app restarts until it listens again. docs/COMMANDS.md says exactly what the
+  hold covers.
+- Tests: the stand-in app of `test/e2e-adopt.sh` keeps connections alive again; the suite adds a
+  kept-alive client, POSTs during a rollback (held, stored once), a reload during a restart, and
+  the failed-reload cases.
+- Added: native modules that are not per-platform npm packages now run on the server without a
+  container build (the measured container build is about 3 times slower under emulation; this takes
+  about half the time of it). After the platform-package swap tando: accepts and trims packages that
+  carry several platforms' binaries inside them (`prebuilds/`: better-sqlite3 13, bcrypt 6, argon2,
+  bufferutil, utf-8-validate; the guard no longer refuses them as it did); restores such a package
+  from your `node_modules` when Next's standalone output pruned the server's binary; downloads the
+  server's binary for packages that fetch it at install with `prebuild-install` or `node-pre-gyp`
+  (sqlite3, canvas, bcrypt 5), from the https host the package's own package.json declares, no
+  redirects, a validated archive, never running the package's scripts (output: `not verified by
+  the lockfile`; the glibc the binary needs is read, and checked against the server's once
+  `tando-agent info` reports it); and stops before upload, naming the module, for packages that
+  only compile on Linux (node-pty), with `tando ci github` as the way out. `@parcel/watcher`'s
+  `-glibc` packages are swapped; `@tailwindcss/oxide` gets its Linux binary when only its
+  WebAssembly fallback was installed. The deploy box and `--dry-run` list what was done per module;
+  a Prisma note is printed when Prisma is in the release. docs/CROSS-ARCH.md has the coverage table,
+  the trust statement and the timings.
+- Security: a project `.npmrc` (it can carry a registry token) is never copied into a release for
+  any recipe, and the guard refuses a release that has one.
+- Fixed: platform-specific npm packages nested at any depth (Next's own sharp under
+  `node_modules/next/node_modules`, when the project asks for another sharp version) are swapped for
+  the server's platform in their own `node_modules`; before, only `node_modules/<pkg>` and
+  `node_modules/@scope/<pkg>` were, and the guard then refused the deploy. Each swapped package is
+  one line in the deploy box. More families by the same rule (`os`/`cpu` in package.json): the
+  Next compiler, esbuild, Rollup, Lightning CSS, a Linux laptop of another CPU (docs/CROSS-ARCH.md).
+- Security: the version of a swapped package must be exact (no range, tag, URL, git or file spec)
+  and its name valid before `npm pack` runs (with `--ignore-scripts` and `--`). The fetched tarball
+  is checked against the sha512 in package-lock.json/npm-shrinkwrap.json (nested paths too),
+  yarn.lock (v1) or pnpm-lock.yaml; a mismatch stops the deploy. Without a lockfile tando can read
+  the box says `not verified` and why. `.tando/cache` keeps each tarball with its sha512 and fetches
+  again when the file changed.
+- Fixed: the Next.js pre-flight loads sharp as Next resolves it (from Next's own directory, as the
+  app's user in its sandbox), and every other copy in the release; the error names the copy that
+  failed. Before, it tried the first top-level copy only: a broken nested copy passed when the image
+  cache was warm, and a top-level copy that Next traced without its code (a devDependency of
+  another version) failed a good release.
+- Changed: when the guard refuses native code for another platform it lists every file, why tando
+  could not swap it, and what to do (nested copies, `images: { unoptimized: true }`, Prisma
+  `binaryTargets`, `tando ci github`); new docs/CROSS-ARCH.md.
+- Added: `tando deploy --dry-run` builds and stages, swaps, and prints the file count, the size,
+  the largest directories and what was swapped and verified; it uploads nothing, takes no lease,
+  installs nothing and creates no app (it reads the server's platform and whether the app exists).
+- Changed: `tando deploy` in a fresh clone (dependencies in package.json, no node_modules) stops
+  before anything else with the lockfile's install command (`run npm ci first`, pnpm, yarn, bun);
+  `tando up` and the pre-push hook's temporary checkout still install them.
+- Changed: `tando init --yes` prints the lines it added to next.config. Outside a terminal (CI, a
+  log) each deploy step prints a line when it starts. The stage line shows the release's size;
+  over 50 MB the deploy names the three largest directories.
+- Tests: fixture trees for the swap and the guard in `test/native-test.sh` (run by ui-test);
+  e2e-next deploys a project with Next's sharp nested (dry run, deploy, broken nested copy);
+  e2e and e2e-cli cover the dry run, the start lines, the size line and the fresh-clone stop.
+- Security: a deploy no longer finds "another upload" by command line. The agent looked for any
+  process whose command line had `apps/<app>/incoming` in it (`pgrep -f`) and, taking over a
+  stale upload, killed every such process as root (`pkill -KILL -f`): any app could block every
+  deploy of another app by putting that text in its own command line, and the admin's shell or
+  editor with it was killed. An upload's receiver is now the rsync process whose executable is
+  rsync, whose user owns the app's `incoming/` and whose working directory is it (read from
+  `/proc`), or the deploy key's confined unit as before. No change for clients.
+- Security: job units are named `tando-<app>_job-<name>` (was `tando-<app>-job-<name>`). With the
+  old names, a deploy or `host setup` of app `foo` deleted the job timers of app `foo-job`, and
+  app `x-job-y`'s own service had the name of job `y` of app `x`. `tando host setup` (and the next
+  deploy) renames each app's units, recognising its own by the runner line in the unit file, and
+  keeps each timer's last run. Destroy, adopt, `tando jobs`, `jobs run`, `tando logs` and the job
+  alert use the new names; job output from before the rename stays in the journal under the old
+  unit name.
+- Added: `job_timeout = <seconds>` (default 3600) and `job.<name>.timeout`: a job that runs longer
+  is stopped by systemd and reported as timed out (`tando jobs`, `tando jobs run`, the `job.<name>`
+  alert). Before, a hung job ran for ever and was never alerted. Existing jobs get the one hour
+  default with the next `host setup` or deploy: a job that needs longer needs `job_timeout`.
+  `tando jobs` shows the last run whether its timer or `tando jobs run` started it (it showed the
+  timer's only, so a run by hand stayed "never").
+- Security: names that are another app's or tando's own are refused for a new app: `d-<x>` and
+  `m-<x>` (app x's deploy user and settings group), `<x>-backup` (app x's backup unit), `rx-<x>`,
+  `adopt-<x>`, `unadopt-<x>`, and `watch`, `host`, `metrics`, `offsite`, `recover`, `firewall`,
+  `down` (tando's units). Apps that exist keep working; the agent kills or adds to the settings
+  group only a deploy user `tando-d-<app>` that tando-gate made (not app `d-<app>`'s user), and
+  keeps an app's settings root's when `tando-m-<app>` is app `m-<app>`'s user group. Destroying a
+  container app no longer removes another app's `run/<app>-<port>.env` files (`foo` took `foo-2`'s).
+  The upload receivers' old fixed unit name `tando-rx-<app>.service` is app `rx-<app>`'s service:
+  while such an app exists neither the agent nor tando-gate counts it as an upload or stops it.
+
 - Changed: `tando adopt apply` refuses to start when the hand-written Caddy site does not hold
   requests while the app restarts (no `lb_try_duration`), and `tando adopt plan` says what that
   costs and which command adds it. On the first real server 36 requests got 502 because the hold

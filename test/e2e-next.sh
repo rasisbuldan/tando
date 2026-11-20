@@ -179,5 +179,92 @@ check "N9b the same code without the break deploys (rc=$rc)" test $rc = 0 -a "$(
 COLUMNS=120 "$R" ls > "$E/ls.out" 2>&1; cat "$E/ls.out" >&2
 check "N6 ls shows the link with its path" grep -q "nextdemo.localhost:$HP/demo" "$E/ls.out"
 
+# N10. the project asks for another sharp than Next does (a devDependency here): npm nests Next's
+#      own copy under node_modules/next/node_modules (with its platform packages, depth 4). The
+#      deploy swaps it there and verifies it against package-lock.json; a dry run says so and sends
+#      nothing; the pre-flight loads the copy Next resolves, and names it when it is broken
+log "npm install --save-dev sharp@0.34.5 (Next keeps its own 0.35)"
+npm install --no-audit --no-fund --save-dev sharp@0.34.5 > "$E/npm2.out" 2>&1 || { cat "$E/npm2.out" >&2; exit 1; }
+nested=""
+for p in node_modules/next/node_modules/@img/sharp-[dlw]*-*; do
+  case $p in *libvips*) ;; *) [ -d "$p" ] && nested=$p && break;; esac
+done
+check "N10a npm nested Next's sharp ($nested)" test -n "$nested" -a -f node_modules/next/node_modules/sharp/package.json
+here=$(uname -s | tr 'A-Z' 'a-z')-$(uname -m | sed 's/x86_64/x64/; s/aarch64/arm64/')
+# a deploy box as one line: box_say wraps long lines between words
+flat() { sed -E 's/^[^ ]+ +//; s/ +[^ ]+$//' "$1" | tr '\n' ' ' | tr -s ' '; }   # (the borders: first and last word)
+up_t=$(srv "sudo stat -c %Y $A/upload 2> /dev/null; sudo ls $A/releases | wc -l; sudo cat $A/history.tsv | wc -l" | tr '\n' ' ')
+"$R" deploy --dry-run > "$E/dry.out" 2>&1; rc=$?; cat "$E/dry.out" >&2
+if [ "$here" = "linux-$cpu" ]; then
+  echo "SKIP N10b this machine is linux-$cpu like the server: nothing to swap"
+else
+  check "N10b dry run: the nested package is swapped at its depth, verified against package-lock.json (rc=$rc)" \
+    eval '[ $rc = 0 ] && flat "$E/dry.out" | grep -q "swapped node_modules/next/node_modules/@img/sharp-[a-z]*-[a-z0-9]* for @img/sharp-linux-$cpu 0.35.5, verified against package-lock.json" &&
+          grep -q "dry run: nothing was uploaded" "$E/dry.out"'
+fi
+check "N10c the dry run left nothing on the server: no lease, no release, no history line ($up_t)" \
+  test "$(srv "sudo stat -c %Y $A/upload 2> /dev/null; sudo ls $A/releases | wc -l; sudo cat $A/history.tsv | wc -l" | tr '\n' ' ')" = "$up_t"
+echo "export const VERSION = '3';" > version.js
+"$R" deploy > "$E/d-nested.out" 2>&1; rc=$?; cat "$E/d-nested.out" >&2
+check "N10d deploy with Next's nested sharp goes live (rc=$rc, version $(version)); nothing for another platform staged" \
+  eval '[ $rc = 0 ] && [ "$(version)" = 3 ] && [ -d .tando/stage/node_modules/next/node_modules/@img/sharp-linux-$cpu ] &&
+        ! find .tando/stage -name "*darwin*" -o -name "*win32*" | grep -q .'
+cp tando.conf "$E/tando.conf.keep"
+b=$(sed -n 's/^build *= *//p' tando.conf)
+grep -v '^build *=' tando.conf > tando.conf.tmp && echo "build = ${b:-npm run build} && sh break-sharp.sh" >> tando.conf.tmp && mv tando.conf.tmp tando.conf
+cat > break-sharp.sh <<'SH'
+p=.next/standalone/node_modules/next/node_modules/sharp/package.json
+node -e 'const fs = require("fs"), path = require("path"), p = process.argv[1];
+  const main = JSON.parse(fs.readFileSync(p)).main || "index.js";
+  fs.writeFileSync(path.join(path.dirname(p), main), "throw new Error(\"no sharp for this platform\")\n");' "$p"
+SH
+echo "export const VERSION = '4';" > version.js
+"$R" deploy > "$E/d-nested-bad.out" 2>&1; rc=$?; cat "$E/d-nested-bad.out" >&2
+check "N10e a broken copy that Next uses (nested) fails the pre-flight, named as Next's copy (rc=$rc, still 3)" \
+  eval '[ $rc -ne 0 ] && grep -q "5/7  preflight" "$E/d-nested-bad.out" &&
+        flat "$E/d-nested-bad.out" | grep -q "node_modules/next/node_modules/sharp (the copy Next.js uses)" && [ "$(version)" = 3 ]'
+cp "$E/tando.conf.keep" tando.conf; rm -f break-sharp.sh
+
+# N11. a package that carries every platform's binary inside itself (better-sqlite3 13: prebuilds/
+#      <platform>-<arch>.node). Next's standalone output keeps only the build machine's architecture;
+#      here the server's own file is removed from the standalone output after the build (what the
+#      tracing does on a Mac for an x86-64 server), so the deploy has to restore the package from the
+#      project's node_modules. A second deploy leaves the output as Next wrote it: the other
+#      platforms' files must not stop the guard, and are not shipped. A route loads the module on the server.
+log "npm install better-sqlite3@13.2.0"
+npm install --no-audit --no-fund better-sqlite3@13.2.0 > "$E/npm3.out" 2>&1 || { cat "$E/npm3.out" >&2; exit 1; }
+mkdir -p app/api/sqlite
+cat > app/api/sqlite/route.js <<'JS'
+import Database from "better-sqlite3";
+export const dynamic = "force-dynamic";
+export async function GET() {
+  const x = new Database(":memory:").prepare("select 1 + 1 as x").get().x;
+  return Response.json({ ok: true, x, platform: process.platform + "-" + process.arch });
+}
+JS
+sqlite() { curl -s -m 10 "$(url /demo/api/sqlite)"; }
+cat > prune-sqlite.sh <<SH
+rm -f .next/standalone/node_modules/better-sqlite3/prebuilds/linux-$cpu.node
+SH
+cp tando.conf "$E/tando.conf.keep"
+b=$(sed -n 's/^build *= *//p' tando.conf)
+grep -v '^build *=' tando.conf > tando.conf.tmp && echo "build = ${b:-npm run build} && sh prune-sqlite.sh" >> tando.conf.tmp && mv tando.conf.tmp tando.conf
+echo "export const VERSION = '5';" > version.js
+"$R" deploy > "$E/d-sqlite.out" 2>&1; rc=$?; cat "$E/d-sqlite.out" >&2
+check "N11a standalone output without the server's better-sqlite3 binary: deployed (rc=$rc, version $(version))" \
+  test $rc = 0 -a "$(version)" = 5
+check "N11b the deploy box says the package was restored from node_modules" \
+  eval 'flat "$E/d-sqlite.out" | grep -q "node_modules/better-sqlite3: restored from node_modules (better-sqlite3 13.2.0"'
+check "N11c the route loads better-sqlite3 on the server: $(sqlite)" \
+  eval '[ "$(sqlite)" = "{\"ok\":true,\"x\":2,\"platform\":\"linux-$cpu\"}" ]'
+check "N11d only linux binaries are in the release" \
+  eval 'ls .tando/stage/node_modules/better-sqlite3/prebuilds | grep -q "^linux-$cpu.node\$" && ! ls .tando/stage/node_modules/better-sqlite3/prebuilds | grep -q "darwin\|win32"'
+cp "$E/tando.conf.keep" tando.conf; rm -f prune-sqlite.sh
+echo "export const VERSION = '6';" > version.js
+"$R" deploy > "$E/d-sqlite2.out" 2>&1; rc=$?; cat "$E/d-sqlite2.out" >&2
+check "N11e as Next wrote it (binaries for several platforms in the package): deployed, accepted as already inside (rc=$rc)" \
+  eval '[ $rc = 0 ] && [ "$(version)" = 6 ] && flat "$E/d-sqlite2.out" | grep -q "node_modules/better-sqlite3: already inside the package (prebuilds/linux-$cpu.node" &&
+        [ "$(sqlite)" = "{\"ok\":true,\"x\":2,\"platform\":\"linux-$cpu\"}" ]'
+
 echo "$FAILS failed"
 [ $FAILS -eq 0 ]

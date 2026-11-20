@@ -65,7 +65,8 @@ static), start command and health path (`/api/health` or `/health` when the proj
 route), and suggests `database = postgres` when `pg`/`postgres`/psycopg is a dependency. With one
 server registered (or `-H`) it writes `host = <name>`. For Next.js it offers to add
 `output: "standalone"` to next.config.*, or to write next.config.mjs when there is none (`--yes`
-does it); declining does not fail init (tando.conf is written; deploy checks again).
+does it, and prints the lines it added with their numbers); declining does not fail init
+(tando.conf is written; deploy checks again).
 Example: `tando init && cat tando.conf`
 
 ### up
@@ -76,7 +77,7 @@ the app was last deployed from another directory. `--wait`: as for `deploy`.
 Example: `cd my-app && tando up`
 
 ### deploy
-`tando deploy [-a app] [-H host] [--force] [--yes] [--wait]`. Arguments: none.
+`tando deploy [-a app] [-H host] [--force] [--yes] [--wait] [--dry-run]`. Arguments: none.
 Build here, upload changes, start the release on a spare port, health-check, switch, check again
 through Caddy, then a soak (30 s, `soak = N`) in which a crash rolls back. Returns once live;
 `--wait` (or `TANDO_WAIT=1`) waits for the soak. `--force`: another directory deployed last;
@@ -87,6 +88,18 @@ finds another one's release soaking is queued and says what it waits for. While 
 (also from another terminal of the same user) is uploading, a deploy is refused at once.
 `release = <command>` in tando.conf runs once per deploy on the server, between pre-flight and
 switch (database migrations): see [The release command](#the-release-command).
+`--dry-run`: build and stage here, swap the platform packages, then print the file count, the
+size, the five largest directories and each swapped package with whether it was verified against
+the lockfile. Nothing is uploaded: no lease, no configure, no runtime install, no release; the
+server is only asked for its platform and whether the app exists (`configure check`). An app that
+does not exist yet is staged all the same (`tando up` creates it). The last deploy target of the
+directory is not changed.
+A fresh clone (dependencies in package.json, no node_modules) stops before anything else with the
+lockfile's install command (`npm ci`, `pnpm install --frozen-lockfile`, `yarn install
+--frozen-lockfile`, `bun install --frozen-lockfile`); `tando up` and the pre-push hook run it.
+Output: the stage line shows the files and the size; each swapped npm package is one line (yellow
+when not verified; docs/CROSS-ARCH.md); a release over 50 MB names its three largest directories.
+Outside a terminal (CI, a log file) every step prints a line when it starts.
 Note: `-a` is accepted but not in the usage line (mismatch 8).
 Example: `tando deploy`
 
@@ -166,7 +179,17 @@ Example: `tando env set STRIPE_KEY`
 0-1: the app), run (1: the job).
 The app's scheduled jobs (`job.<name> = <schedule> | <command>` in tando.conf): schedule, next run,
 last run and result. Not retried. `run` runs one now, as the app's user: its output, then
-`job <name>: ok in Ns` or `failed (<result>, exit N)`; tando exits with the job's status.
+`job <name>: ok in Ns` or `failed (<result>, exit N)`; tando exits with the job's status (124
+when it timed out).
+A run may take at most its timeout: `job_timeout = <seconds>` for all of the app's jobs (1 to
+86400; default 3600, one hour) or `job.<name>.timeout = <seconds>` for one. Past it systemd stops
+the job (SIGTERM, SIGKILL 90 s later) and records the result `timeout`: `tando jobs` shows it,
+`run` says `timed out`, and the alert fires like for any failed run. A job that hangs therefore
+ends and is alerted instead of running for ever.
+Each job runs in its own units, `tando-<app>_job-<name>.service` and `.timer` (`_` is in no app or
+job name, so the name is exactly this app's job; before this change they were `tando-<app>-job-<name>`,
+which app `foo-job` shared with app `foo`: `tando host setup` renames them, keeping each timer's
+last run).
 A run that fails is alerted, by its timer or by hand alike: check `job.<name>`, one message per
 failed run, resolved by the job's next success (so `tando jobs run <name>` after a fix clears it);
 a job removed from tando.conf takes its alert with it (docs/MONITORING.md, "Scheduled jobs").
@@ -358,8 +381,12 @@ The order is `plan`, `site --apply`, `apply`.
 `site` shows what your own Caddy site lacks next to one tando renders: `lb_try_duration` in the
 app's `reverse_proxy` (requests wait while the app restarts instead of getting 502) and the request
 log that `tando requests`, `tando errors` and the 5xx alert read. `site --apply` adds them: a copy of
-the Caddyfile is kept, the new file is validated, Caddy is reloaded (never restarted) and the app is
-checked through it; a failure puts the previous file back. A site it cannot read with certainty
+the Caddyfile is kept, the new file is validated, its ports are checked (one another program holds
+is refused before anything is reloaded), Caddy is reloaded and the app is checked through it; a
+failure puts the previous file back. Caddy is restarted only after a reload that failed, and only
+when the previous file loads: a failed reload leaves part of the rejected configuration serving
+until a restart ("What the hold covers, exactly" under Limits and load). When the previous file
+does not load either, Caddy is left running and the output says to fix the file and restart it. A site it cannot read with certainty
 (several `reverse_proxy` lines to the port, a log of its own, an imported file) is not edited: the
 lines to add by hand are printed.
 Before adoption `site` takes the unit, as `plan` does (with the same `--health`), and reports and
@@ -514,6 +541,26 @@ distribution has one major version only): try it on a copy of the server first.
    `sudo pg_dropcluster --stop 18 main`. Until then, going back is steps 3 and 4 with the versions
    swapped (the old cluster still has its data and the old passwords; restore after that as well,
    since step 4 sets new passwords).
+
+**What the hold covers, exactly.** While an app restarts (deploy, rollback, `restart`, adoption,
+`adopt undo`), Caddy holds a request up to the hold and sends it once the app listens, so it is
+answered late instead of failing. Held: every request that cannot connect, whatever its method
+(nothing reached the app), and a GET whose connection to the app broke (Caddy 2.6 to 2.10 retry a
+GET on any error; nothing else needs adding for that). Not held, and answered 502:
+- a request that is not a GET (POST, PUT, DELETE, HEAD) already sent on a kept-alive connection
+  that the stopping app then closed. It may have been processed, so neither Caddy nor tando sends it
+  again. The window is the instant the app closes an idle connection Caddy has just picked; the
+  tests (test/e2e-adopt.sh A7f) have not met it;
+- a request the old process still had when it was killed after `stop_timeout`;
+- a restart longer than the hold;
+- a request held while Caddy reloads: the reload ends it. tando's own site changes wait until the
+  app listens again; a reload you run yourself at that moment is not covered;
+- every request, held or not, that reaches what is left of a reload that failed while Caddy started
+  its servers: Caddy (2.6 to 2.10) keeps the servers it had started, with the rejected
+  configuration and nothing held, until it restarts. tando refuses a Caddyfile that listens on a
+  port another program holds (the usual cause) before reloading; after a failed reload it puts the
+  previous file back and restarts Caddy when that file loads; `tando doctor` shows a failed reload
+  since Caddy started (row `caddy reload`) and says to restart Caddy.
 
 Loopback is never limited (tando's probes, an app calling itself through Caddy); ssh is not touched.
 All apps together get half the CPU weight of the system services (Caddy, sshd, the agent), and an

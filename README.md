@@ -40,7 +40,8 @@ What that means in practice:
   small server out of memory.
 
 Where tando is not the best choice: Kamal switches traffic with a shorter pause (about 0.1 s
-against 0.4 to 1.7 s, during which tando holds requests instead of failing them), and each app
+against 0.4 to 1.7 s, during which tando holds requests instead of failing them; docs/COMMANDS.md,
+"What the hold covers, exactly", lists what a hold cannot save), and each app
 runs on one server. tando does not do clusters or load balancing across servers.
 
 ## Notable features

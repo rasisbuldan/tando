@@ -17,14 +17,14 @@ setInterval(()=>{ const c=net.connect(4101,"127.0.0.1",()=>{ c.write("GET / HTTP
 process.stdout.on("error",()=>{}); console.log("job up");'
 J
 EOS
-for i in $(seq 1 40); do rootsh 'journalctl --namespace=tando-gamma -u tando-gamma-job-tick -o cat --no-pager | grep -q "job up"' && break; sleep 1; done
-rootsh 'systemctl show -P ActiveState tando-gamma-job-tick.service' | grep -q activating || inconclusive "job did not start"
-sleep 3; echo "before destroy:"; rootsh "journalctl --namespace=tando-gamma -u tando-gamma-job-tick -n8 -o cat --no-pager"
+for i in $(seq 1 40); do rootsh 'journalctl --namespace=tando-gamma -u tando-gamma_job-tick -o cat --no-pager | grep -q "job up"' && break; sleep 1; done
+rootsh 'systemctl show -P ActiveState tando-gamma_job-tick.service' | grep -q activating || inconclusive "job did not start"
+sleep 3; echo "before destroy:"; rootsh "journalctl --namespace=tando-gamma -u tando-gamma_job-tick -n8 -o cat --no-pager"
 (cd "$G" && echo gamma | "$R" destroy --purge 2>&1) | tail -3
 sleep 4
 rootsh 'echo "user: $(getent passwd tando-gamma)"; echo "processes:"; ps -o user:12,pid,cmd -u tando-gamma 2>/dev/null | head -3;
   echo "nft rules mentioning its uid:"; nft list table inet tando | grep -c "skuid $(id -u tando-gamma 2>/dev/null || echo none)";
-  systemctl status tando-gamma-job-tick.service --no-pager 2>&1 | head -4; ls -d /opt/tando/apps/gamma 2>&1'
+  systemctl status tando-gamma_job-tick.service --no-pager 2>&1 | head -4; ls -d /opt/tando/apps/gamma 2>&1'
 sleep 3; st=$(rootsh 'for p in $(pgrep -u tando-gamma); do cat /proc/$p/root/dev/shm/a03-state 2>/dev/null && break; done')
 echo "the surviving job now: $st"
 rootsh 'pkill -KILL -u tando-gamma; sleep 1; userdel tando-gamma; groupdel tando-gamma 2>/dev/null; groupdel tando-m-gamma 2>/dev/null; true'

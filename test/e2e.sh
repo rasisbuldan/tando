@@ -211,6 +211,40 @@ files=$(sed -n 's/.* \([0-9][0-9]*\) files\{0,1\} changed.*/\1/p' "$E/d2.out")
 sent=$(sed -n 's/.*changed, \([0-9.]* [KMG]*B\) sent.*/\1/p' "$E/d2.out")
 check "2b second upload sent only the changed file (files=$files, sent=$sent, release ~300 KB)" \
   test "$files" = 1 -a -n "$(echo "$sent" | grep -E '^[0-9.]+ (B|KB)$')"
+# 23. outside a terminal (this log), each step says when it starts, before its result line
+first() { grep -n -E -- "$2" "$1" | head -1 | cut -d: -f1; }
+starts() { # file: every step's start line comes before its result line
+  local f=$1 s r a b
+  for s in "stage: copying|[0-9]/7  stage" "upload: sending|[0-9]/7  upload" "copy: the server copies|[0-9]/7  copy" \
+           "pre-flight: the new release starts|[0-9]/7  preflight" "switch: traffic moves|[0-9]/7  switch" \
+           "verify: checking the live release|[0-9]/7  verify"; do
+    r=${s#*|}; s=${s%%|*}; a=$(first "$f" "$s"); b=$(first "$f" "$r")
+    [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ] || { echo "  no start line before \"$r\" ($a, $b)" >&2; return 1; }
+  done
+}
+check "23a outside a terminal every step has a start line before its result (stage, upload, copy, pre-flight, switch, verify)" \
+  starts "$E/d2.out"
+# 24. deploy --dry-run builds and stages but sends nothing and leaves nothing on the server: no
+#     lease, no release, no history line, incoming/ and app.conf unchanged; for an app that does
+#     not exist yet nothing is created
+snap() { srv "sudo sh -c 'cd /opt/tando/apps/hello && ls releases; test -e upload && echo LEASE; wc -l < history.tsv;
+  find incoming -printf \"%P %s %T@\n\" | sort | cksum; cksum < app.conf; ls /opt/tando/apps'"; }  # lint: allow RL02 runs on the server
+# shellcheck disable=SC2034 # s0 is read by the eval'd check
+s0=$(snap); setv 99
+"$R" deploy --dry-run > "$E/dry.out" 2>&1; rc=$?; cat "$E/dry.out" >&2
+check "24a deploy --dry-run: built and staged, file count and size, nothing uploaded (rc=$rc)" \
+  eval '[ $rc = 0 ] && grep -q "2/7  stage" "$E/dry.out" && grep -qE "[0-9]+ files, [0-9.]+ [KMG]?B in .tando/stage" "$E/dry.out" &&
+        grep -q "dry run: nothing was uploaded" "$E/dry.out" && ! grep -q "3/7  upload" "$E/dry.out"'
+check "24b ... the server is as it was (lease, releases, history, incoming, app.conf), still v2" \
+  eval '[ "$(snap)" = "$s0" ] && eqv 2'
+setv 2
+cp -R "$W/hello" "$W/drynew" && conf_set "$W/drynew/tando.conf" app drynew && rm -rf "${W:?}/drynew/.tando"
+(cd "$W/drynew" && "$R" deploy --dry-run) > "$E/drynew.out" 2>&1; rc=$?; cat "$E/drynew.out" >&2
+check "24c dry run of an app that does not exist: staged, says tando up creates it; no app, user or directory on the server (rc=$rc)" \
+  eval '[ $rc = 0 ] && grep -q "drynew is not on test yet (tando up creates it)" "$E/drynew.out" &&
+        grep -q "dry run: nothing was uploaded" "$E/drynew.out" &&
+        srv "! test -e /opt/tando/apps/drynew && ! id tando-drynew" > /dev/null 2>&1'
+rm -rf "${W:?}/drynew"
 
 # 3. unhealthy release: never stops answering, marked bad, history shows it
 "$R" env set UNHEALTHY_VERSION=3 >&2
@@ -747,7 +781,7 @@ conf_set "$W/broke-2/tando.conf" app broke-2
 before=$(traces | wc -l | tr -d ' ')
 echo broke | "$R" destroy --purge > "$E/d-ok.out" 2>&1; rc=$?; cat "$E/d-ok.out" >&2
 check "19l destroy broke leaves broke-2 alone: its unit, job timer and link" \
-  eval 'srv "systemctl -q is-active tando-broke-2 && systemctl -q is-enabled tando-broke-2-job-tick.timer" &&
+  eval 'srv "systemctl -q is-active tando-broke-2 && systemctl -q is-enabled tando-broke-2_job-tick.timer" &&
         get broke-2 | grep -q "hello v"'
 (cd "$W/broke-2" && echo broke-2 | "$R" destroy --purge > /dev/null 2>&1)
 traces > "$E/left"
