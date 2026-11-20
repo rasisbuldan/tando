@@ -44,7 +44,7 @@ uses; `test/server/down.sh` with the same `TANDO_TEST_NAME` removes it).
 | `srv/<package>` | `go`, and the suite of that package's feature: watch, hostcare → the alerts suites and `e2e-host`; logs → `e2e-logs`; offsite → `e2e-offsite`; status, metrics → `e2e-status`, `e2e-top`; gate → `e2e-ci`, `e2e-sec2`. `srv/internal`, `srv/daemon`, `srv/cmd`: everything. |
 | Next.js handling (`recipe = next`, sharp, the image pre-flight) | `e2e-next` |
 | backups, restore | `e2e-data`, `e2e-offsite` |
-| anything about failure handling in a deploy | `e2e`, and the fault shards `e2e-faults-q1` to `q4` |
+| anything about failure handling in a deploy | `e2e`, the fault shards `e2e-faults-q1` to `q4`, `e2e-matrix-quick`; for the state machine itself (recover, finish, switch, rollback) also `test/e2e-matrix.sh` with the flags in docs/TESTING.md, "The fault matrix" |
 | a test suite | that suite, and `lint` |
 | docs only | `lint`, `ui-test`, `e2e-cli`, `install-test` (they check that docs, help and commands agree) |
 
