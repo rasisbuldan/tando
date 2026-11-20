@@ -393,6 +393,12 @@ check "21f during the first deploy the page is served" until_ 30 shop_503
 wait $shop_up
 shop_live() { [ "$(curl -s -m 5 http://shop.localhost:$HP/)" = "hello v1 greeting=" ]; }
 check "21f first release live: the page is gone and the app answers" until_ 30 shop_live
+# 21g. a release directory removed by hand while the app runs (fault g9): the link dangles, but the
+# app has a release by tando's records and its process answers: never the "being deployed" page
+srv "sudo sh -c 'rm -rf /opt/tando/apps/shop/releases/*'"
+rn=$(curl -s -o "$E/shop.dang" -w '%{http_code}' -m 5 http://shop.localhost:$HP/)
+check "21g releases emptied by hand, app still running: it answers 200, not the deploying page ($rn)" \
+  eval '[ "$rn" = 200 ] && ! grep -q "being deployed" "$E/shop.dang"'
 ( cd "$W/shop" && echo shop | "$R" destroy --purge >&2 )
 
 # 3f. healthy in pre-flight but failing after the switch: automatic rollback

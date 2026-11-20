@@ -186,8 +186,10 @@ Caddy modes per app: proxy (holding requests up to 15 s while the process restar
 `app-down` when the unit has failed for good; cleared by the next start, restart or deploy),
 `503 being deployed` (while the app has no release yet, from the site's setup until its first
 release switches in, and again if it ends with none; a small HTML page with `Retry-After: 10`). The
-last one is a Caddy `file` matcher on the app's `current` link, looked at on each request: the page
-goes away by itself when the link appears, with no site rewrite and no reload.
+last one is a Caddy `file` matcher, looked at on each request, on the app's `current` link and on `live`
+(an empty file `switch_link` makes before the link and removes with it, so a link left dangling by a
+release directory removed by hand does not show the page): it goes away by itself when the release
+switches in, with no site rewrite and no reload.
 
 ## Trust boundaries
 - Loopback: Caddy's admin API is on a unix socket in /run/caddy (caddy and root only), never on
