@@ -61,7 +61,7 @@ valid_app() {   # letters spelled out: [a-z] matches capitals too in some locale
   local l=abcdefghijklmnopqrstuvwxyz
   case $1 in ["$l"]*) ;; *) return 1;; esac
   case $1 in *[!"$l"0123456789-]*) return 1;; esac
-  [ ${#1} -ge 2 ] && [ ${#1} -le 26 ]
+  [ ${#1} -ge 2 ] && [ ${#1} -le 24 ]   # 24: the server makes the group tando-m-<app>, and a group name stops at 32
 }
 valid_host() { case $1 in ""|*[!A-Za-z0-9_.-]*) return 1;; esac; }
 valid_id() { # YYYYMMDD-HHMMSS with an optional -N suffix
@@ -701,7 +701,7 @@ resolve() {
   case $(host_get "$HOST" kind) in deploy) DEPLOY_KEY=1;; esac
   if [ "$1" = 1 ]; then
     [ -n "$APP" ] || no_conf
-    valid_app "$APP" || die "bad app name: $APP (a-z, 0-9, -, 2-26 chars)"
+    valid_app "$APP" || die "bad app name: $APP (a-z, 0-9, -; 2-24 characters)"
   fi
 }
 

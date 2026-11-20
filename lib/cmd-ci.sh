@@ -44,7 +44,7 @@ ci_key_resolve() {
   local key=$TANDO_DEPLOY_KEY host=${TANDO_HOST:-} port=${TANDO_PORT:-22} cp="$CFG/cm/%C" a b c t k
   [ -n "$APP" ] || APP=${TANDO_APP:-}
   [ -n "$APP" ] || die "no app: run in a directory with tando.conf, or set TANDO_APP"
-  valid_app "$APP" || die "bad app name: $APP"
+  valid_app "$APP" || die "bad app name: $APP (a-z, 0-9, -; 2-24 characters)"
   [ -n "$host" ] || die "TANDO_DEPLOY_KEY is set but TANDO_HOST is not"
   case $host in *[!A-Za-z0-9.-]*|-*) die "bad TANDO_HOST: $host";; esac
   is_num "$port" || die "bad TANDO_PORT: $port"

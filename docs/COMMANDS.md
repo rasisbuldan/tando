@@ -80,6 +80,9 @@ Example: `tando deploy`
 ### rollback
 `tando rollback [app] [id] [-H host]`. Arguments: 0-2, in either order.
 Back to the previous verified release, or to `<id>` (`tando releases` lists them).
+A stopped app (`tando stop`) is treated as a deploy to it is: when the release rolled back to passes
+its health check it goes live and the app runs; when it fails, the app is left as it was: its
+release, stopped.
 Example: `tando rollback 20261113-171103`
 
 ### releases
@@ -351,10 +354,14 @@ pull (2).
 Backups of the data directory and database. `restore` asks first and keeps a safety backup. `ls`
 and `pull` work for a destroyed app's final backup. `pull` creates the file mode 600 (it holds the
 data and a database dump) and refuses an existing file. `ls` heads its time column `TIME (GMT)`.
-A restore cut off by a kill or a reboot is ended by the server's recovery: the app runs its release
-again. When the database (or an adopted app's data directory) was being replaced at that moment,
+A restore of an app stopped with `tando stop` leaves it stopped (the data restored; `tando start`
+starts it). A restore cut off by a kill or a reboot is ended by the server's recovery: the app runs
+its release again (a stopped app stays stopped). When the database (or an adopted app's data directory) was being replaced at that moment,
 it may be partly restored: `tando status <app>` and `tando doctor` say so, with the backup to restore
 again and the safety backup that holds the data from before (`tando ls` marks the app), until a restore ends.
+`backup now` runs to its end when the ssh session drops (Ctrl-C). A backup cut off by a kill or a
+reboot leaves an unfinished temporary directory: `tando doctor` names it, and the next backup of the
+app or the server's recovery removes it.
 `tando backup offsite [status|set|test|hosts|sync|off]` · `tando backup offsite key --show|--saved|--import|--rotate`:
 copies of every backup in Cloudflare R2 or any S3-compatible store, encrypted on the server with a
 recovery key shown once (docs/BACKUP.md). `set` asks for the account id or endpoint, bucket, access

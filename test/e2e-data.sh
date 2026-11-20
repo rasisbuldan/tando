@@ -303,6 +303,65 @@ COLUMNS=220 "$R" status notes > "$E/cut-status2.out" 2>&1; COLUMNS=220 "$R" ls >
 check "D9f restoring again works (rc=$rc, $(page)) and status and ls no longer show a cut restore" \
   eval '[ $rc = 0 ] && [ "$(page)" = "notes v2 db=3 file=3" ] && ! grep -q "restore was cut" "$E/cut-status2.out" "$E/cut-ls2.out"'
 
+# D9g. a restore of an app stopped on purpose (tando stop) leaves it stopped: the data restored, the
+# unit inactive and disabled, the state stopped, Caddy's stopped page; tando start brings it back
+kept_stopped() { # file for the page
+  curl -s -o "$1" -w '%{http_code}' -m 5 "http://notes.localhost:$HP/" | grep -qx 503 && grep -q "notes is stopped" "$1" &&
+    ! srv "systemctl -q is-active tando-notes" && ! srv "systemctl -q is-enabled tando-notes" &&
+    srv "sudo grep -qx stopped=1 /opt/tando/apps/notes/state && sudo grep -qx phase=idle /opt/tando/apps/notes/state"
+}
+nrows() { psql_as tando_notes "$pw" tando_notes "SELECT count(*) FROM notes"; }
+psql_as tando_notes "$pw" tando_notes 'DELETE FROM notes' > /dev/null
+"$R" stop >&2
+"$R" backup restore "$id" --yes > "$E/restore-stopped.out" 2>&1; rc=$?; cat "$E/restore-stopped.out" >&2
+check "D9g a restore of a stopped app restores the data and leaves it stopped (rc=$rc, $(nrows) rows)" \
+  eval '[ $rc = 0 ] && [ "$(nrows)" = 3 ] && kept_stopped "$E/stopped1.body" && grep -q "notes stays stopped" "$E/restore-stopped.out"'
+# D9h. the same restore cut off (the agent killed as it ends: fault point rs.start), ended by
+# recovery (what tando-watch and a boot run): the app stays stopped too
+psql_as tando_notes "$pw" tando_notes 'DELETE FROM notes' > /dev/null
+srv "sudo install -m 644 -o root -g root /dev/null /etc/tando-test-server && sudo install -d -m 700 -o root -g root /run/tando-test &&
+     printf 'point=rs.start\naction=kill\nnth=1\nverb=backup-restore\napp=notes\n' | sudo tee /run/tando-test/fault > /dev/null"
+"$R" backup restore "$id" --yes > "$E/restore-stopped-cut.out" 2>&1; rcc=$?; cat "$E/restore-stopped-cut.out" >&2
+fired=$(srv "sudo test -f /run/tando-test/fired && echo yes")
+srv "sudo rm -rf /run/tando-test /etc/tando-test-server"
+srv "sudo $AGENT recover notes" >&2
+check "D9h a restore of a stopped app cut off (rc=$rcc, fault fired: ${fired:-no}) and recovered leaves it stopped, data restored ($(nrows) rows)" \
+  eval '[ "$fired" = yes ] && [ $rcc != 0 ] && [ "$(nrows)" = 3 ] && kept_stopped "$E/stopped2.body"'
+"$R" start >&2
+check "D9i tando start brings it back with the restored data" t_until 30 eval '[ "$(page)" = "notes v2 db=3 file=3" ]'
+
+# D9j. a backup cut off (kill, reboot) leaves its temp directory: doctor names it; recover-all
+# removes it, but not while the app's lock is held (a backup being written holds it); the next
+# backup of the app removes one too
+tmpd=$BK/notes/.20260101-000000-manual.tmp
+srv "sudo mkdir -m 700 $tmpd && sudo touch $tmpd/data.tar.gz"
+COLUMNS=250 "$R" doctor > "$E/doctor-tmp.out" 2>&1; cat "$E/doctor-tmp.out" >&2
+check "D9j doctor names a backup temp directory a cut-off backup left" grep -q "notes.*unfinished backup temp directory" "$E/doctor-tmp.out"
+srv "sudo flock /opt/tando/apps/notes/lock sh -c 'touch /run/tando-test-held; while [ -e /run/tando-test-held ]; do sleep 0.2; done'" > /dev/null 2>&1 &
+hp=$!
+t_until 20 eval 'srv "test -e /run/tando-test-held"'
+srv "sudo $AGENT recover-all" > /dev/null 2>&1
+kept=$(srv "sudo test -d $tmpd && echo yes")
+srv "sudo rm -f /run/tando-test-held"; wait $hp
+srv "sudo $AGENT recover-all" > /dev/null 2>&1
+gone=$(srv "sudo test -e $tmpd || echo yes")
+check "D9k recover-all removes it once nothing holds the app's lock (kept while held: ${kept:-no}, removed after: ${gone:-no})" \
+  test "$kept/$gone" = yes/yes
+srv "sudo mkdir -m 700 $tmpd"
+"$R" backup now > "$E/bk-tmp.out" 2>&1; rc=$?; cat "$E/bk-tmp.out" >&2
+gone=$(srv "sudo test -e $tmpd || echo yes")
+check "D9l the next backup removes it too (rc=$rc, removed: ${gone:-no})" test "$rc/$gone" = 0/yes
+# D9m. backup-run outlives a dropped ssh session (Ctrl-C at the laptop): its output pipe closes,
+# and the agent's next write (here the warning about a file the app made unreadable) must not end
+# it half way, with the backup never finished and its temp directory left
+srv "sudo -u tando-notes sh -c 'echo x > /opt/tando/apps/notes/shared/data/locked && chmod 000 /opt/tando/apps/notes/shared/data/locked'"
+srv "sudo bash -c '$AGENT backup-run notes manual 2>&1 | true'"
+done_bk=$(srv "sudo sh -c 'grep -l ^warning=.*locked $BK/notes/*/meta' 2> /dev/null | wc -l | tr -d ' '")   # (root's glob: the directory is 700)
+left=$(srv "sudo ls -A $BK/notes | grep -c '^\..*\.tmp\$'")
+check "D9m a backup whose ssh session dropped finishes (backups with the warning: $done_bk, temp dirs left: $left)" \
+  test "$done_bk/$left" = 1/0
+srv "sudo rm -f /opt/tando/apps/notes/shared/data/locked"
+
 # D10. pull a backup to the laptop
 "$R" backup pull "$id" "$E/pulled.tar" > /dev/null 2>&1
 check "D10 backup pull: a tar with data.tar.gz and db.dump" \

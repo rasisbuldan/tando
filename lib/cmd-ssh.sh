@@ -25,7 +25,7 @@ cmd_ssh() {
   resolve 0
   [ -z "${DEPLOY_KEY:-}" ] || die "tando ssh needs the admin's login, not a deploy key"
   if [ -z "$named" ]; then exec ssh -t "${SSHO[@]}" "$TARGET"; fi
-  valid_app "$APP" || die "bad app name: $APP"
+  valid_app "$APP" || die "bad app name: $APP (a-z, 0-9, -; 2-24 characters)"
   local caps
   # shellcheck disable=SC2029 # AGENT_BIN is a constant path
   # lint: allow RL04 AGENT_BIN is a constant path

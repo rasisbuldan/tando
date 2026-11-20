@@ -95,7 +95,7 @@ fp_hit() {
 # mono: MONO = whole seconds of the monotonic clock (uptime), for timeouts and the soak: a wall
 # clock set back or forward (NTP after a long stop, a hand fix) neither stretches nor skips them
 mono() { local u; read -r u _ < /proc/uptime; MONO=${u%.*}; }
-valid_app() { [[ $1 =~ ^[a-z][a-z0-9-]{1,25}$ ]]; }
+valid_app() { [[ $1 =~ ^[a-z][a-z0-9-]{1,23}$ ]]; }   # at most 24: tando-m-<app> is a group name (32 at most)
 valid_id() { [[ $1 =~ ^[0-9]{8}-[0-9]{6}(-[0-9]{1,3})?$ ]]; }
 # int_norm v: a number written with leading zeros ("08") as plain decimal; anything else as is
 # (bash arithmetic would read 08 as a bad octal number)
@@ -1503,7 +1503,7 @@ finish() { # kind [note]
 # revert kind why [note] [soaked]: the target of a deploy or rollback failed after the switch (or
 # could not be started): back to the fallback. The decision is recorded first (reverting=1):
 # a crash from here on is finished by recover the same way, never by verifying the target again.
-# A deploy to a stopped app goes back to the stopped app.
+# A deploy or a rollback of a stopped app goes back to the stopped app.
 revert() { # kind why [note] [soaked 0|1] [result: rolledback, or failed when it never went live]
   local kind=$1 why=$2 note=${3:-$2} res=${5:-rolledback} id=${S[target]} fb back=1
   [[ $kind == deploy ]] && S[status_$id]=bad
@@ -2489,6 +2489,13 @@ cmd_doctor() {
       [[ -n $cur && ${S[status_$cur]:-} != verified ]] && msg="current release $cur is ${S[status_$cur]:-unverified}"
       [[ ${S[phase]:-idle} != idle ]] && msg="activation in phase ${S[phase]}"
       [[ -n ${S[restore_cut]:-} ]] && row check fail "app $a" "${S[restore_cut]}"
+      # a backup cut off left its temp directory (stale only while nothing holds the app's lock:
+      # every backup is taken under it)
+      local t nt=0
+      for t in "$BK/$a"/.*.tmp; do [[ -d $t && ! -L $t && ${t##*/} =~ ^\.[0-9]{8}-[0-9]{6}-[a-z]+\.tmp$ ]] && nt=$((nt + 1)); done
+      if ((nt)) && flock -n "$D/lock" true 2> /dev/null; then
+        row check warn "app $a" "$nt unfinished backup temp director$( ((nt == 1)) && echo y || echo ies) in $BK/$a, left by a backup that was cut off: the next backup of $a removes it (tando backup now -a $a)"
+      fi
       # (an app stopped with tando stop is meant not to run: ls and status say stopped)
       [[ -n $cur && -z ${S[stopped]:-} ]] && has_unit && ! systemctl -q is-active "tando-$a" && msg="${msg:+$msg, }unit not running"
       if [[ ${C[backup]:-off} == daily ]] && [[ ${S[last_backup]:-0} =~ ^[0-9]{1,12}$ ]] && (( $(now) - 10#${S[last_backup]:-0} > 2 * 86400 )); then
@@ -3527,7 +3534,7 @@ recover_locked() {
       else rm -f "$D/.env.check"; st phase idle env_revert ""; fi;;
     stop) S[stopped]=1; stop_app || unset "S[stopped]"; st phase idle;;
     start|restart) restart_app && workers_follow all; st phase idle;;
-    restore) rs_end "cut off";;     # (the app runs its release again; a half step is recorded)
+    restore) rs_end "cut off";;     # (the app runs its release again, or stays stopped; a half step is recorded)
     destroy) destroy_finish; return 0;;   # (the user asked for it: finished, never undone)
     *) st phase idle;;
   esac
@@ -3565,6 +3572,7 @@ rec_idle() {
   fi
   [[ -n ${S[outcome]:-} && ${S[outcome]} != "${S[outcome_done]:-}" ]] && op_trailer
   rec_reap
+  bk_tmp_clean      # (a backup cut off: its temp directory)
   # what an operation that died leaves: its helper units (none of this app runs while this holds
   # the lock), half-written files
   local units=()
@@ -3678,7 +3686,9 @@ cmd_rollback() {
   # how each of the two starts and is checked: app.conf describes the current release now; the
   # target's own lines come back from its snapshot (a newer health path would fail the older code)
   [[ -n $cur && ! -f $D/start/$cur ]] && valid_id "$cur" && start_snap "$cur"
-  st phase rollback target "$to" kind rollback prev "$cur" fallback "$cur" pre_stopped "" reverting ""
+  # a stopped app, as a deploy to it: the rollback starts its target; when that fails, the app
+  # goes back to its release, stopped (pre_stopped: revert)
+  st phase rollback target "$to" kind rollback prev "$cur" fallback "$cur" pre_stopped "${S[stopped]:-}" reverting ""
   AUDIT_NOTE="from ${cur:--} to $to"
   start_back "$to" && conf_put || { start_back "$cur"; conf_put; end_op "$to" rollback failed "could not apply the settings of $to"; die "could not apply the settings of $to (disk full?)"; }
   t=$(ds)
@@ -3810,10 +3820,22 @@ as_app_pg() {
     -p "Slice=$(app_slice)" -p MemoryMax=512M choom -n 500 -- runuser -u "$AU" -- "$@")
 }
 
-backup_take() { # kind -> prints the backup id (and sets BK_ID)
+# bk_tmp_clean: the temp directories of backups of the app that were cut off (a kill, a reboot, an
+# ssh session that dropped) go. The caller holds the app's lock: every backup is taken under it
+# (and a process a cut-off backup left writing, its tar or pg_dump, keeps it), so no temp
+# directory there belongs to a backup still being written.
+bk_tmp_clean() {
+  local t
+  for t in "$BK/$A"/.*.tmp; do
+    [[ -d $t && ! -L $t && ${t##*/} =~ ^\.[0-9]{8}-[0-9]{6}-[a-z]+\.tmp$ ]] && rm -rf "$t"
+  done
+  return 0
+}
+backup_take() { # kind -> prints the backup id (and sets BK_ID); the caller holds the app's lock
   local kind=$1 id dir tmp n=0 snap=() live=$ADATA/app.sqlite
   BK_WARN="" BK_ID=""
   install -d -m 700 -o root -g root "$BK" "$BK/$A"
+  bk_tmp_clean
   id="$(date -u +%Y%m%d-%H%M%S)-$kind"
   while [[ -e $BK/$A/$id ]]; do sleep 1; id="$(date -u +%Y%m%d-%H%M%S)-$kind"; n=$((n + 1)); ((n < 5)) || return 1; done
   dir=$BK/$A/$id tmp=$BK/$A/.$id.tmp
@@ -3931,12 +3953,14 @@ cmd_backup_run() { # app kind: the timer (daily), `tando backup now` (manual)
   lock 3600
   load "$D/state" S
   # (the daily run's outcome, for the backup ping of tando-watch: docs/MONITORING.md, "From
-  # outside". backup_take ran in a subshell and wrote the state there: read it again first)
-  if ! id=$(backup_take "$kind"); then
-    [[ $kind == daily ]] && { load "$D/state" S; st backup_daily_failed "$(now)"; }
+  # outside". backup_take runs in this shell, not $(...): a subshell does not keep the handler
+  # that lets this verb outlive a dropped ssh session, and its first write would end the backup)
+  if ! backup_take "$kind" > /dev/null; then
+    [[ $kind == daily ]] && st backup_daily_failed "$(now)"
     die "backup failed"
   fi
-  [[ $kind == daily ]] && { load "$D/state" S; st backup_daily_ok "$(now)" backup_daily_id "$id"; }
+  id=$BK_ID
+  [[ $kind == daily ]] && st backup_daily_ok "$(now)" backup_daily_id "$id"
   echo "id=$id"
 }
 
@@ -4005,8 +4029,9 @@ cmd_backup_restore() {
   # (its workers too: nothing of the app writes while its data is replaced)
   fp rs.stop
   systemctl stop "tando-$A" "tando-${A}_worker-*"
-  safety=$(backup_take safety) || { rs_end; die "could not take the safety backup; nothing restored"; }
-  load "$D/state" S      # (backup_take wrote it in a subshell)
+  # (in this shell, not $(...): it keeps the handler for a dropped ssh session)
+  backup_take safety > /dev/null || { rs_end; die "could not take the safety backup; nothing restored"; }
+  safety=$BK_ID
   echo "safety=$safety"
   st restore_safety "$safety" restore_step data
   fp rs.data
@@ -4049,6 +4074,7 @@ cmd_backup_restore() {
   fp rs.start
   rs_end
   [[ -n ${S[current]:-} ]] || { echo healthy=1; return; }
+  [[ -z ${S[stopped]:-} ]] || { echo stopped=1; echo healthy=1; return; }
   if via_caddy "$(app_unit)"; then echo healthy=1; else echo healthy=0; fi
 }
 # rs_end [why]: a restore ends (done, failed, or cut off: recover): the app and its workers run
@@ -4065,7 +4091,7 @@ rs_end() {
     for o in "$D"/shared/.replaced-*; do [[ -d $o && ! -L $o ]] && mv -T "$o" "$D/shared/data" && break; done
   fi
   for o in "$D"/shared/.restore-* "$D"/shared/.replaced-*; do [[ -e $o || -L $o ]] && as_app rm -rf "$o"; done
-  rm -rf "$BK/$A"/.*-safety.tmp 2> /dev/null
+  bk_tmp_clean      # (the safety backup's, when it was cut off)
   if [[ $step == db ]] && db_creds && db_limits "$DB_ROLE"; then S[applied]=${S[restore_applied]:-}; fi
   part=$what
   [[ -n $what ]] && what="the restore of backup $bid stopped while the $what was being replaced (${why:-cut off}), so it may be partly restored: tando backup restore $bid --yes runs it again; the data from before it is in backup ${S[restore_safety]:-(none: it was not taken)}"
@@ -4076,7 +4102,10 @@ rs_end() {
   else
     st phase idle restore_step "" restore_applied "" restore_cut "" restore_id "" restore_safety ""
   fi
-  if [[ -n ${S[current]:-} ]]; then
+  # an app stopped on purpose (tando stop) stays stopped: its data is in place for tando start
+  if [[ -n ${S[current]:-} && -n ${S[stopped]:-} ]]; then
+    stop_app || echo "tando-agent: ${WC_WHY:-could not keep $A stopped}" >&2
+  elif [[ -n ${S[current]:-} ]]; then
     restart_app
     workers_follow all || echo "tando-agent: $WF_WHY" >&2
   fi
@@ -4698,16 +4727,17 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
 destroy_finish() {
   local purge=${S[destroy_purge]:-} id f
   if [[ ${S[destroy_step]:-backup} == backup ]]; then
-    rm -rf "$BK/$A"/.*-final.tmp 2> /dev/null      # (one cut off)
+    bk_tmp_clean      # (a final backup's that was cut off)
     # (no user any more: an earlier destroy got that far, after its final backup)
     if [[ $purge != purge ]] && has_backup_data && id "$AU" &> /dev/null; then
       fp ds.stop
       systemctl stop "tando-$A" "tando-${A}_worker-*"
       # (the app runs again when nothing is removed)
-      id=$(backup_take final) || { st phase idle destroy_purge "" destroy_step ""
+      # (in this shell, not $(...): it keeps the handler for a dropped ssh session)
+      backup_take final > /dev/null || { st phase idle destroy_purge "" destroy_step ""
         [[ -z ${S[stopped]:-} && -n ${S[current]:-} ]] && restart_app && workers_follow all
         die "final backup failed; nothing removed (use --purge to skip it)"; }
-      load "$D/state" S      # (backup_take wrote it in a subshell)
+      id=$BK_ID
       echo "backup=$BK/$A/$id"
     fi
     st destroy_step remove
@@ -6130,7 +6160,7 @@ esac
 # db-studio too: its session ends when the laptop goes (Ctrl-C drops the ssh session), and the
 # agent must live to see its unit end and unload it (units_unload) and remove its directories.
 case $verb in
-  configure|rollback|env-set|env-unset|start|stop|restart|destroy|backup-restore|domain-add|domain-rm|db-studio)
+  configure|rollback|env-set|env-unset|start|stop|restart|destroy|backup-run|backup-restore|domain-add|domain-rm|db-studio)
     trap 'exec > /dev/null 2>&1' PIPE HUP;;
 esac
 # (and a Ctrl-C at the laptop, which ssh may pass on as SIGINT, does not end the studio's relay

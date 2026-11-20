@@ -294,6 +294,9 @@ cmd_env() {
     [ ${#NOTE} -le 200 ] || die "the note is ${#NOTE} characters; at most 200"
     # (base64: the agent's arguments are plain words; it decodes and checks the note again)
     nargs="note64=$(printf '%s' "$NOTE" | base64 | tr -d '\n')"
+    # a server from before notes would drop it silently: refuse before anything changes
+    agent info > "$TMPD/info"
+    proto_check "$TMPD/info"
   fi
   case $op in
     import) env_import "${ARGS[2]:-}" > "$TMPD/env"; op="set"; via=via=import;;
@@ -390,8 +393,10 @@ cmd_backup() {
       valid_backup_id "$id" || usage_err "bad backup id: $id (tando backup ls lists them)" backup
       confirm "This replaces the live data of $APP on $HOST with backup $id (the current data is kept as a safety backup; a backup only offsite is fetched and verified first)." "$APP"
       agent sudo backup-restore "$APP" "$id" < /dev/null > "$TMPD/o"
-      kv_read "$TMPD/o" safety
-      health_note "restored $id; the data before the restore is in backup $K_safety";;
+      kv_read "$TMPD/o" safety stopped
+      if [ "$K_stopped" = 1 ]; then
+        note "restored $id; the data before the restore is in backup $K_safety. $APP stays stopped: tando start -a $APP starts it"
+      else health_note "restored $id; the data before the restore is in backup $K_safety"; fi;;
     pull)
       valid_backup_id "$id" || usage_err "bad backup id: $id (tando backup ls lists them)" backup
       [ -e "$file" ] && die "$file exists"
@@ -486,7 +491,7 @@ pos_app() {
   fi
   [ -n "$k" ] || return 0
   a=${ARGS[k]}
-  valid_app "$a" || usage_err "not an app name: $a (a-z, 0-9, -; 2-26 characters; tando ls lists them)" \
+  valid_app "$a" || usage_err "not an app name: $a (a-z, 0-9, -; 2-24 characters; tando ls lists them)" \
     "$(spec_has "$cmd" && echo "$cmd")"
   [ -z "$APP" ] || [ "$APP" = "$a" ] || usage_err "two apps: -a $APP and $a (give one)" "$cmd"
   APP=$a

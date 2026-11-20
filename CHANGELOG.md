@@ -27,6 +27,39 @@ first, grouped by area.
 - Fixed: a job name of more than 21 characters was refused with only `bad job: job.<name>`;
   `tando` now says the rule (lower case letters, digits and dashes, starting with a letter, at
   most 21 characters) at the line of tando.conf, and docs/CONFIG.md says it.
+- Fixed: `tando backup restore` of an app stopped with `tando stop` started it (its unit, its
+  workers, the state no longer stopped), and so did the recovery of such a restore when it was cut
+  off. A restore now leaves a stopped app stopped: the data restored, the unit inactive and
+  disabled, Caddy's stopped page; the client says so (`tando start` starts it). e2e-data D9g-D9i.
+- Fixed: a rollback of a stopped app whose health check failed ended with the app running on its
+  old release. A rollback of a stopped app now does what a deploy to it does: a target that passes
+  its check goes live and runs; one that fails leaves the app as it was, stopped (docs/COMMANDS.md,
+  rollback). e2e 14b, 14c.
+- Fixed: a backup cut off (a kill, a reboot) left its temporary directory
+  (`/var/backups/tando/<app>/.<id>-<kind>.tmp`) for good; only those of safety and final backups
+  were removed. The next backup of the app and the server's recovery now remove every one whose
+  backup is no longer being written (all backups are taken under the app's lock), and `tando doctor`
+  names one it finds. `tando backup now` runs to its end when its ssh session drops (Ctrl-C), like
+  the other verbs that change an app. e2e-data D9j-D9m.
+- Fixed: app names of 25 or 26 characters were accepted but the server could not create them
+  (`groupadd: 'tando-m-<name>' is not a valid group name`: group names stop at 32 characters),
+  which left a half-made app that `tando ls` showed as "not deployed". The limit is now 24, in the
+  client and the agent, with the limit in the message; `tando init` cuts a directory name to 24.
+  The other names derived from an app name (the user `tando-<app>`, the deploy user and group
+  `tando-d-<app>` / `tando-m-<app>` at exactly 32, units, slice, database role) fit with 24.
+- Fixed: `tando env set|unset|import --note` against a server from before notes (0.1.1) dropped
+  the note silently and exited 0. It now refuses before changing anything ("the server's tando is
+  older than this client: run tando host setup <host>"); without `--note` nothing changed.
+- Fixed: `tando logs` with a deploy key printed `tando: logs: ` and nothing else; it now says
+  "not allowed with a deploy key: logs". `tando health` ("unexpected characters in the request")
+  and `tando doctor` ("bad request") said the same for a key: the gate now names the refused
+  command for a request of an admin program that is malformed for a key, like for any other.
+- Fixed: `tando init` in a package of a pnpm (or npm/yarn) workspace said "no lockfile: npm", and
+  `tando up` stopped at stage on "dangling symlink: node_modules/express". Both now stop at once
+  and say that deploying one package of a workspace is not supported yet, and to make a
+  standalone copy (`pnpm deploy --filter <package> <dir>`) and deploy that. The message for a
+  workspace root no longer reads as if it worked.
+
 - Fixed: an ended `tando db studio` session could stay listed by `systemctl list-units --all` as
   `loaded inactive dead` (about 1 run in 3 of the studio suite), with nothing holding it: systemd
   had not unloaded it and a stop did not help. A destroy left the app's slice listed the same way
