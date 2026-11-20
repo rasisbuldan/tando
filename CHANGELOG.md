@@ -73,10 +73,10 @@ first, grouped by area.
   could be installed cut short, and a deploy's end was recorded with half its jobs old. Each file
   must be complete before it is installed; a failure leaves the operation's end unfinished, and
   recovery (tando-watch's minute, the next command) writes the jobs again.
-- Fixed: tando-watch and `tando status` tested an app's lock by taking it for an instant: a
-  command's own try at that moment waited, and two probes at once saw each other as "busy" (a
-  recovery skipped for a minute). They now read /proc/locks and take no lock (also the agent's
-  `busy` check).
+- Fixed: tando-watch and `tando status` tested an app's lock by taking it exclusively for an
+  instant: two probes at once saw each other as "busy" (a recovery skipped for a minute, a deploy
+  told it waits when nothing held the app). They (and the agent's `busy` check) now try a shared
+  lock: probes never see each other; a command's own try in that instant only waits for it to drop.
 - Fixed: after the clock was set back, pre-deploy (and other) backups were pruned by name: backups
   named from the future kept their place and each new one was deleted at the next backup. Backups
   now carry their order (`seq` in meta) and are pruned by it.

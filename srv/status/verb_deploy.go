@@ -184,6 +184,6 @@ func actLog(path string) []string {
 	return bashread.Lines(b)
 }
 
-// lockHeld: another process holds the app's lock (busy_info's `flock -n "$D/lock" true`, without
-// taking it: lock.Held reads /proc/locks, so this probe never delays or fails a verb's own try).
+// lockHeld: another process holds the app's lock exclusively (busy_info's lock_busy: a shared try,
+// so probes never see each other; lock.Held).
 func lockHeld(p string) bool { return lock.Held(p) }
