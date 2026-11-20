@@ -390,8 +390,10 @@ cmd_backup() {
       valid_backup_id "$id" || usage_err "bad backup id: $id (tando backup ls lists them)" backup
       confirm "This replaces the live data of $APP on $HOST with backup $id (the current data is kept as a safety backup; a backup only offsite is fetched and verified first)." "$APP"
       agent sudo backup-restore "$APP" "$id" < /dev/null > "$TMPD/o"
-      kv_read "$TMPD/o" safety
-      health_note "restored $id; the data before the restore is in backup $K_safety";;
+      kv_read "$TMPD/o" safety stopped
+      if [ "$K_stopped" = 1 ]; then
+        note "restored $id; the data before the restore is in backup $K_safety. $APP stays stopped: tando start -a $APP starts it"
+      else health_note "restored $id; the data before the restore is in backup $K_safety"; fi;;
     pull)
       valid_backup_id "$id" || usage_err "bad backup id: $id (tando backup ls lists them)" backup
       [ -e "$file" ] && die "$file exists"
