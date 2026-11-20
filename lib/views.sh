@@ -504,6 +504,85 @@ cmd_env_ls() {
   else ui_box_close "values hidden: tando env ls --show prints them"; fi
 }
 
+# env log: the changelog of the app's env, key NAMES only (the agent never stores a value). Rows from
+# the agent: envlog <n> <epoch> <who> <verb> <note> <added> <changed> <removed> (n: 1 is the newest;
+# names comma-separated, "-" for none). The time is shown in UTC.
+envlog_rows() { # agent rows on stdin -> the same with the epoch as "YYYY-MM-DD HH:MM" (one awk, no date(1))
+  LC_ALL=C awk -F '\t' -v OFS='\t' '
+    $1 == "envlog" && NF == 9 {
+      t = $3 + 0; d = int(t / 86400); s = t - d * 86400; z = d + 719468
+      era = int(z / 146097); doe = z - era * 146097
+      yoe = int((doe - int(doe / 1460) + int(doe / 36524) - int(doe / 146096)) / 365)
+      y = yoe + era * 400; doy = doe - (365 * yoe + int(yoe / 4) - int(yoe / 100))
+      mp = int((5 * doy + 2) / 153); dd = doy - int((153 * mp + 2) / 5) + 1; m = mp < 10 ? mp + 3 : mp - 9
+      if (m <= 2) y++
+      $3 = sprintf("%04d-%02d-%02d %02d:%02d", y, m, dd, int(s / 3600), int(s % 3600 / 60)); print }'
+}
+envlog_json() { # rows file -> a JSON array of entries (names only)
+  LC_ALL=C awk -F '\t' '
+    function esc(v) { gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); return "\"" v "\"" }
+    function arr(c,   a, n, i, o) { if (c == "-") return "[]"; n = split(c, a, ","); o = "["
+      for (i = 1; i <= n; i++) o = o (i > 1 ? "," : "") esc(a[i]); return o "]" }
+    BEGIN { printf "[" }
+    { printf "%s{\"n\":%d,\"time\":%s,\"by\":%s,\"verb\":%s,\"note\":%s,\"added\":%s,\"changed\":%s,\"removed\":%s}",
+        (NR > 1 ? "," : ""), $2, esc($3 " UTC"), esc($4), esc($5), esc($6), arr($7), arr($8), arr($9) }
+    END { printf "]" }' "$1"
+}
+# envlog_page rows-file n: one entry as a page: when, by, verb, note, then the three lists of names
+envlog_page() {
+  local r n when who verb nt add chg rem save_w=$UI_W save_i=$UI_IN
+  [ "$UI_W" -gt 80 ] && { UI_W=80; UI_IN=76; }
+  while IFS=$TAB read -r r n when who verb nt add chg rem; do
+    [ "$n" = "$2" ] || continue
+    ui_box_open "env change $n" "$APP on $HOST"
+    ui_kv "when" "$when UTC"
+    ui_kv "by" "$who"
+    ui_kv "verb" "$verb"
+    ui_kv_wrap "note" "$nt"
+    local lbl list k c
+    for lbl in Added Changed Removed; do
+      case $lbl in Added) list=$add;; Changed) list=$chg;; *) list=$rem;; esac
+      c=0; [ "$list" = "-" ] || c=$(printf '%s' "$list" | tr ',' '\n' | grep -c .)
+      ui_box_sep "$lbl ($c)"
+      if [ "$c" = 0 ]; then ui_box_line "${UI_DIM}none${UI_NC}"
+      else
+        for k in $(printf '%s' "$list" | tr ',' ' '); do ui_box_wrap "$k"; done
+      fi
+    done
+    ui_box_close "names only: tando never stores or shows a value in this log"
+    UI_W=$save_w UI_IN=$save_i
+    return 0
+  done < "$1"
+  UI_W=$save_w UI_IN=$save_i
+  die "no entry $2 in the env log of $APP (tando env log lists them)"
+}
+cmd_env_log() {
+  resolve 1
+  local n=${ARGS[2]:-} r i nt when who verb add chg rem
+  if [ -n "$n" ]; then
+    { is_num "$n" && [ "$n" -ge 1 ]; } || usage_err "env log takes an entry number (1 is the newest): $n" env
+  fi
+  agent_raw sudo env-log "$APP" $n < /dev/null | envlog_rows > "$TMPD/el" ; [ "${PIPESTATUS[0]}" = 0 ] || exit 1
+  if [ -n "$JSON" ]; then
+    printf '{"host":%s,"app":%s,"entries":' "$(json_str "$HOST")" "$(json_str "$APP")"
+    envlog_json "$TMPD/el"; printf '}\n'; return 0
+  fi
+  if [ -n "$n" ]; then envlog_page "$TMPD/el" "$n"; return 0; fi
+  if [ ! -s "$TMPD/el" ]; then note "No changes logged for $APP yet (tando env set KEY=VALUE adds the first)"; return 0; fi
+  local tty=""; [ -t 0 ] && [ -t 2 ] && tty=1
+  # the rows: [when] [note] >  (numbered at a terminal, where one is picked)
+  i=0
+  while IFS=$TAB read -r r n when who verb nt add chg rem; do
+    i=$((i + 1))
+    if [ -n "$tty" ]; then printf '  %3s) [%s] [%s] >\n' "$n" "$when" "$nt"
+    else printf '[%s] [%s] >\n' "$when" "$nt"; fi
+  done < "$TMPD/el"
+  [ -n "$tty" ] || return 0
+  pick_num "$i" entry 1
+  echo
+  envlog_page "$TMPD/el" "$PICK"
+}
+
 # doctor_prog_differs name detail: is this row "a program on the server differs from the client's"
 # (agent, gate, logs, metrics, watch, status, daemon, offsite, host, studio; the agent words it three ways)?
 doctor_prog() { case $1 in agent|gate|logs|metrics|watch|status|daemon|offsite|host|studio) return 0;; esac; return 1; }

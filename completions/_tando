@@ -90,7 +90,7 @@ _tando() {
         stop) subs="" flags="-H -a" args="apps" ;;
         restart) subs="" flags="-H -a" args="apps" ;;
         top) subs="" flags="--watch --read-only -H" args="hosts" ;;
-        env) subs="ls set unset import" flags="--show -a -H" args="apps" ;;
+        env) subs="ls set unset import log" flags="--show -a -H --note --json" args="apps" ;;
         jobs) subs="run ls" flags="-H -a" args="apps" ;;
         db) subs="psql url studio info" flags="-a -H --show --no-open --idle --stop" args="apps" ;;
         backup) subs="ls now restore pull offsite" flags="-a -H --yes --show --saved --import --rotate" args="apps" ;;
