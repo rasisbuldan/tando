@@ -307,5 +307,16 @@ as_case twohalf "-1 0 0 0 0 0" 'a.example {\n\thandle /api/* {\n\t\treverse_prox
 as_case none "0 0 0 0 0 0" 'a.example {\n\treverse_proxy 127.0.0.1:31000\n\timport sites/*\n}\n'
 rm -rf "$AS"
 
+# ---- swap_native and guard (lib/build.sh, lib/native.js) on fixture node_modules trees: a stub npm
+# and a local fake registry, no network (test/native-test.sh, one FAIL line per failed check)
+nt=$("$BASH_BIN" "$here/test/native-test.sh" 2>&1)
+printf '%s\n' "$nt" | grep '^FAIL' || true
+nt_n=$(printf '%s\n' "$nt" | sed -n 's/^native: \([0-9]*\) checks, \([0-9]*\) failed$/\1 \2/p')
+if [[ -z $nt_n ]]; then bad "native-test.sh did not finish: $(printf '%s\n' "$nt" | tail -3)"
+else
+    checks=$((checks + ${nt_n% *})); fails=$((fails + ${nt_n#* }))
+    echo "native: ${nt_n% *} checks, ${nt_n#* } failed"
+fi
+
 echo "$checks checks, $fails failed"
 [[ $fails == 0 ]]

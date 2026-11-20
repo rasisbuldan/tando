@@ -28,7 +28,7 @@ ui_init
 . "$TANDO_HOME/lib/args.sh"
 
 # the flags every command shares (lib/args.sh has already refused the ones a command does not take)
-WATCH="" FOLLOW="" NLINES=100 ARGS=() ALL="" PURGE="" SHOW="" HELP="" JSON="" YES="" FORCE=""
+WATCH="" FOLLOW="" NLINES=100 ARGS=() ALL="" PURGE="" SHOW="" HELP="" JSON="" YES="" FORCE="" DRY_RUN=""
 parse() {
   while [ $# -gt 0 ]; do
     case $1 in
@@ -40,6 +40,7 @@ parse() {
       --all) ALL=1; shift;;
       --purge) PURGE=1; shift;;
       --show) SHOW=1; shift;;
+      --dry-run) DRY_RUN=1; shift;;   # deploy: build and stage, upload nothing (lib/deploy.sh)
       --json|--yes|--force|--wait)   # plugins read these from ARGS themselves
         # --wait: deploy/up wait out the soak (lib/deploy.sh); domain add polls DNS (lib/cmd-domain.sh)
         case $1 in --json) JSON=1;; --yes) YES=1;; --force) FORCE=1;; --wait) WAIT_VERIFIED=1 DNS_WAIT=1;; esac

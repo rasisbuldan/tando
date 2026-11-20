@@ -125,7 +125,7 @@ answer, no app's `db_conns` is judged: one host alert, not one per app.
 
 ### Scheduled jobs
 
-The agent writes one systemd unit per job of the live release (`tando-<app>-job-<name>.service`,
+The agent writes one systemd unit per job of the live release (`tando-<app>_job-<name>.service`,
 started by its timer or by `tando jobs run`). How a job last ended is read where `tando jobs`
 reads it: the unit's state and result, the exit status of its process and the time the run ended,
 asked in the run's one question to systemd for every app unit. No program is started and no

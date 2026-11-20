@@ -10,7 +10,7 @@ calls: work happens in commands, transient units and one per-minute timer.
 | `bin/tando` | entry point: flags, dispatch, host/env/rollback/backup/db/destroy/unlock commands |
 | `lib/help.txt`, `lib/args.sh` | every command's help, flags and argument counts; checked before anything runs |
 | `lib/common.sh` | messages, validation, host registry, ssh options, tando.conf parser, agent calls |
-| `lib/build.sh` | `init`, build step, staging, release guard, npm platform-package swap |
+| `lib/build.sh` | `init`, build step, staging, release guard, npm platform-package swap and the fixes for other native packages (planned by `lib/native.js`, which reads JSON and file headers, and downloads declared prebuilt binaries; docs/CROSS-ARCH.md) |
 | `lib/deploy.sh` | `configure`, upload lease and rsync, activation polling, deploy box |
 | `lib/views.sh` | boxed views: ls (one host, `--all`), status, history, releases, jobs, env, backups, doctor, host ls |
 | `lib/ui.sh` | boxed UI library |
@@ -126,7 +126,7 @@ appended.
 /var/backups/tando/<app>/<YYYYMMDD-HHMMSS>-<kind>/   data.tar.gz, db.dump, meta (root 700); offsite (its upload state), fetched (came from the bucket)
 /opt/tando/offsite.conf, offsite.key, offsite.id     offsite settings + credentials, recovery keys (root 600), host id (docs/BACKUP.md)
 /var/lib/tando/offsite/state/<app>, host             offsite state per app (for alerts and status) and of the credentials
-/etc/systemd/system/tando-<app>.service, tando-<app>-job-*.{service,timer}, tando-<app>-backup.*
+/etc/systemd/system/tando-<app>.service, tando-<app>_job-*.{service,timer}, tando-<app>-backup.*
 /etc/caddy/tando/<app>.caddy        (all key=value files are written to a temp file and renamed)
 /etc/systemd/journald@tando-<app>.conf, /var/log/journal/<id>.tando-<app>/   the app's own journal
 /var/log/tando/<app>/access.log*, /var/log/tando/audit.log    request log, audit trail

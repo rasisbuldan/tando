@@ -4,7 +4,6 @@
 # Info findings (RL08 line length, shellcheck style notes) are never recorded here.
 lib/cmd-alerts.sh	RL04	ssh "${SSHO[@]}" "$TARGET" "if [ ! -x $WATCH_BIN ]; then echo 'alerts are not set up on this host: tando alerts enable' >&2; exit 3; fi; $s$WATCH_BIN $*" \
 lib/common.sh	RL04	ssh "${SSHO[@]}" "$TARGET" "$s$AGENT_BIN $*" 2> "${ERRF:-$TMPD/err}" | strip
-server/tando-agent	SC2010	ls /etc/systemd/system 2> /dev/null | grep "^tando-$A-" ; } | sort -u |
 test/e2e-bootstrap.sh	SC2034	sum0=$(srv 'sudo cksum < /etc/caddy/tando/hello.caddy')
 test/e2e-bootstrap.sh	SC2034	sum1=$(srv 'sudo cksum < /etc/caddy/tando/hello.caddy')
 test/e2e-data.sh	SC2034	listing=$(srv "sudo tar -tvzf $BK/notes/$id2/data.tar.gz")
@@ -47,7 +46,7 @@ test/race/s6-timing.sh	SC2046	set -- $(srv "sudo cat /opt/tando/apps/$APP/curren
 test/sec2/attacks/a01-job-port-hijack.sh	RL09	#!/bin/bash
 test/sec2/attacks/a02-job-preflight-port.sh	RL09	#!/bin/bash
 test/sec2/attacks/a03-destroy-survivor.sh	RL09	#!/bin/bash
-test/sec2/attacks/a03-destroy-survivor.sh	SC2034	for i in $(seq 1 40); do rootsh 'journalctl --namespace=tando-gamma -u tando-gamma-job-tick -o cat --no-pager | grep -q "job up"' && break; sleep 1; done
+test/sec2/attacks/a03-destroy-survivor.sh	SC2034	for i in $(seq 1 40); do rootsh 'journalctl --namespace=tando-gamma -u tando-gamma_job-tick -o cat --no-pager | grep -q "job up"' && break; sleep 1; done
 test/sec2/attacks/a04-loopback-matrix.sh	RL09	#!/bin/bash
 test/sec2/attacks/a05-writable-chown-race.sh	RL09	#!/bin/bash
 test/sec2/attacks/a06-probe-ua-unlogged.sh	RL09	#!/bin/bash

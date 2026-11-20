@@ -216,12 +216,12 @@ tando adopt plan magazine -H vps --health /api/health
 tando adopt site magazine -H vps --health /api/health --apply    # the request hold, first
 tando adopt apply magazine -H vps --health /api/health
 tando jobs -a magazine -H vps                  # six jobs, next runs at the same times as before
-systemctl list-timers --all | grep magazine    # tando-magazine-job-* active, magazine-* inactive
+systemctl list-timers --all | grep magazine    # tando-magazine_job-* active, magazine-* inactive
 ```
 
 **Expect one shifted interval at each handover, not a doubled or missed run.** systemd fires an
 `OnCalendar` timer somewhere in `[elapse, elapse + AccuracySec)` (one minute by default), at a
-fixed offset of its own. The hand-written `magazine-sync.timer` and `tando-magazine-job-sync.timer`
+fixed offset of its own. The hand-written `magazine-sync.timer` and `tando-magazine_job-sync.timer`
 have different offsets (on the replica :25 and :00 past the minute), so around adopt or undo one
 interval between two calls is shorter or longer than the schedule, for example 35 s or 85 s for the
 every-minute job. If an elapse falls in the few seconds the timers are paused, it runs once at
@@ -229,7 +229,7 @@ resume time, which can add a second short interval. Every elapse still runs exac
 before its scheduled time, and never twice. This is the same latitude the hand-written timers
 always had, so no endpoint sees anything it could not see before (an endpoint that relied on calls
 being exactly 60 s apart would already have been wrong). To check after adopting: the run times of
-each job, `journalctl -u tando-magazine-job-sync.service -o short-iso | grep Starting`, show one
+each job, `journalctl -u tando-magazine_job-sync.service -o short-iso | grep Starting`, show one
 run per minute.
 
 **A run that fires while the app restarts is lost, as it always was.** Each job is a `curl` to
@@ -319,7 +319,12 @@ reverse_proxy 127.0.0.1:3100 {
 Measured on the replica with both apps adopted: tando deploy, rollback and restart of each app, about
 2,500 requests and 72 orders, **0 failed**; the longest stall was 0.65 s (requests held, then served).
 Validate (`caddy validate`) and `systemctl reload caddy` (no restart). This also helps any future
-deploy, with tando or by hand.
+deploy, with tando or by hand. If that reload fails (`systemctl reload caddy` exits non-zero), fix
+the file and restart Caddy (`sudo systemctl restart caddy`): a reload that failed while Caddy started
+its servers leaves those it started serving the rejected configuration, where nothing is held,
+until a restart (`tando doctor` shows it as `caddy reload`). The hold covers requests that cannot
+reach the app and GETs whose connection broke; a POST already sent to the stopping app is not sent
+again (docs/COMMANDS.md, "What the hold covers, exactly").
 
 ## What only the real server can confirm
 

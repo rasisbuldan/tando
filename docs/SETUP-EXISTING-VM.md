@@ -13,7 +13,7 @@ before `tando host setup`. Laptop first: [SETUP-LAPTOP.md](SETUP-LAPTOP.md). Fre
 |---|---|
 | `/opt/tando`, `/var/lib/tando`, `/var/log/tando`, `/var/cache/tando-logs`, `/var/log/tando-apt.log`, `/var/backups/tando` | Programs, host and app settings, state, logs, backups. One app is `/opt/tando/apps/<app>`. |
 | Users `tando-<app>`, `tando-keys`, `tando-d-<app>` (CI) and their groups | System users, no login shell. CI also adds `/etc/sudoers.d/tando-d-<app>`. |
-| Units `tando-<app>.service`, `tando-<app>.slice`, `tando-<app>-backup.*`, `tando-<app>-job-*`, `tando-recover`, `tando-firewall`, `tando.slice`, `tando-down@`, `tando-watch*`, `tandod`, `tando-host*` | systemd. Also `/etc/systemd/journald@tando-<app>.conf`. |
+| Units `tando-<app>.service`, `tando-<app>.slice`, `tando-<app>-backup.*`, `tando-<app>_job-*`, `tando-recover`, `tando-firewall`, `tando.slice`, `tando-down@`, `tando-watch*`, `tandod`, `tando-host*` | systemd. Also `/etc/systemd/journald@tando-<app>.conf`. |
 | `/etc/caddy/tando/<app>.caddy` | One Caddy site per app. |
 | nftables table `inet tando` | Loopback rules and, on a Caddy tando owns, per-address limits. |
 

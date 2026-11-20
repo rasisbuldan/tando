@@ -294,6 +294,7 @@ C_memory="" C_timeout="" C_path="" C_data="" C_jobs="" C_writable="" C_backup=""
 C_soak=""
 C_logs=""   # log_max, log_keep, log_rate, access_log as key=value lines (checked by the server)
 C_image="" C_container_port="" C_build_memory="" C_dockerfile="" C_node="" C_domain="" C_www=""
+C_job_timeout=""   # seconds a scheduled job may run (the server's default: 3600)
 C_release="" C_release_shell="" C_release_timeout=""   # the release command (lib/deploy.sh; checked by the server too)
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
 
@@ -397,6 +398,12 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       domain) C_domain=$(printf '%s' "$v" | tr ',' ' ' | tr -s ' ');;
       www) C_www=$v
         case $v in redirect|serve|off) ;; *) die "$f:$n: www must be redirect, serve or off";; esac;;
+      job_timeout) C_job_timeout=$v
+        ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 86400 ] || die "$f:$n: job_timeout is 1 to 86400 seconds (got \"$v\")";;
+      job.*.timeout)
+        ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 86400 ] || die "$f:$n: $k is 1 to 86400 seconds (got \"$v\")"
+        C_jobs="$C_jobs$k=$v
+";;
       job.*) C_jobs="$C_jobs$k=$v
 ";;
       *) die "$f:$n: unknown key: $k";;
@@ -416,6 +423,11 @@ conf_load() { # [file]; a file already loaded in this run is not read again
   elif [ -n "$C_release_shell$C_release_timeout" ]; then
     die "$f: release_shell and release_timeout need release = <command>"
   fi
+  # a job's timeout needs the job
+  local jt
+  for jt in $(printf '%s' "$C_jobs" | sed -n 's/^\(job\.[^=]*\)\.timeout=.*/\1/p'); do
+    printf '%s' "$C_jobs" | grepq "^$jt=" || die "$f: $jt.timeout is set but there is no $jt = <schedule> | <command>"
+  done
   CONF_LOADED=$f
   return 0
 }

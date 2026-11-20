@@ -57,9 +57,9 @@ nothing behind on the server.
 Example: cd my-app && tando up
 
 @@ deploy
-flags: -a= -H= --force --yes --wait
+flags: -a= -H= --force --yes --wait --dry-run
 args: 0
-usage: tando deploy [-a app] [-H host] [--force] [--yes] [--wait]
+usage: tando deploy [-a app] [-H host] [--force] [--yes] [--wait] [--dry-run]
 Build here, upload the changes, start the new release on a spare port, check
 its health, switch traffic to it and check again through Caddy; any failure
 rolls back to the release that was live. The new release then has to stay up
@@ -78,6 +78,14 @@ undo a migration: docs/COMMANDS.md, "The release command".
 --force deploys although the app was last deployed from another directory;
 --yes deploys although tando.conf now names another app or server than the
 last deploy from this directory (otherwise tando asks).
+--dry-run builds and stages here, swaps the platform packages, and prints the
+file count, the size, the largest directories and what was swapped; it uploads
+nothing and changes nothing on the server (it only reads the server's platform
+and whether the app exists; an app that does not exist yet is staged all the
+same, and tando up creates it).
+A fresh clone without node_modules stops before the build: run npm ci (or your
+package manager's install) first; tando up runs it for you.
+Native npm packages for another platform than the server's: docs/CROSS-ARCH.md.
 Example: tando deploy
 
 @@ rollback
@@ -195,7 +203,9 @@ The app's scheduled jobs (job.<name> = <schedule> | <command> in tando.conf):
 schedule, next run, last run and its result. A job is run once per schedule and
 not retried: tando cannot know whether a command may run twice. A job that calls
 its own app over HTTP can meet it restarting (a deploy, tando restart): retry in
-the job (curl --retry 5 --retry-connrefused).
+the job (curl --retry 5 --retry-connrefused). A run is stopped after its timeout
+(job_timeout = <seconds>, default 3600; job.<name>.timeout for one job) and
+reported as timed out.
 
 @@ db
 flags: -a= -H= --show --no-open --idle= --stop

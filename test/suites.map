@@ -17,6 +17,7 @@ bin/*                    ALL
 lib/common.sh            ALL
 lib/deploy.sh            ALL
 lib/build.sh             ALL
+lib/native.js            ALL
 lib/args.sh              ALL
 server/tando-agent       ALL
 server/tando-install-recover  ALL
@@ -90,6 +91,7 @@ bench/*                  lint
 test/lint*               lint
 test/go.sh               go
 test/ui-test*            ui-test lint
+test/native-test.sh      ui-test lint
 test/pty-run.sh          ui-test e2e-top lint
 test/top-pty.py          e2e-top
 test/install-test.sh     install-test lint
