@@ -15,7 +15,7 @@
 AD=$R/adopt
 # the client installs this file from its own tree on every adopt call; the agent on the server may
 # be older and lack helpers used here: refuse with the way out instead of failing half-way
-for _f in lockfile fw_sync lock_mark app_slice; do
+for _f in lockfile fw_sync lock_mark app_slice job_unit old_job_owner; do
   declare -F "$_f" > /dev/null ||
     die "the tando agent on this server is older than this adopt helper: run tando host setup <host> first"
 done
@@ -415,7 +415,7 @@ adopt_scan() {
   ad_row chg "new variables" "-" "MALLOC_ARENA_MAX=2, HOME=$D/home (read-only; caches in $D/shared/.cache), TANDO_DATA_DIR=${F[data_dir]:-$D/shared/data}"
   ad_row chg restart "Restart=${F[restart]}" "Restart=on-failure, RestartSec=2"
   ad_row chg sandbox "ReadWritePaths=${F[rw]}" "ReadWritePaths=$D/shared ${F[data_dir]} $D/releases; PrivateDevices, binds only tcp:${F[port]:-?}"
-  for n in "${JOBS[@]}"; do ad_row chg "timer $n" "${J0[$n.timer]}" "tando-$A-job-$n.timer, same OnCalendar, Persistent=true, as ${F[user]}"; done
+  for n in "${JOBS[@]}"; do ad_row chg "timer $n" "${J0[$n.timer]}" "$(job_unit "$n").timer, same OnCalendar, Persistent=true, as ${F[user]}"; done
   [[ -n ${F[incoming]:-} ]] && ad_row chg incoming "${F[incoming]} (upload directory)" "a file saying tando manages $A: the old deploy script stops at its first step"
   ad_row chg logs "journalctl -u $unit" "tando logs (journalctl -u tando-$A); older entries stay under $unit"
   ad_row keep port "${F[port]:-?}: the Caddy site and anything else calling it are unchanged"
@@ -500,12 +500,16 @@ rec_load() {
 # may contain "-", so that glob also matches another app (hello and hello-2).
 own_units() {
   local n f jobs=" ${F[jobs]//,/ } "
-  for n in "${!C[@]}"; do [[ $n == job.* ]] && jobs+="${n#job.} "; done
+  for n in "${!C[@]}"; do [[ $n == job.* && $n != job.*.* ]] && jobs+="${n#job.} "; done
   for f in "tando-$A.service" "tando-$A-backup.service" "tando-$A-backup.timer"; do
     [[ -e /etc/systemd/system/$f ]] && echo "$f"
   done
   for n in $jobs; do
-    for f in "tando-$A-job-$n.service" "tando-$A-job-$n.timer"; do [[ -e /etc/systemd/system/$f ]] && echo "$f"; done
+    for f in "$(job_unit "$n").service" "$(job_unit "$n").timer"; do [[ -e /etc/systemd/system/$f ]] && echo "$f"; done
+    # (the form before the agent named job units tando-<app>_job-<name>: only when its file says so)
+    for f in "tando-$A-job-$n.service" "tando-$A-job-$n.timer"; do
+      [[ -e /etc/systemd/system/$f && $(old_job_owner "$f") == "$A" ]] && echo "$f"
+    done
   done
   return 0
 }
@@ -586,7 +590,7 @@ adopt_restore() {
   # 1. timers: pause whichever side holds each job before the app restarts. A job that never ran
   #    under tando gives the old timer its recorded stamp back, so the state is exactly as it was.
   for n in ${F[jobs]//,/ }; do
-    tm=${J0[$n.timer]} rt=tando-$A-job-$n.timer
+    tm=${J0[$n.timer]} rt=$(job_unit "$n").timer
     if [[ -f /etc/systemd/system/$rt ]] && systemctl -q is-active "$rt"; then
       lt=$(systemctl show --timestamp=unix -P LastTriggerUSec "$rt" | tr -d @) st=""
       [[ -n ${J0[$n.handed]:-} && $lt == "${J0[$n.handed]}" ]] && st=${J0[$n.stamp]:-}
@@ -676,7 +680,7 @@ cmd_adopt_apply() { # unit [health=/path] [jobs=no] [hold=accept]: start the det
 
 cmd_adopt_run() { # unit health jobs owner (inside its own transient unit)
   need_root
-  local unit=$1 health=$2 jobs=$3 owner=${4:-root} t t0 id rel n tm f l dt pid digest stage=check
+  local unit=$1 health=$2 jobs=$3 owner=${4:-root} t t0 id rel n tm rt f l dt pid digest stage=check
   trap '' HUP PIPE
   adopt_scan "$unit" "$health"
   lockfile "$AD/$A/lock"; exec 6>"$AD/$A/lock"; flock -n 6 || exit 1
@@ -821,10 +825,11 @@ cmd_adopt_run() { # unit health jobs owner (inside its own transient unit)
     tm=${J0[$n.timer]}
     sync_jobs_one "$n" || afail 5 jobs "could not write the job $n"
     J0[$n.handed]=${J0[$n.paused]}; rec_save
-    timer_resume "tando-$A-job-$n.timer" yes "${J0[$n.cal]}" "${J0[$n.paused]}" yes ||
-      afail 5 jobs "could not start tando-$A-job-$n.timer"
-    systemctl -q is-active "tando-$A-job-$n.timer" && ! systemctl -q is-active "$tm" ||
-      afail 5 jobs "timer handoff $tm -> tando-$A-job-$n.timer did not settle"
+    rt=$(job_unit "$n").timer
+    timer_resume "$rt" yes "${J0[$n.cal]}" "${J0[$n.paused]}" yes ||
+      afail 5 jobs "could not start $rt"
+    systemctl -q is-active "$rt" && ! systemctl -q is-active "$tm" ||
+      afail 5 jobs "timer handoff $tm -> $rt did not settle"
   done
   ap_step 5 jobs ok "$(el "$t")" "${#JOBS[@]} timers handed over${JOBS[*]:+: ${JOBS[*]}}"
 
@@ -842,11 +847,12 @@ cmd_adopt_run() { # unit health jobs owner (inside its own transient unit)
 
 # one job's units, not enabled (the handoff enables it; sync_jobs would start them all at once)
 sync_jobs_one() { # name
-  local n=$1 cal f=/etc/systemd/system/tando-$A-job-$1
+  local n=$1 cal f
+  f=/etc/systemd/system/$(job_unit "$1")
   cal=$(trim "${C[job.$n]%%|*}")
   {
     printf '[Unit]\nDescription=tando job %s %s\n\n[Service]\nType=oneshot\n' "$A" "$n"
-    printf 'ExecStart=%s run-job %s %s\nWorkingDirectory=%s/current\n' "$AGENT" "$A" "$n" "$D"
+    printf 'ExecStart=%s run-job %s %s\nWorkingDirectory=%s/current\nTimeoutStartSec=%s\n' "$AGENT" "$A" "$n" "$D" "$JOB_TIMEOUT"
     props - job                     # jobs bind no port at all (SocketBindDeny=any), like the agent's
   } > "$f.service"
   printf '[Unit]\nDescription=tando job timer %s %s\n\n[Timer]\nOnCalendar=%s\nPersistent=true\n' \

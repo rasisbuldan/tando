@@ -166,7 +166,17 @@ Example: `tando env set STRIPE_KEY`
 0-1: the app), run (1: the job).
 The app's scheduled jobs (`job.<name> = <schedule> | <command>` in tando.conf): schedule, next run,
 last run and result. Not retried. `run` runs one now, as the app's user: its output, then
-`job <name>: ok in Ns` or `failed (<result>, exit N)`; tando exits with the job's status.
+`job <name>: ok in Ns` or `failed (<result>, exit N)`; tando exits with the job's status (124
+when it timed out).
+A run may take at most its timeout: `job_timeout = <seconds>` for all of the app's jobs (1 to
+86400; default 3600, one hour) or `job.<name>.timeout = <seconds>` for one. Past it systemd stops
+the job (SIGTERM, SIGKILL 90 s later) and records the result `timeout`: `tando jobs` shows it,
+`run` says `timed out`, and the alert fires like for any failed run. A job that hangs therefore
+ends and is alerted instead of running for ever.
+Each job runs in its own units, `tando-<app>_job-<name>.service` and `.timer` (`_` is in no app or
+job name, so the name is exactly this app's job; before this change they were `tando-<app>-job-<name>`,
+which app `foo-job` shared with app `foo`: `tando host setup` renames them, keeping each timer's
+last run).
 A run that fails is alerted, by its timer or by hand alike: check `job.<name>`, one message per
 failed run, resolved by the job's next success (so `tando jobs run <name>` after a fix clears it);
 a job removed from tando.conf takes its alert with it (docs/MONITORING.md, "Scheduled jobs").

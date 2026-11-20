@@ -387,10 +387,15 @@ func (a *app) units() [][2]string {
 	}
 	slices.Sort(jobs)
 	for _, j := range jobs {
-		u = append(u, [2]string{"tando-" + a.name + "-job-" + j + ".service", "job:" + j})
+		u = append(u, [2]string{jobUnit(a.name, j), "job:" + j})
 	}
 	return u
 }
+
+// jobUnit: the unit of a scheduled job, as the agent names it (job_unit): "_" is in neither an app
+// nor a job name, so the name is exactly this app's job (tando-<app>-job-<name>, the form before,
+// was also the service of an app named <app>-job-<name>).
+func jobUnit(app, job string) string { return "tando-" + app + "_job-" + job + ".service" }
 
 // reJob: a job name as the agent accepts it.
 var reJob = regexp.MustCompile(`^[a-z][a-z0-9-]{0,20}$`)

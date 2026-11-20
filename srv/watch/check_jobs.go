@@ -14,7 +14,10 @@ import (
 )
 
 // Scheduled jobs (job.<name> in tando.conf). The agent writes one oneshot unit per job of the
-// live release, tando-<app>-job-<name>.service, started by its timer or by `tando jobs run`.
+// live release, tando-<app>_job-<name>.service, started by its timer or by `tando jobs run`
+// ("_" is in no app or job name: the unit is exactly this app's job, never another app's unit).
+// A run longer than its timeout (job_timeout, job.<name>.timeout) is ended by systemd with the
+// result "timeout": a failed run like any other.
 // How a job last ended is in systemd, where `tando jobs` reads it too: the unit's ActiveState and
 // Result, the exit status of its process, and when the unit last became inactive or failed
 // (InactiveEnterTimestampMonotonic, which changes with every run that ends: it tells one failed
@@ -36,7 +39,7 @@ import (
 
 var jobNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,20}$`)
 
-func jobUnit(app, job string) string { return "tando-" + app + "-job-" + job + ".service" }
+func jobUnit(app, job string) string { return "tando-" + app + "_job-" + job + ".service" }
 
 // jobsOf: the scheduled jobs of the app, as the agent's jobs_follow decides them: those the live
 // release was deployed with (apps/<app>/jobs/<id>), app.conf's for a release from before that

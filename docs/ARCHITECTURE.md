@@ -121,7 +121,7 @@ appended.
 /var/backups/tando/<app>/<YYYYMMDD-HHMMSS>-<kind>/   data.tar.gz, db.dump, meta (root 700); offsite (its upload state), fetched (came from the bucket)
 /opt/tando/offsite.conf, offsite.key, offsite.id     offsite settings + credentials, recovery keys (root 600), host id (docs/BACKUP.md)
 /var/lib/tando/offsite/state/<app>, host             offsite state per app (for alerts and status) and of the credentials
-/etc/systemd/system/tando-<app>.service, tando-<app>-job-*.{service,timer}, tando-<app>-backup.*
+/etc/systemd/system/tando-<app>.service, tando-<app>_job-*.{service,timer}, tando-<app>-backup.*
 /etc/caddy/tando/<app>.caddy        (all key=value files are written to a temp file and renamed)
 /etc/systemd/journald@tando-<app>.conf, /var/log/journal/<id>.tando-<app>/   the app's own journal
 /var/log/tando/<app>/access.log*, /var/log/tando/audit.log    request log, audit trail

@@ -6,6 +6,36 @@ first, grouped by area.
 
 ## Unreleased
 
+- Security: a deploy no longer finds "another upload" by command line. The agent looked for any
+  process whose command line had `apps/<app>/incoming` in it (`pgrep -f`) and, taking over a
+  stale upload, killed every such process as root (`pkill -KILL -f`): any app could block every
+  deploy of another app by putting that text in its own command line, and the admin's shell or
+  editor with it was killed. An upload's receiver is now the rsync process whose executable is
+  rsync, whose user owns the app's `incoming/` and whose working directory is it (read from
+  `/proc`), or the deploy key's confined unit as before. No change for clients.
+- Security: job units are named `tando-<app>_job-<name>` (was `tando-<app>-job-<name>`). With the
+  old names, a deploy or `host setup` of app `foo` deleted the job timers of app `foo-job`, and
+  app `x-job-y`'s own service had the name of job `y` of app `x`. `tando host setup` (and the next
+  deploy) renames each app's units, recognising its own by the runner line in the unit file, and
+  keeps each timer's last run. Destroy, adopt, `tando jobs`, `jobs run`, `tando logs` and the job
+  alert use the new names; job output from before the rename stays in the journal under the old
+  unit name.
+- Added: `job_timeout = <seconds>` (default 3600) and `job.<name>.timeout`: a job that runs longer
+  is stopped by systemd and reported as timed out (`tando jobs`, `tando jobs run`, the `job.<name>`
+  alert). Before, a hung job ran for ever and was never alerted. Existing jobs get the one hour
+  default with the next `host setup` or deploy: a job that needs longer needs `job_timeout`.
+  `tando jobs` shows the last run whether its timer or `tando jobs run` started it (it showed the
+  timer's only, so a run by hand stayed "never").
+- Security: names that are another app's or tando's own are refused for a new app: `d-<x>` and
+  `m-<x>` (app x's deploy user and settings group), `<x>-backup` (app x's backup unit), `rx-<x>`,
+  `adopt-<x>`, `unadopt-<x>`, and `watch`, `host`, `metrics`, `offsite`, `recover`, `firewall`,
+  `down` (tando's units). Apps that exist keep working; the agent kills or adds to the settings
+  group only a deploy user `tando-d-<app>` that tando-gate made (not app `d-<app>`'s user), and
+  keeps an app's settings root's when `tando-m-<app>` is app `m-<app>`'s user group. Destroying a
+  container app no longer removes another app's `run/<app>-<port>.env` files (`foo` took `foo-2`'s).
+  The upload receivers' old fixed unit name `tando-rx-<app>.service` is app `rx-<app>`'s service:
+  while such an app exists neither the agent nor tando-gate counts it as an upload or stops it.
+
 - Changed: `tando adopt apply` refuses to start when the hand-written Caddy site does not hold
   requests while the app restarts (no `lb_try_duration`), and `tando adopt plan` says what that
   costs and which command adds it. On the first real server 36 requests got 502 because the hold
