@@ -120,6 +120,8 @@ Example: `tando logs -f --grep error -i`
 `tando start|stop|restart [app] [-H host]`. Arguments: 0-1 (the app).
 `start` starts a stopped app; `restart` restarts it; requests are held meanwhile. `stop` stops it:
 visitors get 503 "<app> is stopped" until `start`; jobs stop too; nothing is removed.
+Before an app's first release is live (a first `up` still running, or one that failed and left
+nothing live) its address answers 503 "<app> is being deployed" with `Retry-After: 10`, not 502.
 Example: `tando restart -a shop`
 
 ### top

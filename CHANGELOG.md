@@ -6,6 +6,13 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: between an app's site being set up and its first release going live (a first `tando up`
+  still running, or one that failed and left nothing live), a request to its address waited 15 s
+  and got an empty 502 (and scanners that find a new certificate in the public logs filled the
+  error rate). It now gets an instant 503 "<app> is being deployed" page with `Retry-After: 10`.
+  Caddy checks for the app's `current` link on each request, so the page goes away by itself when
+  the release switches in, adds no Caddy reload and no time to a deploy, and never shows for an
+  app that has a release (a later failed deploy still serves the old one).
 - Added: `tando db studio [app]`: a small web page in your browser for the app's PostgreSQL
   database: the tables (rows, sort, structure, a value in a side panel) and a SQL editor
   (Cmd/Ctrl+Enter, cancel, a result tab per statement, the error's position, CSV, an encrypted
