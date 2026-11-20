@@ -50,6 +50,10 @@ Jobs
   job.<name>      <schedule> | <command>, like daily | node nightly.js
   job_timeout     seconds any job may run, 1-86400 (default 3600)
   job.<name>.timeout  seconds for one job
+Workers (not static, not container)
+  worker.<name>   a command that runs beside the app, like node worker.js
+  worker.<name>.memory  its memory limit (default: memory)
+  worker.<name>.stop_timeout  seconds it may finish its work when stopped, 1-3600 (default 30)
 Domains
   domain          domains, separated by spaces or commas
   www             redirect | serve | off (by name; domain add says why)

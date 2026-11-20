@@ -530,7 +530,7 @@ restart_app() {
 stop_app() {
   write_caddy || return 1
   has_unit || return 0
-  fp svc.disable && systemctl disable -q --now "tando-$A"
+  fp svc.disable && systemctl disable -q --now "tando-$A" && workers_follow
 }
 # lock [secs]: the app's lock (fd 9). While it waits, $D/lock.wait.<pid> says so; once it holds
 # it, $D/lock.holder names the verb. busy_info reports both, so a client tells "my call is
@@ -593,7 +593,8 @@ cur_link() { local l; l=$(readlink "$D/current" 2>/dev/null) || return 0; echo "
 # (The other apps' journal namespaces are closed by journal_dir: their directories are 0750.)
 # ProtectProc=invisible (no other user's processes in /proc: the admin's `tando ssh app -- cmd`,
 # sudo lines, other apps) and ProcSubset=pid (no /proc/meminfo, /proc/sys...): systemd 247+
-SD_PROC=$( (( $(systemctl --version 2> /dev/null | awk 'NR == 1 { print $2 + 0 }') >= 247 )) && echo 1)
+SD_V=$(systemctl --version 2> /dev/null | awk 'NR == 1 { print $2 + 0 }'); [[ $SD_V =~ ^[0-9]+$ ]] || SD_V=0
+SD_PROC=""; ((SD_V >= 247)) && SD_PROC=1
 # the rest of the kernel-facing sandbox (all in systemd 247+, as ProtectProc): no kernel tunables,
 # modules, logs, cgroup writes, clock, hostname, namespaces, realtime, setuid files, personality;
 # native syscalls of @system-service only (a refused one answers EPERM: libuv falls back from
@@ -610,16 +611,25 @@ SD_HARD=()
 # app's slice tando-<app>.slice, under tando.slice: the app's limits hold for all of them together.
 # (The name is escaped: hello-2's slice must not be a child of hello's.) OOMScoreAdjust=500: under
 # memory pressure the kernel kills an app before Caddy, sshd or the agent.
+# size_mb size: 512M, 1G, 65536K -> MB (0 when it is no size)
+size_mb() {
+  [[ $1 =~ ^([0-9]+)([KMG])$ ]] || { echo 0; return; }
+  case ${BASH_REMATCH[2]} in K) echo $((10#${BASH_REMATCH[1]} / 1024));; M) echo $((10#${BASH_REMATCH[1]}));; G) echo $((10#${BASH_REMATCH[1]} * 1024));; esac
+}
 app_slice() { echo "tando-${A//-/\\x2d}.slice"; }   # (systemd-escape of a name like hello-2)
 write_slice() {
   local mem=${C[memory]:-256M} mb cpu=${C[cpu]:-}
   [[ $mem =~ ^([0-9]+)([KMG])$ ]] || mem=256M
   [[ $mem =~ ^([0-9]+)([KMG])$ ]]; mb=${BASH_REMATCH[1]}
   case ${BASH_REMATCH[2]} in K) mb=$((mb / 1024));; G) mb=$((mb * 1024));; esac
-  # memory: the live app, its pre-flight beside it during a deploy, and a job or shell (3x memory)
+  # memory: the live app, its pre-flight beside it during a deploy, and a job or shell (3x memory),
+  # plus each worker's own cap
+  local n wmb=0
+  [[ " ${!C[*]}" == *" worker."* ]] &&
+    for n in $(worker_names); do wmb=$((wmb + $(size_mb "${C[worker.$n.memory]:-$mem}"))); done
   [[ $cpu == *% ]] || { [[ -n $cpu ]] && cpu=$(awk -v c="$cpu" 'BEGIN { printf "%d%%", c * 100 }'); }
   { printf '[Unit]\nDescription=tando app %s: all its units together\n\n[Slice]\n' "$A"
-    printf 'MemoryMax=%sM\nTasksMax=%s\nCPUWeight=100\n' $((mb * 3)) "${C[tasks]:-1024}"
+    printf 'MemoryMax=%sM\nTasksMax=%s\nCPUWeight=100\n' $((mb * 3 + wmb)) "${C[tasks]:-1024}"
     [[ -n $cpu ]] && printf 'CPUQuota=%s\n' "$cpu"
   } | write_if_changed "/etc/systemd/system/$(app_slice)"
 }
@@ -1126,6 +1136,7 @@ switch_to() {
   SW_MOVED=0
   if [[ -z $1 ]]; then
     systemctl stop "tando-$A"; rm -f "$D/current" "$D/live"; st current ""
+    workers_follow
     return
   fi
   assets_link "$1" || echo "tando-agent: the fingerprinted files of release $1 could not all be shared; the app answers them" >&2
@@ -1402,9 +1413,9 @@ prune() {
 # soak_why: how the app fell over in the soak, for the history note, the client and the alert:
 # "it exited with status 1", "the kernel killed it (out of memory, memory = 128M)", "it died from
 # signal SEGV"; "it went down (restart, crash or out of memory)" when systemd has started it again
-soak_why() {
+soak_why() { # [unit, default the app's]
   local -A U=() ; local l
-  while IFS= read -r l; do U[${l%%=*}]=${l#*=}; done < <(systemctl show -p Result,ExecMainCode,ExecMainStatus "tando-$A" 2> /dev/null)
+  while IFS= read -r l; do U[${l%%=*}]=${l#*=}; done < <(systemctl show -p Result,ExecMainCode,ExecMainStatus "${1:-tando-$A}" 2> /dev/null)
   case ${U[Result]:-}:${U[ExecMainCode]:-} in
     oom-kill:*) echo "the kernel killed it (out of memory, memory = ${C[memory]:-256M})";;
     exit-code:*|*:1) [[ ${U[ExecMainStatus]:-} =~ ^[0-9]+$ ]] && echo "it exited with status ${U[ExecMainStatus]}" && return
@@ -1422,8 +1433,23 @@ finish() { # kind [note]
   if ! fp fin.verify; then PROBE_WHY="health check failed (test fault)"
   elif via_caddy "$(app_unit)"; then ok=1
   elif ! systemctl -q is-active caddy && caddy_up && via_caddy "$(app_unit)"; then ok=1; fi
+  # the workers follow once the web process answers (old ones stop, the release's start); they
+  # are watched with it from here on (wb: their restart counts now)
+  local wb=""
+  if ((ok)); then
+    if ! { fp fin.workers && workers_follow; }; then ok=0; PROBE_WHY=${WF_WHY:-the workers could not be started}
+    elif ((${#WK_UNITS[@]})); then wb=$(wk_state "${WK_UNITS[@]}"); fi
+  fi
   # soak: the release must stay up for a while; a crash or an OOM kill in the window rolls back
   soak=${C[soak]:-${H[soak]:-$SOAK}}
+  if ((ok)) && [[ -n $wb ]] && { [[ $kind != deploy ]] || ((soak == 0)); }; then
+    # (no soak: the new workers must still stay up WORKER_SETTLE seconds)
+    local wend; mono; wend=$((MONO + WORKER_SETTLE))
+    while mono; ((MONO < wend)); do
+      sleep 1
+      workers_ok "$wb" || { ok=0 soaked=1; PROBE_WHY="$WF_WHY, after going live"; break; }
+    done
+  fi
   if ((ok)) && [[ $kind == deploy ]] && has_unit && ((soak > 0)); then
     pg t_verify "$(el "$t")" phase soak soak "$soak" soak_end $(($(now) + soak))
     n0=$(systemctl show -P NRestarts "tando-$A")
@@ -1437,6 +1463,9 @@ finish() { # kind [note]
       if ! fp fin.soak || [[ $n =~ ^[0-9]+$ && $n != "$n0" ]] ||
          { ! systemctl -q is-active "tando-$A" && [[ $(systemctl show -P ActiveState "tando-$A") =~ ^(failed|inactive|activating|deactivating)$ ]]; }; then
         mono; ok=0 soaked=1; PROBE_WHY="$(soak_why), $((soak - end + MONO)) s after going live"; break
+      fi
+      if [[ -n $wb ]] && ! workers_ok "$wb"; then
+        mono; ok=0 soaked=1; PROBE_WHY="$WF_WHY, $((soak - end + MONO)) s after going live"; break
       fi
     done
   fi
@@ -1475,6 +1504,8 @@ revert() { # kind why [note] [soaked 0|1] [result: rolledback, or failed when it
     fi
   elif [[ -z ${S[prev]:-} ]]; then switch_to ""      # a first deploy: nothing to go back to
   fi
+  # the fallback's workers (or none: stopped, nothing to go back to)
+  if ((back)) && ! { fp bad.workers && workers_follow; }; then back=0; WC_WHY=$WF_WHY; fi
   if ((!back)); then
     # going back did not work this time (a full disk, a unit that would not start): nothing is
     # committed; the phase stays (rollback, reverting) and recover tries again (this activation's
@@ -1532,12 +1563,10 @@ busy_info() {
   echo "busy_by=$(lock_holder)"
 }
 cmd_busy() { need_root; app "$1"; busy_info; }
-# lock_busy file: a process holds a flock on it. Read from /proc/locks (by inode: see lock.Held in
-# srv/internal/lock): the probe takes no lock, so it never delays a verb or makes recover skip
-lock_busy() {
-  local i; i=$(stat -c %i "$1" 2> /dev/null) || return 1
-  grepq -E "^[0-9]+: FLOCK +[A-Z]+ +[A-Z]+ +[0-9]+ +[0-9a-f]+:[0-9a-f]+:$i " /proc/locks
-}
+# lock_busy file: a process holds it exclusively. The probe takes a shared lock for an instant
+# (lock.Held in srv/internal/lock): probes never see each other as busy, and a verb's own try in
+# that instant only waits for it to drop. (/proc/locks leaves out locks taken through flock(1).)
+lock_busy() { [[ -f $1 && ! -L $1 ]] && ! flock -n -s "$1" true 2> /dev/null; }
 
 # ---- upload lease: one upload into incoming/ at a time ----------------------------------
 
@@ -2208,7 +2237,7 @@ cmd_runtime() { # runtime [version]: install a runtime an app needs (tando up as
 # doctor <client agent checksum>: rows "check <state> <name> <detail>", state ok|warn|fail
 cmd_doctor() {
   load "$R/host.conf" H
-  local mine a n=0 bad=() caps=0 mt=0 k v used avail pct
+  local mine a n=0 bad=() caps=0 mt=0 k v used avail pct wv
   # each installed piece against the client's copy (checksums: agent, gate, logs, metrics, watch, status, tandod)
   local name file want version cver=${6:-}
   version=$(cat "$R/VERSION" 2> /dev/null || echo unknown)
@@ -2406,6 +2435,11 @@ cmd_doctor() {
     v=$(sed -n 's/^memory=//p' "$R/apps/$a/app.conf")
     case $v in *G) caps=$((caps + ${v%G} * 1073741824));; *M) caps=$((caps + ${v%M} * 1048576));;
       *K) caps=$((caps + ${v%K} * 1024));; esac
+    # and its workers' (worker.<name>.memory, else the app's memory)
+    for wv in $(awk -F= -v m="${v:-256M}" '$1 ~ /^worker\.[^.]+$/ { w[$1] = m } $1 ~ /^worker\..*\.memory$/ { sub(/\.memory$/, "", $1); x[$1] = $2 }
+        END { for (k in w) print (k in x ? x[k] : w[k]) }' "$R/apps/$a/app.conf"); do
+      caps=$((caps + $(size_mb "$wv") * 1048576))
+    done
   done
   [[ -x $R/bin/tando-offsite ]] && "$R/bin/tando-offsite" doctor   # offsite backups (docs/BACKUP.md)
   if [[ -x $R/bin/tando-watch ]]; then "$R/bin/tando-watch" doctor
@@ -2449,7 +2483,7 @@ cmd_configure() {
   A=$1 D=$R/apps/$1
   load "$R/host.conf" H
   [[ -n ${H[port_min]:-} ]] || die "host not set up (tando host setup)"
-  local k v new=0 jobs=() owner="${SUDO_USER:-root}" f p used=" " parts check=0 origin="" force=0 confdom="" confwww="" x
+  local k v new=0 jobs=() workers=() owner="${SUDO_USER:-root}" f p used=" " parts check=0 origin="" force=0 confdom="" confwww="" x
   # the settings first; then, for an existing app, its lock before app.conf is read: a domain add
   # or another configure in between would otherwise be overwritten by this one's stale copy
   local input; input=$(cat)
@@ -2538,6 +2572,18 @@ cmd_configure() {
       job.*) [[ ${k#job.} =~ ^[a-z][a-z0-9-]{0,20}$ && $v == *'|'* ]] || die "bad job: $k"
              systemd-analyze calendar "$(trim "${v%%|*}")" &> /dev/null || die "bad schedule for job ${k#job.}: $(trim "${v%%|*}")"
              jobs+=("$k");;
+      # workers (workers_follow): a command each, its memory and the time it gets to stop
+      worker.*.memory|worker.*.stop_timeout)
+             x=${k#worker.}; x=${x%.*}
+             [[ $x =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "bad worker name: $x (lower case letters, digits and -, at most 21)"
+             if [[ $k == *.memory ]]; then [[ $v =~ ^[1-9][0-9]*[KMG]$ ]] || die "bad $k: $v (a size like 256M)"
+             else [[ $v =~ ^[1-9][0-9]{0,3}$ ]] && ((v <= 3600)) || die "bad $k: $v (seconds, 1 to 3600)"; fi
+             workers+=("$k");;
+      worker.*) x=${k#worker.}
+             [[ $x == *.* ]] && die "unknown setting: $k (a worker has .memory and .stop_timeout)"
+             [[ $x =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "bad worker name: $x (lower case letters, digits and -, at most 21)"
+             [[ -n $v && ${#v} -le 1000 ]] || die "bad $k: a command, at most 1000 characters"
+             workers+=("$k");;
       # check=1: only validate and say whether the app exists (before a build); origin: where the
       # client deploys from (user@machine:directory), force=1: deploy although it differs
       check) check=1; continue;;
@@ -2561,6 +2607,20 @@ cmd_configure() {
   for k in "${jobs[@]}"; do   # a timeout is for a job of this tando.conf
     [[ $k != *.timeout || " ${jobs[*]} " == *" ${k%.timeout} "* ]] || die "$k is set but there is no ${k%.timeout}"
   done
+  # workers: their settings need the worker; a name is a job's or a worker's; not every recipe
+  for k in ${workers[@]+"${workers[@]}"}; do
+    x=${k#worker.}; x=${x%%.*}
+    [[ $k == worker.*.* && " ${workers[*]} " != *" worker.$x "* ]] && die "$k is set but there is no worker.$x = <command>"
+    [[ " ${jobs[*]} " == *" job.$x "* ]] && die "worker $x has the name of a job: give one of them another name"
+  done
+  if ((${#workers[@]})); then
+    case ${C[recipe]:-node} in
+      static) die "workers are not supported for a static site: it has no process (recipe = static)";;
+      container) die "workers are not supported for recipe = container yet: run the process in its own app";;
+    esac
+    x=0; for k in "${workers[@]}"; do [[ $k == *.* && $k != worker.*.* ]] && x=$((x + 1)); done
+    ((x <= 20)) || die "$x workers: at most 20 per app"
+  fi
   if [[ -n $origin && -n ${C[origin]:-} && ${C[origin]} != "$origin" ]] && ((!force)); then
     die "$A on <host> was last deployed from ${C[origin]}, not from here ($origin). Deploy from here anyway: tando deploy --force (or tando up --force)"
   fi
@@ -2634,6 +2694,7 @@ cmd_configure() {
   fi
   for k in "${!C[@]}"; do   # drop jobs (and their timeouts) no longer configured
     [[ $k == job.* && " ${jobs[*]} " != *" $k "* ]] && unset "C[$k]"
+    [[ $k == worker.* && " ${workers[*]-} " != *" $k "* ]] && unset "C[$k]"   # (workers too)
   done
   [[ ${C[database]:-} == sqlite && -z ${C[data]:-} ]] && C[data]=data   # the file lives in data/
   if [[ -z ${C[backup]:-} && ( -n ${C[data]:-} || -n ${C[database]:-} ) ]]; then C[backup]=daily; fi
@@ -3306,7 +3367,7 @@ recover_locked() {
       if [[ -f $D/env.next || -f $D/env.prev ]]; then env_finish > /dev/null
       else rm -f "$D/.env.check"; st phase idle env_revert ""; fi;;
     stop) S[stopped]=1; stop_app || unset "S[stopped]"; st phase idle;;
-    start|restart) restart_app; st phase idle;;
+    start|restart) restart_app && workers_follow all; st phase idle;;
     destroy) return 0;;      # a destroy cut short: tando destroy again finishes it, nothing here
     *) st phase idle;;
   esac
@@ -3407,6 +3468,7 @@ rec_service() {
          systemctl -q is-enabled "tando-$A" 2> /dev/null || systemctl enable -q "tando-$A";;
     esac
   fi
+  workers_follow || echo "tando-agent: $WF_WHY" >&2
   return 0
 }
 # journalctl option for the app's namespace (plus the main journal), once it has one
@@ -3769,9 +3831,10 @@ cmd_backup_restore() {
   recover; lock 300
   load "$D/state" S
   # on failure: start the app again and say where the data before the restore is
-  rfail() { [[ -n ${S[current]:-} ]] && restart_app; die "$1 (the previous data is in backup $safety)"; }
-  systemctl stop "tando-$A"
-  safety=$(backup_take safety) || { restart_app; die "could not take the safety backup; nothing restored"; }
+  rfail() { [[ -n ${S[current]:-} ]] && restart_app && workers_follow all; die "$1 (the previous data is in backup $safety)"; }
+  # (its workers too: nothing of the app writes while its data is replaced)
+  systemctl stop "tando-$A" "tando-${A}_worker-*"
+  safety=$(backup_take safety) || { restart_app; workers_follow all; die "could not take the safety backup; nothing restored"; }
   echo "safety=$safety"
   if [[ -f $dir/data.tar.gz ]] && [[ -n ${C[data_dir]:-} ]]; then
     # an adopted app's own data directory: emptied and refilled as its user (its rights only)
@@ -3809,6 +3872,7 @@ cmd_backup_restore() {
   fi
   [[ -n ${S[current]:-} ]] || { echo healthy=1; return; }
   restart_app
+  workers_follow all || echo "tando-agent: $WF_WHY" >&2
   if via_caddy "$(app_unit)"; then echo healthy=1; else echo healthy=0; fi
 }
 
@@ -4370,6 +4434,7 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
     echo "database=${C[database]:-}"
     echo "backups=$(find "$BK/$A" -mindepth 1 -maxdepth 1 2> /dev/null | grep -c .)"
     echo "jobs=$(job_names | grep -c .)"
+    echo "workers=$(worker_names | grep -c .)"
     echo "final=$(has_backup_data && echo 1 || echo 0)"
     return 0
   fi
@@ -4378,7 +4443,7 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
   st phase destroy      # (recover leaves the app alone from here: it is going)
   # (no user any more: an earlier destroy got that far, after its final backup)
   if [[ $purge != purge ]] && has_backup_data && id "$AU" &> /dev/null; then
-    systemctl stop "tando-$A"
+    systemctl stop "tando-$A" "tando-${A}_worker-*"
     # (the app runs again when nothing is removed)
     id=$(backup_take final) || { st phase idle; [[ -z ${S[stopped]:-} && -n ${S[current]:-} ]] && restart_app
       die "final backup failed; nothing removed (use --purge to skip it)"; }
@@ -4387,7 +4452,8 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
   # this app's units only: app names may contain "-", so tando-<app>-* would also match hello-2's
   local units=() u
   while IFS= read -r u; do units+=("$u"); done < <(app_units)
-  for u in "${units[@]}"; do [[ $u == *.timer ]] && systemctl disable -q --now "$u" 2> /dev/null; done
+  # (timers and workers are enabled: their links in *.wants go with them)
+  for u in "${units[@]}"; do [[ $u == *.timer || $u == tando-"$A"_worker-*.service ]] && systemctl disable -q --now "$u" 2> /dev/null; done
   systemctl disable -q --now "tando-$A.service" 2> /dev/null
   # every unit of the app, running jobs and transients included, then every process of its user
   ((${#units[@]})) && { systemctl stop "${units[@]}" 2> /dev/null; systemctl kill -s KILL "${units[@]}" 2> /dev/null; }
@@ -4540,7 +4606,7 @@ cmd_status() {
   # one systemctl call for all apps; blocks are separated by empty lines
   while IFS= read -r l; do
     if [[ -n $l ]]; then U[${l%%=*}]=${l#*=}; continue; fi
-    ( A=${names[i]} D=$R/apps/${names[i]}; load "$D/app.conf" C; load "$D/state" S; app_row U )
+    ( A=${names[i]} D=$R/apps/${names[i]}; load "$D/app.conf" C; load "$D/state" S; app_row U; worker_rows )
     U=(); i=$((i + 1))
   done < <(systemctl show -p ActiveState,MemoryMax,CPUUsageNSec,NRestarts \
              -p ActiveEnterTimestampMonotonic "${units[@]}"; echo)
@@ -4806,6 +4872,7 @@ env_finish() {
   [[ -f $D/env.next ]] && mv -f "$D/env.next" "$D/env"
   # (a restart that failed leaves the old process answering: its answer says nothing of the env)
   if restart_app && fp env.verify && via_caddy "$(app_unit)"; then
+    workers_follow all || echo "tando-agent: $WF_WHY" >&2      # (the workers on the new env too)
     envlog_commit; rm -f "$D/env.prev"; st phase idle env_revert ""; return 0
   fi
   ENV_WHY=${PROBE_WHY:-the app could not be restarted (${WC_WHY:-systemctl restart failed})}
@@ -4921,6 +4988,7 @@ cmd_svc() { # start|stop|restart app
   fi
   st phase "$1" || die "could not save the state"
   if ! restart_app; then st phase idle; die "${WC_WHY:-systemctl $1 failed}"; fi
+  workers_follow all || echo "tando-agent: $WF_WHY" >&2
   st phase idle
   fp svc.check
   if via_caddy "$(app_unit)"; then echo healthy=1; else echo healthy=0; fi
@@ -5081,6 +5149,7 @@ conf_key() {
     health|path|data|writable|backup|database|db_statement_timeout|db_idle_tx_timeout|db_temp_limit|\
     memory|health_timeout|soak|cpu|tasks|max_conns|max_requests|stop_timeout|hold|log_max|log_keep|\
     log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|assets|job.*) return 0;;
+    log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|job.*|worker.*) return 0;;
   esac
   return 1
 }
@@ -5306,6 +5375,199 @@ cmd_jobs() {
   done
 }
 
+# ---- workers ------------------------------------------------------------------------------------
+#
+# worker.<name> = <command> in tando.conf: a long-running process beside the web one (a queue
+# consumer, a websocket server, a scheduler). Each is its own unit tando-<app>_worker-<name>.service
+# ("_" is in neither an app nor a worker name, and "_worker-" is not "_job-": a unit name says
+# exactly whose worker it is), in the app's slice, as the app's user, with the sandbox, env file
+# and working directory (the release) of the web unit, no port, not in Caddy. Its command runs
+# with sh -c when it has shell syntax, else as its words (exec-worker: the release's own
+# settings, start/<id>). Settings per worker:
+# worker.<name>.memory (default: the app's memory) and worker.<name>.stop_timeout (seconds SIGTERM
+# gets before SIGKILL, default WORKER_GRACE). Restart=always with a backoff and no start limit: a
+# worker that keeps crashing is restarted for ever (status, ls and the worker alert say so) and
+# never takes the web process down. Not for static sites, not for containers (v1).
+#
+# Lifecycle: the workers that run are always those of the release `current` points at
+# (workers_follow, one idempotent step). At a deploy or a rollback they follow once the web
+# process passed its check through Caddy (finish): old workers stop gracefully, then the new ones
+# start (one systemctl restart per unit: two generations never run together); the soak (or
+# WORKER_SETTLE seconds without one) watches them with the web process, and a worker that does
+# not stay up fails the release like a web crash (revert: the fallback's workers come back). A
+# deploy whose web check fails never touches the running workers. Every step happens inside an
+# operation's phase, before its end is committed: a crash anywhere is finished by recover, which
+# runs finish or revert again; rec_service makes them follow in idle too (a reboot: the units are
+# enabled and start on the release current points at).
+WORKER_GRACE=30   # seconds a stopping worker may finish its work (worker.<name>.stop_timeout)
+WORKER_SETTLE=3   # seconds new workers must stay up when the operation has no soak (a rollback)
+worker_unit() { echo "tando-${A}_worker-$1"; }   # name -> unit name without .service
+# worker_names [array]: the workers of app.conf (or the array), sorted
+worker_names() {
+  local -n _wn=${1:-C}
+  local k
+  for k in "${!_wn[@]}"; do [[ $k != worker.* || $k == worker.*.* ]] || echo "${k#worker.}"; done | LC_ALL=C sort
+}
+# worker_rows: one row per worker of the live release (app.conf), after its app row (srv/status
+# prints the same): worker <app> <name> <state> <restarts> <memory> <max>. state: systemd's,
+# "restarting" when it crashed and waits for its automatic restart, "stopped" when the app is;
+# memory: anon + shmem of its cgroup; max: its MemoryMax (0: none)
+worker_rows() {
+  [[ " ${!C[*]}" == *" worker."* ]] || return 0
+  local n u l st mem k v max
+  for n in $(worker_names); do
+    u=$(worker_unit "$n").service
+    local -A W=()
+    while IFS= read -r l; do W[${l%%=*}]=${l#*=}; done < <(systemctl show -p ActiveState,SubState,NRestarts,MemoryMax "$u" 2> /dev/null)
+    st=${W[ActiveState]:-inactive}
+    [[ $st == activating && ${W[SubState]:-} == auto-restart ]] && st=restarting
+    [[ -n ${S[stopped]:-} ]] && st=stopped
+    mem=0
+    if [[ -r /sys/fs/cgroup/tando.slice/$(app_slice)/$u/memory.stat ]]; then
+      while read -r k v; do [[ $k == anon || $k == shmem ]] && mem=$((mem + v)); done < "/sys/fs/cgroup/tando.slice/$(app_slice)/$u/memory.stat"
+    fi
+    max=${W[MemoryMax]:-}; [[ $max =~ ^[0-9]+$ ]] || max=0
+    l=${W[NRestarts]:-0}; [[ $l =~ ^[0-9]+$ ]] || l=0
+    row worker "$A" "$n" "$st" "$l" "$mem" "$max"
+  done
+}
+# worker_file array name: the unit file of that worker, as the array's settings say
+worker_file() {
+  local -n _wf=$1
+  local n=$2 mem keep=${C[memory]-} had=${C[memory]+x} rs=""
+  mem=${_wf[worker.$n.memory]:-${_wf[memory]:-256M}}
+  ((SD_V >= 254)) && rs=$'RestartSteps=6\nRestartMaxDelaySec=60\n'
+  printf '[Unit]\nDescription=tando worker %s %s\nAfter=network.target\nStartLimitIntervalSec=0\n\n[Service]\n' "$A" "$n"
+  printf 'ExecStart=%s exec-worker %s %s\nWorkingDirectory=%s/current\n' "$AGENT" "$A" "$n" "$D"
+  printf 'Restart=always\nRestartSec=2\n%sTimeoutStopSec=%s\nSyslogIdentifier=%s\n' "$rs" \
+    "${_wf[worker.$n.stop_timeout]:-$WORKER_GRACE}" "tando-$A-$n"
+  # the job sandbox (no listening socket), with this worker's memory (and Node's heap cap from it)
+  C[memory]=$mem
+  props - job
+  if [[ -n $had ]]; then C[memory]=$keep; else unset "C[memory]"; fi
+  printf '\n[Install]\nWantedBy=multi-user.target\n'
+}
+# worker_runs unit id: it runs release id (or waits for its automatic restart, which starts what
+# current points at: id). The release is the TANDO_RELEASE exec-worker gave it, else its cwd
+worker_runs() {
+  local -A U=(); local l r
+  while IFS= read -r l; do U[${l%%=*}]=${l#*=}; done < <(systemctl show -p ActiveState,SubState,MainPID "$1" 2> /dev/null)
+  case ${U[ActiveState]:-}:${U[SubState]:-} in
+    activating:auto-restart) return 0;;
+    active:*) ;;
+    *) return 1;;
+  esac
+  [[ ${U[MainPID]:-0} =~ ^[1-9][0-9]*$ ]] || return 1
+  r=$(tr '\0' '\n' < "/proc/${U[MainPID]}/environ" 2> /dev/null | sed -n 's/^TANDO_RELEASE=//p' | head -1)
+  [[ -n $r ]] || { r=$(readlink "/proc/${U[MainPID]}/cwd" 2> /dev/null); r=${r#"$D"/releases/}; r=${r%%/*}; }
+  [[ $r == "$2" ]]
+}
+# workers_follow [all]: the worker units become those of the release current points at, each
+# running it; with "all" every one restarts (tando restart, a new env). None runs when the app is
+# stopped or has no release (their units stay, disabled). A worker no longer configured is stopped
+# (its stop_timeout), disabled and removed. Only what differs is touched; an app that has no
+# workers and had none returns at once. Sets WK_UNITS (the units that must run). Returns 1 (WF_WHY)
+# when a unit could not be written or started.
+# shellcheck disable=SC2034  # WC is read by worker_names and worker_file through their namerefs
+workers_follow() {
+  local id u f n changed=0 run=() gone=() off=() want=" "
+  WK_UNITS=() WF_WHY=""
+  # (no worker in the settings and no unit of one: nothing to do, no fork; every recover asks)
+  [[ " ${!C[*]}" == *" worker."* ]] || compgen -G "/etc/systemd/system/tando-${A}_worker-*.service" > /dev/null || return 0
+  id=$(cur_link)
+  local -A WC=()
+  if valid_id "$id" && [[ -r $D/start/$id ]] && grepq -x conf=1 "$D/start/$id"; then load "$D/start/$id" WC
+  else conf_copy C WC; fi
+  local names; names=$(worker_names WC)
+  # (static and container apps have none: their units, if any, go)
+  { has_unit && [[ ${C[recipe]:-node} != container ]]; } || names=""
+  local stopped=${S[stopped]:-}; [[ -n $id ]] || stopped=1
+  for n in $names; do
+    u=$(worker_unit "$n").service f=/etc/systemd/system/$u
+    want+="$n "
+    if ! { fp wk.write && worker_file WC "$n" > "$f.new" && [[ $(tail -1 "$f.new") == WantedBy=multi-user.target ]]; }; then
+      rm -f "$f.new"; WF_WHY="could not write the unit of worker $n (disk full?)"; return 1
+    fi
+    if cmp -s "$f.new" "$f"; then rm -f "$f.new"
+    elif mv -f "$f.new" "$f"; then changed=1; [[ ${1:-} == all ]] || run+=("$u")
+    else rm -f "$f.new"; WF_WHY="could not install the unit of worker $n"; return 1; fi
+    if [[ -n $stopped ]]; then off+=("$u"); else WK_UNITS+=("$u"); fi
+  done
+  for f in /etc/systemd/system/tando-"$A"_worker-*.service; do
+    [[ -f $f ]] || continue
+    u=${f##*/}; n=${u#tando-"$A"_worker-}; n=${n%.service}
+    [[ $want == *" $n "* ]] || gone+=("$u")
+  done
+  # removed ones first, each given its stop_timeout to finish
+  if ((${#gone[@]})); then
+    { fp wk.stop && systemctl disable -q --now "${gone[@]}" 2> /dev/null; } ||
+      { WF_WHY="could not stop worker ${gone[0]#tando-"$A"_worker-}"; return 1; }
+    for u in "${gone[@]}"; do rm -f "/etc/systemd/system/$u"; done
+    systemctl reset-failed "${gone[@]}" 2> /dev/null; changed=1
+  fi
+  ((changed)) && systemctl daemon-reload
+  if ((${#off[@]})); then
+    { fp wk.stop && systemctl disable -q --now "${off[@]}" 2> /dev/null; } || { WF_WHY="could not stop the workers"; return 1; }
+    return 0
+  fi
+  ((${#WK_UNITS[@]})) || return 0
+  if [[ ${1:-} == all ]]; then run=("${WK_UNITS[@]}")
+  else
+    for u in "${WK_UNITS[@]}"; do
+      [[ " ${run[*]} " == *" $u "* ]] || worker_runs "$u" "$id" || run+=("$u")
+    done
+  fi
+  # one call: systemd stops each old process (its stop_timeout) and then starts the new one, all
+  # workers at once (a deploy waits for the slowest stop, not for their sum)
+  if ((${#run[@]})); then
+    systemctl reset-failed "${run[@]}" 2> /dev/null
+    { fp wk.start && systemctl restart "${run[@]}"; } || { WF_WHY="the workers could not be started (systemctl restart failed)"; return 1; }
+  fi
+  local todo=()
+  for u in "${WK_UNITS[@]}"; do systemctl -q is-enabled "$u" 2> /dev/null || todo+=("$u"); done
+  ((${#todo[@]})) && { systemctl enable -q "${todo[@]}" 2> /dev/null || { WF_WHY="could not enable the workers"; return 1; }; }
+  return 0
+}
+# wk_state units...: "<unit> <ActiveState>/<SubState> <NRestarts>" per unit
+wk_state() {
+  (($#)) || return 0
+  systemctl show -p Id,ActiveState,SubState,NRestarts "$@" 2> /dev/null | awk -F= '
+    $1 == "Id" { u = $2 } $1 == "ActiveState" { s = $2 } $1 == "SubState" { ss = $2 } $1 == "NRestarts" { n = $2 }
+    /^$/ { if (u != "") print u, s "/" ss, n; u = "" } END { if (u != "") print u, s "/" ss, n }'
+}
+# workers_ok base: every worker in WK_UNITS runs and was not restarted since base (wk_state's
+# output then); WF_WHY names the first that is not. An empty answer (systemd busy) counts as up.
+workers_ok() {
+  local u s n b
+  while read -r u s n; do
+    [[ -n $u ]] || continue
+    b=$(awk -v u="$u" '$1 == u { print $3 }' <<< "$1")
+    if [[ ${s%/*} != active || ( $n =~ ^[0-9]+$ && $b =~ ^[0-9]+$ && $n != "$b" ) ]]; then
+      n=${u#tando-"$A"_worker-}; WF_WHY="worker ${n%.service}: $(soak_why "$u")"; return 1
+    fi
+  done < <(wk_state "${WK_UNITS[@]}")
+  return 0
+}
+
+# exec-worker <app> <name>: runs as the app user inside the worker's unit, in the release current
+# pointed at when it started; the command comes from that release's own settings (start/<id>)
+cmd_exec_worker() {
+  app "$1"
+  local n=${2:-} rid
+  rid=$(pwd -P); rid=${rid##*/}
+  valid_id "$rid" || die "no release"
+  rel_conf "$rid"
+  local cmd=${C[worker.$n]:-}
+  [[ -n $cmd ]] || die "release $rid has no worker ${n//[^a-z0-9-]/?}"
+  [[ ${C[recipe]:-node} == python && -d $PWD/.venv ]] && export VIRTUAL_ENV=$PWD/.venv PATH="$PWD/.venv/bin:$PATH"
+  export TANDO_RELEASE=$rid TANDO_WORKER=$n
+  # shell syntax: sh -c; else the words themselves, so the worker is the unit's main process and
+  # gets its stop signal once, from systemd
+  case $cmd in *[\|\&\;\<\>\$\`\"\'\(\)\*\?\~\{\}\#\\]*) exec /bin/sh -c "$cmd";; esac
+  local argv; read -ra argv <<< "$cmd"
+  exec "${argv[@]}"
+}
+
 # ---- dispatch ------------------------------------------------------------------------------
 
 verb=${1:-}
@@ -5365,6 +5627,7 @@ case $verb in
     fi
     exec "$LOGS" "$verb" "$@";;
   exec-app) cmd_exec_app "$@";;
+  exec-worker) cmd_exec_worker "$@";;
   exec-release) cmd_exec_release "$@";;
   run-job) cmd_run_job "$@";;
   jobs) cmd_jobs "$@";;

@@ -102,9 +102,9 @@ Read verbs run through sudo for the admin and as the deploy user for a CI key (v
 Every mutating verb writes one audit line (`tando audit`). Internal
 (run by systemd): `run-activation`, `recover-all`, `exec-app` (as the app user; as root for
 containers), `container-stop`, `app-down` (tando-down@ when a unit has failed), `run-job` (as the
-app user), `backup-run daily`. `info` prints `version` (from /opt/tando/VERSION), `arch`, `libc`,
+app user), `exec-worker <app> <name>` (as the app user, in a worker's unit), `backup-run daily`. `info` prints `version` (from /opt/tando/VERSION), `arch`, `libc`,
 `apps_domain`, `tls`, `sum` (agent checksum), `podman`, `python`. Output: `key=value` lines, or tab-separated rows whose first field names the row type (`host`,
-`app`, `rel`, `hist`, `env`, `job`, `backup`, `check`); empty fields are `-`. New fields are only
+`app`, `worker`, `rel`, `hist`, `env`, `job`, `backup`, `check`); empty fields are `-`. New fields are only
 appended.
 
 ## Server state
@@ -126,7 +126,7 @@ appended.
 /var/backups/tando/<app>/<YYYYMMDD-HHMMSS>-<kind>/   data.tar.gz, db.dump, meta (root 700); offsite (its upload state), fetched (came from the bucket)
 /opt/tando/offsite.conf, offsite.key, offsite.id     offsite settings + credentials, recovery keys (root 600), host id (docs/BACKUP.md)
 /var/lib/tando/offsite/state/<app>, host             offsite state per app (for alerts and status) and of the credentials
-/etc/systemd/system/tando-<app>.service, tando-<app>_job-*.{service,timer}, tando-<app>-backup.*
+/etc/systemd/system/tando-<app>.service, tando-<app>_job-*.{service,timer}, tando-<app>_worker-*.service, tando-<app>-backup.*
 /etc/caddy/tando/<app>.caddy        (all key=value files are written to a temp file and renamed)
 /etc/systemd/journald@tando-<app>.conf, /var/log/journal/<id>.tando-<app>/   the app's own journal
 /var/log/tando/<app>/access.log*, /var/log/tando/audit.log    request log, audit trail
@@ -165,6 +165,38 @@ command from app.conf). A failure, a timeout (`RuntimeMaxSec`) or an interruptio
 phase `release` stops the unit) ends like a failed pre-flight: bad, current untouched. Nothing is
 restored. Its seconds are `t_release` in the activation file and a 13th field of the deploy's
 history line (docs/COMMANDS.md, "The release command").
+
+### Workers
+
+`worker.<name> = <command>` (docs/CONFIG.md, "Workers") is one unit per worker,
+`tando-<app>_worker-<name>.service` (`_` is in no app or worker name and `_worker-` is not `_job-`:
+the name is exactly this app's worker; `app_units` enumerates them for destroy). The unit has the
+job sandbox (`props - job`: the app's user, env file, slice, no listening socket) with the
+worker's own MemoryMax, `WorkingDirectory=<app>/current`, `exec-worker` (the command from
+`start/<id>` of the release its cwd is in; it exports `TANDO_RELEASE` and `TANDO_WORKER`),
+`Restart=always` with a backoff and no start limit (never "failed", never tando-down@: the web
+process is not touched), `TimeoutStopSec` = `worker.<name>.stop_timeout` (30), enabled.
+
+One idempotent step, `workers_follow`, makes the workers those of the release `current` points
+at: unit files written (only what differs), removed workers stopped (their stop time), disabled
+and deleted, every worker not running that release (`TANDO_RELEASE` of its main process) restarted
+in one `systemctl restart` (per unit: the old process stops, then the new one starts: two
+generations never run together), none when the app is stopped. It runs:
+
+- in `finish` (deploy, rollback, and recover's re-run of either), after the web process passed its
+  check through Caddy and before the soak; the soak (or 3 s when there is none: a rollback, `soak
+  = 0`) watches the workers' NRestarts and ActiveState with the web unit's, and a worker that does
+  not stay up fails the release (`revert`). A release whose web check fails never touches the
+  workers that run;
+- in `revert`, after the fallback's web process is back and before the end is committed (its
+  workers come back; a failure leaves the phase for recover to retry);
+- in `stop_app`, `rec_service` (every idle recover: a reboot, a worker the machine missed),
+  `start`/`restart`/`env set` (all restarted), a backup restore (stopped first) and `switch_to ""`.
+
+Every call happens inside an operation's phase, before its `end_op`: a kill or a reboot at any
+point is finished by recover running `finish` or `revert` again. Fault points: `wk.write`,
+`wk.stop`, `wk.start`, `fin.workers`, `bad.workers` (the fault matrix's kind `worker` checks that
+the workers that run are exactly the serving release's: invariant 11).
 
 ## Recipes
 | Recipe | Release | Process |
@@ -450,7 +482,7 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
   `tando-<app>.slice` (name escaped, so hello-2's is not under hello's) under `tando.slice`
   (CPUWeight/IOWeight 50: all apps together yield to Caddy, sshd and the agent). The slice caps
   the app's units together: MemoryMax 3x `memory` (the live app, its pre-flight beside it during a
-  deploy, a job or shell), TasksMax `tasks` (1024), CPUQuota `cpu`; each unit keeps its own
+  deploy, a job or shell) plus each worker's memory, TasksMax `tasks` (1024), CPUQuota `cpu`; each unit keeps its own
   MemoryMax `memory`. App units have OOMScoreAdjust=500 (killed before Caddy, sshd, the agent);
   Caddy -500 where tando owns it. Destroy and adopt undo remove the slice. Metrics samples are root's
   (/var/lib/tando/metrics 700; `tando top` reads them through sudo). Restores unpack the data with

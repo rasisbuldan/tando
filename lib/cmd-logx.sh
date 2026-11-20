@@ -2,7 +2,7 @@
 # Sourced by bin/tando (cmd_logs calls logx_logs). bash 3.2.
 #
 #   tando logs [-n N] [-f] [--since T] [--until T] [--grep TEXT [--regex] [-i]] [--level L]
-#              [--release ID | --deploy ID] [--json]
+#              [--release ID | --deploy ID] [--worker NAME] [--json]
 #   tando logs pull <file> [--since T] [--until T] [--grep ...] [--level L] [--json]
 #
 # T is relative (30s, 15m, 2h, 7d, 1w), absolute in the laptop's time zone (2026-11-13,
@@ -67,7 +67,7 @@ lx_err() { strip < "$TMPD/lx.err" | sed -En 's/^tando-(logs|agent): //p' | tail 
 logx_logs() {
   resolve 1
   local i=1 a v nl='
-' fmt=text since="" until="" grep="" mode=fixed icase="" level="" rel="" dep="" pull="" spec n
+' fmt=text since="" until="" grep="" mode=fixed icase="" level="" rel="" dep="" wk="" pull="" spec n
   while [ "$i" -lt "${#ARGS[@]}" ]; do
     a=${ARGS[$i]} v=${ARGS[$((i + 1))]:-}
     case $a in
@@ -81,6 +81,9 @@ logx_logs() {
       --level) level=$(lx_level "$v") || die "bad --level: $v (err, warning, notice, info, debug)"; i=$((i + 2));;
       --release) valid_id "$v" || die "bad release id: $v"; rel=$v; i=$((i + 2));;
       --deploy) valid_id "$v" || die "bad release id: $v"; dep=$v; i=$((i + 2));;
+      --worker) case $v in [a-z]*) ;; *) die "bad worker name: $v";; esac
+                case $v in *[!a-z0-9-]*) die "bad worker name: $v";; esac
+                wk=$v; i=$((i + 2));;
       --json) fmt=json; i=$((i + 1));;   # (kept in ARGS for plugins by bin/tando)
       *) die "logs: unknown argument: $a";;
     esac
@@ -91,6 +94,7 @@ logx_logs() {
     die "--grep cannot contain control characters"
   fi
   [ -n "$rel" ] && [ -n "$dep" ] && die "--release and --deploy cannot be combined"
+  [ -n "$wk" ] && [ -n "$dep" ] && die "--worker and --deploy cannot be combined"
   [ -n "$FOLLOW" ] && [ -n "$rel$pull" ] && die "-f cannot be combined with --release or pull"
   n=$NLINES
   [ -n "$pull" ] && n=all
@@ -103,6 +107,7 @@ logx_logs() {
     [ -n "$level" ] && printf 'level=%s\n' "$level"
     [ -n "$rel" ] && printf 'release=%s\n' "$rel"
     [ -n "$dep" ] && printf 'deploy=%s\n' "$dep"
+    [ -n "$wk" ] && printf 'worker=%s\n' "$wk"
   } > "$spec"
   # on a terminal, say which clock the lines use (never into a pipe or a pulled file)
   [ -z "$pull" ] && [ "$fmt" = text ] && [ -t 1 ] && printf '%s# times in GMT (UTC)%s\n' "$UI_DIM" "$UI_NC"

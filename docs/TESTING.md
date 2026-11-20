@@ -18,9 +18,9 @@ What to run when. [AGENTS.md](../AGENTS.md) has the short version and the rules.
 |---|---|---|---|
 | check | `test/check.sh` | after every edit | on the changed files only: `bash -n` (3.2, and the server's bash for `server/`), lint, gofmt/vet/test of the changed Go packages, the secret scan, and that `test/suites.map` knows the change. No server. |
 | quick | `test/all.sh --tier quick` | before saying a change works | the suites `test/select.sh` maps the changed files to (`test/suites.map`), plus `e2e-trial` as a smoke deploy. Go without the race detector; lint and Go may reuse cached results. A core file, or a file no rule knows, selects every suite. |
-| full | `test/all.sh` | before a push to main and before a tag | every suite, nothing cached, the fault scenarios as four parallel shards (`e2e-faults-q1` to `q4`) and the fault matrix's cells (`e2e-matrix-quick`). The map is not read. |
-| nightly | `test/all.sh --tier nightly` | by hand, when the machine is free for half an hour (not in CI) | full, with the fault scenarios as two chains (`e2e-faults-h1`, `h2`) whose split moves every day, so over a week every scenario runs right after every neighbour. |
-| weekly | `test/all.sh --tier weekly` | by hand, about once a week and before a release that touched deploys (not in CI) | full, with the fault scenarios as one chain (`e2e-faults`) and the 25 s soak on every deploy (`FAULT_SETUP_SOAK=25`): the suite as it was before it was made faster. |
+| full | `test/all.sh` | before a push to main and before a tag | every suite, nothing cached, the fault scenarios as six parallel shards (`e2e-faults-q1` to `q6`) and the fault matrix's quick cells (`e2e-matrix-quick`: node, container, static). The map is not read. |
+| nightly | `test/all.sh --tier nightly` | by hand, when the machine is free for half an hour (not in CI) | full, with the fault scenarios as two chains (`e2e-faults-h1`, `h2`) whose split moves every day, so over a week every scenario runs right after every neighbour; the matrix's weekly cells of the other kinds of app (`e2e-matrix-weekly`). |
+| weekly | `test/all.sh --tier weekly` | by hand, about once a week and before a release that touched deploys (not in CI) | full, with the fault scenarios as one chain (`e2e-faults`) and the 25 s soak on every deploy (`FAULT_SETUP_SOAK=25`): the suite as it was before it was made faster, with every scenario file (`--all`, 49 more than the shards run) and `e2e-matrix-weekly`. |
 
 Why the fault scenarios differ by tier: they are independent by design, but a scenario that leaves
 something behind is only found by the one that runs after it (the upload lease left by a refused
@@ -131,6 +131,7 @@ side and two people (or agents) never break each other's runs:
 |---|---|---|
 | `e2e-cli` | none (ssh/rsync are stubs; all.sh still gives it a server name) | `--help`/`--bogus`/extra arguments for every command of lib/help.txt, typos with the suggested command, the error messages a newcomer meets (E*), `domain add --wait` polling, global flags, `strip`, host setup under /bin/bash 3.2 |
 | `e2e-bootstrap` | the bare image (`TANDO_TEST_BARE=1`), needs `TANDO_TEST_OWNED=1` | empty VM → host setup → up of a static site, hello and Next.js → domains (tls internal, `TANDO_TEST_RESOLVE` fake DNS) → setup again changes nothing → doctor green; prints the empty-VM-to-live-link time |
+| `e2e-workers` | own | workers (`worker.<name>` in tando.conf): one and two workers run the new release as the app's user with its env; a second deploy replaces them (no older process left, the old worker's 5 s graceful stop ends before the new one starts, the worker is its unit's main process); a worker that crashes at start fails the deploy and the old workers run again; rollback (a worker the older release lacks goes); stop, start; env set; status, `logs --worker`; memory and stop_timeout on the unit and in the slice; a removed worker's unit goes; a worker that keeps crashing is restarted and reported while the web process serves; names, settings and recipes refused (client and server); destroy leaves no unit, link or process. About 3 minutes |
 | `e2e-sec2` | own | the attacks of docs/SECURITY-REVIEW-2.md (test/sec2) plus N8/N9/N11/N13 checks, the third review (test/sec2/sec3.sh), and L/J (test/sec2/lease-jobs.sh): an upload found by its receiver, never by a command line; job units of apps alpha, alpha-job, alpha-job-tick kept apart, renamed from the old form by host setup |
 | `e2e-faults` | own, `--memory 2g --cpus 1` | the fault scenarios of docs/FAULT-REVIEW.md (test/faults); the 27 that failed there and the baseline by default, plus m1-m6, a21 (the activation killed while the release command runs; a22, the restart, with `--all`) and n1-n5 (jobs follow the verified release, env revert, same-user upload lease, concurrent domain add, idempotent re-runs and resumed interrupted up/destroy), `--all` for all (about two hours) |
 | `e2e-offsite` | param + a second server (`TANDO_TEST_NAME2`) + an S3 container | offsite backups (docs/BACKUP.md): set/test/status, wrong and revoked credentials, a key that may not delete and a bucket lock (the test's rows, retention left to the bucket), every backup uploaded and encrypted (no plaintext in the bucket), offsite-only restore and pull, a failed upload retried and the alert state file, retention, a 300 MB backup in parts and a push killed mid-way, and the disaster recovery of a PostgreSQL app onto the second server. The S3 target is `srv/offsite/testdata/fakes3` (our own, std lib, it checks every SigV4 signature) in an `ubuntu:24.04` container with TLS, because MinIO's image could not be pulled where it was written; it needs npm (examples/notes) and apt for PostgreSQL. `test/offsite-r2-check.sh` runs the provider subset against a real R2 bucket |
@@ -170,7 +171,7 @@ each on its own server.
 `FAULT_SETUP_SOAK=25`: every deploy soaks 25 s, the suite as it was). `--shard i/K` runs the i-th
 of K chunks of the list, balanced by the scenarios' known durations, s00 first in each;
 `--rotate N` (or `auto`: by the day of the year) rotates the list before it is cut; `--plan`
-prints the chunks and runs nothing. `test/e2e-faults-q1.sh` to `q4.sh` are the four quarters (full
+prints the chunks and runs nothing. `test/e2e-faults-q1.sh` to `q6.sh` are the six shards (full
 and quick tiers), `test/e2e-faults-h1.sh` and `h2.sh` the two halves with `--rotate auto`
 (nightly). The script fails at once when a scenario of the list has no file or would be in no
 shard. Scenarios that need the long soak everywhere say so themselves (n5 compares the settings of
@@ -194,12 +195,12 @@ agent there), fail (that action fails, as on a full disk), reboot (the agent wai
 the next version's tando.conf, then goes on). A trace of the operation without a fault lists its
 points. After the fault,
 recovery runs as on a server (ExecStopPost, then what tando-watch's minute does) and `mx_inv`
-checks eleven invariants and names the one that broke: one intended release serves; link, state and
+checks the invariants and names the one that broke: one intended release serves; link, state and
 app.conf's start and health agree with it; its status; one history line with the right result and
 nothing "running"; idle and the lock free; no leftover unit, lease, temp file or reservation; a
 rollback target exists; stopped stays stopped; data and database untouched; no failed visitor
 request. The node and static apps ship a fingerprinted file per version
-(`assets = assets`; docs/ARCHITECTURE.md "Assets"): the eleventh invariant is that the serving
+(`assets = assets`; docs/ARCHITECTURE.md "Assets"): invariant 12 is that the serving
 release's file answers through Caddy with its bytes and the immutable header, and that no half-made
 link or list is left in the shared directory (the cells `k` kill the activation just before and just
 after the files are linked). `--selftest` breaks each invariant on purpose and expects it named.
@@ -208,14 +209,32 @@ Versions alternate their health path, start command, memory, `max_conns` and a j
 (odd and even), so a unit file, Caddy site, job timer or app.conf left with the other version's
 settings is named (inv2).
 
-`test/e2e-matrix-quick.sh` (full and quick tiers, about 6 minutes) runs `--cells`: one cell for
-each defect fixed in milestone 1 and 2a (the list `CELLS` in the driver: two clients' settings,
-nothing of a deploy that does not go live reaching the live app, job units that could not be
-written, a queue that gave up, a site file that was not replaced), node and the container
-recipe's switch failure. The rest only by name: `test/e2e-matrix.sh --ops deploy,rollback
---actions kill --points '(^|/)(pre|post):'` (a kill at every state write of a deploy and a
-rollback), or any `--ops`, `--actions`, `--kind`, `--quick`. Not covered: a real power cut (a
-container keeps the page cache) and a real reboot.
+`--kind worker` gives the app workers (odd versions `a` and `b`, even ones `a` only) and adds
+invariant 11: the workers that run are exactly the serving release's, each running it, enabled;
+none when the app is stopped (`--selftest` breaks it twice: a worker stopped behind tando's back,
+a stray worker unit).
+
+`test/e2e-matrix-quick.sh` (full and quick tiers, about 8 minutes) runs `--cells`: one cell for
+each defect fixed in milestone 1, 2a and 2b (the list `CELLS` in the driver: two clients' settings, nothing of a deploy that does not go live reaching the live app, job units that could not be written, a queue that gave up, a site file that was not replaced, a rollback cut before its first state write), node; two cells of
+the container recipe (the switch failure, a kill at its spawn) and two of a static site (a kill at
+Caddy's file site, after the link moved), and for the kind `worker` a kill in the middle of the
+workers' switch (`wk.start`) and a failed start of the old workers when a bad release goes back
+(`bad.workers`). `test/e2e-matrix-weekly.sh` (nightly and weekly tiers,
+about 15 minutes) runs `--weekly` for static, container, python and next: the cells of each kind's
+`WEEKLY_CELLS`, the points where its path differs from node's. Everything else only by name:
+`test/e2e-matrix.sh --ops deploy,rollback --actions kill --points '(^|/)(pre|post):'` (a kill at
+every state write of a deploy and a rollback), or any `--kind`, `--ops`, `--actions`, `--quick`.
+Not covered: a real power cut (a container keeps the page cache) and a real reboot.
+
+The grid of each kind was run in milestone 2b: static in full (deploy, deploy-pre, rollback: 274
+cells, kill, fail and reboot at every point), container (deploy and deploy-bad: 204 cells; its
+rollback and restart not yet), python and next (deploy and deploy-bad at the `--quick` points,
+kill and fail: 50 cells each, all passed). What did not
+pass is either fixed or listed in `MX_KNOWN` in the driver with the invariant and the reason: such a
+cell prints as `SKIP KNOWN failure ...`, and fails when it starts to pass (remove it from the list
+then). One class is known: an agent killed after it took the upload lease and before the lease got
+its release id leaves the lease (invariant 6); it is stale after 30 s (5 s for the same
+user@machine asking again), `tando unlock` clears it, recovery does not. (A failed write of app.conf inside `start_back` was a second known class; state machine 2a fixed it and its cells pass.)
 
 ### The alerts suites
 

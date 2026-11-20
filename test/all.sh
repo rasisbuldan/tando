@@ -4,7 +4,7 @@
 #   test/all.sh                      the full tier: every suite (docs/TESTING.md, "Tiers")
 #   test/all.sh --tier quick         only the suites the changed files can break (test/suites.map),
 #                                    plus one smoke deploy; --base REF or --files a b choose the change
-#   test/all.sh --tier full          every suite; the fault scenarios as four parallel shards
+#   test/all.sh --tier full          every suite; the fault scenarios as six parallel shards
 #   test/all.sh --tier nightly       full, the fault scenarios as two chains split at a place that
 #                                    moves every day
 #   test/all.sh --tier weekly        full, the fault scenarios as one chain with the long soak
@@ -157,15 +157,17 @@ for f in test/ui-test.sh test/lint.sh test/go.sh test/install-test.sh test/e2e.s
   ALL+=("$n")
 done
 # in_tier <suite>: the fault scenarios run as one chain (e2e-faults, weekly), as two chains whose
-# split moves daily (e2e-faults-h1/h2, nightly) or as four shards (e2e-faults-q1..q4, full, quick);
+# split moves daily (e2e-faults-h1/h2, nightly) or as six shards (e2e-faults-q1..q6, full, quick);
 # every other suite is in every tier
 in_tier() {
   case $1 in
     e2e-faults) [ "$tier" = weekly ];;
     e2e-faults-h[0-9]*) [ "$tier" = nightly ];;
     e2e-faults-q[0-9]*) [ "$tier" = full ] || [ "$tier" = quick ];;
-    # the fault matrix: the cells of the fixed defects in full and quick; all of it only by name
+    # the fault matrix: the cells of the fixed defects in full and quick, the weekly cells of the
+    # other kinds of app in nightly and weekly; the driver itself (every option) only by name
     e2e-matrix-quick) [ "$tier" = full ] || [ "$tier" = quick ];;
+    e2e-matrix-weekly) [ "$tier" = nightly ] || [ "$tier" = weekly ];;
     e2e-matrix) return 1;;
     *) return 0;;
   esac

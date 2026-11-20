@@ -152,9 +152,8 @@ func evcount(file, key string) int64 {
 func (w Watch) appCgroup(a string) string { return cgroup.AppDir(w.Env.Cgroup, a) }
 
 // lockHeld: something holds the flock of path (an activation, a rollback or a backup holds the
-// app's lock). A missing file is held by nothing. It takes no lock and creates nothing (lock.Held
-// reads /proc/locks): tando-watch's minute never delays a verb, nor makes another probe or the
-// agent's recover see the lock held.
+// app's lock). A missing file is held by nothing; nothing is created. A shared try (lock.Held):
+// another probe at the same moment is never taken for the holder.
 func lockHeld(path string) bool { return lock.Held(path) }
 
 // which finds a program in cmdEnv's PATH (`command -v`).

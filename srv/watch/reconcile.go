@@ -37,6 +37,9 @@ func (t *tick) reconcile() {
 		if strings.HasPrefix(c, "job.") {
 			sw = "job" // every job of the app is one switch: job=off, <app>.job=off
 		}
+		if strings.HasPrefix(c, "worker.") {
+			sw = "worker" // and every worker: worker=off, <app>.worker=off
+		}
 		if a == "_host" {
 			sa = ""
 			if c == "memory" || c == "oom" {

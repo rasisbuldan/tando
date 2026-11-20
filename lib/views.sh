@@ -164,6 +164,32 @@ limits_line() {
   ui_kv_wrap limits "cpu $c ${UI_G_MID} $ltasks tasks ${UI_G_MID} $lconns conns ${UI_G_MID} $q"
 }
 
+# worker_lines: one "worker" line per worker row of status (name, state, restarts, memory)
+worker_lines() {
+  local r wa wn ws wr wm wx t
+  while IFS=$TAB read -r r wa wn ws wr wm wx; do
+    [ "$r" = worker ] || continue
+    case $ws in
+      active) t=running;;
+      restarting) t="${UI_RED}restarting${UI_NC}: it keeps exiting (tando logs --worker $wn)";;
+      stopped) t=stopped;;
+      *) t="${UI_YELLOW}$ws${UI_NC}";;
+    esac
+    if ui_int "$wx" && [ "$wx" -gt 0 ]; then wm="$(mb "$wm") of $(mb "$wx")"; else wm=$(mb "$wm"); fi
+    ui_kv worker "$wn  $t   ${UI_DIM}restarts${UI_NC} $wr   ${UI_DIM}memory${UI_NC} $wm"
+  done < "$TMPD/st"
+  return 0
+}
+# worker_hint: in ls, one line per worker that does not run while its app does
+worker_hint() {
+  local r wa wn ws wr _x
+  while IFS=$TAB read -r r wa wn ws wr _x; do
+    [ "$r" = worker ] || continue
+    case $ws in active|stopped) continue;; esac
+    ui_box_line "${UI_RED}$wa: worker $wn is $ws ($wr restarts): tando status $wa, tando logs $wa --worker $wn${UI_NC}"
+  done < "$TMPD/st"
+  return 0
+}
 render_ls() {
   local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx n=0 upt dep
   if [ -n "$JSON" ]; then
@@ -193,6 +219,7 @@ render_ls() {
   cache_apps
   if [ $n -gt 0 ]; then ui_table "l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"   # LINK whole: other columns go first
   else ui_box_line "No apps on $HOST yet. In your app's directory: tando up"; fi
+  worker_hint
   hc_hint
   local na foot
   na=$(grep -c "^alert${TAB}[^${TAB}]*${TAB}[^${TAB}]*${TAB}firing" "$TMPD/st")
@@ -283,6 +310,7 @@ render_status() {
     ui_kv memory "$(mb "$mem") (no cap)"
   fi
   ui_kv cpu "$CPUP%"
+  worker_lines
   limits_line
   if [ -n "$WATCH" ]; then ui_kv trend "cpu $(ui_spark "$SPC" 16)  mem $(ui_spark "$SPM" 16)"
   elif [ -n "$hm" ]; then ui_kv "16 min" "cpu $(ui_spark "$hc" 16)  mem $(ui_spark "$hm" 16)"; fi

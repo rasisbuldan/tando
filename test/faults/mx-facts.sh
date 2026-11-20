@@ -80,5 +80,17 @@ if [ "$(g database "$D/app.conf")" = postgres ]; then
   db=tando_$(echo "$A" | tr - _)
   kv db_rows "$(sudo -u postgres psql -X -At -d "$db" -c 'select count(*) from mx' 2> /dev/null)"
 fi
+# the workers: every unit file and loaded unit, "wk=<name>:<state>:<release it runs>:<enabled>"
+for w in $( { for x in /etc/systemd/system/tando-"$A"_worker-*.service; do [ -e "$x" ] && echo "${x##*/}"; done
+             systemctl list-units --all --plain --no-legend "tando-${A}_worker-*" 2> /dev/null | awk '{ print $1 }'; } | sort -u); do
+  n=${w#tando-"$A"_worker-}; n=${n%.service}
+  st=$(systemctl show -P ActiveState "$w" 2> /dev/null); en=$(systemctl is-enabled "$w" 2> /dev/null)
+  [ -f "/etc/systemd/system/$w" ] || st="$st-nofile"
+  pid=$(systemctl show -P MainPID "$w" 2> /dev/null); r=""
+  if [ -n "$pid" ] && [ "$pid" != 0 ]; then
+    r=$(tr '\0' '\n' < "/proc/$pid/environ" 2> /dev/null | sed -n 's/^TANDO_RELEASE=//p' | head -1)
+  fi
+  kv wk "$n:$st:$r:${en:-none}"
+done
 n=0; for x in /etc/systemd/system/tando-"$A"-job-*.timer; do [ -e "$x" ] && n=$((n + 1)); done; kv jobs "$n"
 exit 0

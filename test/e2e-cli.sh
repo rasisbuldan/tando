@@ -225,7 +225,8 @@ cat > "$E/agentbin/ssh" <<'STUB'
 case "$*" in
   *" env-set "*|*" env-unset "*) cat > /dev/null; printf '%b' "$STUB_ENV";;
   *" env-log "*) printf '%b' "$STUB_ELOG";;
-  *" job-run "*) printf 'log=hello from tick\nresult=%s\nstatus=%s\nsecs=2\n' "$STUB_JOB" "$STUB_RC";;
+  *" job-run "*) [ "$STUB_JOB" = pgdown ] && { echo 'pg_dump: error: connection to server at "127.0.0.1", port 5432 failed: Connection refused' >&2; exit 1; }
+                 printf 'log=hello from tick\nresult=%s\nstatus=%s\nsecs=2\n' "$STUB_JOB" "$STUB_RC";;
   *" history "*) printf 'hist\thello\t1763000000\t20261113-021000\tdeploy\trolledback\t31\t1\t0\t0\t1\t0\t20\tit exited with status 1, 20 s after going live: rolled back to 20261112-090000\n'
                  printf 'hist\thello\t1763000100\t20261113-021500\trollback\tok\t1\t0\t0\t0\t0\t1\t0\t-\n';;
   *) echo "ssh: connect to host 127.0.0.1 port 9: Connection refused" >&2; exit 255;;
@@ -246,6 +247,9 @@ check "S4 jobs run tick: its output, then ok (rc=$rc)" \
 out=$(STUB_JOB=exit-code STUB_RC=3 sa jobs run tick); rc=$?
 check "S5 a failing job: result and exit status, tando exits with it (rc=$rc)" \
   eval 'test $rc = 3 && printf "%s" "$out" | grep -q "job tick: failed (exit-code, exit 3) in 2s"'
+out=$(STUB_JOB=pgdown sa jobs run tick); rc=$?
+check "S5b a command that fails on the server with 'Connection refused' (PostgreSQL down) is not blamed on ssh (rc=$rc)" \
+  eval 'test $rc != 0 && printf "%s" "$out" | grep -q "pg_dump: error: connection to server" && ! printf "%s" "$out" | grep -q "cannot reach"'
 m S6 "jobs run with a bad name" 'bad job name: a/b' -- jobs run a/b -a hello
 out=$(COLUMNS=80 sa history)
 check "S7 history at 80 columns: the rollback reason whole, under the table" \

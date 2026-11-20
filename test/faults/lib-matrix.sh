@@ -7,7 +7,8 @@
 # kill (SIGKILL of the agent there), fail (that action fails: a full disk, a command that
 # fails) or reboot (the agent waits there, then the server restarts: docker restart). Then
 # recovery runs as on a server (the activation's ExecStopPost, a recover-all as tando-watch or
-# the boot would run it), and ONE checker (mx_inv) asserts the ten invariants of the matrix.
+# the boot would run it), and ONE checker (mx_inv) asserts the invariants of the matrix (eleven; the 11th, the workers', for
+# the kind worker).
 # The points of an operation come from a trace of the same operation without a fault.
 #
 # The hook fires only with root's /etc/tando-test-server and /run/tando-test/fault on the server
@@ -49,6 +50,9 @@ mx_mem_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo 128
 # and the job's schedule (node and data: the job units are the live release's)
 mx_job_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo '*:0/10'; else echo '*:0/20'; fi; }
 mx_has_job() { case $KIND in node|data) return 0;; esac; return 1; }
+# and the workers (kind worker): odd versions have a and b, even ones a only, so a worker left
+# from the other version (or missing) is seen by the checker (inv11)
+mx_workers_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo "a b"; else echo "a"; fi; }
 mx_mc_of() { if [ $(($1 % 2)) = 1 ] || [ -n "${MX_SAMECONF:-}" ]; then echo 64; else echo 96; fi; }
 mx_start_of() {
   local n=$1; [ -n "${MX_SAMECONF:-}" ] && n=1
@@ -83,12 +87,15 @@ mx_version() {
     esac
     mx_has_job && echo "job.tick = $(mx_job_of "$n") | true"
     [ "$KIND" = node ] && echo "assets = assets"
+    if [ "$KIND" = worker ]; then for w in $(mx_workers_of "$n"); do echo "worker.$w = node worker.js"; done; fi
     [ -n "${MX_RELEASE:-}" ] && echo "release = $MX_RELEASE"
   } > "$d/tando.conf"
   case $KIND in
     static)
       rm -f "$d"/hc-*; echo "v$n env=-" > "$d/index.html"; echo ok > "$d/${h#/}"
-      [ "$beh" = ok ] || echo "x" > "$d/${h#/}";;    # (static cannot be unhealthy after the switch)
+      # (static cannot be unhealthy after the switch; its pre-flight checks that the health file
+      # exists in the release: exit@pre leaves it out, so the release is refused there)
+      case $beh in ok) ;; exit@pre) rm -f "$d/${h#/}";; *) echo "x" > "$d/${h#/}";; esac;;
     python) cp "$MX_DIR/mx-app/app.py" "$d/"; : > "$d/requirements.txt";;
     next)
       cp "$MX_DIR/mx-app/server.js" "$d/mx.js"
@@ -104,6 +111,7 @@ mx_version() {
       [ "$beh" = ok ] || rm -f "$d/www/${h#/}"
       printf '%s\n' 'FROM alpine:3.22' 'RUN apk add --no-cache busybox-extras' 'COPY www /www' \
         'CMD ["/bin/sh", "-c", "exec httpd -f -v -p 0.0.0.0:${PORT:-8080} -h /www"]' > "$d/Dockerfile";;
+    worker) cp "$MX_DIR/mx-app/server.js" "$MX_DIR/mx-app/worker.js" "$d/";;
     *) cp "$MX_DIR/mx-app/server.js" "$d/";;
   esac
   # a fingerprinted file per version (node: assets = assets; static: found by its name)
@@ -125,6 +133,7 @@ mx_settings() {
   [ "$KIND" = data ] && printf 'data=data\ndatabase=postgres\n'
   mx_has_job && printf 'job.tick=%s | true\n' "$(mx_job_of "$n")"
   [ "$KIND" = node ] && printf 'assets=assets\n'
+  if [ "$KIND" = worker ]; then for w in $(mx_workers_of "$n"); do printf 'worker.%s=node worker.js\n' "$w"; done; fi
   return 0
 }
 # mx_client <out> <args...>: the CLI in the app's work dir; status in MXRC
@@ -173,7 +182,7 @@ mx_loop_stop() {
   MX_REQ=$(grep -c . "$W/loop" 2> /dev/null)
 }
 
-# ---- the checker: the ten invariants ----------------------------------------------------------
+# ---- the checker: the invariants ----------------------------------------------------------
 # Inputs (set by the case): MX_OP, MX_OLD (current before), MX_NEW (the operation's release:
 # the deploy's new one, the rollback's target; may be empty), MX_WANT old|new|any (which of the
 # two must serve), MX_RUN running|stopped|any, MX_ENVW (env value expected, or "any:a b"),
@@ -265,6 +274,27 @@ mx_inv() {
     esac
     [ -z "$(fv env_bad)" ] || mx_bad 2 "agree: the env that broke the app (MX_BAD) is still in the env file"
   fi
+  # 11. the workers that run are exactly the serving release's, each running it (none when stopped)
+  if [ "$KIND" = worker ] && [ -n "$want" ] && [ -n "$(mx_ver_of "$want")" ]; then
+    local ww wn wa wr we wl run=""
+    ww=" $(mx_workers_of "$(mx_ver_of "$want")") "
+    for wl in $(sed -n 's/^wk=//p' "$W/facts"); do
+      IFS=: read -r wn wa wr we <<< "$wl"
+      case $wa in active|activating|reloading|deactivating) run="$run $wn";; esac
+      if [ "$stopped" = 1 ]; then
+        case $wa in active|activating|reloading) mx_bad 11 "workers: the app is stopped, worker $wn is $wa";; esac
+        [ "$we" != enabled ] || mx_bad 11 "workers: the app is stopped, worker $wn is enabled (it would start at boot)"
+        continue
+      fi
+      case $ww in *" $wn "*) ;; *) mx_bad 11 "workers: worker $wn (unit $wa) is not one of release $want's:$ww"; continue;; esac
+      [ "$wa" = active ] || mx_bad 11 "workers: worker $wn of release $want is $wa, not active"
+      [ "$wr" = "$want" ] || mx_bad 11 "workers: worker $wn runs release ${wr:-none}, the serving one is $want"
+      [ "$we" = enabled ] || mx_bad 11 "workers: worker $wn is $we, not enabled (a reboot would not start it)"
+    done
+    if [ "$stopped" = 0 ]; then
+      for wn in $ww; do case " $run " in *" $wn "*) ;; *) mx_bad 11 "workers: release $want's worker $wn does not run";; esac; done
+    fi
+  fi
   # 3. statuses
   if [ -n "$want" ]; then
     st=$(fv "rel_$want") lg=$(fv s_last_good)
@@ -286,6 +316,8 @@ mx_inv() {
       local kind=deploy; [ "$MX_OP" = rollback ] && kind=rollback
       if [ -z "$MX_NEW" ]; then
         [ "$nh" = 0 ] || mx_bad 4 "history: $nh lines, but the operation never got a release: $(grep '^hist=' "$W/facts" | tr '\n' ' ')"
+      elif [ "$MX_OP" = rollback ] && [ "$nh" = 0 ] && [ "$want" = "$MX_OLD" ] && [ "$(fv p_id)" != "$MX_NEW" ]; then
+        :   # (a rollback cut before it wrote anything, its progress file included: it never began)
       else
         n=$(grep -c "^hist=$MX_NEW $kind " "$W/facts")
         [ "$nh" = 1 ] && [ "$n" = 1 ] || mx_bad 4 "history: $nh new lines, $n for $MX_NEW $kind (exactly one): $(grep '^hist=' "$W/facts" | tr '\n' ' ')"
@@ -327,14 +359,14 @@ mx_inv() {
   # 9. data and database untouched
   [ "$(fv data_sum)" = "${MX_DATA0:-}" ] || mx_bad 9 "data: the sentinel changed (${MX_DATA0:-none} -> $(fv data_sum))"
   [ -z "${MX_DB0:-}" ] || [ "$(fv db_rows)" = "$MX_DB0" ] || mx_bad 9 "data: database rows $MX_DB0 -> $(fv db_rows)"
-  # 11. assets: the serving release's fingerprinted file answers through Caddy with its bytes and
+  # 12. assets: the serving release's fingerprinted file answers through Caddy with its bytes and
   # the immutable header (linked before the switch: a kill at any point of the copy must not take it)
   if [ "$stopped" = 0 ] && [ -n "$sv" ] && [ "$MX_CODE" = 200 ] && mx_has_assets; then
     local acode
     acode=$(curl -s -m 10 -D "$W/ah" -o "$W/ab" -w '%{http_code}' "http://$A.localhost:$TANDO_TEST_HTTP_PORT/assets/$(mx_asset_name "$sv")")
     { [ "$acode" = 200 ] && [ "$(cat "$W/ab")" = "v$sv asset" ] && grep -qi '^cache-control:.*immutable' "$W/ah"; } ||
-      mx_bad 11 "assets: v$sv's fingerprinted file answers $acode \"$(head -c 40 "$W/ab" | tr -d '\r\n')\", cache: $(grep -i '^cache-control' "$W/ah" | tr -d '\r')"
-    [ -z "$(fv asset_left)" ] || mx_bad 11 "assets: leftovers in the shared directory: $(fv asset_left)"
+      mx_bad 12 "assets: v$sv's fingerprinted file answers $acode \"$(head -c 40 "$W/ab" | tr -d '\r\n')\", cache: $(grep -i '^cache-control' "$W/ah" | tr -d '\r')"
+    [ -z "$(fv asset_left)" ] || mx_bad 12 "assets: leftovers in the shared directory: $(fv asset_left)"
   fi
   # 10. visitors
   if [ "${MX_LOOPOK:-0}" = 1 ] && [ -s "$W/loop" ]; then
@@ -362,7 +394,8 @@ mx_settled() {
 mx_wait_settled() { T_UNTIL_STEP=0.5 t_until "${1:-240}" mx_settled; }
 # what tando-watch's minute does (srv/watch/pretick.go recoverNeeded): recover-all when an app is
 # in a phase other than idle with its lock free, its link and state disagree, it is down, a
-# release is reserved by an activation whose unit has no process, or an operation's end was not
+# release is reserved by an activation whose unit has no process, a rollback cut before its first
+# state write (activation says kind=rollback result=running, lock free) or an operation's end was not
 # written out (outcome)
 mx_watcher() {
   dxs "D=/opt/tando/apps/$A; g() { sed -n \"s/^\$1=//p\" \$D/state | head -1; }
@@ -372,6 +405,7 @@ mx_watcher() {
     elif [ -n \"\$cur\" ] && [ \"\$l\" != \"\$cur\" ] && [ -d \$D/releases/\$cur ]; then need=1
     elif [ -z \"\$cur\" ] && [ -n \"\$l\" ] && [ -d \$D/releases/\$l ]; then need=1
     elif [ -n \"\$(g down)\" ] && [ -z \"\$(g stopped)\" ] && [ -n \"\$cur\" ]; then need=1
+    elif grep -qx kind=rollback \$D/activation 2>/dev/null && grep -qx result=running \$D/activation && flock -n \$D/lock true; then need=1
     elif [ -n \"\$(g outcome)\" ] && [ \"\$(g outcome)\" != \"\$(g outcome_done)\" ]; then need=1
     else
       for r in \$D/releases/*; do i=\${r##*/}; [ -d \"\$r\" ] && [ -z \"\$(g status_\$i)\" ] && [ \"\$i\" != \"\$cur\" ] || continue
