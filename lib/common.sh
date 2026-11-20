@@ -495,6 +495,14 @@ cron_to_cal() {
   [ "$dow" = '*' ] || CRON_CAL="$dow $CRON_CAL"
   return 0
 }
+# job_name_ok <name> <file:line>: dies with the rule when it is not a job name (it is part of the
+# job's unit names on the server: tando-<app>_job-<name>)
+job_name_ok() {
+  case $1 in
+    [a-z]*) case $1 in *[!a-z0-9-]*) ;; *) [ ${#1} -le 21 ] && return 0;; esac;;
+  esac
+  die "$2: bad job name: $1 (lower case letters, digits and dashes, starting with a letter, at most 21 characters)"
+}
 # job_sched_norm <name> <value> <file:line>: the value of a job.<name> line with a cron schedule
 # written as OnCalendar (JOB_V); dies with what to write when it cannot
 job_sched_norm() {
@@ -597,6 +605,7 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       job_missed) C_job_missed=$v
         case $v in run|skip) ;; *) die "$f:$n: job_missed is run or skip (got \"$v\")";; esac;;
       job.*.timeout|job.*.spread|job.*.missed)
+        x=${k#job.}; job_name_ok "${x%.*}" "$f:$n"
         case $k in
           *.timeout) ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 86400 ] || die "$f:$n: $k is 1 to 86400 seconds (got \"$v\")";;
           *.spread) ui_int "$v" && [ "$v" -le 3600 ] || die "$f:$n: $k is 0 to 3600 seconds (got \"$v\")";;
@@ -604,7 +613,7 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         esac
         C_jobs="$C_jobs$k=$v
 ";;
-      job.*) job_sched_norm "${k#job.}" "$v" "$f:$n"
+      job.*) job_name_ok "${k#job.}" "$f:$n"; job_sched_norm "${k#job.}" "$v" "$f:$n"
         C_jobs="$C_jobs$k=$JOB_V
 ${JOB_CRON:+$k.cron=$JOB_CRON
 }";;

@@ -595,6 +595,20 @@ done
 printf 'app = x\njob.a = daily | x\njob.a.spread = 0\njob.a.missed = skip\njob_spread = 30\njob_missed = run\n' > "$tmp/conf.t"
 "$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; conf_load "$2"' _ "$here" "$tmp/conf.t" > /dev/null 2>&1 || d="$d [refused the good job settings]"
 if [[ -z $d ]]; then ok; else bad "job settings in tando.conf:$d"; fi
+# a job name the server cannot take (it is part of the unit names) is refused with the rule, at its line
+d=""
+for l in 'job.abcdefghijklmnopqrstuv = daily | x' 'job.9am = daily | x' 'job.a_b = daily | x' 'job.abcdefghijklmnopqrstuv.timeout = 5'; do
+  printf 'app = x\n%s\n' "$l" > "$tmp/conf.t"
+  r=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; conf_load "$2"' _ "$here" "$tmp/conf.t" 2>&1) && d="$d [accepted: $l]"
+  [[ $r == *"conf.t:2: bad job name: "*"(lower case letters, digits and dashes, starting with a letter, at most 21 characters)"* ]] || d="$d [$l: $r]"
+done
+printf 'app = x\njob.abcdefghijklmnopqrstu = daily | x\n' > "$tmp/conf.t"
+"$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; conf_load "$2"' _ "$here" "$tmp/conf.t" > /dev/null 2>&1 || d="$d [refused a name of 21]"
+if [[ -z $d ]]; then ok; else bad "job names in tando.conf:$d"; fi
+# a time a day or more away: its date, with the year when that is not this year (a Feb 29 job)
+r=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/views.sh"; NOW=1795200000
+  printf "%s|%s|%s|%s" "$(ago 1835481540)" "$(ago 1797000000)" "$(ago 1764000000)" "$(ago 1795198380)"' _ "$here" 2>&1)
+if [[ $r == "2028-02-29 23:59 GMT|12-11 14:40 GMT|2025-11-24 16:00 GMT|27m ago" ]]; then ok; else bad "ago with the year: $r"; fi
 
 echo "$checks checks, $fails failed"
 [[ $fails == 0 ]]

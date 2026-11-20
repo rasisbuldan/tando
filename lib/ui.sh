@@ -717,17 +717,22 @@ ui_dur_v() {
 }
 ui_dur() { ui_dur_v "$@"; printf '%s' "$UI_RET"; }
 
-# ui_utc_v epoch [s] -> UI_RET: the time in UTC, "11-14 17:01" ("11-14 17:01:15" with s); "-"
-# when not a number. A fraction is ignored. Pure arithmetic (civil-from-days), never forks date.
+# ui_utc_v epoch [s|y] -> UI_RET: the time in UTC, "11-14 17:01" ("11-14 17:01:15" with s,
+# "2028-02-29 23:59" with y); "-" when not a number. UI_YEAR: its year. A fraction is ignored.
+# Pure arithmetic (civil-from-days), never forks date.
 ui_utc_v() {
     local x="${1:-}" t z doe yoe doy mp
     x=${x%%.*}
-    if [[ ! $x =~ ^(0|[1-9][0-9]{0,14})$ ]]; then UI_RET="-"; return 0; fi
+    if [[ ! $x =~ ^(0|[1-9][0-9]{0,14})$ ]]; then UI_RET="-" UI_YEAR=""; return 0; fi
     t=$((10#$x)) z=$((t / 86400 + 719468))
     doe=$((z % 146097)) yoe=$(((doe - doe / 1460 + doe / 36524 - doe / 146096) / 365))
     doy=$((doe - (365 * yoe + yoe / 4 - yoe / 100))) mp=$(((5 * doy + 2) / 153))
+    UI_YEAR=$((yoe + z / 146097 * 400 + (mp < 10 ? 0 : 1)))
     t=$((t % 86400))
-    if [ "${2:-}" = s ]; then
+    if [ "${2:-}" = y ]; then
+        printf -v UI_RET '%04d-%02d-%02d %02d:%02d' "$UI_YEAR" $((mp < 10 ? mp + 3 : mp - 9)) \
+            $((doy - (153 * mp + 2) / 5 + 1)) $((t / 3600)) $((t % 3600 / 60))
+    elif [ "${2:-}" = s ]; then
         printf -v UI_RET '%02d-%02d %02d:%02d:%02d' $((mp < 10 ? mp + 3 : mp - 9)) \
             $((doy - (153 * mp + 2) / 5 + 1)) $((t / 3600)) $((t % 3600 / 60)) $((t % 60))
     else

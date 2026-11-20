@@ -6,6 +6,27 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: with `spa = true`, an older release's fingerprinted file (and a missing one) was
+  answered with index.html (200, text/html): the single-page fallback is a rewrite, which Caddy
+  runs before the shared assets handle. The fallback now leaves the assets prefixes alone: an
+  older release's file is that file, a missing one is a 404; deep links still get index.html.
+- Fixed: a job removed from tando.conf (by a deploy or a rollback) while a run of it went on had
+  its unit file deleted under it: systemd ended the run after 90 s, its history line was never
+  written and the unit stayed listed as `not-found failed`. Its timer now stops at once; the run
+  finishes within its own timeout (safer for a job that writes data), then its job-end hook
+  removes the unit (and a later deploy removes one it did not get to).
+- Fixed: a job that ran longer than its interval ran again as soon as it ended (systemd made up
+  the time that passed during the run). The job's start condition (`job-due`) now skips a time
+  that passed while its last run went on; a run by hand always starts. Needs systemd 250 or later
+  (`systemd-analyze calendar --base-time`); with an older one jobs behave as before.
+- Fixed: `tando jobs` showed `● ok` and a LAST time while the first run of a job was still going
+  on; it now says never and running until a run has ended.
+- Fixed: `tando jobs` showed a next run in another year without its year (`02-29 23:59` for
+  2028); every older or later time of `tando` in another year now has its year. The jobs header
+  says GMT, the word the times use, instead of UTC.
+- Fixed: a job name of more than 21 characters was refused with only `bad job: job.<name>`;
+  `tando` now says the rule (lower case letters, digits and dashes, starting with a letter, at
+  most 21 characters) at the line of tando.conf, and docs/CONFIG.md says it.
 - Fixed: an ended `tando db studio` session could stay listed by `systemctl list-units --all` as
   `loaded inactive dead` (about 1 run in 3 of the studio suite), with nothing holding it: systemd
   had not unloaded it and a stop did not help. A destroy left the app's slice listed the same way
