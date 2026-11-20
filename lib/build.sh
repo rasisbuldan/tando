@@ -505,13 +505,16 @@ stage_container() {
 swap_native() {
   local cpu libc kind from dest name ver integ lock why tab=$'\t' njs=$TANDO_HOME/lib/native.js
   SWAPPED=""; : > "$TMPD/swaps"; : > "$TMPD/native.notes"
+  NS_LEVEL=0
   [ -d "$STAGE/node_modules" ] || return 0
   case $K_arch in x86_64) cpu=x64;; aarch64|arm64) cpu=arm64;; *) cpu=$K_arch;; esac
   libc=glibc; [ "${K_libc:-}" = musl ] && libc=musl
   # (without Node nothing here was built by npm; the guard still looks at every native file)
   command -v node > /dev/null || return 0
-  node "$njs" plan "$STAGE" "$cpu" "$libc" "$(native_lockdir)" > "$TMPD/plan" 2> "$TMPD/plan.err" ||
-    sfail "could not read the staged node_modules: $(strip < "$TMPD/plan.err" | grep . | tail -1)"
+  # one node process does the plan, and (when no swap is due, so the tree stays as it is) the fix
+  # scan and the guard's excused list too; see native_stage
+  native_stage "$cpu" "$libc" plan
+  cp "$TMPD/ns/plan" "$TMPD/plan"
   if grep -q "^fail$tab" "$TMPD/plan"; then
     { sed -n "s/^fail$tab/  /p" "$TMPD/plan" | strip
       echo "  build on Linux instead: tando ci github (CI builds and deploys); docs/CROSS-ARCH.md"
@@ -563,6 +566,15 @@ swap_lines() {
   while IFS= read -r l; do box_say "$UI_DIM" "        $l"; done < "$TMPD/native.notes"
 }
 
+# native_stage cpu libc plan|noplan: lib/native.js stage into $TMPD/ns; sets NS_LEVEL (1 plan only,
+# 2 plan and fix, 3 plan, fix and excused: what is valid while the tree stays as it is) for NS_STAGE
+native_stage() {
+  mkdir -p "$TMPD/ns"; rm -f "$TMPD/ns/"*
+  NS_LEVEL=$(node "$TANDO_HOME/lib/native.js" stage "$STAGE" "$1" "$2" "$(native_lockdir)" "$(native_projdir)" "$TMPD/ns" "$3" 2> "$TMPD/ns.err") ||
+    sfail "could not read the staged node_modules: $(strip < "$TMPD/ns.err" | grep . | tail -1)"
+  NS_STAGE=$STAGE
+}
+
 # the server's cpu and libc as npm names them: NCPU, NLIBC
 native_target() {
   case $K_arch in x86_64) NCPU=x64;; aarch64|arm64) NCPU=arm64;; *) NCPU=$K_arch;; esac
@@ -593,6 +605,7 @@ native_fix() {
   proj=$(native_projdir)
   nmaj=$(native_nodemajor)
   : > "$TMPD/fixed"; : > "$TMPD/pruned"
+  NS_FIRST=1
   native_fix_plan
   if grep -q "^fail$tab" "$TMPD/fix"; then   # before anything is fetched
     { while IFS=$tab read -r kind rel a b; do
@@ -646,6 +659,13 @@ native_fix() {
   return 0
 }
 native_fix_plan() {
+  if [ "${NS_FIRST:-0}" = 1 ]; then   # the first scan of native_fix: the stage process has it, or runs now
+    NS_FIRST=0
+    if [ "${NS_STAGE:-}" != "$STAGE" ] || [ "${NS_LEVEL:-0}" -lt 2 ]; then native_stage "$NCPU" "$NLIBC" noplan; fi
+    cp "$TMPD/ns/fix" "$TMPD/fix"; return 0
+  fi
+  # level 3: nothing changed the tree, the first scan is still the answer
+  if [ "${NS_STAGE:-}" = "$STAGE" ] && [ "${NS_LEVEL:-0}" = 3 ]; then cp "$TMPD/ns/fix" "$TMPD/fix"; return 0; fi
   node "$TANDO_HOME/lib/native.js" fix "$STAGE" "$NCPU" "$NLIBC" "$(native_projdir)" > "$TMPD/fix" 2> "$TMPD/fix.err" ||
     sfail "could not read the staged node_modules: $(strip < "$TMPD/fix.err" | grep . | tail -1)"
 }
@@ -805,7 +825,9 @@ guard() {
   # a binary for another platform in prebuilds/ of a package that holds the server's own is not
   # one the loader picks (node-gyp-build, better-sqlite3 13, bcrypt 6, argon2): it is accepted
   : > "$TMPD/excused"
-  if command -v node > /dev/null && [ -s "$TMPD/native" ]; then
+  if [ "${NS_STAGE:-}" = "$STAGE" ] && [ "${NS_LEVEL:-0}" = 3 ] && [ -f "$TMPD/ns/excused" ]; then
+    cp "$TMPD/ns/excused" "$TMPD/excused"   # computed with the fix scan, in the same process
+  elif command -v node > /dev/null && [ -s "$TMPD/native" ]; then
     native_target
     node "$TANDO_HOME/lib/native.js" excused "$STAGE" "$NCPU" "$NLIBC" > "$TMPD/excused" 2> /dev/null || : > "$TMPD/excused"
   fi
@@ -817,6 +839,7 @@ guard() {
       *) printf '%s\t%s\n' "${l#"$STAGE"/}" "$(printf '%s' "$d" | cut -d, -f1 | strip | cut -c1-60)" >> "$TMPD/foreign";;
     esac
   done < "$TMPD/native"
+  NS_LEVEL=0
   [ -s "$TMPD/foreign" ] && guard_native
   return 0
 }

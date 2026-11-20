@@ -1034,7 +1034,8 @@ probe_header() {
 }
 probe() {
   probe_header
-  local to=$1 end unit=$2 code rc n0=0 n state err_since="" body
+  local to=$1 end unit=$2 code rc n0=0 n state err_since="" body step=0
+  local -a nap=(0.05 0.1 0.2)   # first polls come fast (an app is often up in 0.3 s), then every 0.5 s
   mono; end=$((MONO + $1))
   shift 2
   # straight to a port (the pre-flight, adopt's checks): never the secret, the app would learn it
@@ -1078,7 +1079,7 @@ probe() {
         failed|inactive) PROBE_WHY="the app exited ($state; last: $LAST_ANSWER)"; rm -f "$body"; return 1;;
       esac
     fi
-    sleep 0.5
+    sleep "${nap[step]:-0.5}"; step=$((step + 1))
   done
 }
 
@@ -1430,7 +1431,7 @@ soak_why() { # [unit, default the app's]
 
 # Verify the live target of a deploy or rollback through Caddy, or go back to the fallback.
 finish() { # kind [note]
-  local id=${S[target]} kind=$1 t ok=0 n0 n soak soaked=0
+  local id=${S[target]} kind=$1 t ok=0 n0 n soak soaked=0 k v state
   t=$(ds); pg phase verify
   caddy_up || { PROBE_WHY="Caddy is not running and did not start (sudo journalctl -u caddy)"; }
   if ! fp fin.verify; then PROBE_WHY="health check failed (test fault)"
@@ -1461,10 +1462,14 @@ finish() { # kind [note]
     while mono; ((MONO < end)); do
       sleep 1
       # (an empty answer is systemd not answering in time, not a restart: asked again next second)
-      n=$(systemctl show -P NRestarts "tando-$A")
+      # (one systemctl call for both: the restart count and the state)
+      n="" state=""
+      while IFS='=' read -r k v; do
+        case $k in NRestarts) n=$v;; ActiveState) state=$v;; esac
+      done <<< "$(systemctl show -p NRestarts -p ActiveState "tando-$A")"
       [[ $n =~ ^[0-9]+$ && ! $n0 =~ ^[0-9]+$ ]] && n0=$n
       if ! fp fin.soak || [[ $n =~ ^[0-9]+$ && $n != "$n0" ]] ||
-         { ! systemctl -q is-active "tando-$A" && [[ $(systemctl show -P ActiveState "tando-$A") =~ ^(failed|inactive|activating|deactivating)$ ]]; }; then
+         [[ $state =~ ^(failed|inactive|activating|deactivating)$ ]]; then
         mono; ok=0 soaked=1; PROBE_WHY="$(soak_why), $((soak - end + MONO)) s after going live"; break
       fi
       if [[ -n $wb ]] && ! workers_ok "$wb"; then
