@@ -6,6 +6,16 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: a rollback, revert or recovery to a release whose settings record (`start/<id>`) is older
+  than a setting dropped that setting from the app (a record written before `assets`,
+  `job_spread`, `job_missed` or `worker.*` existed: the app lost it, as if the release had it
+  unset). Each record now lists the settings the agent knew when it wrote it (`keys=`); one rule
+  (`rec_put`) puts a release's settings back: a setting the record knows but lacks was unset, one
+  it does not know keeps the app's current value. A 0.1.1 record (start and health only) already
+  kept everything else, domains and the database role's limits included; e2e-upgrade now checks
+  that on a rollback to a 0.1.1 release (U4j2-U4j5), and its 0.1.1 deploys of the matrix's app add
+  their domain (U5c expected one the old client never added). Fault matrix cell `o`: a rollback to
+  a release whose record predates `assets`; invariant 2 checks app.conf's `assets=`.
 - Fixed: a deploy through a deploy key (CI) was refused with "the server's tando is older than this
   client": the deploy gate answered `info` without the protocol number. It prints it now, from the
   same constant as tando-agent and tando-status (srv/internal/buildinfo.Proto).

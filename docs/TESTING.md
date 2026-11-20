@@ -231,7 +231,9 @@ Versions alternate their health path, start command, memory, `max_conns`, a job'
 timer, role or app.conf left with the other version's settings is named (inv2). Each version also
 has its own `domain =` (`v<n>.mx.test`, resolved by `TANDO_TEST_RESOLVE`; the matrix's host has
 `domain_tls=off`): the serving release's domain must be in app.conf and the site, and a domain of
-a version that never served (refused, reverted, a second client's) in neither.
+a version that never served (refused, reverted, a second client's) in neither. Cell `o` rolls
+back to a release whose settings record is edited to look older than `assets` (no `keys=`, no
+`assets=`): the app must keep `assets=` (inv2).
 
 `--kind worker` gives the app workers (odd versions `a` and `b`, even ones `a` only) and adds
 invariant 11: the workers that run are exactly the serving release's, each running it, enabled;

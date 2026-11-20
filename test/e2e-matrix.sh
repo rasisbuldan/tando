@@ -272,6 +272,8 @@ mx_cell() {
   before=$(mx_releases) MX_NEW="" MX_OP=$op MX_FAULT=$pt MX_REBOOT_T=0 MX_UP_T=0 MX_RACED="" MX_Q=""
   if [ "$op" = rollback ]; then   # the newest verified release older than the current one
     MX_NEW=$(sed -n 's/^rel_\([^=]*\)=verified$/\1/p' "$W/facts" | grep -vx "$MX_OLD" | sort | tail -1)
+    # (cell o: the target's record is from before a setting existed: no keys=, no assets=)
+    [ "${MX_CELL:-}" = o ] && [ -n "$MX_NEW" ] && dxs "f=/opt/tando/apps/$A/start/$MX_NEW; grep -Ev '^(keys|assets)=' \$f > \$f.o && cat \$f.o > \$f && rm -f \$f.o"
   fi
   # the next version: its parity differs from the live one's (another health path and start
   # command), so a check or a restart that reaches the wrong release cannot pass by chance
@@ -473,7 +475,10 @@ k rollback rollback post:activation 1 kill before
 l deploy begin post:upload 1 kill before
 l deploy activate act.mkdir 1 kill before
 x destroy destroy ds.site 1 kill none
-q deploy run-activation sw.caddy_up 1 queue-fail after"
+q deploy run-activation sw.caddy_up 1 queue-fail after
+o rollback - - 0 none after"
+# o: a rollback to a release whose record predates a setting (assets): the app keeps its value of
+# it (the record never said it was unset), so the release's files still answer (inv 12)
 # k: a rollback killed after its progress file (result=running) and before its first state write: tando-watch's recover-all
 # (srv/watch/pretick.go rollbackCut) ends it; nothing did before
 # q: a deploy queued at run-activation's lock behind this one (mx_queue_prep), which is refused
@@ -563,6 +568,7 @@ if [ "$CELLSONLY" = 1 ]; then
   while read -r d op v p n act ph <&3; do
     [ -n "$d" ] || continue
     if [ "$LIST" = 1 ]; then echo "$d: $op $v $p#$n $act ($ph)"; continue; fi
+    MX_CELL=$d
     if [ "$p" = - ]; then mx_cell "$op" - - 0 none after < /dev/null; else mx_cell "$op" "$v" "$p" "$n" "$act" "$ph" < /dev/null; fi
   done 3<<< "$CELLS"
   [ "$LIST" = 1 ] && exit 0

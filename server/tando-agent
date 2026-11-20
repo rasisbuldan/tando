@@ -5349,9 +5349,7 @@ start_back() { # live id
   local -A RS=()
   valid_id "${1:-}" && [[ -f $D/start/$1 ]] || return 0
   load "$D/start/$1" RS
-  if [[ ${RS[conf]:-} == 1 ]]; then
-    for k in "${!C[@]}"; do conf_key "$k" && unset "C[$k]"; done
-    for k in "${!RS[@]}"; do conf_key "$k" && C[$k]=${RS[$k]}; done
+  if [[ ${RS[conf]:-} == 1 ]]; then rec_put RS C
   else
     for k in start start_shell health health_expect; do
       [[ -n ${RS[$k]+x} ]] || continue                    # (a file from before a key was recorded)
@@ -5365,8 +5363,10 @@ start_snap() { # id: record release id's settings (app.conf, C, as it is now)
   getent group "tando-m-$A" > /dev/null && meta_group_ok && g=tando-m-$A
   [[ -d $D/start ]] || { mkdir -m 750 "$D/start" && chown "root:$g" "$D/start"; } || return 1
   # (start, start_shell, health, health_expect always: empty is a value too)
-  { printf 'conf=1\nstart=%s\nstart_shell=%s\nhealth=%s\nhealth_expect=%s\n' "${C[start]:-}" "${C[start_shell]:-}" \
-      "${C[health]:-}" "${C[health_expect]:-}"
+  # (keys=: the settings this agent knows; one the record lacks was not set. A later key is not in
+  # it: rec_put keeps the app's value of that one)
+  { printf 'conf=1\nkeys=%s\nstart=%s\nstart_shell=%s\nhealth=%s\nhealth_expect=%s\n' "${CONF_KEYS_A[*]} job.* worker.*" \
+      "${C[start]:-}" "${C[start_shell]:-}" "${C[health]:-}" "${C[health_expect]:-}"
     conf_text C | grep -Ev '^(start|start_shell|health|health_expect)='; true; } > "$D/start/$1.tmp" &&
     [[ $(head -1 "$D/start/$1.tmp") == conf=1 ]] &&
     chown "root:$g" "$D/start/$1.tmp" && chmod 640 "$D/start/$1.tmp" &&
@@ -5378,23 +5378,39 @@ rel_conf() {
   local k
   valid_id "${1:-}" && [[ -r $D/start/$1 ]] || return 0
   local -A RS=(); load "$D/start/$1" RS
-  if [[ ${RS[conf]:-} == 1 ]]; then
-    for k in "${!C[@]}"; do conf_key "$k" && unset "C[$k]"; done
-    for k in "${!RS[@]}"; do conf_key "$k" && C[$k]=${RS[$k]}; done
+  if [[ ${RS[conf]:-} == 1 ]]; then rec_put RS C
   elif [[ -n ${RS[start]:-} ]]; then C[start]=${RS[start]} C[start_shell]=${RS[start_shell]:-}
   fi
   return 0
 }
 # conf_key key: a setting of tando.conf (what configure takes from the client): it belongs to a
 # release. The rest of app.conf is the server's own (port, created, domains, origin, adopt's)
+CONF_KEYS_A=(recipe image container_port build_memory start start_shell release release_shell release_timeout
+  health path data writable backup database db_statement_timeout db_idle_tx_timeout db_temp_limit
+  memory health_timeout soak cpu tasks max_conns max_requests stop_timeout hold log_max log_keep
+  log_rate access_log request_log_max health_expect health_fails health_recover job_timeout job_spread
+  job_missed assets)
+CONF_KEYS=" ${CONF_KEYS_A[*]} "
+# what a record of the first agent that recorded every setting knew (conf=1 without keys=)
+CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets } job.* "
 conf_key() {
-  case $1 in
-    recipe|image|container_port|build_memory|start|start_shell|release|release_shell|release_timeout|\
-    health|path|data|writable|backup|database|db_statement_timeout|db_idle_tx_timeout|db_temp_limit|\
-    memory|health_timeout|soak|cpu|tasks|max_conns|max_requests|stop_timeout|hold|log_max|log_keep|\
-    log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|job_spread|job_missed|assets|job.*|worker.*) return 0;;
-  esac
-  return 1
+  case $1 in job.*|worker.*) return 0;; *[[:space:]]*|'') return 1;; esac
+  [[ $CONF_KEYS == *" $1 "* ]]
+}
+# rec_put record target: target (C, or a copy of it) takes a release's recorded settings (a conf=1
+# record of start/<id>). A setting the record knows (its keys=) but does not have was not set for
+# that release: it goes. One the record does not know (written before that setting existed) keeps
+# target's value: a rollback to an older release never drops what it could not record
+rec_put() {
+  local -n _rp=$1 _rt=$2
+  local k g known=" ${_rp[keys]:-$CONF_KEYS1} "
+  for k in "${!_rt[@]}"; do
+    conf_key "$k" && [[ -z ${_rp[$k]+x} ]] || continue
+    g=$k; [[ $k == *.* ]] && g="${k%%.*}.*"
+    [[ $known == *" $g "* ]] && unset "_rt[$k]"
+  done
+  for k in "${!_rp[@]}"; do conf_key "$k" && _rt[$k]=${_rp[$k]}; done
+  return 0
 }
 # conf_text array: its tando.conf settings, sorted key=value lines
 conf_text() {
@@ -5881,8 +5897,10 @@ workers_follow() {
   [[ " ${!C[*]}" == *" worker."* ]] || compgen -G "/etc/systemd/system/tando-${A}_worker-*.service" > /dev/null || return 0
   id=$(cur_link)
   local -A WC=()
-  if valid_id "$id" && [[ -r $D/start/$id ]] && grepq -x conf=1 "$D/start/$id"; then load "$D/start/$id" WC
-  else conf_copy C WC; fi
+  conf_copy C WC
+  if valid_id "$id" && [[ -r $D/start/$id ]] && grepq -x conf=1 "$D/start/$id"; then
+    local -A RS=(); load "$D/start/$id" RS; rec_put RS WC
+  fi
   local names; names=$(worker_names WC)
   # (static and container apps have none: their units, if any, go)
   { has_unit && [[ ${C[recipe]:-node} != container ]]; } || names=""

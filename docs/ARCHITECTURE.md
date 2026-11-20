@@ -164,7 +164,10 @@ verb) reverts copy/preflight and finishes or reverts switch/verify/rollback.
 
 A deploy's settings (its tando.conf) wait in `confs/<id>` from `configure` to the switch, where
 `conf_put` writes them into app.conf, the unit file and the site; a revert, a rollback or a deploy
-that does not go live puts the fallback's back (`start/<id>`, `start_back`). Two things follow the
+that does not go live puts the fallback's back (`start/<id>`, `start_back`). A record lists the
+settings its agent knew (`keys=`); `rec_put` unsets one it knows but lacks and keeps the app's
+value of one it does not know (a record older than that setting; 0.1.1's has only start and
+health). Domains are the app's, not in a release's record: a rollback keeps them. Two things follow the
 same rule. New domains of tando.conf: `configure` checks them (`domain_free`, under
 `.domains.lock`) and stages them (`domain_add=` in `confs/<id>`); the switch checks them again
 under the same lock (another app may have taken one meanwhile: the deploy then fails before the

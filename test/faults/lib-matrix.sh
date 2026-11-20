@@ -265,6 +265,11 @@ mx_inv() {
       mx_bad 2 "agree: the job timer says OnCalendar=$(fv job_cal), release $want (v$v2) is deployed with $(mx_job_of "$v2")"
     [ "$KIND" != data ] || [ "$(fv db_st)" = "$(mx_dbst_of "$v2")" ] ||
       mx_bad 2 "agree: the database role has statement_timeout=$(fv db_st), release $want (v$v2) is deployed with $(mx_dbst_of "$v2")"
+    # (every node version has assets = assets: a rollback to a release recorded before that
+    # setting existed keeps it, never drops it)
+    if [ "$KIND" = node ] && mx_has_assets && [ "$(fv c_assets)" != assets ]; then
+      mx_bad 2 "agree: app.conf has assets=$(fv c_assets), release $want (v$v2) is deployed with assets"
+    fi
   fi
   # domains: the serving release's is the app's (app.conf and Caddy's site); one of a version that
   # never went live (a refused deploy's, a reverted one's, a second client's) is in neither

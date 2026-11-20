@@ -45,6 +45,10 @@ code() { curl -s -m 10 -o /dev/null -w '%{http_code}' "$(t_url "$1")"; }
 mpid() { srv "systemctl show -P MainPID tando-$1.service"; }
 st() { srv "sudo sed -n 's/^$2=//p' $AP/$1/state" | head -1; }
 conf_of() { srv "sudo cat $AP/$1/app.conf" | grep -E "^($2)=" | sort; }
+# dserved <domain>: what the server answers for one of an app's own domains (domain_tls=off)
+dserved() { curl -s -m 10 --connect-to "$1:80:127.0.0.1:$HP" "http://$1/" | head -c 120 | tr -d '\r\n'; }
+# dbset <app>: the database role's settings (its limits), sorted
+dbset() { srv "sudo -u postgres psql -X -At -c \"select c from pg_roles, unnest(rolconfig) c where rolname = 'tando_$1'\"" | sort | tr '\n' ' ' | sed 's/ $//'; }
 NODE="ua udb ujob ufail"
 # the fault matrix's app and checker (U5): ukill, kind node, without assets (0.1.1 has none)
 . "$ROOT/test/faults/lib-matrix.sh"
@@ -54,16 +58,18 @@ A=ukill KIND=node
 MX_SAMECONF=1
 mx_has_assets() { return 1; }
 kv_ver() { mx_version "$@"; sed -i.bak '/^assets = /d' "$W/$A/tando.conf"; }
-kold() { kv_ver "$1" "${2:-ok}"; old ukill "k$1.out" deploy; mx_note_id "$(mx_rid "$E/k$1.out")" "$1"; }
+# (TANDO_TEST_RESOLVE: 0.1.1's client adds the domain of tando.conf only when its DNS is right)
+kold() { kv_ver "$1" "${2:-ok}"; TANDO_TEST_RESOLVE=mx.test=127.0.0.1 old ukill "k$1.out" deploy; mx_note_id "$(mx_rid "$E/k$1.out")" "$1"; }
 
 # ---- U1. 0.1.1 sets up the host and deploys ---------------------------------------------------
-"$RO" host setup test public_port="$HP" postgres=yes > "$E/setup-old.out" 2>&1; rc=$?; cat "$E/setup-old.out" >&2
+"$RO" host setup test public_port="$HP" postgres=yes domain_tls=off > "$E/setup-old.out" 2>&1; rc=$?; cat "$E/setup-old.out" >&2
 check "U1a 0.1.1 host setup with postgres (rc=$rc)" t_eq "$rc" 0
 app ua 1; old ua ua1.out deploy; r1=$RC
 app ua 2; old ua ua2.out deploy; r2=$RC
 check "U1b 0.1.1: ua deployed twice (rc=$r1/$r2), serves v2" t_eq "$(served ua)" "hello v2 greeting="
-app udb 1 'database = postgres'; old udb udb1.out deploy
-check "U1c 0.1.1: udb with a database (rc=$RC)" t_eq "$(served udb)" "hello v1 greeting="
+app udb 1 'database = postgres' 'domain = udb.test' 'www = off'; TANDO_TEST_RESOLVE=udb.test=127.0.0.1 old udb udb1.out deploy
+check "U1c 0.1.1: udb with a database and a domain (rc=$RC)" eval \
+  '[ "$(served udb)" = "hello v1 greeting=" ] && [ "$(conf_of udb domains)" = "domains=udb.test|off" ]'
 app ujob 1 'job.tick = *:0/10 | true'; old ujob ujob1.out deploy
 check "U1d 0.1.1: ujob with a job (rc=$RC), its timer is there" eval \
   '[ "$(served ujob)" = "hello v1 greeting=" ] && srv "test -e /etc/systemd/system/tando-ujob-job-tick.timer"'
@@ -178,6 +184,16 @@ new udb udb-bk.out backup now; bk=$(sed -n 's/^backed up [a-z0-9-]*: \([^ ]*\).*
 check "U4i backup now of 0.1.1's database app (rc=$RC): $bk" eval '[ "$RC" = 0 ] && [ -n "$bk" ]'
 new udb udb-rs.out backup restore "$bk" --yes
 check "U4j restore it (rc=$RC), the app serves" eval '[ "$RC" = 0 ] && [ "$(served udb)" = "hello v1 greeting=" ]'
+# a rollback to 0.1.1's release (its record has no domains, no role limits): the app keeps both
+app udb 2 'database = postgres' 'domain = udb.test' 'www = off' 'db_statement_timeout = 30s'; new udb udb2.out deploy
+lim0=$(dbset udb)
+check "U4j2 deploy of udb with this client (rc=$RC): v2, its role limit set ($lim0)" eval \
+  '[ "$RC" = 0 ] && [ "$(served udb)" = "hello v2 greeting=" ] && case " $lim0 " in *" statement_timeout=30s "*) true;; *) false;; esac'
+new udb udb-rb.out rollback
+check "U4j3 rollback of udb to 0.1.1's v1 (rc=$RC): v1 serves" t_eq "$(served udb)" "hello v1 greeting="
+check "U4j4 and udb keeps its domain: app.conf ($(conf_of udb domains)), Caddy answers for udb.test ($(dserved udb.test))" eval \
+  '[ "$(conf_of udb domains)" = "domains=udb.test|off" ] && [ "$(dserved udb.test)" = "hello v1 greeting=" ]'
+check "U4j5 and its role limits are unchanged ($(dbset udb))" t_eq "$(dbset udb)" "$lim0"
 app ufail 3; new ufail ufail3.out deploy
 check "U4k deploy of the app whose 0.1.1 deploy failed (rc=$RC)" t_eq "$(served ufail)" "hello v3 greeting="
 site 3; new usite usite3.out deploy
