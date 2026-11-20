@@ -485,3 +485,44 @@ minute on the same work (one round of checks plus one metrics sample, from the t
 The frozen app: the alert fired after 3 failed checks, about 3.5 minutes, and tando restarted the app.
 
 Not measured: a full day of the daemon, and more than 3 apps on this server.
+
+## db studio (`tando db studio`), 20 Nov 2026
+
+`bench/run-studio.sh` on a test server limited to 1 CPU (pinned) and 2 GB, PostgreSQL 18.6, through
+the real client and its ssh forward. One run each (the laptop was shared with other test runs:
+numbers move by about 30% between runs). Raw output: `bench/raw/studio/`.
+
+| Measure | Result | Budget |
+|---|---|---|
+| Startup, server side (agent verb to ready) | 211 ms | 400 ms |
+| Startup, laptop (command to a probed link, local server) | 0.95 s | 2.5 s |
+| Idle, page open, 5 min: unit memory / CPU | 9.1 MB / 72 ms | 15 MB / 200 ms |
+| First page of a 100,000-row table (100 rows), API time | 4 ms | 150 ms |
+| Page 1,000 (offset 99,900) | 49 ms | 300 ms |
+| Peak memory over 50 pages of 500 sorted rows | 12 MB | 30 MB |
+| 10,000 rows x 10 columns: time, studio CPU, peak | 30 ms, 11 ms, 12 MB | 1.5 s, 0.6 s, 48 MB |
+| SELECT of 5M rows (1,000 kept): time, peak, backends active 1 s later | 3 ms, 12 MB, 0 | 1 s, 48 MB, 0 |
+| 20 MB cells x 100 rows (cut at 64 KB): time, peak | 1.1 s, 12 MB | -, 48 MB |
+| Heavy query (self-join of 100k rows sorted on md5, aggregate): backend private memory | 14-15 MB | (work_mem 2 MB per node) |
+| Page weight raw / gzip | 36,249 / 12,720 bytes | 53,248 / 18,432 |
+| After stop: units, processes, files | 0 0 0 | 0 0 0 |
+
+No budget missed. The binary is 7.2 MB (amd64) and 6.7 MB (arm64); the release grows by those two.
+
+**App impact** (scoping): the app's own pgbench (2 clients; a point read, a range count and an
+update per transaction) and 20 s of the other app's HTTP, (a) alone, (b) with a CPU-bound studio
+query (`sum(hashtext(...))` over 400M generated rows) without the priority lowering (`prio=off`),
+(c) the same with it (the backend moved into a scope of CPU and I/O weight 1, nice 19). Three
+interleaved rounds; the medians:
+
+| | app pgbench tps | p95 | other app HTTP req/s | p95 |
+|---|---|---|---|---|
+| (a) alone | 234 | 22.6 ms | 35 | 6.3 ms |
+| (b) heavy query, not lowered | 181 | 26.2 ms | 33 | 5.5 ms |
+| (c) heavy query, scoped | 202 | 21.9 ms | 37 | 5.3 ms |
+
+Honestly: (c) brings the app's p95 back to (a)'s and recovers part of the throughput, but rounds
+1 and 2 showed (c) equal to (b) and round 3 (c) above (a): the effect is within this machine's
+noise. The other app's HTTP is not measurably affected in any case (it is mostly Caddy and Node,
+not the database). The memory bound is from settings (2 MB per sort or hash node); an OOM kill of a
+backend is never relied on.

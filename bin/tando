@@ -53,10 +53,10 @@ parse() {
 
 # everything tando runs on a server: the agent, its logging helper, the metrics sampler, the alert
 # checks and their daemon (tandod), the read-only verbs in Go (tando-status), the offsite backups
-# (tando-offsite) and the CI gate (their units and timers are written by `setup` and their own
+# (tando-offsite), the database studio (tando-studio) and the CI gate (their units and timers are written by `setup` and their own
 # installers; tando-offsite's by `tando backup offsite set`)
 install_agent() {
-  install_helpers tando-agent tando-logs tando-metrics tando-watch tandod tando-status tando-offsite tando-host tando-gate tando-install-recover ||
+  install_helpers tando-agent tando-logs tando-metrics tando-watch tandod tando-status tando-offsite tando-host tando-studio tando-gate tando-install-recover ||
     die "could not install tando on $HOST: $(agent_msgs < "$TMPD/err" | tail -2 | tr '\n' ' ')"
   HELPERS_INSTALLED=1
   # the agent ships with the client: record the version it came with
@@ -409,6 +409,8 @@ db_info() {
 }
 
 cmd_db() {
+  # studio checks its own flags first (lib/studio.sh, srv/studio)
+  [ "${ARGS[1]:-}" = studio ] && { . "$TANDO_HOME/lib/studio.sh"; cmd_db_studio; return; }
   resolve 1
   case ${ARGS[1]:-info} in
     info) db_info;;
@@ -449,7 +451,7 @@ pos_app() {
   k=""
   if [ -n "$sub" ]; then
     case $cmd:${ARGS[pos[0]]} in
-      env:ls|backup:ls|backup:now|db:info|db:psql|db:url|domain:ls|jobs:ls|requests:summary|requests:tail|requests:errors)
+      env:ls|backup:ls|backup:now|db:info|db:psql|db:url|db:studio|domain:ls|jobs:ls|requests:summary|requests:tail|requests:errors)
         [ ${#pos[@]} -ge 2 ] && k=${pos[1]};;
     esac
   else

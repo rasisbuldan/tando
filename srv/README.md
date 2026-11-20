@@ -15,6 +15,7 @@ call them and parse their output unchanged.
 | `tando-offsite` | Go (`cmd/tando-offsite`, `offsite/`), new (no shell original): offsite copies of the backups in S3-compatible storage, encrypted (docs/BACKUP.md) |
 | `tandod` | Go (`cmd/tandod`, `daemon/`): the long-running monitor; runs the per-minute work of tando-watch, tando-metrics and the log scan in one process and answers on a unix socket |
 | `tando-host` | Go (`cmd/tando-host`, `hostcare/`): host care, the server itself (docs/HOSTCARE.md); no shell original |
+| `tando-studio` | Go (`cmd/tando-studio`, `studio/`), new: `tando db studio`, the read-only web UI and SQL editor (docs/COMMANDS.md); started only by `tando-agent db-studio` |
 | `tando-agent`, `tando-adopt` | shell, staying shell (but for the verbs above) |
 
 Module `tando/srv`, standard library only (no third-party modules, ever), Go as in `go.mod`.
@@ -41,6 +42,11 @@ cmd/tando-host/         main: dispatches host care's verbs (status, check, care-
 hostcare/               domain: facts, findings, the summary file, care mode, the reboot rule (below)
 cmd/tando-offsite/      main: dispatches the verbs of tando-offsite and version
 offsite/                domain: S3 client, encryption, push/fetch/sync/retention, disaster recovery (below)
+cmd/tando-studio/       main: serve (flags, the credential file, the socket, signals) and version
+studio/                 domain: tando db studio: the HTTP API on a unix socket, the read-only rules (below)
+  pgwire/     its PostgreSQL client: protocol 3.0, SCRAM-SHA-256, simple and extended query, cancel
+  sqlsplit/   the editor's statements (quotes, dollar quotes, nested comments), the read-only allowlist
+  ui/         the page: index.html, s.css, s.js (embedded; no framework, no outside request)
 internal/               platform: everything at least two programs need; never imports a domain package
   run/        start a program: argv, timeout, explicit env; never a shell. The only os/exec user
               (Cmd.User: as another user, privileges dropped: psql as postgres)
@@ -65,7 +71,7 @@ internal/               platform: everything at least two programs need; never i
 ```
 
 Who uses what (`go list -deps ./cmd/<name>` is the truth): `env`, `out`, `valid`, `decimal`
-every domain package, `run` every one but metrics (which starts programs only through `systemd`); `bashread` gate, status, watch, kvfile (the shell's `read` and
+every domain package, `run` every one but metrics (which starts programs only through `systemd`) and studio (none at all); `bashread` gate, status, watch, kvfile (the shell's `read` and
 `kv`; status's `load`); `kvfile` logs, watch, apps (`load`/`save`); `atomicfile` metrics, watch,
 gate, logs, status (`save`, `atomic`, `put`); `lock` watch, gate, logs (`lockfile` + `flock -w`);
 `fsinfo` gate, logs, status, watch (`[[ -d ]]`, `[[ -f ]]`, df); `cksum` status, watch;
@@ -355,6 +361,47 @@ errors that name the cause without the secret, sync retries and the brief, a kil
 rotation, retention, disaster recovery, validation, hostile output. Fuzz: `FuzzOpen`,
 `FuzzParseList`, `FuzzReadBundle`, `FuzzParseKey`. `TestProviderLive` runs only from
 test/offsite-r2-check.sh against a real bucket.
+
+## studio: how the package is laid out
+
+`tando db studio` (docs/COMMANDS.md; the trust boundary and the resource scoping are in
+docs/ARCHITECTURE.md). It starts no program (no `run`; `source_test.go` checks on the syntax
+trees: no os/exec, no exec syscall, net.Listen only "unix"), so srvlint has nothing to list for
+it. `pgwire` is the wire client: one TCP connection to 127.0.0.1:5432, the startup parameters,
+SCRAM-SHA-256 only (MD5, cleartext, trust and other methods are refused with a message that names
+`tando db psql`), `Simple` for the studio's own statements and `Exec` (Parse/Bind/Describe/
+Execute/Sync, text format) for the user's: Parse refuses two commands in one string. Every
+message is length-checked (8 MB) except DataRow, which is read as a stream: a cell is cut at its
+cap and the rest discarded from the socket. COPY is answered (CopyFail, or the out data drained)
+and refused; `Cancel` sends a CancelRequest on a connection of its own. `sqlsplit` splits the
+editor's text (code-point offsets for error positions) and reads the first words: `ReadOnly` is
+the allowlist. `studio` itself: `studio.go` (Config, New, the session's life: heartbeat, idle,
+EOF; Serve and its shutdown order; the unix socket), `http.go` (the checks every request passes:
+Host with the port, Origin, Sec-Fetch-Site, the content type, the bearer token; the one-time code;
+the headers), `db.go` (the one connection and `ro`: `BEGIN READ ONLY; SELECT 1`, the statements,
+`ROLLBACK`, `DISCARD ALL` and the resource settings again; the studio's own clock per statement;
+cancel; the connection closed when idle), `query.go` (the editor: the allowlist before anything
+runs, then statement by statement, streamed), `catalog.go` (tables, structure, rows: names from
+the catalog only, quoted; values as parameters), `sink.go` (a result as streamed JSON, the row,
+cell and answer caps), `jsonw.go` (the JSON writer: < > & U+2028/9 escaped, bad UTF-8 as U+FFFD),
+`args.go` (the command line and the credential file), `ui.go` (the embedded page, gzip).
+
+Tests: `pgwire_test.go` a scripted server on a net.Pipe (the RFC 7677 SCRAM exchange byte for
+byte, the refused methods, a bad server signature or nonce, the wire bytes of P/B/D/E/S, error
+fields, a notice mid-stream, a cut cell keeping the stream in sync, PortalSuspended, CopyIn
+answered with CopyFail and Sync, CopyOut drained, the cancel packet, short reads, an oversized
+message); `FuzzReadMessage`, `FuzzDataRow`; `live_test.go` the same client against a real
+PostgreSQL (PGWIRE_LIVE; test/e2e-studio.sh S11 runs it on the test server). `sqlsplit_test.go`
+the table of quotes and comments, code-point offsets, the allowlist; `FuzzSplit`.
+`studio_test.go` with a fake DB that records every call: the exact sequence of a batch, a
+transaction ended mid-batch, every known bypass refused before anything runs, absolute error
+positions, row and byte caps, the studio's clock (cancel, then the connection closed), cancel and
+busy, every refusal of the HTTP edge, the headers on every route, the one-time code, the history
+key, the session's end in each way, no SQL text or value in the log. `catalog_test.go` the rows
+SQL with hostile names (golden), `FuzzQuoteIdent`, `FuzzBuildRows` (every quoted name is the
+catalog's, one statement), `FuzzJSONString`, the arguments. `ui_test.go` the page's byte budgets
+and no HTML sink in s.js; `live_test.go` every bypass against a real PostgreSQL with the table
+checked after.
 
 ## daemon: tandod
 

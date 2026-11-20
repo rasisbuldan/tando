@@ -55,6 +55,7 @@ lib/cmd-ssh.sh           lint ui-test e2e-cli e2e
 lib/cmd-top.sh           lint ui-test e2e-cli e2e-top
 lib/hostcare.sh          lint ui-test e2e-cli e2e-host
 lib/offsite.sh           lint ui-test e2e-cli e2e-offsite e2e-data
+lib/studio.sh            lint ui-test e2e-cli e2e-studio
 
 # ---- server side
 server/tando-adopt       lint ui-test e2e-ci e2e-status e2e-adopt
@@ -66,6 +67,7 @@ srv/status/*             go e2e-status e2e-top e2e-cli
 srv/metrics/*            go e2e-status e2e-top @alerts
 srv/gate/*               go e2e-ci e2e-sec2
 srv/hostcare/*           go e2e-host @alerts
+srv/studio/*             go e2e-studio
 srv/tools/*              go
 srv/README.md            lint
 

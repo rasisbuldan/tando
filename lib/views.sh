@@ -506,7 +506,7 @@ cmd_doctor() {
   # (the sums of tando-status and tandod come after the version, named: an older agent ignores them)
   agent_raw sudo doctor $(server_sums) "$(client_version)" "status=$(server_sums tando-status | tr -d ' ')" \
     "tandod=$(server_sums tandod | tr -d ' ')" "offsite=$(server_sums tando-offsite | tr -d ' ')" \
-    "host=$(server_sums tando-host | tr -d ' ')" > "$TMPD/st" || exit 1
+    "host=$(server_sums tando-host | tr -d ' ')" "studio=$(server_sums tando-studio | tr -d ' ')" > "$TMPD/st" || exit 1
   {
     printf 'CHECK\tSTATE\tDETAIL\n'
     while IFS=$TAB read -r r state name detail; do

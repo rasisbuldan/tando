@@ -789,3 +789,14 @@ server_sums() {
     printf '%s ' "${s:-none}"
   done
 }
+
+# open_url url: in the browser (macOS open; xdg-open with a display); 1 when there is none or
+# TANDO_NO_BROWSER=1 (tando open, tando db studio)
+open_url() {
+  [ -z "${TANDO_NO_BROWSER:-}" ] || return 1
+  if [ "$(uname)" = Darwin ] && command -v open > /dev/null; then
+    open "$1" > /dev/null 2>&1
+  elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open > /dev/null; then
+    xdg-open "$1" > /dev/null 2>&1
+  else return 1; fi
+}

@@ -136,6 +136,7 @@ side and two people (or agents) never break each other's runs:
 | `e2e-offsite` | param + a second server (`TANDO_TEST_NAME2`) + an S3 container | offsite backups (docs/BACKUP.md): set/test/status, wrong and revoked credentials, a key that may not delete and a bucket lock (the test's rows, retention left to the bucket), every backup uploaded and encrypted (no plaintext in the bucket), offsite-only restore and pull, a failed upload retried and the alert state file, retention, a 300 MB backup in parts and a push killed mid-way, and the disaster recovery of a PostgreSQL app onto the second server. The S3 target is `srv/offsite/testdata/fakes3` (our own, std lib, it checks every SigV4 signature) in an `ubuntu:24.04` container with TLS, because MinIO's image could not be pulled where it was written; it needs npm (examples/notes) and apt for PostgreSQL. `test/offsite-r2-check.sh` runs the provider subset against a real R2 bucket |
 | `e2e-trial` | param (the standard image: Caddy with its default admin on 2019) | what the first real-server trial found: host add with the key only in `~/.ssh/known_hosts`, a failed add always says why, host setup moves Caddy's admin to its socket without a restart, doctor at 80 columns; run it again with `TANDO_TEST_CADDY=ubuntu` |
 | `e2e-adopt` | param | `tando adopt` on a synthetic hand-deployed app ("bakery": a small Node server in the layout of a Next.js standalone release, run by a hand-written unit as its own user with an env file and a data directory, behind a hand-written Caddy site with one plain `reverse_proxy` line, with a backup script in cron; nothing from the network). Under a request loop through Caddy: the plan and its missing-hold section, `apply` refused without the hold (client and server), the site shapes `adopt site` does not edit, an edit Caddy rejects and one it cannot load (the previous Caddyfile stays), `adopt site --apply` before adoption, `apply`, `tando deploy` and `rollback` with zero failed requests, the request log after adoption and `tando requests`, `undo` back to the recorded state, and a control: the same adoption with `--accept-502` and no hold, where requests do fail (the app takes 1.5 s to listen, so the loop always meets the restart). Not in it: timers that become jobs, a real Next.js build, TLS, and a request sent on a kept-alive upstream connection that the stopping app has just closed (the stand-in app closes every connection: Caddy 2.6.2 answers 502 for that case even with the hold, see the suite's header) |
+| `e2e-studio` | param (PostgreSQL from apt) | `tando db studio` (docs/COMMANDS.md): drives the page's API with curl through the client's own ssh forward, with the hidden test options (`TANDO_STUDIO_TEST="hb=1 timeout=4 idle-s=3 conn-idle=2"`) so the lifecycle takes seconds. S1 start (the socket's directory and modes, the app's user, no capabilities, no TCP listener), S2 the HTTP edge (token, one-time code, Host/Origin/Sec-Fetch-Site, content type), S3 every known read-only bypass, each followed by a write only PostgreSQL can refuse and the data checked as the superuser, S4 limits and the studio's own clock, S5 cancel, S6 browsing, S7 every way a session ends with nothing left, S8 CI keys at four layers, S9 the refusals and connection slots, S10 the password and a secret cell in no journal, audit line or process list, S11 the Go live tests (pgwire, the studio) built for the server's CPU and run as the app's user, S12 doctor, S13 the backend's scoping (settings, priority, a heavy query's memory, a migration's lock wait, no snapshot between requests), S14 two apps isolated, S15 the app picker. The UI is not driven: see the checklist below |
 
 `e2e-status` (param, needs the network once for PostgreSQL; its db app is skipped without;
 status is compared through tandod (0b checks it answers) and again with tandod stopped (6*), and
@@ -191,6 +192,37 @@ the reboot, boot grace and the real timer) and `e2e-alerts-daemon` (29, then 27h
 and its fallback). Every check id is in exactly one of them. Waits that prove a quiet period, a
 grace period or a real timer were kept and say so in a comment; waits for an event became polls
 or runs started by hand. Measured the same day: 493, 600 and 261 s.
+
+## tando db studio: the manual UI checklist
+
+No headless browser is in the repository, so the page (srv/studio/ui) is checked by hand before a
+release that changes it, in Chrome and Safari, light and dark (the system's and the toggle):
+`tando db studio <app>` on a test server with the e2e-studio data (`KEEP` a server of that suite).
+
+1. The link opens the page; the address bar loses `#c=` at once; a reload keeps working; the same
+   link in a second tab says it was already used.
+2. The top bar names the app, its database and the server; the tab's title too; nothing names
+   another app anywhere; "system schemas" adds pg_catalog and information_schema and takes them away.
+3. Tables: filter (`/` focuses it), kinds and estimates, a click opens rows; sort a column (asc,
+   desc, none); page « ‹ ›, 50/100/500; NULL dim italic, `''` dim; numbers right-aligned;
+   `items_v` notes that a view may page unstably.
+4. A cell: the side panel with the value, a long one cut with the note, JSON pretty-printed, a
+   bytea as hex with its size, Copy works, Esc closes.
+5. Structure: columns, defaults, identity, the key; indexes; "Open in SQL" fills a query.
+6. SQL: Cmd/Ctrl+Enter runs the statement at the cursor, with a selection the selection,
+   Shift+Cmd/Ctrl+Enter all; Tab indents, Esc then Tab leaves; the line:column indicator; one tab
+   per statement; an error selects its position (try a typo after a multi-byte character); notices
+   listed; `SELECT pg_sleep(20)` then Cmd/Ctrl+. cancels; 10,000 rows show 1,000 and "Show 1,000
+   more"; a refused statement (`DELETE ...`) says read-only and names tando db psql.
+7. CSV: a cell `=1+1` comes out as `'=1+1`, Shift-click gives the raw file; the file name has no
+   odd characters; a truncated result's name says so.
+8. History: queries listed newest first, a click puts one back; Clear; after Stop and a new
+   session the history and the editor text are back; in the browser's storage only ciphertext
+   (devtools: localStorage `tando.studio.<app>.history` is not readable SQL).
+9. Stop: the "studio of <app> ended" screen with the command; Ctrl-C in the terminal and a
+   laptop sleep of a minute give the same screen within a minute (the ping); a markup value in a
+   table (`<img src=x onerror=alert(1)>`) shows as text.
+10. Narrow window (720 px): the sidebar shrinks, nothing overlaps.
 
 ## test/go.sh
 

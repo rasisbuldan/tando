@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tando studio</title>
+<link rel="stylesheet" href="/s.css">
+</head>
+<body>
+<header id="top">
+<b id="app">tando studio</b><span id="where" class="dim"></span>
+<span class="badge" title="Writes: tando db psql">read-only</span>
+<nav class="seg"><button id="t-tables" aria-selected="true">Tables</button><button id="t-sql" aria-selected="false">SQL</button></nav>
+<span class="grow"></span>
+<button id="b-keys" class="ghost">?</button>
+<button id="b-theme" class="ghost" title="Theme">◐</button>
+<button id="b-stop" class="ghost danger">Stop</button>
+</header>
+<main>
+<aside id="side">
+<input id="filter" type="search" placeholder="Filter tables  /" autocomplete="off" spellcheck="false">
+<label><input id="sys" type="checkbox"> system schemas</label>
+<div id="tree"></div>
+<p id="sidenote" class="dim small"></p>
+</aside>
+<section id="v-tables">
+<div id="t-empty" class="empty">Pick a table or view on the left.</div>
+<div id="t-head" class="bar" hidden>
+<h2 id="t-name"></h2><span id="t-meta" class="dim small"></span><span class="grow"></span>
+<nav class="seg"><button id="s-rows" aria-selected="true">Rows</button><button id="s-struct" aria-selected="false">Structure</button></nav>
+<button id="b-insql">Open in SQL</button>
+</div>
+<div id="p-rows" hidden>
+<div class="gw"><table id="grid" class="grid"></table></div>
+<div class="bar small">
+<select id="psize" title="Rows per page"><option>50</option><option selected>100</option><option>500</option></select>
+<button id="pg-first">«</button><button id="pg-prev">‹</button><span id="pg-info"></span><button id="pg-next">›</button>
+<span id="pg-note" class="dim"></span>
+</div>
+</div>
+<div id="p-struct" class="pad" hidden></div>
+</section>
+<section id="v-sql" hidden>
+<div class="bar">
+<button id="b-run" class="primary" title="⌘/Ctrl+Enter">Run</button>
+<button id="b-all" title="⌘/Ctrl+Shift+Enter">Run all</button>
+<button id="b-cancel" title="⌘/Ctrl+." disabled>Cancel</button>
+<select id="maxrows" title="Rows kept per statement"><option value="100">100 rows</option><option value="1000" selected>1,000 rows</option><option value="10000">10,000 rows</option></select>
+<span class="grow"></span><span id="pos" class="dim small mono">1:1</span>
+<button id="b-hist">History</button>
+</div>
+<textarea id="ed" spellcheck="false" autocapitalize="off" aria-label="SQL"></textarea>
+<div id="status" class="bar small dim"></div>
+<div id="qerr" class="err" hidden></div>
+<div id="rtabs" class="bar"></div>
+<div class="gw"><table id="rgrid" class="grid"></table></div>
+<div id="rmore" class="bar small" hidden></div>
+<ul id="notices" class="small"></ul>
+</section>
+<aside id="drawer" class="panel" hidden>
+<div class="bar"><b id="d-title"></b><span class="grow"></span><button id="d-copy">Copy</button><button id="d-close" class="ghost">×</button></div>
+<p id="d-note" class="dim small"></p><pre id="d-val"></pre>
+</aside>
+<aside id="hist" class="panel" hidden>
+<div class="bar"><b>History</b><span class="dim small">encrypted, this computer only</span><span class="grow"></span><button id="h-clear">Clear</button><button id="h-close" class="ghost">×</button></div>
+<ol id="h-list"></ol>
+</aside>
+</main>
+<div id="ended" class="overlay" hidden><div class="card">
+<h2 id="end-title">This studio session ended</h2><p id="end-why"></p>
+<p>Run <code id="end-cmd">tando db studio</code> again. Your editor text is kept.</p>
+</div></div>
+<div id="keys" class="overlay" hidden><div class="card">
+<h2>Keyboard</h2>
+<dl><dt>⌘/Ctrl Enter</dt><dd>run the selection, or the statement at the cursor</dd>
+<dt>⌘/Ctrl Shift Enter</dt><dd>run everything</dd><dt>⌘/Ctrl .</dt><dd>cancel the query</dd>
+<dt>Tab</dt><dd>indent (Esc, then Tab, leaves the editor)</dd><dt>/</dt><dd>filter the tables</dd><dt>Esc</dt><dd>close a panel</dd></dl>
+<p class="dim small">Read-only (writes: tando db psql). One app per studio: tando db studio &lt;app&gt;</p>
+</div></div>
+<script src="/s.js"></script>
+</body>
+</html>
