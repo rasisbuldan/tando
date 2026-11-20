@@ -50,6 +50,48 @@ audit_done() {
   AUDIT_VERB=""
 }
 need_root() { [[ $EUID -eq 0 ]] || die "this needs root (sudo)"; }
+
+# fp <point>: a fault point for the test matrix (test/e2e-matrix.sh, docs/TESTING.md "Fault
+# matrix"). On a production server it is one builtin test: /run/tando-test does not exist. On a
+# test server both markers must be root's regular files: /etc/tando-test-server (made by the test
+# driver, never by tando) and the one-shot spec /run/tando-test/fault (point=, action=kill|fail|
+# hang, app=, verb=, nth=). The point is matched with its context (FPC: rec/ inside recover). A
+# spec fires once (renamed first, so recovery runs clean; next becomes the following spec):
+# kill = SIGKILL of this agent, fail = the point's action fails (the caller's failure branch),
+# hang = wait for /run/tando-test/release (a reboot is a hang, then a docker restart).
+# With /run/tando-test/trace, every point passed is appended to it (the driver's list of points).
+fp() {
+  [[ -d /run/tando-test ]] || return 0
+  fp_hit "${FPC:+$FPC/}$1"
+}
+fp_hit() {
+  local T=/run/tando-test p=$1 s
+  [[ $EUID == 0 && -f /etc/tando-test-server && ! -L /etc/tando-test-server && -O /etc/tando-test-server &&
+     -O $T && ! -L $T ]] || return 0
+  [[ -f $T/trace && -O $T/trace && ! -L $T/trace ]] && printf '%s %s %s\n' "${verb:-?}" "${A:--}" "$p" >> "$T/trace"
+  [[ -f $T/fault && -O $T/fault && ! -L $T/fault ]] || return 0
+  local -A F=(); load "$T/fault" F
+  [[ ${F[point]:-} == "$p" && ( -z ${F[app]:-} || ${F[app]} == "${A:-}" ) &&
+     ( -z ${F[verb]:-} || ${F[verb]} == "${verb:-}" ) ]] || return 0
+  s=$T/taking.$BASHPID
+  mv "$T/fault" "$s" 2> /dev/null || return 0          # (another process took it first)
+  if [[ ${F[nth]:-1} =~ ^[0-9]+$ ]] && ((F[nth] > 1)); then
+    F[nth]=$((F[nth] - 1))
+    for p in "${!F[@]}"; do printf '%s=%s\n' "$p" "${F[$p]}"; done > "$s" && mv -f "$s" "$T/fault"
+    return 0
+  fi
+  printf 'point=%s\naction=%s\nverb=%s\npid=%s\n' "${F[point]}" "${F[action]:-}" "${verb:-}" "$BASHPID" > "$s"
+  mv -f "$s" "$T/fired"
+  [[ -f $T/next ]] && mv -f "$T/next" "$T/fault"
+  case ${F[action]:-} in
+    kill) kill -KILL $$ "$BASHPID";;
+    fail) return 1;;
+    hang) : > "$T/reached"; local i
+          for ((i = 0; i < 6000; i++)); do [[ -e $T/release ]] && break; sleep 0.1; done
+          rm -f "$T/release" "$T/reached";;
+  esac
+  return 0
+}
 # mono: MONO = whole seconds of the monotonic clock (uptime), for timeouts and the soak: a wall
 # clock set back or forward (NTP after a long stop, a hand fix) neither stretches nor skips them
 mono() { local u; read -r u _ < /proc/uptime; MONO=${u%.*}; }
@@ -142,6 +184,8 @@ load() {
 save() {
   local -n _m=$2
   local k tmp="$1.tmp.$$" i
+  # (test fault points: before and after every write of a state file; fail = a disk too full)
+  fp "pre:${1##*/}" || { echo "tando-agent: could not write $1: the disk is full (test fault)" >&2; return 1; }
   for i in 1 2; do
     if ( umask 077; for k in "${!_m[@]}"; do printf '%s=%s\n' "$k" "${_m[$k]}"; done | sort > "$tmp" ); then
       # unchanged: nothing written (a re-run touches nothing)
@@ -149,6 +193,7 @@ save() {
       # flushed before the rename, so a power cut leaves the old file or the new one, never an
       # empty one (the activation's progress file is only a display: not flushed)
       if meta_mode "$tmp" "${1##*/}" && { [[ ${1##*/} == activation ]] || sync "$tmp"; } && mv -f "$tmp" "$1"; then
+        fp "post:${1##*/}"
         return 0
       fi
     fi
@@ -386,12 +431,12 @@ restart_app() {
     unset "S[stopped]" "S[down]"
     write_caddy                     # proxy again (dies, the state unchanged, when Caddy refuses)
     save "$D/state" S
-    has_unit && systemctl enable -q "tando-$A"
+    has_unit && fp ra.enable && systemctl enable -q "tando-$A"
   fi
   write_caddy
   has_unit || return 0
   systemctl reset-failed "tando-$A" 2> /dev/null
-  systemctl restart "tando-$A"
+  fp ra.restart && systemctl restart "tando-$A"
 }
 # lock [secs]: the app's lock (fd 9). While it waits, $D/lock.wait.<pid> says so; once it holds
 # it, $D/lock.holder names the verb. busy_info reports both, so a client tells "my call is
@@ -680,7 +725,7 @@ write_caddy() {
   [[ -f $f ]] && cp -p "$f" "$f.old"
   mv -f "$f.tmp" "$f"
   local verr=""
-  if ! verr=$(caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1) ||
+  if ! fp caddy.reload || ! verr=$(caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1) ||
      ! verr=$(systemctl reload caddy 2>&1); then
     if [[ -f $f.old ]]; then mv -f "$f.old" "$f"; else rm -f "$f"; fi
     exec 11>&-
@@ -814,7 +859,8 @@ switch_to() { # <id> or "" (no release left: stop the app)
     return
   fi
   [[ -d $D/releases/$1 ]] || { echo "tando-agent: release $1 is not on disk" >&2; return 1; }
-  ln -sfn "releases/$1" "$D/current.tmp" && mv -Tf "$D/current.tmp" "$D/current" || return 1
+  fp link.mv && ln -sfn "releases/$1" "$D/current.tmp" && mv -Tf "$D/current.tmp" "$D/current" || return 1
+  fp link.moved
   st current "$1" || return 1
   restart_app
 }
@@ -894,7 +940,8 @@ finish() { # kind [note]
   local id=${S[target]} fb=${S[fallback]:-} kind=$1 t ok=0 n0 soak soaked=0
   t=$(ds); pg phase verify
   caddy_up || { PROBE_WHY="Caddy is not running and did not start (sudo journalctl -u caddy)"; }
-  if via_caddy "$(app_unit)"; then ok=1
+  if ! fp fin.verify; then PROBE_WHY="health check failed (test fault)"
+  elif via_caddy "$(app_unit)"; then ok=1
   elif ! systemctl -q is-active caddy && caddy_up && via_caddy "$(app_unit)"; then ok=1; fi
   # soak: the release must stay up for a while; a crash or an OOM kill in the window rolls back
   soak=${C[soak]:-${H[soak]:-$SOAK}}
@@ -905,7 +952,7 @@ finish() { # kind [note]
     local end; mono; end=$((MONO + soak))
     while mono; ((MONO < end)); do
       sleep 1
-      if [[ $(systemctl show -P NRestarts "tando-$A") != "$n0" ]] || ! systemctl -q is-active "tando-$A"; then
+      if ! fp fin.soak || [[ $(systemctl show -P NRestarts "tando-$A") != "$n0" ]] || ! systemctl -q is-active "tando-$A"; then
         mono; ok=0 soaked=1; PROBE_WHY="$(soak_why), $((soak - end + MONO)) s after going live"; break
       fi
     done
@@ -914,23 +961,23 @@ finish() { # kind [note]
     S[status_$id]=verified
     [[ $kind == rollback && -n ${S[prev]:-} ]] && S[status_${S[prev]}]=rolledback   # left, not failed
     st last_good "$id" phase idle
-    jobs_follow
+    fp fin.jobs && jobs_follow
     pg t_verify "$(el "$t")" phase done result ok
-    hist "$id" "$kind" ok "${2:-}"
+    fp fin.hist && hist "$id" "$kind" ok "${2:-}"
     return 0
   fi
   pg t_verify "$(el "$t")" phase rollback
   [[ $kind == deploy ]] && S[status_$id]=bad
   fb=$(fallback_of "$fb" "$id")
   st phase rollback
-  if [[ -n $fb ]]; then switch_to "$fb" || true
+  if [[ -n $fb ]]; then { fp bad.switch && switch_to "$fb"; } || true
   elif [[ -z ${S[prev]:-} ]]; then switch_to ""; fi      # a first deploy: nothing to go back to
   st phase idle
-  jobs_follow
-  [[ $kind == deploy && $id != "$fb" ]] && start_back "$fb"   # app.conf describes the live release again
+  fp bad.jobs && jobs_follow
+  [[ $kind == deploy && $id != "$fb" ]] && fp bad.start_back && start_back "$fb"   # app.conf describes the live release again
   pg phase done result rolledback message "after the switch: $PROBE_WHY; back on ${fb:-nothing}"
-  hist "$id" "$kind" rolledback "${2:-$PROBE_WHY}"
-  [[ $kind == deploy && $id != "$fb" ]] && drop_release "$id"
+  fp bad.hist && hist "$id" "$kind" rolledback "${2:-$PROBE_WHY}"
+  [[ $kind == deploy && $id != "$fb" ]] && fp bad.drop && drop_release "$id"
   # the client has usually returned ("live") before the soak ends: the alert channels are told
   ((soaked)) && watch_notice rollback "$id" "release $id rolled back to ${fb:-nothing}: $PROBE_WHY"
   return 1
@@ -2048,6 +2095,7 @@ cmd_activate() {
   [[ $ifree =~ ^[0-9]+$ ]] && ((ifree < nf + 1000)) && rm -f "$D/upload" &&
     die "not enough free inodes on <host> for this release: it has $nf files, $ifree inodes are free (tando doctor; old releases: tando releases)"
   base=$(date -u +%Y%m%d-%H%M%S); id=$base
+  fp act.mkdir || { rm -f "$D/upload"; die "could not reserve a release id (test fault)"; }
   until mkdir "$D/releases/$id" 2> /dev/null; do
     n=$((n + 1)); id="$base-$n"; ((n < 100)) || { rm -f "$D/upload"; die "could not reserve a release id"; }
   done
@@ -2058,7 +2106,7 @@ cmd_activate() {
   [[ -x $LOGS ]] && read -r w f < <("$LOGS" audit-origin) && who=(-E "TANDO_AUDIT_WHO=$w" -E "TANDO_AUDIT_FROM=$f")
   # ExecStopPost: whatever ends the activation (an OOM kill, SIGKILL, a full disk), recover runs
   # at once and finishes or reverts it, so no release stays half-activated
-  if ! systemd-run --quiet --collect --unit="tando-$A-act-$id" "${who[@]}" \
+  if ! fp act.spawn || ! systemd-run --quiet --collect --unit="tando-$A-act-$id" "${who[@]}" \
       -p Description="tando activation $A $id" -p "ExecStopPost=$AGENT recover $A" \
       "$AGENT" run-activation "$A" "$id" "$b" "$u"; then
     rmdir "$D/releases/$id"; rm -f "$D/upload"
@@ -2143,6 +2191,7 @@ cmd_run_activation() {
   local id=$2 rel=$D/releases/$2 t l bad
   valid_id "$id" || die "bad id"
   lock 3600
+  fp run.locked
   AUDIT_NOTE="release $id"
   load "$D/state" S
   # its number in deploy order (rollback and prune go by it, not by the clock); a damaged value
@@ -2166,13 +2215,13 @@ cmd_run_activation() {
     AUDIT_NOTE="release $id: $1"
     S[status_$id]=bad; st phase idle
     pg phase done result failed message "$1"
-    hist "$id" deploy failed "$1"
-    drop_release "$id"
-    start_back "$prev"
+    fp fail.hist && hist "$id" deploy failed "$1"
+    fp fail.drop && drop_release "$id"
+    fp fail.start_back && start_back "$prev"
     free_lease 2> /dev/null   # (a failure before the copy ended: the upload's lease goes with it)
     exit 1
   }
-  jobs_snap "$id" || fail "could not record the release's jobs (disk full?)"
+  { fp run.jobs_snap && jobs_snap "$id"; } || fail "could not record the release's jobs (disk full?)"
 
   # one limit for the upload and the releases kept, in real bytes (du counts a hardlink once)
   local used max=$(( ${H[app_max_mb]:-8192} * 1048576 ))
@@ -2191,7 +2240,7 @@ cmd_run_activation() {
   # another process answering on the spare port could pass the pre-flight in the new release's place
   has_unit && ss -Hltn "sport = :$spare" | grepq . && fail "pre-flight port $spare is in use by another process"
   while IFS= read -r x; do args+=(-p "$x"); done < <(props "$spare" preflight)
-  has_unit && { systemd-run --quiet --collect --unit="$unit" "${args[@]}" -p "WorkingDirectory=$rel" \
+  has_unit && { fp pre.spawn && systemd-run --quiet --collect --unit="$unit" "${args[@]}" -p "WorkingDirectory=$rel" \
     "$AGENT" exec-app "$A" "$rel" || fail "could not start the pre-flight unit"; }
   if has_unit && ! { probe "${C[health_timeout]:-60}" "$unit" "http://127.0.0.1:$spare$(health_path)" &&
                      own_listener "$spare" "$unit.service"; }; then
@@ -2209,20 +2258,20 @@ cmd_run_activation() {
     P[t_preflight]=$(el "$t")
     fail "pre-flight: $PROBE_WHY"
   fi
-  has_unit && systemctl stop "$unit"
+  has_unit && fp pre.stop && systemctl stop "$unit"
   : > "$D/activation.log"
   pg t_preflight "$(el "$t")" phase switch
 
   # back up the app's data, switch, then verify through Caddy (finish goes back to last_good)
   t=$(ds); st phase switch
-  caddy_up || fail "Caddy is not running on <host> and did not start, so nothing was switched (sudo journalctl -u caddy -n 20)"
+  { fp sw.caddy_up && caddy_up; } || fail "Caddy is not running on <host> and did not start, so nothing was switched (sudo journalctl -u caddy -n 20)"
   if has_unit && ! own_listener "${C[port]}" "tando-$A.service" && [[ $PROBE_WHY == *"outside"* ]]; then
     fail "port ${C[port]} is held by another process, not by tando-$A: nothing was switched ($PROBE_WHY)"
   fi
   local bk=""
   if has_backup_data; then
     # (in this shell, not $(...): backup_take records last_backup in the state)
-    backup_take predeploy > /dev/null 2> "$D/backup.err" ||
+    { fp sw.backup && backup_take predeploy > /dev/null 2> "$D/backup.err"; } ||
       fail "the pre-deploy backup failed, so the release was not switched in: $(tail -c 300 "$D/backup.err" | tr '\n' ' ')"
     bk=$BK_ID
   fi
@@ -2231,6 +2280,7 @@ cmd_run_activation() {
   if [[ -n ${C[release]:-} ]]; then
     local sw=$(( $(ds) - t ))
     t=$(ds); st phase release; pg phase release
+    fp rel.run
     run_release "$bk"
     pg t_release "$(el "$t")" phase switch
     t=$(( $(ds) - sw )); st phase switch
@@ -2243,7 +2293,7 @@ cmd_run_activation() {
     AUDIT_RESULT=rolledback AUDIT_NOTE="release $id: ${P[message]:-rolled back}"
     app_journal -u "tando-$A" -n 60 --no-pager -o cat > "$D/activation.log" 2>&1
   fi
-  prune
+  fp run.prune && prune
   exit $rc
 }
 
@@ -2345,7 +2395,7 @@ import_release() {
   local before after
   before=$(upload_sum)
   local after_inc; after_inc=$(inc_sum)
-  if ! cp -a --no-dereference "$D/incoming" "$rel" 2> "$D/copy.err"; then
+  if ! { fp imp.cp && cp -a --no-dereference "$D/incoming" "$rel" 2> "$D/copy.err"; }; then
     # the cause in words: cp's own error, and what is left on the file system
     local why fb ifree
     why=$(grep -v '^$' "$D/copy.err" | tail -1 | cut -c1-200)
@@ -2362,6 +2412,7 @@ import_release() {
   [[ $before == "$after" ]] || { rm -rf "$rel"; fail "the upload changed during the copy"; }
   chmod go-rwx "$D/incoming"   # rsync -p copies the client's mode; other users never read it
   st inc_id "$id" inc_sum "$after_inc" inc_applied "${S[applied]:-}"   # (for an unchanged next deploy)
+  fp imp.free_lease
   free_lease
   chown -RhP "root:$group" "$rel" && chmod -R a-st,u=rwX,g=rX,o= "$rel" || fail "chown failed"
   open_public "$rel"
@@ -2460,7 +2511,9 @@ preflight_static() {
 # Finish or revert an interrupted activation. Skipped while an activation holds the lock.
 recover() {
   lockfile "$D/lock"; exec 9>"$D/lock"; flock -n 9 || return 0
+  local FPC=rec
   lock_mark recover
+  fp enter
   load "$D/state" S; load "$D/activation" P
   local ph=${S[phase]:-idle} id=${S[target]:-} fb=${S[fallback]:-}
   case $ph in
@@ -2481,7 +2534,7 @@ recover() {
       fi;;
     copy|preflight|release)
       # (release: the command is stopped where it was; what it had changed in the data stays)
-      systemctl stop "tando-$A-pre-$id" "tando-$A-rel-$id" 2> /dev/null
+      fp pre_stop && systemctl stop "tando-$A-pre-$id" "tando-$A-rel-$id" 2> /dev/null
       systemctl reset-failed "tando-$A-rel-$id" 2> /dev/null
       S[status_$id]=bad; st phase idle
       pg phase done result failed message "interrupted during $ph"
@@ -2493,12 +2546,12 @@ recover() {
       ;;
     switch|verify|soak|rollback)
       if [[ $(cur_link) == "$id" ]]; then
-        restart_app
+        fp finish && restart_app
         finish "${S[kind]:-deploy}" "recovered after interruption"
       else
         [[ ${S[kind]:-deploy} == deploy ]] && S[status_$id]=bad
         fb=$(fallback_of "$fb" "$id")
-        if [[ -n $fb && $(cur_link) != "$fb" ]]; then switch_to "$fb"
+        if [[ -n $fb && $(cur_link) != "$fb" ]]; then fp switch && switch_to "$fb"
         elif [[ -n $fb ]]; then restart_app; fi
         st phase idle
         jobs_follow
@@ -2550,7 +2603,7 @@ cmd_rollback() {
   P=([id]=$to [phase]=switch [result]=running [started]=$(now) [started_ds]=$(ds)); pg
   st phase rollback target "$to" kind rollback prev "$cur" fallback "$cur"
   AUDIT_NOTE="from ${cur:--} to $to"
-  t=$(ds); switch_to "$to" || { st phase idle; die "could not switch to $to"; }
+  t=$(ds); { fp rb.switch && switch_to "$to"; } || { st phase idle; die "could not switch to $to"; }
   pg t_switch "$(el "$t")"
   st phase verify
   finish rollback "from $cur" || die "rollback health check failed ($PROBE_WHY); back on $cur"
@@ -3551,7 +3604,7 @@ cmd_env() {
   if has_unit && [[ -n ${S[current]:-} && -z ${S[stopped]:-} && ${C[recipe]:-node} != container ]] &&
      systemctl -q is-active "tando-$A"; then
     env_save E "$D/.env.check" || die "could not write the env file (disk full?); nothing changed"
-    if ! env_preflight "$D/.env.check"; then
+    if ! { fp env.check && env_preflight "$D/.env.check"; }; then
       rm -f "$D/.env.check"
       local out SAN; out=$(grep -v 'systemd\[\|tando-.*\.service: ' "$D/activation.log" 2> /dev/null | grep . | tail -2 | tr '\n' ' ' | cut -c1-300)
       san_v "$out"
@@ -3559,7 +3612,8 @@ cmd_env() {
     fi
     rm -f "$D/.env.check"
   fi
-  env_save E || die "could not write the env file (disk full?); nothing changed"
+  { fp env.save && env_save E; } || die "could not write the env file (disk full?); nothing changed"
+  fp env.saved
   echo changed=1
   if ! has_unit; then echo restarted=0; echo why=static; echo healthy=1; return; fi
   if [[ -z ${S[current]:-} ]]; then echo restarted=0; echo why=nothing-deployed; echo healthy=1; return; fi
@@ -3569,11 +3623,11 @@ cmd_env() {
   [[ -z ${S[down]:-} ]] && systemctl -q is-active "tando-$A" && was_up=1
   restart_app
   echo restarted=1
-  if via_caddy "$(app_unit)"; then echo healthy=1; return 0; fi
+  if fp env.verify && via_caddy "$(app_unit)"; then echo healthy=1; return 0; fi
   local why=$PROBE_WHY
   if ((was_up)); then
     E=(); for k in "${!OLD[@]}"; do E[$k]=${OLD[$k]}; done
-    env_save E || die "the app fails its health check with the new env ($why), and the previous env could not be written back (disk full?): fix the value with tando env set, or tando env unset it"
+    { fp env.revert && env_save E; } || die "the app fails its health check with the new env ($why), and the previous env could not be written back (disk full?): fix the value with tando env set, or tando env unset it"
     restart_app
     if via_caddy "$(app_unit)"; then
       AUDIT_RESULT=reverted
@@ -3664,9 +3718,10 @@ cmd_svc() { # start|stop|restart app
     [[ -n ${S[stopped]:-} ]] && { echo already=1; echo healthy=1; return; }
     # the state says stopped only once Caddy answers 503 (write_caddy dies before the save)
     S[stopped]=1; unset "S[down]"
+    fp svc.caddy || die "Caddy rejected the site config (test fault)"
     write_caddy
     save "$D/state" S || die "could not save the state"
-    has_unit && { systemctl disable -q --now "tando-$A" || die "systemctl stop failed"; }
+    has_unit && { { fp svc.disable && systemctl disable -q --now "tando-$A"; } || die "systemctl stop failed"; }
     echo healthy=1
     return
   fi
@@ -3677,6 +3732,7 @@ cmd_svc() { # start|stop|restart app
     echo already=1; echo healthy=1; return
   fi
   restart_app || die "systemctl $1 failed"
+  fp svc.check
   if via_caddy "$(app_unit)"; then echo healthy=1; else echo healthy=0; fi
 }
 
@@ -3690,6 +3746,7 @@ cmd_app_down() {
   load "$D/state" S
   [[ $(systemctl show -P ActiveState "tando-$A") == failed ]] || return 0
   S[down]=1
+  fp down.caddy
   write_caddy
   save "$D/state" S
 }
