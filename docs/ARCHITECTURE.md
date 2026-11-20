@@ -214,7 +214,8 @@ server has a public address, else `localhost`) plus the app's own domains in the
 `www.` twins redirecting in blocks of their own. Every change is validated against the whole
 Caddyfile before the reload and rolled back if Caddy rejects it.
 Caddy modes per app: proxy (holding requests up to 15 s while the process restarts), file_server
-(static), `503 stopped` (after `tando stop`; the unit is disabled), `503 unavailable` (set by
+(static; in both, the fingerprinted files of the kept releases are answered first from the app's
+shared assets directory, see "Assets" below,, `503 stopped` (after `tando stop`; the unit is disabled), `503 unavailable` (set by
 `app-down` when the unit has failed for good; cleared by the next start, restart or deploy),
 `503 being deployed` (while the app has no release yet, from the site's setup until its first
 release switches in, and again if it ends with none; a small HTML page with `Retry-After: 10`). The
@@ -222,6 +223,52 @@ last one is a Caddy `file` matcher, looked at on each request, on the app's `cur
 (an empty file `switch_link` makes before the link and removes with it, so a link left dangling by a
 release directory removed by hand does not show the page): it goes away by itself when the release
 switches in, with no site rewrite and no reload.
+
+## Assets
+
+A browser that holds a page of release N asks for release N's hashed files
+(`/_next/static/<build>/...`, `/assets/index-<hash>.js`) after N+1 went live, and the new release
+does not have them: a 404 that breaks the page until reload. The same for a CDN or a slow client.
+So the fingerprinted files of every release tando keeps are hard-linked into one directory per app,
+`/opt/tando/apps/<app>/assets/`, laid out like their URLs (`assets/demo/_next/static/...`), and
+Caddy answers a request under those URL prefixes from it first and hands a miss to the app (or, for a
+static site, to its own `file_server`). It is `$D/assets` and not `shared/` because `shared/` is the
+app's own (it creates and owns what is in it, root never writes there) and Caddy must read the files.
+
+- **What counts:** the Next.js recipe's `.next/static` (Next itself sends the whole tree as
+  immutable); the directory `assets = <dir>[, <url prefix>]` names; for a static site, the first of
+  `assets`, `_astro`, `static`, `_next/static` whose files all carry a hash in their names (the last
+  `-`, `.` or `_` before the extension followed by 8 to 32 characters of `[A-Za-z0-9_-]` with a
+  digit or a capital after the first: `index-DiwrgTda.js`, `main.3f2a1c0b.chunk.js`); one file
+  without it and the directory is not taken. Node, Python and the rest only by `assets =`. A
+  container's files are inside its image: not supported (`assets` is refused for one).
+- **Records** (`$D/assetlog/`, root only): `<id>` lists the files release `<id>` put in the shared
+  directory, `<id>.spec` the `<dir><TAB><url prefix>` lines (written last: Caddy serves a prefix
+  only when every file of the release is in place), `<id>.cc` the `Cache-Control` the app itself
+  sent for one of its files, when it sent one.
+- **When:** `assets_link` runs at the start of `switch_to`, before the link moves: for a deploy,
+  after the pre-flight passed and the backup and release command ran; for a rollback and a revert,
+  for the release going live (a file of the same name with other bytes, which a fingerprint rules
+  out but a constant build id does not, is replaced by the newer release's, by a rename). A new file
+  is a `cp -l` (a hard link); a name that exists keeps its file. A failure only says so: the
+  app answers what is not shared.
+- **Pruning:** `prune` ends with `assets_gc`: records of releases that are gone are removed, then
+  every file of the shared directory that no kept release lists. Releases are kept as before (5, and
+  current, last_good and the target), so the files of the last releases stay and nothing grows without
+  bound. A failed or cut-off deploy's release is dropped the same way.
+- **Crash safety:** the files are linked before the link moves, and the serving release's files are
+  never removed while it is kept (its list is in the union). A kill leaves files nobody lists (or a
+  `*.tmp` list): the next prune takes them; the kill's own recovery is that of any kill before the
+  switch. A hit on a file in the middle of a replace never misses (link beside, then rename).
+- **Caddy:** `@tandoassets` (GET, HEAD, the prefixes, and the file exists in `$D/assets`) is a
+  `handle` with `Cache-Control: public, max-age=31536000, immutable` and `file_server`; the
+  request guards (a Host with a port, a Host that is not the site's) become `handle` blocks before
+  it, because `handle` comes before `respond` in Caddy's order and they must answer first. A site
+  with no mounts is exactly as before. The header is the app's own when the app sent one for a sample
+  file in the pre-flight (`<id>.cc`), so an app that caches its assets another way keeps that.
+  Not in the stopped and down pages.
+- **Cost:** hard links use no data blocks beyond the first copy; deploy time and measurements
+  are in the changelog entry.
 
 ## Trust boundaries
 - Loopback: Caddy's admin API is on a unix socket in /run/caddy (caddy and root only), never on

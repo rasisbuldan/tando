@@ -343,6 +343,7 @@ app_units() {
 drop_release() {
   valid_id "$1" && [[ -d $D/releases/$1 && $(cur_link) != "$1" ]] || return 0
   rm -rf --one-file-system "${D:?}/releases/$1"; rm -f "$D/jobs/$1" "$D/start/$1"
+  [[ -f $D/assetlog/$1 || -f $D/assetlog/$1.tmp ]] && assets_gc
   [[ ${C[recipe]:-} == container ]] && podman rmi -f "localhost/tando-$A:$1" > /dev/null 2>&1
   return 0
 }
@@ -748,6 +749,16 @@ write_caddy() {
   # internal, the other a public certificate), the site is a snippet imported by two blocks
   [[ -n ${C[domains]:-} && ( ${H[tls]:-off} == internal && $dt == auto || ${H[tls]:-off} == auto && $dt == internal ) ]] &&
     split=1
+  # the fingerprinted files of this and the kept releases (assets_link): their URL prefixes are
+  # answered from $D/assets, a miss by the app. Not while the stopped or down page answers.
+  local mounts="" acc="" m
+  if [[ -z ${S[stopped]:-}${S[down]:-} ]]; then
+    for m in $(assets_mounts); do mounts+=" $m*"; done
+    acc="public, max-age=31536000, immutable"
+    if [[ -n $mounts && -f $D/assetlog/${S[current]:-x}.cc ]]; then   # (the app's own, when it sent one)
+      read -r acc < "$D/assetlog/${S[current]}.cc"; [[ $acc == none ]] && acc=""
+    fi
+  fi
   {
     if [[ -n $split ]]; then echo "(tando-site-$A) {"; else echo "$name {"; fi
     [[ -z $split && ( ${H[tls]:-off} == internal || ( -n ${C[domains]:-} && $dt == internal ) ) ]] && echo "	tls internal"
@@ -759,7 +770,9 @@ write_caddy() {
     echo "		header_regexp Host :[0-9]+\$"
     [[ -n ${H[public_port]:-} ]] && echo "		not header Host *:${H[public_port]}"
     echo "	}"
-    echo "	respond @tandoport 400"
+    # (handle, not respond, when the assets are answered below: handle comes before it in Caddy's
+    # order, and a request with a port in its Host is answered 400 before anything else)
+    if [[ -n $mounts ]]; then echo "	handle @tandoport {"; echo "		respond 400"; echo "	}"; else echo "	respond @tandoport 400"; fi
     # Caddy before 2.7 serves a Host in other letters (ALPHA.localhost) but does not log it: the
     # Host must be one of the site's names exactly (the header matcher is case-sensitive)
     # (one `header Host` line per name: Caddy 2.6 takes one value per line, they are OR'ed)
@@ -772,7 +785,24 @@ write_caddy() {
     done
     echo "		}"
     echo "	}"
-    echo "	respond @tandohost 400"
+    if [[ -n $mounts ]]; then echo "	handle @tandohost {"; echo "		respond 400"; echo "	}"; else echo "	respond @tandohost 400"; fi
+    if [[ -n $mounts ]]; then
+      # a hit (a plain file under the prefix, for GET and HEAD) is Caddy's alone, with a header that
+      # says the name is the content; anything else goes on to the app (or the static file_server)
+      echo "	@tandoassets {"
+      echo "		method GET HEAD"
+      echo "		path$mounts"
+      echo "		file {"
+      echo "			root $D/assets"
+      echo "			try_files {path}"
+      echo "		}"
+      echo "	}"
+      echo "	handle @tandoassets {"
+      [[ -n $acc ]] && echo "		header Cache-Control \"$acc\""
+      echo "		root * $D/assets"
+      echo "		file_server"
+      echo "	}"
+    fi
     # Before the first release is live ($D/current is made when it switches) a visitor gets a 503
     # "being deployed" page, not a 502 after the hold or a 404. Caddy looks for the link on each
     # request (the file matcher), so the page goes away by itself when the release switches in,
@@ -1109,6 +1139,7 @@ switch_to() {
     workers_follow
     return
   fi
+  assets_link "$1" || echo "tando-agent: the fingerprinted files of release $1 could not all be shared; the app answers them" >&2
   switch_link "$1" || return 1
   restart_app
 }
@@ -1205,6 +1236,161 @@ releases_by_seq() {
     valid_id "$i" && printf '%s %s\n' "${S[seq_$i]:-0}" "$i"
   done | sort -k1,1n -k2,2 | cut -d' ' -f2
 }
+# ---- fingerprinted assets ----------------------------------------------------------------------
+#
+# A browser (or a CDN, or a slow client) that holds a page of release N asks for release N's hashed
+# files (/_next/static/<build>/..., /assets/index-<hash>.js) after N+1 went live, and the new
+# release has not got them: a 404 that breaks the page until it is reloaded. So the fingerprinted
+# files of every release tando keeps are hard-linked (the same disk blocks) into one directory,
+# $D/assets, laid out like their URLs; Caddy answers a request for such a URL from it first
+# (write_caddy) and hands a miss to the app. Their names carry their content, so the same URL is
+# the same bytes in every release, and Caddy may say so (Cache-Control: immutable).
+#   $D/assetlog/<id>        what release <id> put there (paths below $D/assets), made after the links
+#   $D/assetlog/<id>.spec   "<dir in the release><TAB><URL prefix>" lines, made after every file is in
+#                           place: Caddy serves a prefix only from then on (and while the release is kept)
+#   $D/assetlog/<id>.cc     the Cache-Control the app itself sent for one of them, when it sent one
+# Nothing in $D/assets is removed while a kept release lists it: assets_gc (prune) removes what no
+# kept release lists. A kill at any point leaves files nobody lists (gc takes them), never a
+# release without its files: they are linked before the switch, and the app answers what is missing.
+
+# assets_hashed dir: every file under dir has a content hash in its name (Vite and Rollup
+# index-DiwrgTda.js, webpack main.3f2a1c0b.js, Astro index.BkJmRqZs.js): the last dash, dot or
+# underscore before the extension is followed by 8 to 32 characters of [A-Za-z0-9_-] with a digit
+# or a capital after the first character. One file without it and the directory is not taken.
+assets_hashed() {
+  local f n=0
+  while IFS= read -r f; do
+    f=${f##*/}; f=${f%.map}; f=${f%.gz}; f=${f%.br}
+    [[ $f == *.chunk.* ]] && f=${f%.chunk.*}.${f##*.}
+    [[ $f =~ [-._]([A-Za-z0-9_-]{8,32})\.[A-Za-z0-9]+$ ]] || return 1
+    [[ ${BASH_REMATCH[1]} =~ [0-9]|.[A-Z] ]] || return 1
+    n=$((n + 1)); ((n <= 20000)) || return 1
+  done < <(find "$1" -type f)
+  ((n))
+}
+# assets_spec release-dir: the fingerprinted trees of a release as "<dir>\t<URL prefix>" lines. The
+# Next.js recipe's .next/static (Next itself calls the whole tree immutable), the tree `assets =`
+# names, and for a static site the first of assets, _astro, static, _next/static whose files are all
+# hashed. A container's files are in its image: not here.
+assets_spec() {
+  local rel=$1 d u v=${C[assets]:-} base=${C[path]:-} c
+  [[ $v == off || ${C[recipe]:-node} == container ]] && return 0
+  if [[ ${C[recipe]:-node} == next && -d $rel/.next/static && ! -L $rel/.next/static ]]; then
+    printf '.next/static\t%s/_next/static/\n' "$base"
+  fi
+  if [[ -n $v ]]; then
+    d=$(trim "${v%%,*}"); u=""; [[ $v == *,* ]] && u=$(trim "${v#*,}")
+    [[ -n $u ]] || u=$base/${d%/}
+    [[ $u == */ ]] || u+=/
+    [[ -d $rel/$d && ! -L $rel/$d ]] && printf '%s\t%s\n' "${d%/}" "$u"
+  elif [[ ${C[recipe]:-node} == static ]]; then
+    for c in assets _astro static _next/static; do
+      [[ -d $rel/$c && ! -L $rel/$c ]] && assets_hashed "$rel/$c" && { printf '%s\t/%s/\n' "$c" "$c"; break; }
+    done
+  fi
+  return 0
+}
+# assets_list dir: "<path below dir><TAB><inode><TAB><size>" of its plain files that root owns (a
+# file the app may write is not shared) and whose names are plain
+assets_list() {
+  find "$1" -type f -user root ! -path $'*\n*' ! -path $'*\t*' ! -path '*\\*' -printf '%P\t%i\t%s\n'
+}
+# assets_link id: hard-link release id's fingerprinted files into $D/assets (see above). 1 when
+# something could not be done: the release then keeps its files for the app to answer.
+assets_link() {
+  local id=$1 rel=$D/releases/$1 L=$D/assetlog dir url src root f k
+  valid_id "$id" && [[ -d $rel && ${C[caddy]:-} != external ]] || return 0
+  [[ ${ASSETS_DONE:-} == "$id" ]] && return 0
+  local spec; if [[ -f $L/$id.spec ]]; then spec=$(< "$L/$id.spec"); else spec=$(assets_spec "$rel"); fi
+  [[ -n $spec ]] || return 0
+  [[ -d $L ]] || install -d -m 700 -o root -g root "$L" || return 1
+  [[ -d $D/assets ]] || install -d -m 755 -o root -g root "$D/assets" || return 1
+  local man=$L/$id.tmp; : > "$man" || return 1
+  local -a add=() chg=() cmp=()
+  while IFS=$'\t' read -r dir url; do
+    [[ -n $dir ]] || continue
+    src=$rel/$dir root=$D/assets$url
+    [[ $(readlink -f "$src") == "$src" ]] || continue
+    # the files Caddy serves are the app's (group tando-<app>, mode 640) or Caddy's: a hard link
+    # is one file with one mode, so the app's are made readable (they are public files)
+    [[ $(stat -c %G "$rel") == caddy ]] || find "$src" -type f -user root ! -perm -o=r -exec chmod o+r {} +
+    add=() chg=() cmp=()
+    install -d -m 755 "$root" || return 1
+    (cd "$root" && find "$src" -mindepth 1 -type d -printf '%P\0' | xargs -0 -r mkdir -p --) || return 1
+    while IFS=$'\t' read -r k f; do
+      case $k in L) add+=("$f");; R) chg+=("$f");; C) cmp+=("$f");; esac
+    done < <(awk -F'\t' 'NR == FNR { i[$1] = $2; s[$1] = $3; next }
+                         { n++; nm[n] = $1; si[$1] = $2; ss[$1] = $3 }
+                         END { for (k = 1; k <= n; k++) { f = nm[k]
+                                 if (!(f in i)) print "L\t" f
+                                 else if (i[f] != si[f]) print (s[f] != ss[f] ? "R" : "C") "\t" f
+                                 } }' \
+               <(printf '\t\t\n'; assets_list "$root") <(assets_list "$src"))   # (the first line: awk's NR == FNR must not hold for an empty listing)
+    # a name in both with other bytes is not a fingerprint: the newer release's file replaces it
+    if ((${#cmp[@]})); then
+      while IFS= read -r f; do chg+=("$f"); done < <(
+        awk -F'  ' 'NR == FNR { h[substr($0, 35)] = $1; next } h[substr($0, 35)] != $1 { print substr($0, 35) }' \
+          <(cd "$root" && printf '%s\0' "${cmp[@]}" | xargs -0 md5sum --) \
+          <(cd "$src" && printf '%s\0' "${cmp[@]}" | xargs -0 md5sum --))
+    fi
+    assets_list "$src" | cut -f1 | sed "s|^|${url#/}|" >> "$man"
+    fp imp.assets
+    ((${#add[@]})) && { (cd "$src" && printf '%s\0' "${add[@]}" | xargs -0 cp -l --parents -t "$root" --) || return 1; }
+    fp imp.assets2
+    for f in "${chg[@]}"; do   # (a link beside it, then a rename: the name never goes missing)
+      ln "$src/$f" "$root/$f.new" && mv -f "$root/$f.new" "$root/$f" || return 1
+    done
+  done <<< "$spec"
+  # (a kill before this line leaves files nobody lists: assets_gc takes them)
+  sort -u -o "$man" "$man"; sync "$man"
+  mv -f "$man" "$L/$id" || return 1
+  # every listed file is there: only then does Caddy serve the prefix
+  local miss; miss=$(cd "$D/assets" && while IFS= read -r f; do [[ -f $f ]] || echo "$f"; done < "$L/$id" | head -1)
+  [[ -z $miss ]] || { echo "tando-agent: asset $miss of release $id could not be linked" >&2; return 1; }
+  [[ -f $L/$id.spec ]] || { printf '%s\n' "$spec" > "$L/$id.spec.tmp" && mv -f "$L/$id.spec.tmp" "$L/$id.spec"; } || return 1
+  ASSETS_DONE=$id
+  return 0
+}
+# assets_gc: after a prune: the records of releases that are gone, then every file of $D/assets
+# that no kept release lists (and the directories that are empty then)
+assets_gc() {
+  local L=$D/assetlog f i keep
+  [[ -d $L ]] || return 0
+  rm -f "$L"/*.tmp
+  for f in "$L"/*; do
+    [[ -e $f ]] || continue
+    i=${f##*/}; i=${i%%.*}
+    valid_id "$i" && [[ -d $D/releases/$i ]] || rm -f "$f"
+  done
+  [[ -d $D/assets ]] || return 0
+  keep=$(mktemp "$L/.keep.XXXXXX") || return 0
+  # (a list that cannot be read makes the list of what to keep short: then nothing is removed)
+  if find "$L" -maxdepth 1 -type f ! -name '*.*' -exec cat {} + 2> /dev/null | sort -u > "$keep"; then
+    (cd "$D/assets" && find . -type f -printf '%P\n' | sort | comm -23 - "$keep" | xargs -d '\n' -r rm -f --)
+    find "$D/assets" -mindepth 1 -type d -empty -delete 2> /dev/null
+  fi
+  rm -f "$keep"
+}
+# assets_mounts: the URL prefixes Caddy serves from $D/assets (those of every kept release)
+assets_mounts() {
+  local f
+  for f in "$D"/assetlog/*.spec; do [[ -f $f ]] && cut -f2 "$f"; done | sort -u
+}
+# assets_sample port id: the Cache-Control the app itself sends for one fingerprinted file of the
+# release (asked on its spare port), when it sends one: Caddy then sends the same, never its own
+assets_sample() {
+  local port=$1 id=$2 rel=$D/releases/$2 dir url f cc
+  IFS=$'\t' read -r dir url < <(assets_spec "$rel")
+  [[ -n ${dir:-} ]] || return 0
+  f=$(find "$rel/$dir" -type f ! -path $'*\n*' ! -path '*[%?# ]*' -printf '%P\n' -quit)
+  [[ -n $f ]] || return 0
+  cc=$(curl -s -m 5 -A "$PROBE_UA" -H "@$PROBE_HDR" -D - -o /dev/null "http://127.0.0.1:$port$url$f" 2> /dev/null |
+    tr -d '\r' | awk -F': ' 'tolower($1) == "cache-control" { sub(/^[^:]*: */, ""); print; exit }')
+  [[ -n $cc ]] || return 0
+  [[ $cc =~ ^[A-Za-z0-9=,._\ -]{1,200}$ ]] || cc=none
+  install -d -m 700 -o root -g root "$D/assetlog" &&
+    printf '%s\n' "$cc" > "$D/assetlog/$id.cc" || true
+}
 prune() {
   local i n=0 keep
   for i in $(releases_by_seq | tac); do
@@ -1221,6 +1407,7 @@ prune() {
   # settings staged by a configure a day ago or more (a deploy whose upload never came)
   [[ -d $D/confs ]] && find "$D/confs" -maxdepth 1 -type f -mmin +1440 ! -name "${S[staged]:-none}" -delete 2> /dev/null
   save "$D/state" S
+  assets_gc
 }
 
 # soak_why: how the app fell over in the soak, for the history note, the client and the alert:
@@ -2337,7 +2524,7 @@ cmd_configure() {
     # and so are its settings (start, health, memory, path...): a deploy that does not go live must
     # not change how the live one starts, is checked or runs (a file from before has only four)
     if valid_id "${S[current]:-}" && ! grepq -x conf=1 "$D/start/${S[current]}" 2> /dev/null; then
-      start_snap "${S[current]}" || die "could not record the live release's settings (disk full?)"
+      start_snap "${S[current]}" || die "could not record the live release's settings - disk full?"
     fi
   else
     # a user of that name is only taken over when an earlier configure of this app made it and was
@@ -2353,7 +2540,7 @@ cmd_configure() {
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" \
-    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]"
+    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -2394,20 +2581,32 @@ cmd_configure() {
       tasks) [[ $v =~ ^[1-9][0-9]{1,5}$ ]] || die "bad tasks: $v (processes and threads, like 512)";;
       max_conns|max_requests) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] || die "bad $k: $v";;
       stop_timeout) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || die "bad stop_timeout: $v (seconds)";;
+      # the fingerprinted files of the release (assets_spec): off, a directory in the release and
+      # optionally the URL prefix they are served under
+      assets) [[ $v == off || $v =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*(\ *,\ *(/[A-Za-z0-9_.~-]+)+/?)?$ && /$v/ != */../* && /$v/ != */./* ]] ||
+                die "bad assets: $v (off, or a directory in the release like assets, and optionally a URL prefix: assets, /static/)";;
       hold) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || die "bad hold: $v (seconds)";;
       log_max|log_keep|log_rate|access_log|request_log_max) "$LOGS" valid "$k" "$v" 2> /dev/null || die "bad $k: $v";;
       # health check of tando-watch: expected status and/or text, failures to fire, successes to resolve
       health_expect) [[ $v =~ ^([1-5]([0-9]{2}|xx))?( ?[\ -~]{1,100})?$ && -n $v && $v != *[\"\\]* ]] ||
                        die "bad health_expect: $v (like 200, 2xx or 200 ok)";;
       health_fails|health_recover) [[ $v =~ ^[1-9][0-9]?$ ]] || die "bad $k: $v (1 to 99)";;
-      # how long a job may run (sync_jobs), for all of the app's jobs or for one
+      # how a job runs (sync_jobs), for all of the app's jobs or for one: its time limit, the spread of
+      # its start (RandomizedDelaySec) and whether a run missed while the server was off is made up
       job_timeout) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] && ((v <= 86400)) || die "bad job_timeout: $v (seconds, 1 to 86400)";;
-      job.*.timeout) x=${k#job.}; x=${x%.timeout}
+      job_spread) [[ $v =~ ^[0-9]{1,4}$ ]] && ((v <= 3600)) || die "bad job_spread: $v (seconds, 0 to 3600)";;
+      job_missed) [[ $v == run || $v == skip ]] || die "bad job_missed: $v (run or skip)";;
+      job.*.timeout|job.*.spread|job.*.missed|job.*.cron) x=${k#job.}; x=${x%.*}
              [[ $x =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "bad job: $k"
-             [[ $v =~ ^[1-9][0-9]{0,4}$ ]] && ((v <= 86400)) || die "bad $k: $v (seconds, 1 to 86400)"
+             case ${k##*.} in
+               timeout) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] && ((v <= 86400)) || die "bad $k: $v (seconds, 1 to 86400)";;
+               spread) [[ $v =~ ^[0-9]{1,4}$ ]] && ((v <= 3600)) || die "bad $k: $v (seconds, 0 to 3600)";;
+               missed) [[ $v == run || $v == skip ]] || die "bad $k: $v (run or skip)";;
+               cron) [[ $v =~ ^[-0-9A-Za-z@*/,\ ]{1,100}$ ]] || die "bad $k";;   # (what was written: the client translated it)
+             esac
              jobs+=("$k");;
       job.*) [[ ${k#job.} =~ ^[a-z][a-z0-9-]{0,20}$ && $v == *'|'* ]] || die "bad job: $k"
-             systemd-analyze calendar "$(trim "${v%%|*}")" &> /dev/null || die "bad schedule for job ${k#job.}: $(trim "${v%%|*}")"
+             systemd-analyze calendar "$(trim "${v%%|*}")" &> /dev/null || die "bad schedule for job ${k#job.}: $(trim "${v%%|*}") (a cron schedule like */15 * * * * or a systemd one like daily or Mon..Fri 09:00: tando help jobs)"
              jobs+=("$k");;
       # workers (workers_follow): a command each, its memory and the time it gets to stop
       worker.*.memory|worker.*.stop_timeout)
@@ -2439,8 +2638,10 @@ cmd_configure() {
     C[$k]=$v
   done <<< "$input"
   release_ok
-  for k in "${jobs[@]}"; do   # a timeout is for a job of this tando.conf
-    [[ $k != *.timeout || " ${jobs[*]} " == *" ${k%.timeout} "* ]] || die "$k is set but there is no ${k%.timeout}"
+  [[ -n ${C[assets]:-} && ${C[assets]} != off && ${C[recipe]:-} == container ]] &&
+    die "assets is not supported for a container app (its files are inside the image)"
+  for k in "${jobs[@]}"; do   # a job setting is for a job of this tando.conf
+    [[ $k != job.*.* || " ${jobs[*]} " == *" ${k%.*} "* ]] || die "$k is set but there is no ${k%.*}"
   done
   # workers: their settings need the worker; a name is a job's or a worker's; not every recipe
   for k in ${workers[@]+"${workers[@]}"}; do
@@ -2901,6 +3102,7 @@ cmd_run_activation() {
     P[t_preflight]=$(el "$t")
     fail "pre-flight: $PROBE_WHY"
   fi
+  has_unit && assets_sample "$spare" "$id"
   has_unit && fp pre.stop && systemctl stop "$unit"
   : > "$D/activation.log"
   pg t_preflight "$(el "$t")" phase switch
@@ -4990,7 +5192,7 @@ conf_key() {
     recipe|image|container_port|build_memory|start|start_shell|release|release_shell|release_timeout|\
     health|path|data|writable|backup|database|db_statement_timeout|db_idle_tx_timeout|db_temp_limit|\
     memory|health_timeout|soak|cpu|tasks|max_conns|max_requests|stop_timeout|hold|log_max|log_keep|\
-    log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|job.*|worker.*) return 0;;
+    log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|job_timeout|job_spread|job_missed|assets|job.*|worker.*) return 0;;
   esac
   return 1
 }
@@ -5035,16 +5237,22 @@ conf_put() {
   return 0
 }
 # shellcheck disable=SC2034  # J is read by sync_jobs through its nameref
-jobs_follow() { # the job units become those of the current release (none without one)
+jobs_load() { # array: the jobs of the current release (none without one)
+  local -n _jl=$1
   local id=${S[current]:-} k
+  _jl=()
+  if [[ -n $id && -f $D/jobs/$id ]]; then load "$D/jobs/$id" _jl
+  elif [[ -n $id ]]; then for k in "${!C[@]}"; do ! job_key "$k" || _jl[$k]=${C[$k]}; done; fi
+  return 0
+}
+jobs_follow() { # the job units become those of the current release (none without one)
   local -A J=()
-  if [[ -n $id && -f $D/jobs/$id ]]; then load "$D/jobs/$id" J
-  elif [[ -n $id ]]; then for k in "${!C[@]}"; do ! job_key "$k" || J[$k]=${C[$k]}; done; fi
+  jobs_load J
   sync_jobs J
 }
 # job_key key: a setting that belongs to the jobs (and goes with a release): job.<name>,
 # job.<name>.timeout, job_timeout
-job_key() { [[ $1 == job.* || $1 == job_timeout ]]; }
+job_key() { [[ $1 == job.* || $1 == job_timeout || $1 == job_spread || $1 == job_missed ]]; }
 # job_names [array]: the names of the jobs in app.conf (or the array), sorted
 job_names() {
   local -n _jn=${1:-C}
@@ -5057,6 +5265,7 @@ job_names() {
 # timers of app foo-job (sync_jobs of foo deleted them). Units of that form are this app's only by
 # their runner line (old_job_owner), and sync_jobs replaces them with the new ones.
 job_unit() { echo "tando-${A}_job-$1"; }   # name -> unit name without .service/.timer
+JOB_SPREAD=15      # seconds a job's start is spread over (RandomizedDelaySec), unless job_spread says otherwise
 JOB_TIMEOUT=3600   # seconds a job may run unless job_timeout or job.<name>.timeout says otherwise
 # old_job_owner unit: the app a unit of the form before belongs to, from the line its service file
 # was written with (ExecStart=<agent> run-job <app> <name>, which no other app's unit has); fails
@@ -5077,7 +5286,8 @@ old_job_owner() {
 # enabled (a full disk): the caller does not count it done (op_trailer: recovery syncs them again)
 sync_jobs() {
   local -n _jobs=${1:-C}
-  local k n f x cal to b st want=" " changed=0 new=() rc=0
+  local k n f x cal to b st want=" " changed=0 new=() rc=0 sp ms per paused=" "
+  [[ -f $D/jobpaused ]] && paused=" $(tr '\n' ' ' < "$D/jobpaused")"
   for n in $(job_names "${1:-C}"); do
     k=job.$n
     cal=$(trim "${_jobs[$k]%%|*}")
@@ -5086,6 +5296,9 @@ sync_jobs() {
     fi
     to=${_jobs[$k.timeout]:-${_jobs[job_timeout]:-$JOB_TIMEOUT}}
     [[ $to =~ ^[1-9][0-9]{0,4}$ ]] || to=$JOB_TIMEOUT
+    sp=${_jobs[$k.spread]:-${_jobs[job_spread]:-$JOB_SPREAD}}
+    [[ $sp =~ ^[0-9]{1,4}$ ]] || sp=$JOB_SPREAD
+    ms=${_jobs[$k.missed]:-${_jobs[job_missed]:-run}}; per=true; [[ $ms == skip ]] && per=false
     want+="$n "
     b=$(job_unit "$n"); f=/etc/systemd/system/$b
     [[ -f $f.service && -f $f.timer ]] || changed=1
@@ -5093,11 +5306,16 @@ sync_jobs() {
     if ! { fp jobs.write &&
            { printf '[Unit]\nDescription=tando job %s %s\n\n[Service]\nType=oneshot\n' "$A" "$n"
              printf 'ExecStart=%s run-job %s %s\nWorkingDirectory=%s\nTimeoutStartSec=%s\n' "$AGENT" "$A" "$n" "$(job_dir)" "$to"
+             # the run's start and end are recorded by the agent as root (a hook that fails changes
+             # nothing: "-"; "+": outside the job's sandbox): the history and the log of the run
+             printf 'ExecStartPre=-+%s job-begin %s %s\nExecStopPost=-+%s job-end %s %s\n' "$AGENT" "$A" "$n" "$AGENT" "$A" "$n"
              props - job
              echo "# end"
            } > "$f.service.new" && [[ $(tail -1 "$f.service.new") == "# end" ]] &&
-           printf '[Unit]\nDescription=tando job timer %s %s\n\n[Timer]\nOnCalendar=%s\nAccuracySec=1s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' \
-             "$A" "$n" "$cal" > "$f.timer.new" && [[ $(tail -1 "$f.timer.new") == WantedBy=timers.target ]]; }; then
+           { printf '[Unit]\nDescription=tando job timer %s %s\n\n[Timer]\nOnCalendar=%s\nAccuracySec=1s\nPersistent=%s\n' "$A" "$n" "$cal" "$per"
+             ((sp > 0)) && printf 'RandomizedDelaySec=%s\n' "$sp"
+             printf '\n[Install]\nWantedBy=timers.target\n'
+           } > "$f.timer.new" && [[ $(tail -1 "$f.timer.new") == WantedBy=timers.target ]]; }; then
       rm -f "$f.service.new" "$f.timer.new"
       echo "tando-agent: could not write the units of job $n (disk full?)" >&2; rc=1; continue
     fi
@@ -5129,14 +5347,21 @@ sync_jobs() {
     [[ $want == *" $n "* ]] && continue
     systemctl disable -q --now "$b.timer"
     rm -f "$f" "${f%.timer}.service"; changed=1
+    [[ $paused == *" $n "* ]] && job_unpause "$n"   # (added again later, a job is not paused)
   done
   ((changed)) && systemctl daemon-reload
   # the timers not yet enabled and running, in one call (200 jobs: one systemctl, not 200)
-  local todo=()
+  local todo=() off=()
   for k in ${new[@]+"${new[@]}"}; do
+    x=${k#"tando-${A}_job-"}
+    if [[ $paused == *" ${x%.timer} "* ]]; then   # paused: the timer is off and stays off (tando jobs resume)
+      systemctl -q is-enabled "$k" 2> /dev/null || systemctl -q is-active "$k" && off+=("$k")
+      continue
+    fi
     systemctl -q is-enabled "$k" 2> /dev/null && systemctl -q is-active "$k" && continue
     todo+=("$k")
   done
+  ((${#off[@]})) && systemctl disable -q --now "${off[@]}" 2> /dev/null
   ((${#todo[@]})) && { systemctl enable -q --now "${todo[@]}" || rc=1; }
   return $rc
 }
@@ -5150,6 +5375,54 @@ cmd_run_job() { # app name (as the app user)
   [[ -n $cmd ]] || die "no such job"
   cd "$(job_dir)" || die "no release"
   exec /bin/bash -c "${cmd#*|}"
+}
+
+# The journal side of a job's runs, shared by job-run, the run hooks and job-log. A run's lines are
+# those its unit wrote after a cursor taken before it started (the comment in cmd_job_run says why
+# not its invocation id or a time window): the unit's stdout/stderr, in its app's journal namespace
+# (or the system journal when it has none).
+job_jq() { JQ=(journalctl --namespace='*' "_SYSTEMD_UNIT=$1" _TRANSPORT=stdout -o cat --no-pager); }
+job_jsync() { journalctl --sync 2> /dev/null; [[ -n $(jns) ]] && journalctl "$(jns)" --sync 2> /dev/null; return 0; }
+job_cursor() { # unit: the cursor of the last line it wrote (empty: none yet)
+  local JQ; job_jq "$1"
+  "${JQ[@]}" -n 1 --show-cursor 2> /dev/null | sed -n 's/^-- cursor: //p'
+}
+job_hist_dir() { [[ -d $D/jobhist ]] || { mkdir -m 700 "$D/jobhist" && chown root:root "$D/jobhist"; } 2> /dev/null; [[ -d $D/jobhist ]]; }
+job_unpause() { # name: the job is no longer paused
+  [[ -f $D/jobpaused ]] || return 0
+  grep -vx -- "$1" "$D/jobpaused" > "$D/jobpaused.tmp"; mv -f "$D/jobpaused.tmp" "$D/jobpaused"
+  [[ -s $D/jobpaused ]] || rm -f "$D/jobpaused"
+}
+# job-begin / job-end <app> <name>: run by the job's unit as root (ExecStartPre, ExecStopPost; a
+# failing hook never changes the job's result). They keep the history of the job: one line per run
+# in $D/jobhist/<name> (start, seconds, result, exit status, the journal cursor its output started
+# after; never the output itself), the last 50 runs, whatever the journal has rotated away.
+cmd_job_begin() {
+  need_root; app "$1"
+  local n=${2:-} cur
+  [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ ]] || return 0
+  job_jsync
+  cur=$(job_cursor "$(job_unit "$n").service")
+  job_hist_dir || return 0
+  printf '%s\n%s\n' "$(ds)" "$cur" > "$D/jobhist/$n.run.tmp" && mv -f "$D/jobhist/$n.run.tmp" "$D/jobhist/$n.run"
+}
+cmd_job_end() {
+  need_root; app "$1"
+  local n=${2:-} f t0="" cur="" t1 res=${SERVICE_RESULT:-} st=${EXIT_STATUS:-} lines
+  [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ ]] || return 0
+  job_hist_dir || return 0
+  f=$D/jobhist/$n; t1=$(ds)
+  [[ -f $f.run ]] && { { read -r t0; read -r cur; } < "$f.run"; }
+  [[ $t0 =~ ^[0-9]+$ ]] || t0=$t1
+  [[ $res =~ ^[a-z-]{1,20}$ ]] || res=unknown
+  [[ $res == success ]] && st=0
+  [[ $st =~ ^[A-Za-z0-9_-]{1,12}$ ]] || st=-
+  printf '%s\t%s.%s\t%s\t%s\t%s\n' "$((t0 / 10))" "$(((t1 - t0) / 10))" "$(((t1 - t0) % 10))" "$res" "$st" "$cur" >> "$f"
+  rm -f "$f.run"
+  # (at most 50 runs: cut back to 50 when it has 70, so that most runs only append)
+  lines=$(wc -l < "$f")
+  if ((lines > 70)); then tail -n 50 "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"; fi
+  return 0
 }
 
 # job-run <app> <name>: run a scheduled job now, in its own unit (tando-<app>_job-<name>.service:
@@ -5172,9 +5445,9 @@ cmd_job_run() {
   # clock a command reads and journald's stamps were seen half a second apart on a virtual machine.
   # A unit runs one job at a time, so every line of it after the cursor is this run's.
   local i out cur="" jq=(journalctl --namespace='*' "_SYSTEMD_UNIT=$u" _TRANSPORT=stdout -o cat --no-pager)
-  jsync() { journalctl --sync 2> /dev/null; [[ -n $(jns) ]] && journalctl "$(jns)" --sync 2> /dev/null; }
+  jsync() { job_jsync; }
   jsync
-  cur=$("${jq[@]}" -n 1 --show-cursor 2> /dev/null | sed -n 's/^-- cursor: //p')
+  cur=$(job_cursor "$u")
   # (a run by hand is never refused by systemd's start limit, which a job that failed a few times
   # in a row would have reached: the old result would then be printed as this run's)
   systemctl reset-failed "$u" 2> /dev/null
@@ -5199,21 +5472,109 @@ cmd_job_run() {
   return 0
 }
 
+# jobs <app> [full]: one `job` row per job (name, schedule, next, last run, result, exit status,
+# command), then `jobx` (name, on|paused|running, duration of the last run, the next 3 run times as
+# the server writes them: "full" only, it starts systemd-analyze once per job) and `zone`. The last
+# run is the last line of the job's history (job-end); a job from before it has systemd's memory.
 cmd_jobs() {
   app "$1"
-  local k n line last x
+  local k n line last x hs hd hr hc nx nxt state paused=" " lq u
   declare -A U
+  [[ -f $D/jobpaused ]] && paused=" $(tr '\n' ' ' < "$D/jobpaused")"
   for n in $(job_names); do
-    k=job.$n; U=()
+    k=job.$n; U=(); u=$(job_unit "$n")
     while IFS= read -r line; do U[${line%%=*}]=${line#*=}; done < <(
-      systemctl show --timestamp=unix -p NextElapseUSecRealtime,LastTriggerUSec "$(job_unit "$n").timer"
-      systemctl show --timestamp=unix -p Result,ExecMainStatus,ExecMainStartTimestamp "$(job_unit "$n").service")
+      systemctl show --timestamp=unix -p NextElapseUSecRealtime,LastTriggerUSec "$u.timer"
+      systemctl show --timestamp=unix -p Result,ExecMainStatus,ExecMainStartTimestamp,ActiveState "$u.service")
     # the last run: the timer's, or a later one by hand (tando jobs run) or as its timer does
     last=${U[LastTriggerUSec]#@} x=${U[ExecMainStartTimestamp]#@}
     [[ $x =~ ^[0-9]+$ ]] && { [[ ! $last =~ ^[0-9]+$ ]] || ((x > last)); } && last=$x
-    row job "$n" "$(trim "${C[$k]%%|*}")" "${U[NextElapseUSecRealtime]#@}" "$last" \
-      "${U[Result]:-}" "${U[ExecMainStatus]:-}" "$(trim "${C[$k]#*|}")"
+    hs="" hd=- hr=${U[Result]:-} hc=${U[ExecMainStatus]:-}
+    if [[ -f $D/jobhist/$n ]]; then
+      while IFS=$'\t' read -r x line lq nxt _; do hs=$x hd=$line hr=$lq hc=$nxt; done < "$D/jobhist/$n"
+      [[ $hs =~ ^[0-9]+$ ]] && last=$hs
+    fi
+    state=on; [[ ${U[ActiveState]:-} == activ* ]] && state=running
+    [[ $paused == *" $n "* ]] && state=paused
+    nx=("" "" "")
+    if [[ ${2:-} == full && $state != paused ]]; then
+      local i=0
+      while IFS= read -r line; do
+        [[ $line =~ ^[[:space:]]*(Next\ elapse|Iteration\ \#[0-9]+):\ [A-Za-z]{3}\ ([0-9-]+\ [0-9:]+\ [A-Za-z0-9+:/_-]+)$ ]] || continue
+        nx[i++]=${BASH_REMATCH[2]}
+      done < <(systemd-analyze calendar --iterations=3 "$(trim "${C[$k]%%|*}")" 2> /dev/null)
+    fi
+    row job "$n" "${C[$k.cron]:-$(trim "${C[$k]%%|*}")}" "${U[NextElapseUSecRealtime]#@}" "$last" "$hr" "$hc" "$(trim "${C[$k]#*|}")"
+    row jobx "$n" "$state" "$hd" "${nx[0]}" "${nx[1]}" "${nx[2]}"
   done
+  x=$(readlink /etc/localtime 2> /dev/null); row zone "$(date +%Z)" "${x#*zoneinfo/}"
+}
+
+# job-pause <app> <name> pause|resume: switch a job's timer off and on again without touching
+# tando.conf. The name goes into $D/jobpaused, which sync_jobs reads: a paused job's timer is never
+# enabled, so a deploy, a recovery or a reboot leaves it off. A run in progress finishes; a run by
+# hand (tando jobs run) still works.
+cmd_job_pause() {
+  need_root; app "$1"
+  local n=${2:-} how=${3:-}
+  [[ $how == pause || $how == resume ]] || die "job-pause: pause or resume"
+  lock 30
+  local -A J=(); jobs_load J
+  [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ && -n ${J[job.$n]:-} ]] || die "$A has no job ${n//[^A-Za-z0-9_-]/?} (tando jobs lists them)"
+  AUDIT_NOTE="job $n $how"
+  if [[ $how == pause ]]; then
+    { [[ -f $D/jobpaused ]] && grep -vx -- "$n" "$D/jobpaused"; echo "$n"; } | sort > "$D/jobpaused.tmp" &&
+      mv -f "$D/jobpaused.tmp" "$D/jobpaused" || die "could not record the pause (disk full?)"
+    chmod 600 "$D/jobpaused"
+  else
+    job_unpause "$n"
+    # (a Persistent timer made up what it missed while it was off: a resume would start the job at
+    # once. The time of its last run is the stamp's: now, so that the next run is the next time.)
+    touch "/var/lib/systemd/timers/stamp-$(job_unit "$n").timer" 2> /dev/null
+  fi
+  sync_jobs J || die "could not update the timer of job $n (disk full?)"
+  echo "job=$n"; echo "state=$([[ $how == pause ]] && echo paused || echo on)"
+}
+
+# job-log <app> <name> [count]: the output of the last runs (default 3, at most 50), newest last.
+# A run's lines are those after the journal cursor its history line holds, up to the cursor of the
+# next run (the run in progress, or the end): counted, never by time or invocation id. A run whose
+# lines the journal has rotated away says so (gone=1). Rows: run (start, seconds, result, status),
+# then log=<line> (the last 200 lines of the run), or gone=1.
+cmd_job_log() {
+  need_root; app "$1"
+  local n=${2:-} cnt=${3:-3} u f i t s d r c cu l ta tb out; local -a H=() JQ
+  [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ && -n ${C[job.$n]:-} ]] || die "$A has no job ${n//[^A-Za-z0-9_-]/?} (tando jobs lists them)"
+  [[ $cnt =~ ^[0-9]{1,2}$ ]] && ((cnt >= 1 && cnt <= 50)) || die "how many runs: 1 to 50"
+  f=$D/jobhist/$n; u=$(job_unit "$n").service
+  [[ -s $f ]] || { echo "runs=0"; return 0; }
+  job_jsync; job_jq "$u"
+  mapfile -t H < "$f"
+  local end=""   # the cursor the newest run's lines end at: a run in progress starts there
+  [[ -f $f.run ]] && end=$(sed -n 2p "$f.run")
+  local first=$((${#H[@]} - cnt)); ((first < 0)) && first=0
+  for ((i = first; i < ${#H[@]}; i++)); do
+    IFS=$'\t' read -r t d r s c <<< "${H[i]}"
+    row run "$t" "$d" "$r" "$s"
+    # the end of this run: the start of the next (its history line), or of the one in progress
+    cu=$end
+    ((i + 1 < ${#H[@]})) && { IFS=$'\t' read -r _ _ _ _ cu <<< "${H[i + 1]}"; }
+    # (the last line before the run is still in the journal, or the run's own lines may be cut)
+    if [[ -n $c ]] && (($("${JQ[@]}" --cursor="$c" -n 1 2> /dev/null | wc -l) == 0)); then echo "gone=1"; continue; fi
+    if [[ -n $c ]]; then ta=$("${JQ[@]}" --after-cursor="$c" 2> /dev/null | wc -l); else ta=$("${JQ[@]}" 2> /dev/null | wc -l); fi
+    tb=0
+    if [[ -n $cu ]]; then tb=$("${JQ[@]}" --after-cursor="$cu" 2> /dev/null | wc -l)
+    elif ((i + 1 < ${#H[@]})); then tb=$ta; fi   # (the next run's cursor is empty: it started on an empty journal)
+    ((ta -= tb)); ((ta < 0)) && ta=0
+    out=""
+    if ((ta > 0)); then
+      if [[ -n $c ]]; then out=$("${JQ[@]}" --after-cursor="$c" 2> /dev/null | head -n "$ta" | tail -n 200)
+      else out=$("${JQ[@]}" 2> /dev/null | head -n "$ta" | tail -n 200); fi
+    fi
+    [[ -n $out ]] && while IFS= read -r l; do san_v "$l"; echo "log=$SAN"; done <<< "$out"
+  done
+  [[ -f $f.run && $(systemctl show -P ActiveState "$u") == activ* ]] && echo "running=1"
+  return 0
 }
 
 # ---- workers ------------------------------------------------------------------------------------
@@ -5420,7 +5781,7 @@ case $verb in
   domain-add|domain-rm) audit "$verb" "${1:-}";;
   activate|run-activation) audit deploy "${1:-}";;
   configure|rollback|env-set|env-unset|env-ls|start|stop|restart|unlock|destroy|backup-run|\
-  backup-restore|backup-cat|db-url|db-psql|shell|job-run) audit "$verb" "${1:-}";;
+  backup-restore|backup-cat|db-url|db-psql|shell|job-run|job-pause) audit "$verb" "${1:-}";;
   db-studio|db-studio-stop) audit "$verb" "${1:-}";;
 esac
 # Verbs that change an app run to their end when the ssh session that started them drops: the
@@ -5488,6 +5849,7 @@ case $verb in
   shell-put) cmd_shell_put "$@";;
   busy) cmd_busy "$@";;
   job-run) cmd_job_run "$@";;
+  job-begin) cmd_job_begin "$@";; job-end) cmd_job_end "$@";; job-pause) cmd_job_pause "$@";; job-log) cmd_job_log "$@";;
   host)   # host care (docs/HOSTCARE.md): the server itself, answered by tando-host (Go, srv/hostcare)
     need_root
     [[ -x $R/bin/tando-host ]] || die "host care is not installed on <host>: tando host setup <host> installs it"

@@ -86,6 +86,7 @@ mx_version() {
       data) echo "data = data"; echo "database = postgres";;
     esac
     mx_has_job && echo "job.tick = $(mx_job_of "$n") | true"
+    [ "$KIND" = node ] && echo "assets = assets"
     if [ "$KIND" = worker ]; then for w in $(mx_workers_of "$n"); do echo "worker.$w = node worker.js"; done; fi
     [ -n "${MX_RELEASE:-}" ] && echo "release = $MX_RELEASE"
   } > "$d/tando.conf"
@@ -113,7 +114,12 @@ mx_version() {
     worker) cp "$MX_DIR/mx-app/server.js" "$MX_DIR/mx-app/worker.js" "$d/";;
     *) cp "$MX_DIR/mx-app/server.js" "$d/";;
   esac
+  # a fingerprinted file per version (node: assets = assets; static: found by its name)
+  if mx_has_assets; then mkdir -p "$d/assets"; rm -f "$d"/assets/*; echo "v$n asset" > "$d/assets/$(mx_asset_name "$n")"; fi
 }
+# mx_has_assets: the kinds whose versions ship a fingerprinted file (the shared assets directory)
+mx_has_assets() { case $KIND in node|static) return 0;; esac; return 1; }
+mx_asset_name() { echo "app-$(printf 'v%s' "$1" | cksum | cut -d' ' -f1).js"; }
 # mx_settings <n>: what a client's configure sends for version n (the race action: a second client
 # configures the app with its own tando.conf while this one's deploy is in flight)
 mx_settings() {
@@ -126,6 +132,7 @@ mx_settings() {
   [ "$KIND" = container ] && printf 'container_port=8080\n'
   [ "$KIND" = data ] && printf 'data=data\ndatabase=postgres\n'
   mx_has_job && printf 'job.tick=%s | true\n' "$(mx_job_of "$n")"
+  [ "$KIND" = node ] && printf 'assets=assets\n'
   if [ "$KIND" = worker ]; then for w in $(mx_workers_of "$n"); do printf 'worker.%s=node worker.js\n' "$w"; done; fi
   return 0
 }
@@ -352,6 +359,15 @@ mx_inv() {
   # 9. data and database untouched
   [ "$(fv data_sum)" = "${MX_DATA0:-}" ] || mx_bad 9 "data: the sentinel changed (${MX_DATA0:-none} -> $(fv data_sum))"
   [ -z "${MX_DB0:-}" ] || [ "$(fv db_rows)" = "$MX_DB0" ] || mx_bad 9 "data: database rows $MX_DB0 -> $(fv db_rows)"
+  # 12. assets: the serving release's fingerprinted file answers through Caddy with its bytes and
+  # the immutable header (linked before the switch: a kill at any point of the copy must not take it)
+  if [ "$stopped" = 0 ] && [ -n "$sv" ] && [ "$MX_CODE" = 200 ] && mx_has_assets; then
+    local acode
+    acode=$(curl -s -m 10 -D "$W/ah" -o "$W/ab" -w '%{http_code}' "http://$A.localhost:$TANDO_TEST_HTTP_PORT/assets/$(mx_asset_name "$sv")")
+    { [ "$acode" = 200 ] && [ "$(cat "$W/ab")" = "v$sv asset" ] && grep -qi '^cache-control:.*immutable' "$W/ah"; } ||
+      mx_bad 12 "assets: v$sv's fingerprinted file answers $acode \"$(head -c 40 "$W/ab" | tr -d '\r\n')\", cache: $(grep -i '^cache-control' "$W/ah" | tr -d '\r')"
+    [ -z "$(fv asset_left)" ] || mx_bad 12 "assets: leftovers in the shared directory: $(fv asset_left)"
+  fi
   # 10. visitors
   if [ "${MX_LOOPOK:-0}" = 1 ] && [ -s "$W/loop" ]; then
     # (a reboot: requests fail while the server is down; from the first 200 after it, none may)

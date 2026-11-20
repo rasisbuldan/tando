@@ -13,6 +13,47 @@ first, grouped by area.
   release id whose holder is gone: one taken before the server restarted, or whose activate no
   longer runs. A lease an upload is still writing into is never cleared.
 
+- Added: fingerprinted assets of the last releases stay reachable. After a deploy, a browser still
+  holding a page of the old release (or a CDN, or a slow client mid-load) asked for the old
+  release's hashed files (`/_next/static/<build>/...`, `/assets/index-<hash>.js`) and got a 404,
+  which broke the page until reload (measured before: HTTP 404 on a Next.js app and on a static
+  site). Now every release's fingerprinted files are hard-linked into `/opt/tando/apps/<app>/assets/`
+  (laid out like their URLs, no second copy on disk), Caddy answers a request for such a URL from
+  there first with `Cache-Control: public, max-age=31536000, immutable` and hands a miss to the app
+  (or the static `file_server`). What counts: the Next recipe's `.next/static`, the new key
+  `assets = <dir>[, <url prefix>]` (any recipe but a container, whose files are inside the image),
+  and for a static site the first of `assets`, `_astro`, `static`, `_next/static` whose files all
+  have a hash in their names (`index-DiwrgTda.js`, `main.3f2a1c0b.js`); `assets = off` turns it off.
+  Nothing else gets a header: HTML and every path that is not under such a prefix stay exactly as
+  the app sends them, and an app that sends its own `Cache-Control` for its fingerprinted files (seen
+  in the pre-flight on one of them) keeps it. The files are linked before the switch and removed
+  by `prune` only when no kept release lists them (a per-release list in `assetlog/`), so they go
+  with the releases tando already keeps; a rollback links its own again; a kill during the link
+  leaves files nobody lists (the next prune takes them), never a release without its files.
+  Cost: the link took 0.05 s for 12 files, 0.1 s for 300, 0.2 to 0.6 s for 1500 on the test server;
+  disk is nothing (hard links); the deploy's copy, pre-flight and switch phases did not get longer
+  (switch 0.4 to 0.5 s against 0.6 to 2 s before, on a busy machine). Served by Caddy instead of
+  the app's Node process, a 229 KB script on one CPU: 5275 requests/s at 0.15 ms of Caddy CPU
+  each, against 685 requests/s with 0.56 ms of the app's CPU and 0.53 ms of Caddy's (identity), or
+  125 requests/s with 6.5 ms of the app's CPU when the client takes gzip and Next compresses it.
+  Containers: not supported in v1 (`assets` is refused).
+- Added: scheduled jobs mature. (1) `job.<name>` takes cron as well as systemd: `*/15 * * * *`,
+  `0 9 * * mon-fri`, `@daily` (lists, ranges, steps, month and weekday names), translated on your
+  machine to the exact OnCalendar text or refused with what to write instead (both day of month and
+  weekday, `5/15`, wrap-around ranges, `@reboot`, `?` `L` `W` `#`); every schedule is checked before
+  a deploy (`up`, `--dry-run`, `configure check`). `tando jobs` shows what you wrote, the next three
+  run times by the server's clock and the server's time zone, how each job's last run ended (`ok`,
+  `exit 3`, `timed out`, `killed (memory)`) and how long it took. (2) `job_spread` (default 15 s,
+  `RandomizedDelaySec=`: 20 apps' hourly jobs no longer start in the same second) and `job_missed =
+  run|skip` (default run: a run missed while the server was off is made up once, as before; skip
+  drops it), each also per job (`job.<name>.spread`, `.missed`); a job still running at its next
+  time is not started twice (now tested and documented). (3) `tando jobs log <name> [-n N]` shows the
+  output of the last runs from the journal by cursor; the last 50 runs of each job (time, result,
+  duration, never output) are kept on the server (`jobhist/`) for when the journal has rotated.
+  (5) `tando jobs pause <name>` and `resume`: the timer is off until resumed, across deploys,
+  rollbacks and reboots. Not done: retries of a failed run. The job units gain two root hooks
+  (`ExecStartPre`/`ExecStopPost`, `job-begin`/`job-end`) that write the history; a hook that fails
+  never changes the job's result.
 - Fixed: a command that failed on the server with "Connection refused" in its own message (a
   `pg_dump` with PostgreSQL stopped, say) was reported as "cannot reach <host>: connection
   refused", as if ssh had failed. Only ssh's own "connect to host ... Connection refused" says

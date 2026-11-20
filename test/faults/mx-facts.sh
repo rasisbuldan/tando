@@ -69,6 +69,8 @@ kv units "$(systemctl list-units --all --plain --no-legend "tando-$A-*" 2> /dev/
 kv tmp "$( { find "$D" -maxdepth 2 \( -name '*.tmp' -o -name '*.tmp.*' -o -name current.tmp -o -name .env.check \
   -o -name '.env.??????' -o -name copy.err -o -name '.restore-*' -o -name '.replaced-*' \) 2> /dev/null
   ls "$f.tmp" "$f.old" 2> /dev/null; } | sed "s|^$D/||" | tr '\n' ' ')"
+# the shared assets directory: a half-made link, list or key left by an operation that was cut off
+kv asset_left "$( { find "$D/assets" -name '*.new' 2> /dev/null; ls "$D"/assetlog/*.tmp "$D"/assetlog/.keep.* 2> /dev/null; } | sed "s|^$D/||" | tr '\n' ' ')"
 # the env file's MXVAL and MX_BAD, the data sentinel and the database's rows
 kv env_val "$(sed -n 's/^MXVAL="\(.*\)"$/\1/p' "$D/env" 2> /dev/null)"
 kv env_bad "$(sed -n 's/^MX_BAD="\(.*\)"$/\1/p' "$D/env" 2> /dev/null)"
