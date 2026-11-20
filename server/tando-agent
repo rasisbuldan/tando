@@ -4583,15 +4583,27 @@ cmd_job_run() {
     die "job $n is not scheduled yet: jobs take effect with the first verified release that has them (tando up; tando status)"
   AUDIT_NOTE="job $n"
   t0=$(ds)
+  # the job's stdout/stderr of this run is what its unit wrote after the last line it had written
+  # before (a cursor), in its app's journal namespace (or the system journal when it has none).
+  # Not by invocation id: journald reads the id from the process, and a job that ends within
+  # milliseconds is gone by then (seen: its lines stored without the id). Not by time either: the
+  # clock a command reads and journald's stamps were seen half a second apart on a virtual machine.
+  # A unit runs one job at a time, so every line of it after the cursor is this run's.
+  local i out cur="" jq=(journalctl --namespace='*' "_SYSTEMD_UNIT=$u" _TRANSPORT=stdout -o cat --no-pager)
+  jsync() { journalctl --sync 2> /dev/null; [[ -n $(jns) ]] && journalctl "$(jns)" --sync 2> /dev/null; }
+  jsync
+  cur=$("${jq[@]}" -n 1 --show-cursor 2> /dev/null | sed -n 's/^-- cursor: //p')
+  # (a run by hand is never refused by systemd's start limit, which a job that failed a few times
+  # in a row would have reached: the old result would then be printed as this run's)
+  systemctl reset-failed "$u" 2> /dev/null
   systemctl start "$u" < /dev/null 2> /dev/null   # (a oneshot: returns when the job has ended)
   inv=$(systemctl show -P InvocationID "$u")
   if [[ $inv =~ ^[0-9a-f]{32}$ ]]; then
-    # the job's stdout/stderr of this run, in its app's journal namespace (or the system journal
-    # when it has none): journald may still be writing the last lines, so wait up to 3 s for them
-    local i out
+    # journald may still be writing the last lines: wait up to 3 s for them
     for i in 1 2 3 4 5 6; do
-      journalctl --sync 2> /dev/null; [[ -n $(jns) ]] && journalctl "$(jns)" --sync 2> /dev/null
-      out=$(journalctl --namespace='*' "_SYSTEMD_INVOCATION_ID=$inv" _TRANSPORT=stdout -o cat --no-pager -n 200 2> /dev/null)
+      jsync
+      if [[ -n $cur ]]; then out=$("${jq[@]}" --after-cursor="$cur" 2> /dev/null | tail -n 200)
+      else out=$("${jq[@]}" -n 200 2> /dev/null); fi
       [[ -n $out ]] && break
       sleep 0.5
     done

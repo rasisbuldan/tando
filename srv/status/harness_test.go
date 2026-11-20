@@ -160,7 +160,7 @@ func (h *host) run(ctx context.Context, c run.Cmd) ([]byte, error) {
 			fmt.Fprint(c.Stderr, h.programs[key+" #stderr"])
 		}
 		return reply(h.programs[key])
-	case filepath.Base(a[0]) == "node" || filepath.Base(a[0]) == "caddy" || filepath.Base(a[0]) == "python3":
+	case filepath.Base(a[0]) == "node" || filepath.Base(a[0]) == "caddy" || filepath.Base(a[0]) == "python3" || filepath.Base(a[0]) == "getconf":
 		return reply(h.programs[filepath.Base(a[0])])
 	}
 	return nil, fmt.Errorf("%s: not faked", a[0])

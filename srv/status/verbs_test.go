@@ -210,6 +210,7 @@ func TestInfo(t *testing.T) {
 	h.write("root/host.conf", "apps_domain=example.org\ntls=internal\npostgres=16\n")
 	h.programs["node"] = "v24.1.0\n"
 	h.programs["caddy"] = "v2.6.2 h1:abc\n"
+	h.programs["getconf"] = "glibc 2.39\n"
 	info := func() string {
 		got, err := h.out(func(c *Collector, b *bytes.Buffer) error {
 			c.ToolPath = h.path("tools")
@@ -222,9 +223,11 @@ func TestInfo(t *testing.T) {
 	}
 	h.write("tools/node", "")
 	h.write("tools/caddy", "")
+	h.write("tools/getconf", "")
+	os.Chmod(h.path("tools/getconf"), 0o755)
 	os.Chmod(h.path("tools/node"), 0o755)
 	os.Chmod(h.path("tools/caddy"), 0o755)
-	want := rows("version=0.1.0", "arch="+machine(), "libc=glibc", "apps_domain=example.org", "tls=internal", "sum=3015617425",
+	want := rows("version=0.1.0", "arch="+machine(), "libc=glibc", "glibc=2.39", "apps_domain=example.org", "tls=internal", "sum=3015617425",
 		"podman=no", "python=no", "node=24.1.0", "caddy=2.6.2", "postgres=16", "public_port=", "ip=10.0.0.2",
 		"addrs=10.0.0.2 2001:db8::2 ", "domain_tls=internal")
 	eq(t, info(), want)

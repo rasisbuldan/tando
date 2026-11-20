@@ -129,10 +129,13 @@ check "1c install killed after 1 of 3 renames: host setup fails (rc=$rc) and say
   eval '[ $rc != 0 ] && grep -q "cut off" "$E/cut1.out" && grep -q "tando host setup test" "$E/cut1.out"'
 check "1c the cut-off install left a mixed set (1 of 3 new) and its journal" \
   eval '[ "$(nnew)" = 1 ] && srv "sudo test -f /opt/tando/bin/.install.pending"'
-"$R" doctor > "$E/cut-doc.out" 2>&1
+# (doctor shows the programs that differ as one row since the tando.conf/doctor change; --verbose
+# names each, so the check reads both)
+"$R" doctor > "$E/cut-doc.out" 2>&1; "$R" doctor --verbose > "$E/cut-docv.out" 2>&1
 check "1c tando doctor reports the interrupted install and the differing programs before any repair" \
   eval 'tr -d "│\n" < "$E/cut-doc.out" | tr -s " " | grep -q "cut off between files" &&
-        grep -qE "(logs|metrics|watch).*(differs|tando host setup)" "$E/cut-doc.out"'
+        tr -d "│\n" < "$E/cut-doc.out" | tr -s " " | grep -qE "[0-9]+ of [0-9]+ programs differ from the client.*tando host setup test" &&
+        grep -qE "(logs|metrics|watch).*(differs|tando host setup)" "$E/cut-docv.out"'
 unhook
 "$R" host setup test public_port=$HP > "$E/cut2.out" 2>&1; rc=$?
 check "1d the next host setup finishes the switch (rc=$rc): every file is the tree's, no journal or leftovers" \
@@ -741,9 +744,10 @@ check "10b job command not in any unit file" \
 check "17a doctor on a healthy host: no failures (rc=$rc)" \
   eval '[ $rc = 0 ] && grep -q "agent.*same as the client" "$E/doc.out"'
 srv "echo '# drift' | sudo tee -a $AGENT > /dev/null"
-"$R" doctor > "$E/doc2.out" 2>&1; cat "$E/doc2.out" >&2
-check "17b doctor reports agent drift, its fix not cut at 80 columns" \
-  eval 'grep -qE "agent.*(differs from the client|differs from this tando|changed since setup)" "$E/doc2.out" &&
+"$R" doctor > "$E/doc2.out" 2>&1; cat "$E/doc2.out" >&2; "$R" doctor --verbose > "$E/doc2v.out" 2>&1
+check "17b doctor reports agent drift (one row; --verbose names the agent), its fix not cut at 80 columns" \
+  eval 'grep -q "1 of [0-9]* programs differ" "$E/doc2.out" &&
+        grep -qE "agent.*(differs from the client|differs from this tando|changed since setup)" "$E/doc2v.out" &&
         tr -d "│\n" < "$E/doc2.out" | tr -s " " | grep -q "tando host setup test"'
 "$R" host setup test > /dev/null 2>&1
 

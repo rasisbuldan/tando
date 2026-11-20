@@ -41,11 +41,23 @@ func (c *Collector) Info(ctx context.Context, w io.Writer) error {
 	s.kv("version", c.version())
 	s.kv("arch", machine())
 	s.kv("libc", libc)
+	tools := c.loadTools()
+	if libc == "glibc" { // (the client refuses a prebuilt native module that needs a newer glibc)
+		v := c.tool(ctx, tools, "glibc", "getconf", []string{"GNU_LIBC_VERSION"}, func(o string) string {
+			if f := strings.Fields(o); len(f) == 2 {
+				return f[1]
+			}
+			return ""
+		})
+		if v == "no" {
+			v = ""
+		}
+		s.kv("glibc", v)
+	}
 	s.kv("apps_domain", H.get("apps_domain"))
 	s.kv("tls", H.get("tls"))
 	s.kv("sum", c.agentSum())
 	s.kv("podman", H.or("podman", "no"))
-	tools := c.loadTools()
 	// lint: allow RL16 python3 -c runs a Python statement, not a shell
 	s.kv("python", c.tool(ctx, tools, "python", "python3", []string{"-I", "-c", `import venv, sys; print("%d.%d" % sys.version_info[:2])`}, func(o string) string {
 		return strings.TrimRight(o, "\n")
@@ -137,7 +149,7 @@ func (c *Collector) saveTools(t tools) {
 		return
 	}
 	var b strings.Builder
-	for _, n := range []string{"caddy", "node", "python"} {
+	for _, n := range []string{"caddy", "glibc", "node", "python"} {
 		if v, ok := t[n]; ok {
 			fmt.Fprintf(&b, "%s\t%s\t%s\n", n, v[0], v[1])
 		}

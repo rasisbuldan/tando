@@ -62,7 +62,7 @@ t_init "e2e-matrix${MATRIX_SUITE:+-$MATRIX_SUITE}"
 export TANDO_WAIT=1
 A=mx$(printf '%s' "$KIND" | cut -c1-4) W=$E MXV=0
 mkdir -p "$W/$A"; : > "$W/ids"; : > "$W/case.log"
-CELLS=$E/cells.tsv; : > "$CELLS"
+CELLOUT=$E/cells.tsv; : > "$CELLOUT"
 log "fault matrix: kind $KIND, operations: $OPS; actions: $ACTIONS${QUICK:+ (quick=$QUICK)}"
 
 t_server_up --reset || exit 1
@@ -234,17 +234,17 @@ mx_cell() {
   esac
   if [ "$fired" = 0 ]; then
     NSKIP=$((NSKIP + 1)); skip "$id not reached (the point was not passed this time)"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\tskip\t\n' "$KIND" "$op" "$verb" "$pt#$nth" "$act" "$ph" >> "$CELLS"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\tskip\t\n' "$KIND" "$op" "$verb" "$pt#$nth" "$act" "$ph" >> "$CELLOUT"
     mx_inv > /dev/null 2>&1 || mx_reset
     return
   fi
   if mx_inv 2>> "$W/case.log"; then
     NPASS=$((NPASS + 1)); pass "$id ($(( $(date +%s) - t0 )) s)"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\tpass\t\n' "$KIND" "$op" "$verb" "$pt#$nth" "$act" "$ph" >> "$CELLS"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\tpass\t\n' "$KIND" "$op" "$verb" "$pt#$nth" "$act" "$ph" >> "$CELLOUT"
   else
     NFAIL=$((NFAIL + 1))
     fail "$id:$(tr '\n' ';' < "$W/inv.out" | sed 's/;$//; s/;/ |/g')"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\tfail\t%s\n' "$KIND" "$op" "$verb" "$pt#$nth" "$act" "$ph" "$(echo $MX_BROKEN)" >> "$CELLS"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\tfail\t%s\n' "$KIND" "$op" "$verb" "$pt#$nth" "$act" "$ph" "$(echo $MX_BROKEN)" >> "$CELLOUT"
     { echo "  facts:"; sed 's/^/    /' "$W/facts"; echo "  client:"; tail -8 "$W/op.out" | sed 's/^/    /'; } >> "$W/case.log"
     mx_reset
   fi

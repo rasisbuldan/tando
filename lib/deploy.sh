@@ -686,7 +686,7 @@ after_live() {
     # one more call, for a new app only: with no notifier the alerts go nowhere but tando alerts
     [ -n "$(type -t watch_raw)" ] || . "$TANDO_HOME/lib/cmd-alerts.sh"
     if watch_raw sudo show 8 > "$TMPD/al.n" 2> /dev/null && ! grep -q "^notifier$TAB" "$TMPD/al.n"; then
-      note "  (no notifier set: tando alerts notifier add phone ntfy sends them to your phone)"
+      note "  (no notifier set: tando alerts notifier add phone ntfy reaches your phone)"
     fi
     note "  see them: tando health; where they go: tando alerts"
   fi

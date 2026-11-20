@@ -6,6 +6,9 @@ first, grouped by area.
 
 ## Unreleased
 
+- `tando jobs run` always shows the job's output: a job that ended within milliseconds could be
+  stored by the journal without its run id and came back empty; a run by hand is also no longer
+  refused after the job failed several times in a row.
 - New: docs/CONFIG.md lists every `tando.conf` key (type, default, unit, meaning, example), and
   `tando help conf` prints a compact version. `tando init`'s file, docs/COMMANDS.md and README.md
   point at them (the README section they named no longer existed). test/ui-test.sh reads the keys

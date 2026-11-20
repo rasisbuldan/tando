@@ -160,7 +160,8 @@ cmd_domain() {
         note "www: $w (--www $w)"
       else
         w=$(default_www "$d")
-        note "www: $w ($(www_why "$d"); change it with --www redirect|serve|off)"
+        note "www: $w ($(www_why "$d"))"
+        note "  change it with --www redirect|serve|off"
       fi
       server_addrs
       domain_dns "$d" "$w" || exit 1
