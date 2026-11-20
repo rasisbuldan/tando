@@ -158,7 +158,7 @@ top_fetch() {
       fi
       if [ "$G_NEED" = 1 ]; then
         cmd="$cmd; echo '@metrics	$a'; if [ -x /opt/tando/bin/tando-metrics ]; then"
-        cmd="$cmd /opt/tando/bin/tando-metrics read $a $G_W $G_BK; else echo 'mx	none'; fi"
+        cmd="$cmd sudo -n /opt/tando/bin/tando-metrics read $a $G_W $G_BK; else echo 'mx	none'; fi"
         G_NEED=0
       fi
     fi

@@ -351,6 +351,18 @@ if [[ -z $d ]]; then ok; else bad "the client parser rejects keys docs/CONFIG.md
 printf 'nokey = x\n' > "$tmp/conf.t"
 r=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; conf_load "$2"' _ "$here" "$tmp/conf.t" 2>&1)
 if [[ $r == *"unknown key"* ]]; then ok; else bad "the parser check above cannot fail: an unknown key was not refused ($r)"; fi
+# domain = takes host names only: nothing else reaches DNS lookups, the server or a Caddy site
+d=""
+for v in 'shop.example.org;id' 'shop.example.org/x' 'Shop.example.org' 'shop' '-shop.example.org' 'shop..example.org' \
+         'shop.example.org.' '*.example.org' 'shop.example.org $(id)' 'shop-.example.org'; do
+    printf 'domain = %s\n' "$v" > "$tmp/conf.t"
+    r=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; conf_load "$2" && echo "C_domain=$C_domain"' _ "$here" "$tmp/conf.t" 2>&1)
+    [[ $r == *"not a domain name"* && $r != *C_domain=* ]] || d="$d [$v]"
+done
+printf 'domain = shop.example.org, www.example.co.uk\n' > "$tmp/conf.t"
+r=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; conf_load "$2" && echo "C_domain=$C_domain"' _ "$here" "$tmp/conf.t" 2>&1)
+[[ $r == *"C_domain=shop.example.org www.example.co.uk" ]] || d="$d good:[$r]"
+if [[ -z $d ]]; then ok; else bad "tando.conf domain = accepts what is not a host name, or refuses one:$d"; fi
 out=$(TANDO_CONFIG_DIR=$tmp/cfg "$BASH_BIN" "$here/bin/tando" help conf 2>&1)
 if [[ $out == *"docs/CONFIG.md"* && $out == *"release_timeout"* ]]; then ok; else bad "tando help conf: $out"; fi
 mkdir -p "$tmp/proj" && printf '{"name":"x","scripts":{"start":"node a.js"}}\n' > "$tmp/proj/package.json"

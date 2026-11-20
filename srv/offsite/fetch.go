@@ -131,10 +131,14 @@ func (o Offsite) Fetch(ctx context.Context, w *out.Writer, app, id, host string)
 	man, merr := o.manifest(ctx, s, host, app, id)
 	if merr != nil {
 		var se *S3Error
-		if errors.As(merr, &se) && se.Code == "NoSuchKey" {
-			man = nil // (a backup whose manifest did not make it: the object's own checks still hold)
-		} else {
+		switch {
+		case !errors.As(merr, &se) || se.Code != "NoSuchKey":
 			return merr
+		case !s.conf.Encrypt:
+			// a plaintext object has no check of its own: its manifest's SHA-256 is the only one
+			return fmt.Errorf("fetch %s: the backup has no manifest in the bucket, and encryption is off here: refused (nothing checks what it holds)", id)
+		default:
+			man = nil // (a backup whose manifest did not make it: the encrypted object authenticates itself)
 		}
 	}
 	if man != nil && (man["app"] != app || man["backup"] != id) {

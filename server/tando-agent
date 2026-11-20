@@ -401,6 +401,18 @@ domain_owner() { # domain -> the app that has it (as a domain or a www twin), if
     done
   done
 }
+# domain_free domain www: dies unless app $A may take the domain: a host name, not under the
+# server's apps_domain (the apps' own links), not another app's, nor (www not off) its www twin.
+# tando domain add and configure (domain = in tando.conf) both check through it, under the domain lock
+domain_free() {
+  local d=$1 w=$2 owner
+  valid_domain "$d" || die "not a domain name: $d"
+  [[ $d == *.${H[apps_domain]:-localhost} ]] && die "$d is under the server's apps_domain: it is already $A's link pattern"
+  owner=$(domain_owner "$d"); [[ -z $owner || $owner == "$A" ]] || die "$d belongs to $owner on this server: tando domain rm $d -a $owner first"
+  [[ $w == off ]] || { owner=$(domain_owner "$(www_twin "$d")"); [[ -z $owner || $owner == "$A" ]] ||
+    die "$(www_twin "$d") belongs to $owner: use --www off, or remove it there first"; }
+  return 0
+}
 # domain_set app add|rm domain [www]: change C[domains], re-render the site (validated: a config
 # Caddy rejects is rolled back and nothing changes)
 cmd_domain() {
@@ -412,12 +424,8 @@ cmd_domain() {
       for x in ${C[domains]:-}; do row domain "${x%|*}" "${x#*|}" "$(cert_expiry "${x%|*}")"; done
       return;;
     add)
-      valid_domain "$d" || die "not a domain name: $d"
       [[ $w =~ ^(redirect|serve|off)$ ]] || die "www must be redirect, serve or off"
-      [[ $d == *.${H[apps_domain]:-localhost} ]] && die "$d is under the server's apps_domain: it is already $A's link pattern"
-      owner=$(domain_owner "$d"); [[ -z $owner || $owner == "$A" ]] || die "$d belongs to $owner on this server: tando domain rm $d -a $owner first"
-      [[ $w == off ]] || { owner=$(domain_owner "$(www_twin "$d")"); [[ -z $owner || $owner == "$A" ]] ||
-        die "$(www_twin "$d") belongs to $owner: use --www off, or remove it there first"; };;
+      domain_free "$d" "$w";;
     rm) valid_domain "$d" || die "not a domain name: $d";;
     *) die "domain: add, rm or ls";;
   esac
@@ -715,7 +723,7 @@ write_caddy() {
   [[ ${H[tls]:-off} == off ]] && name="http://$name"
   # the app's own domains (tando domain add): in the same site block, with HTTPS (Let's Encrypt,
   # or Caddy's local CA when the host uses tls=internal); their www twins redirect (or serve)
-  local d w dt redirs=""
+  local d w dt redirs="" link=$name split=""
   dt=$(domain_tls)
   for d in ${C[domains]:-}; do
     w=${d#*|} d=${d%|*}
@@ -725,9 +733,13 @@ write_caddy() {
       redirect) redirs+=" $(www_twin "$d")>$d";;
     esac
   done
+  # `tls internal` covers every name of a site block: when the link and the domains differ (one
+  # internal, the other a public certificate), the site is a snippet imported by two blocks
+  [[ -n ${C[domains]:-} && ( ${H[tls]:-off} == internal && $dt == auto || ${H[tls]:-off} == auto && $dt == internal ) ]] &&
+    split=1
   {
-    echo "$name {"
-    [[ ${H[tls]:-off} == internal || ( -n ${C[domains]:-} && $dt == internal ) ]] && echo "	tls internal"
+    if [[ -n $split ]]; then echo "(tando-site-$A) {"; else echo "$name {"; fi
+    [[ -z $split && ( ${H[tls]:-off} == internal || ( -n ${C[domains]:-} && $dt == internal ) ) ]] && echo "	tls internal"
     # request log for every state of the site; headers and query strings are left out
     [[ -x $LOGS ]] && "$LOGS" caddy-log "$A"
     # a Host with a port (site.example:443) reaches the site, but Caddy before 2.7 does not log
@@ -819,6 +831,12 @@ write_caddy() {
       echo "	}"
     fi
     echo "}"
+    if [[ -n $split ]]; then
+      echo "$link {"; [[ ${H[tls]:-off} == internal ]] && echo "	tls internal"
+      echo "	import tando-site-$A"; echo "}"
+      echo "${name#"$link, "} {"; [[ $dt == internal ]] && echo "	tls internal"
+      echo "	import tando-site-$A"; echo "}"
+    fi
     for d in $redirs; do
       if [[ $dt == off ]]; then echo "http://${d%>*} {"; else echo "${d%>*} {"; fi
       [[ $dt == internal ]] && echo "	tls internal"
@@ -1654,6 +1672,10 @@ fw_sync() {
       echo "    oifname \"lo\" meta skuid $u tcp dport { ${own[$u]} } accept"
       echo "    oifname \"lo\" meta skuid $u tcp dport { $lo-$hi, 2019$others } reject with tcp reset"
       [[ -n ${pgu[$u]:-} ]] || echo "    oifname \"lo\" meta skuid $u tcp dport 5432 reject with tcp reset"
+      # the cloud provider's metadata service (instance keys and tokens on many clouds): an app
+      # tricked into fetching a URL (SSRF) must not reach it
+      echo "    meta skuid $u ip daddr 169.254.169.254 reject"
+      echo "    meta skuid $u ip6 daddr fd00:ec2::254 reject"
       # SocketBindDeny filters bind(), but listen() on an unbound socket autobinds 0.0.0.0:<any>:
       # the app's packets in a connection opened from outside (not over lo) are dropped
       echo "    oifname != \"lo\" meta skuid $u ct direction reply drop"
@@ -2303,7 +2325,11 @@ cmd_configure() {
       # check=1: only validate and say whether the app exists (before a build); origin: where the
       # client deploys from (user@machine:directory), force=1: deploy although it differs
       check) check=1; continue;;
-      domain) for x in $v; do valid_domain "$x" || die "not a domain name: $x"; confdom+=" $x"; done; continue;;
+      domain) for x in $v; do
+                valid_domain "$x" || die "not a domain name: $x"
+                [[ $x == *.${H[apps_domain]:-localhost} ]] && die "$x is under the server's apps_domain: it is already an app's link"
+                confdom+=" $x"
+              done; continue;;
       www) [[ $v =~ ^(redirect|serve|off)$ ]] || die "www must be redirect, serve or off"; confwww=$v; continue;;
       origin) [[ ${#v} -le 300 ]] || die "origin too long"; origin=$v; continue;;
       force) [[ $v == 1 ]] && force=1; continue;;
@@ -2346,7 +2372,7 @@ cmd_configure() {
   [[ -n $confdom ]] && domains_lock
   for x in $confdom; do
     [[ " ${C[domains]:-} " == *" $x|"* ]] && continue
-    k=$(domain_owner "$x"); [[ -z $k || $k == "$A" ]] || die "$x belongs to $k on this server"
+    domain_free "$x" "${confwww:-$(default_www "$x")}"
     C[domains]="${C[domains]:+${C[domains]} }$x|${confwww:-$(default_www "$x")}"
   done
   if ((new)); then
@@ -3259,8 +3285,8 @@ make_writable() { # release dir
 
 # ---- backups: /var/backups/tando/<app>/<YYYYMMDD-HHMMSS>-<kind>/ ---------------------------
 #
-# Root never reads the app's files: tar and pg_dump run as the app user (runuser) and root only
-# writes their output stream into its own 700 directory.
+# Root never reads the app's files: tar and pg_dump run as the app user, in the app's slice (tar in
+# its sandbox too: as_app_unit), and root only writes their output stream into its own 700 directory.
 
 BK=/var/backups/tando
 
@@ -3269,16 +3295,26 @@ has_backup_data() { [[ -n ${C[data]:-} || -n ${C[data_dir]:-} || ${C[database]:-
 # any other, adopt undo needs its record, it is never pruned and never copied offsite)
 valid_backup() { [[ $1 =~ ^[0-9]{8}-[0-9]{6}-(daily|predeploy|manual|safety|final|adopt)$ ]]; }
 as_app() { (cd / && exec runuser -u "$AU" -- "$@"); }   # cwd / : root's cwd may be private
-# as_app_unit cmd...: the same, inside the app's sandbox (props backup): it sees only what the app
-# sees, so a symlink the app planted cannot make it read anything the app could not
+# as_app_unit [-p prop]... cmd...: the same, inside the app's sandbox (props backup) and its slice:
+# it sees only what the app sees, so a symlink the app planted cannot make it read anything the app
+# could not, and its memory counts in the app's limits (512 MB at most), never the host's
 as_app_unit() {
-  local args=() x
+  local args=() x wd=/
+  while [[ ${1:-} == -p ]]; do [[ $2 == WorkingDirectory=* ]] && wd=${2#*=} || args+=(-p "$2"); shift 2; done
   while IFS= read -r x; do
     case $x in EnvironmentFile=*|Environment=*|MemoryMax=*|LogNamespace=*) continue;; esac
     args+=(-p "$x")
   done < <(props - backup)
   systemd-run --quiet --pipe --wait --collect --unit="tando-$A-backup-$$-$RANDOM" "${args[@]}" \
-    -p WorkingDirectory=/ -p MemoryMax=512M "$@"
+    -p "WorkingDirectory=$wd" -p MemoryMax=512M "$@"
+}
+# as_app_pg cmd...: a PostgreSQL client (pg_dump, pg_restore) as the app user, in a scope of the
+# app's slice: its memory counts in the app's limits (512 MB at most), OOMScoreAdjust 500 like the
+# app's units, never the host's. A scope, not a sandboxed unit: it costs 8 ms, not 60 (measured);
+# the password stays in the process's environment (its uid's and root's), never on a command line
+as_app_pg() {
+  (cd / && PGPASSWORD=$DB_PW exec systemd-run --quiet --scope --collect --unit="tando-$A-pg-$$-$RANDOM" \
+    -p "Slice=$(app_slice)" -p MemoryMax=512M choom -n 500 -- runuser -u "$AU" -- "$@")
 }
 
 backup_take() { # kind -> prints the backup id (and sets BK_ID)
@@ -3296,7 +3332,7 @@ backup_take() { # kind -> prints the backup id (and sets BK_ID)
     # sqlite: a consistent snapshot through sqlite3 when the binary exists; otherwise the live
     # file is archived as is (a write during the archive can leave it inconsistent)
     if [[ ${C[database]:-} == sqlite && -f $live ]] && command -v sqlite3 > /dev/null &&
-       as_app_unit sqlite3 "$live" ".backup '$live.snapshot'" < /dev/null; then
+       as_app_unit -p "WorkingDirectory=$ADATA" sqlite3 app.sqlite ".backup app.sqlite.snapshot" < /dev/null; then
       snap=(--exclude=./app.sqlite --transform 's,^\./app\.sqlite\.snapshot$,./app.sqlite,')
     fi
     # A file the app made unreadable (or deleted mid-way) is a warning in the backup's meta, not a
@@ -3319,7 +3355,7 @@ backup_take() { # kind -> prints the backup id (and sets BK_ID)
   fi
   if [[ ${C[database]:-} == postgres ]]; then
     db_creds
-    if ! PGPASSWORD=$DB_PW as_app timeout 3600 pg_dump -Fc -h 127.0.0.1 -U "$DB_ROLE" -d "$DB_ROLE" > "$tmp/db.dump"; then
+    if ! as_app_pg timeout 3600 pg_dump -Fc -h 127.0.0.1 -U "$DB_ROLE" -d "$DB_ROLE" < /dev/null > "$tmp/db.dump"; then
       rm -rf "$tmp"; echo "pg_dump failed" >&2; return 1
     fi
   fi
@@ -3477,7 +3513,7 @@ cmd_backup_restore() {
     local was=${S[applied]:-} rrc
     st applied ""
     pgsql -c "ALTER ROLE $DB_ROLE SET temp_file_limit = -1" || rfail "could not prepare the database role for the restore"
-    PGPASSWORD=$DB_PW as_app pg_restore --clean --if-exists --no-owner -h 127.0.0.1 -U "$DB_ROLE" \
+    as_app_pg pg_restore --clean --if-exists --no-owner -h 127.0.0.1 -U "$DB_ROLE" \
       -d "$DB_ROLE" < "$dir/db.dump"; rrc=$?
     db_limits "$DB_ROLE" && st applied "$was"
     ((rrc == 0)) || rfail "database restore failed"

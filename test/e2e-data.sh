@@ -257,7 +257,15 @@ check "P10a restore of a database with a large index succeeds under a 4 MB temp 
 check "P10b the limit is back after the restore (4MB)" eval 'echo "$out" | grep -qx 4MB'
 echo "DROP TABLE big" | psql_in tando_notes "$pw" tando_notes > /dev/null
 
-# D7-D9. backup now, destroy the data, restore
+# D7-D9. backup now, destroy the data, restore. pg_dump and pg_restore are stand-ins meanwhile that
+# log their cgroup (check B1) and run the real ones
+srv 'sudo tee /usr/local/bin/pg_dump > /dev/null && sudo chmod 755 /usr/local/bin/pg_dump &&
+     sudo ln -sf pg_dump /usr/local/bin/pg_restore' <<'WRAP'
+#!/bin/sh
+p=${0##*/}
+logger -t tando-test-pgcg "$p $(cat /proc/self/oom_score_adj) $(cat /proc/self/cgroup)"
+exec /usr/bin/$p "$@"
+WRAP
 id=$("$R" backup now 2>&1 | sed -n 's/^backed up [a-z0-9-]*: \([^ ]*\).*/\1/p')
 check "D7 backup now: $id" eval 'echo "$id" | grep -qE "^[0-9]{8}-[0-9]{6}-manual$"'
 psql_as tando_notes "$pw" tando_notes 'DELETE FROM notes' > /dev/null
@@ -266,6 +274,16 @@ check "D8 data destroyed ($(page))" test "$(page)" = "notes v2 db=0 file=0"
 "$R" backup restore "$id" --yes > "$E/restore.out" 2>&1; rc=$?; cat "$E/restore.out" >&2
 check "D9a restore brings back the database and the file ($(page))" test $rc = 0 -a "$(page)" = "notes v2 db=3 file=3"
 check "D9b a safety backup of the replaced data exists" eval '"$R" backup ls | grep -q " safety "'
+srv 'sudo rm -f /usr/local/bin/pg_dump /usr/local/bin/pg_restore'
+# B1. they ran in the app's slice (its memory limits) with the app's OOMScoreAdjust (500), not in
+# the ssh session's
+cg() { srv 'sudo journalctl -q -o cat -t tando-test-pgcg'; }
+t_until 10 eval 'cg | grep -q "^pg_restore "' || true
+cg=$(cg)
+check "B1 pg_dump and pg_restore ran in tando-notes.slice, oom_score_adj 500 ($(echo "$cg" | grep -v "tando-notes.slice" | head -1 | cut -c1-100))" \
+  eval 'echo "$cg" | grep -q "^pg_dump 500 0::/tando.slice/tando-notes.slice/" &&
+        echo "$cg" | grep -q "^pg_restore 500 0::/tando.slice/tando-notes.slice/" &&
+        ! echo "$cg" | grep -v "^pg_[a-z]* 500 0::/tando.slice/tando-notes.slice/" | grep -q .'
 
 # D10. pull a backup to the laptop
 "$R" backup pull "$id" "$E/pulled.tar" > /dev/null 2>&1

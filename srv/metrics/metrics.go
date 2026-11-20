@@ -1,10 +1,10 @@
 // Package metrics keeps per-minute samples of every tando app and of the host, for the graphs of
 // `tando top` and the trend in `tando status` (docs/TOP.md). Nothing keeps running: `sample` is
 // run once a minute by tando-watch.service (ExecStartPre, see tando-watch's install) and costs
-// one systemctl call and a few /sys and /proc reads; `read` needs no root.
+// one systemctl call and a few /sys and /proc reads; `read` needs root (the directory is 700).
 //
-// Files, in Dir (/var/lib/tando/metrics, 755), all root 644 so `tando top` reads them as the
-// admin's own user:
+// Files, in Dir (/var/lib/tando/metrics, root 700: an app must not read another app's memory, CPU
+// and restarts), read through sudo by `tando top`:
 //
 //	<app>.tsv, <app>.tsv.1   time  anon_bytes  cpu_usec_since_last_sample  restarts  state(r|s|f|a)
 //	host.tsv, host.tsv.1     time  load1x100  mem_used_bytes  mem_total_bytes
@@ -27,8 +27,8 @@ import (
 const (
 	span     = 302400 // seconds one file covers (3.5 days)
 	maxLines = 5100   // lines one file holds
-	fileMode = 0o644  // readable without root: tando top reads as the admin's user
-	dirMode  = 0o755
+	fileMode = 0o600  // root's: tando top reads them through sudo
+	dirMode  = 0o700  // (set again on every sample: older versions made it 755)
 )
 
 // Metrics samples into and reads from Dir.

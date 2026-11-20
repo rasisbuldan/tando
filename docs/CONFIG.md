@@ -115,7 +115,7 @@ Runs on the server once per deploy, before the switch (migrations). Not for `sta
 
 | Key | Type | Default | Unit | Meaning | Example |
 |---|---|---|---|---|---|
-| `domain` | list | none | | Domains for the app, separated by spaces or commas; added at the deploy (`tando domain rm` removes one). | `domain = example.com example.org` |
+| `domain` | list | none | | Domains for the app, separated by spaces or commas; added at the deploy (`tando domain rm` removes one). Lowercase host names only; the server refuses one under its `apps_domain`, one another app has, and one whose www twin another app has, as `tando domain add` does. | `domain = example.com example.org` |
 | `www` | choice | by name, see below | | What `www.<domain>` does: `redirect` to the domain, `serve` the app too, or `off`. | `www = serve` |
 
 `www` defaults to `redirect` for a registered name (`example.com`, `example.co.uk`) and for a

@@ -334,7 +334,7 @@ conf_chk_extra() {
   esac
 }
 conf_load() { # [file]; a file already loaded in this run is not read again
-  local f=${1:-tando.conf} line k v n=0
+  local f=${1:-tando.conf} line k v n=0 x
   [ -f "$f" ] || return 1
   [ "${CONF_LOADED:-}" = "$f" ] && return 0
   while IFS= read -r line || [ -n "$line" ]; do
@@ -395,7 +395,16 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       dockerfile) C_dockerfile=$v;;
       node) C_node=$v
         case $v in [0-9][0-9]) ;; *) die "$f:$n: node is a major version, like 24 (got \"$v\")";; esac;;
-      domain) C_domain=$(printf '%s' "$v" | tr ',' ' ' | tr -s ' ');;
+      domain) # host names before they go anywhere (the server checks them again)
+        case $v in *[!abcdefghijklmnopqrstuvwxyz0123456789.,\ -]*) die "$f:$n: not a domain name: $v (lowercase, like shop.example.org)";; esac
+        C_domain=$(printf '%s' "$v" | tr ',' ' ' | tr -s ' ')
+        for x in $C_domain; do
+          case $x in
+            .*|*.|*..*|-*|*-|*-.*|*.-*) die "$f:$n: not a domain name: $x (lowercase, like shop.example.org)";;
+            *.*) ;;
+            *) die "$f:$n: not a domain name: $x (lowercase, like shop.example.org)";;
+          esac
+        done;;
       www) C_www=$v
         case $v in redirect|serve|off) ;; *) die "$f:$n: www must be redirect, serve or off";; esac;;
       job_timeout) C_job_timeout=$v

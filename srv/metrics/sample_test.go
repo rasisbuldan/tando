@@ -76,6 +76,9 @@ func TestSample(t *testing.T) {
 	h.app("web", `tando.slice/tando-web.slice/tando-web.service`, 1000, 5_000_000)
 	h.app("api-2", `tando.slice/tando-api\x2d2.slice/tando-api-2.service`, 2000, 9_000_000)
 	h.systemd = "ActiveState=active\nNRestarts=1\n\nActiveState=failed\nNRestarts=3\n"
+	if err := os.MkdirAll(h.m.Dir, 0o755); err != nil { // as an older version left it
+		t.Fatal(err)
+	}
 	if err := h.m.Sample(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +96,9 @@ func TestSample(t *testing.T) {
 	check("web.tsv", "1800000000\t1000\t0\t3\tf\n")
 	check("host.tsv", "1800000000\t52\t1536000000\t2048000000\n")
 	check(".state", "api-2 9000000 1800000000 1\nweb 5000000 1800000000 1\n.host 0 1800000000 1\n")
-	// readable without root (tando top reads as the admin's user); the process umask is 022 (main)
-	for f, want := range map[string]os.FileMode{"": 0o755, "web.tsv": 0o644, "host.tsv": 0o644, ".state": 0o644} {
+	// root's alone: an app must not read another app's samples (tando top reads through sudo);
+	// the directory is made 700 although it existed with 755 (an older version's)
+	for f, want := range map[string]os.FileMode{"": 0o700, "web.tsv": 0o600, "host.tsv": 0o600, ".state": 0o600} {
 		if fi, err := os.Stat(filepath.Join(h.m.Dir, f)); err != nil || fi.Mode().Perm() != want&^umask() {
 			t.Errorf("%q: mode %v, want %v", f, fi.Mode().Perm(), want)
 		}

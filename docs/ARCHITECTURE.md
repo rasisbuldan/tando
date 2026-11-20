@@ -194,7 +194,9 @@ goes away by itself when the link appears, with no site rewrite and no reload.
   127.0.0.1:2019. nftables (table `inet tando`, tando-firewall.service) lets each app's uid reach
   only its own port and pre-flight port inside tando's range. Residual: other loopback services
   (PostgreSQL, which needs the app's password; anything the admin runs on 127.0.0.1 outside the
-  port range) stay reachable from every app, and per-app metrics and alert state are world-readable.
+  port range) stay reachable from every app. The cloud metadata address (169.254.169.254, and
+  fd00:ec2::254) is refused to every app's uid: an app tricked into fetching a URL cannot read the
+  instance's keys or tokens.
   **Limit:** the per-uid rules only block what tando knows: other tando apps' ports and Caddy's
   admin. A service tando does not manage that listens on loopback is open to every app, whatever
   port it uses: on the first real server a tando app's shell (`tando ssh <app>`) reached a hand-run
@@ -228,7 +230,9 @@ goes away by itself when the link appears, with no site rewrite and no reload.
   writes only to shared/ and its writable release dirs, binds only its port). Releases are
   root-owned and group-readable by the app only; env files are root:tando-<app> 640.
 - Root never reads app-controlled paths: inspection runs on the root-owned copy; backups and
-  restores run tar/pg_dump/pg_restore as the app user (runuser) and root only handles the streams.
+  restores run tar/pg_dump/pg_restore as the app user and root only handles the streams; the
+  backup's tar in the app's sandbox and slice, pg_dump and pg_restore in a scope of the app's slice
+  (its memory limits, 512 MB at most, oom_score_adj 500).
 - Commands from tando.conf (start, jobs) are stored in app.conf and executed by fixed agent verbs;
   no command text is written into unit files.
 - PostgreSQL: one role per app with CONNECT only on its own database; the password exists only in
@@ -355,10 +359,10 @@ goes away by itself when the link appears, with no site rewrite and no reload.
   the app's units together: MemoryMax 3x `memory` (the live app, its pre-flight beside it during a
   deploy, a job or shell), TasksMax `tasks` (1024), CPUQuota `cpu`; each unit keeps its own
   MemoryMax `memory`. App units have OOMScoreAdjust=500 (killed before Caddy, sshd, the agent);
-  Caddy -500 where tando owns it. Destroy and adopt undo remove the slice. Open: Metrics samples stay world-readable
-  (`tando top` reads them as the admin's own user; memory and CPU numbers only). Backups and
-  restores run pg_dump/tar as the app's user outside its sandbox: with ptrace_scope=0 the app
-  could attach (Ubuntu's default is 1; doctor warns on 0).
+  Caddy -500 where tando owns it. Destroy and adopt undo remove the slice. Metrics samples are root's
+  (/var/lib/tando/metrics 700; `tando top` reads them through sudo). Restores unpack the data with
+  tar as the app's user outside its sandbox: with ptrace_scope=0 the app could attach (Ubuntu's
+  default is 1; doctor warns on 0).
 
 ## Go server programs
 
