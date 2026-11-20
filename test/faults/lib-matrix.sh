@@ -227,6 +227,7 @@ mx_inv() {
       case $MX_WANT in
         old) [ "$sid" = "$MX_OLD" ] || mx_bad 1 "serving: $sid (v$sv) serves, the old release $MX_OLD must";;
         new) [ "$sid" = "$MX_NEW" ] || mx_bad 1 "serving: $sid (v$sv) serves, the new release ${MX_NEW:-?} must";;
+        queue) [ "$sid" = "${MX_Q:-}" ] || mx_bad 1 "serving: $sid (v$sv) serves, the queued release ${MX_Q:-?} must (it ran after $MX_NEW)";;
         any) [ "$sid" = "$MX_OLD" ] || [ "$sid" = "$MX_NEW" ] || mx_bad 1 "serving: $sid serves, neither old $MX_OLD nor new $MX_NEW";;
       esac
       if [ "$KIND" != static ]; then
@@ -345,7 +346,18 @@ mx_inv() {
   case $MX_OP in
     deploy*|rollback|recover)
       local kind=deploy; [ "$MX_OP" = rollback ] && kind=rollback
-      if [ -z "$MX_NEW" ]; then
+      if [ -n "${MX_Q:-}" ]; then
+        # a deploy queued behind this one (action queue-*): this one's line (failed or rolled
+        # back), then the queued one's, ok; exactly these two, in this order
+        h=$(grep '^hist=' "$W/facts" | tr '\n' ' ')
+        case $h in
+          "hist=$MX_NEW deploy failed hist=$MX_Q deploy ok "|"hist=$MX_NEW deploy rolledback hist=$MX_Q deploy ok ") ;;
+          *) mx_bad 4 "history: $MX_NEW's failed or rolled-back line, then the queued $MX_Q's ok line must be the new ones: $h";;
+        esac
+        h=$(dx /opt/tando/bin/tando-agent deploy-status "$A" "$MX_Q" < /dev/null 2> /dev/null | sed -n 's/^result=//p' | head -1)
+        case $h in verified|ok) ;; *) mx_bad 4 "history: deploy-status says result=$h for the queued $MX_Q";; esac
+        case $(fv ds_result) in running|"") mx_bad 4 "history: deploy-status says phase=$(fv ds_phase) result=$(fv ds_result) for $MX_NEW";; esac
+      elif [ -z "$MX_NEW" ]; then
         [ "$nh" = 0 ] || mx_bad 4 "history: $nh lines, but the operation never got a release: $(grep '^hist=' "$W/facts" | tr '\n' ' ')"
       elif [ "$MX_OP" = rollback ] && [ "$nh" = 0 ] && [ "$want" = "$MX_OLD" ] && [ "$(fv p_id)" != "$MX_NEW" ]; then
         :   # (a rollback cut before it wrote anything, its progress file included: it never began)

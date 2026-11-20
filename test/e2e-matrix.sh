@@ -10,7 +10,8 @@
 #                                              container data (node + data dir, postgres, a job)
 #   test/e2e-matrix.sh --ops deploy,rollback   these operations only (default: all of the kind)
 #   test/e2e-matrix.sh --actions kill,fail     these actions only (default kill fail reboot; race:
-#                                              a second client's configure, with other settings, at the point)
+#                                              a second client's configure, with other settings, at the point;
+#                                              queue-fail, queue-kill: cells only, see mx_queue_prep)
 #   test/e2e-matrix.sh --quick                 the points most likely to hide a defect only
 #   test/e2e-matrix.sh --points 'link|ra\.'    points matching this extended regex only
 #   test/e2e-matrix.sh --shard 2/4             every 4th cell from the 2nd (after the traces)
@@ -20,6 +21,8 @@
 #                                              a kill at every state write of a deploy and a rollback
 #   test/e2e-matrix.sh --kind static --weekly  the weekly cells of that kind (WEEKLY_CELLS below: the
 #                                              points where its path differs from node's)
+#   test/e2e-matrix.sh --queue                 the cells of a deploy queued behind one that fails or is
+#                                              killed (QUEUE_CELLS below; node)
 #   test/e2e-matrix.sh --selftest              prove the checker: each invariant, broken on purpose
 #   test/e2e-matrix.sh --list                  trace and print the cells; run none
 # Operations: deploy, deploy-rel (a release command), deploy-bad (fails after the switch),
@@ -31,7 +34,7 @@
 set -u
 : "${TANDO_TEST_SSH_PORT:-2222}"   # the server comes from the environment (test/all.sh reads this line)
 . "$(cd "$(dirname "$0")" && pwd -P)/lib.sh"
-KIND=node OPS="" ACTIONS="kill fail reboot" QUICK=0 PTS="" SHARD="" SELFTEST=0 LIST=0 CELLSONLY=0 WEEKLY=0
+KIND=node OPS="" ACTIONS="kill fail reboot" QUICK=0 PTS="" SHARD="" SELFTEST=0 LIST=0 CELLSONLY=0 WEEKLY=0 QUEUE=0
 while [ $# -gt 0 ]; do
   case $1 in
     --kind) KIND=${2:-}; shift;;
@@ -43,6 +46,7 @@ while [ $# -gt 0 ]; do
     --selftest) SELFTEST=1;;
     --cells) CELLSONLY=1;;
     --weekly) CELLSONLY=1 WEEKLY=1;;
+    --queue) CELLSONLY=1 QUEUE=1;;
     --list) LIST=1;;
     *) echo "e2e-matrix: unknown argument \"$1\" (see the head of this file)" >&2; exit 2;;
   esac
@@ -182,6 +186,8 @@ mx_expect() { # op phase action
       [ "$act" = fail ] && MX_ENVW="any:$MX_ENV0 e$((MXE + 1))";;
   esac
   [ "$op" = recover ] && [ "$ph" = after ] && MX_WANT=any
+  # (a deploy queued behind this one, which fails or is killed: the queued one goes live)
+  case $act in queue-*) MX_WANT=queue;; esac
   MX_LOOPOK=1
   # (a restore stops the app while its data is replaced: visitors are refused by design)
   [ "$op" = restore ] && MX_LOOPOK=0
@@ -210,6 +216,43 @@ mx_known() {
   done <<< "$MX_KNOWN"
   return 1
 }
+# A deploy queued behind another (actions queue-fail, queue-kill at <point>). A second admin
+# client cannot queue: its configure takes the app's lock and its begin follows at once, and the
+# first deploy holds the upload lease from its begin until its copy ends, which is after it took
+# the lock (it waits in configure: m2). A deploy key's deploy has no configure: its begin, upload
+# and activate go through while the first one is past its copy, and its activation waits for the
+# lock. Here the second deploy's settings are staged first (configure, the other version's, lock
+# free), the first deploy is held at its pre-flight's spawn (past the copy: the lease is free),
+# the second begins, uploads and activates with its own settings id, and waits at run-activation's
+# lock (busy_waiting=1); then the first fails or is killed at <point>. The queued one must go live
+# with its own settings on what the first left: history has the first's failed or rolled-back
+# line, then the queued one's ok line.
+mx_queue_prep() { # stage the second deploy (version MXN+1) and its settings: MX_QCONF
+  MXQ=$((MXN + 1)) MX_QCONF=""
+  mx_version "$MXQ"
+  rm -rf "${W:?}/${A}q"; cp -R "$W/$A" "$W/${A}q"; rm -rf "$W/${A}q/.tando"
+  (cd "$W/${A}q" && "$R" deploy --dry-run --force > "$W/q.out" 2>&1) || { cat "$W/q.out"; return 1; }
+  [ -d "$W/${A}q/.tando/stage" ] || return 1
+  MX_QCONF=$(mx_settings "$MXQ" | dx /opt/tando/bin/tando-agent configure "$A" | sed -n 's/^conf=//p')
+  [ -n "$MX_QCONF" ]
+}
+mx_queue_waits() { # the second's activation waits for the app's lock, held by the first
+  dx /opt/tando/bin/tando-agent busy "$A" < /dev/null 2> /dev/null | grep -qx busy_waiting=1 &&
+    dx /opt/tando/bin/tando-agent deploy-status "$A" "$MX_Q" < /dev/null 2> /dev/null | grep -qx phase=queued
+}
+mx_queue_go() { # while the first is held: begin, upload, activate (MX_Q), then wait until queued
+  local d=/opt/tando/apps/$A tok
+  tok=$(dx /opt/tando/bin/tando-agent begin "$A" mxq@test < /dev/null | sed -n 's/^token=//p')
+  [ -n "$tok" ] || { echo "  (the second's begin was refused)"; return 1; }
+  dxs "rm -rf /root/mxq" && docker cp "$W/${A}q/.tando/stage/." "$TANDO_TEST_NAME:/root/mxq" > /dev/null || return 1
+  # (as the client's rsync -rlpt --delete, owned by incoming/'s owner)
+  # lint: allow RL02 this runs on the test server (GNU stat), through docker exec
+  dxs "o=\$(stat -c %U:%G $d/incoming); rsync -rlpt --delete --chown=\$o /root/mxq/ $d/incoming/ && rm -rf /root/mxq" || return 1
+  MX_Q=$(printf '%s\n%s\n' "$tok" "$MX_QCONF" | dx /opt/tando/bin/tando-agent activate "$A" 0 0 | sed -n 's/^id=//p')
+  [ -n "$MX_Q" ] || { echo "  (the second's activate failed)"; return 1; }
+  echo "  (the second deploy: release $MX_Q, settings $MX_QCONF)"
+  T_UNTIL_STEP=0.3 t_until 60 mx_queue_waits
+}
 # mx_cell <op> <verb> <point> <nth> <action> <phase> [second point for recover]: run one cell
 NFAIL=0 NPASS=0 NSKIP=0 NKNOWN=0
 mx_cell() {
@@ -224,7 +267,7 @@ mx_cell() {
   mx_facts > /dev/null 2>&1
   MX_OLD=$(fv s_current) MX_H0=$(fv hist_n) MX_DATA0=$(fv data_sum) MX_DB0=$(fv db_rows) MX_ENV0=$(fv env_val)
   [ -n "$MX_ENV0" ] || MX_ENV0=""
-  before=$(mx_releases) MX_NEW="" MX_OP=$op MX_FAULT=$pt MX_REBOOT_T=0 MX_UP_T=0 MX_RACED=""
+  before=$(mx_releases) MX_NEW="" MX_OP=$op MX_FAULT=$pt MX_REBOOT_T=0 MX_UP_T=0 MX_RACED="" MX_Q=""
   if [ "$op" = rollback ]; then   # the newest verified release older than the current one
     MX_NEW=$(sed -n 's/^rel_\([^=]*\)=verified$/\1/p' "$W/facts" | grep -vx "$MX_OLD" | sort | tail -1)
   fi
@@ -235,8 +278,15 @@ mx_cell() {
   mx_expect "$op" "$ph" "$act"
   if [ "$pt" != - ]; then
     local a=$act; case $act in reboot|race) a=hang;; esac
-    mx_spec fault "$pt" "$a" "$nth" "$verb"
-    [ -n "$p2" ] && mx_spec next "${p2#* }" "${MX_ACT2:-kill}" 1 "${p2%% *}"
+    case $act in
+      queue-*)
+        mx_queue_prep >> "$W/case.log" 2>&1 || { fail "$id: could not stage the second deploy"; mx_reset; return; }
+        mx_spec fault pre.spawn hang 1 run-activation
+        mx_spec next "$pt" "${act#queue-}" "$nth" "$verb";;
+      *)
+        mx_spec fault "$pt" "$a" "$nth" "$verb"
+        [ -n "$p2" ] && mx_spec next "${p2#* }" "${MX_ACT2:-kill}" 1 "${p2%% *}";;
+    esac
   fi
   mx_loop_start
   # the operation in the background (a client that never returns is ended after 10 minutes)
@@ -264,6 +314,14 @@ mx_cell() {
       dxs "touch $MX_T/release"
     fi
   fi
+  case $act in
+    queue-*)
+      while [ $i -lt 600 ] && ! dxs "test -e $MX_T/reached" 2> /dev/null && kill -0 $cl 2> /dev/null; do sleep 0.2; i=$((i + 1)); done
+      if dxs "test -e $MX_T/reached" 2> /dev/null; then
+        mx_queue_go >> "$W/case.log" 2>&1 && MX_RACED=1
+        dxs "touch $MX_T/release"
+      fi;;
+  esac
   i=0; while kill -0 $cl 2> /dev/null && [ $i -lt 1200 ]; do sleep 0.5; i=$((i + 1)); done
   mx_killtree $cl; wait $cl 2> /dev/null
   [ "$op" = env ] && MXE=$((MXE + 1))
@@ -277,6 +335,8 @@ mx_cell() {
   # (a reboot clears /run: there, reaching the point is what counts)
   if [ "$act" = reboot ]; then [ "$MX_REBOOT_T" != 0 ] || fired=0
   elif [ "$act" = race ]; then [ "${MX_RACED:-}" = 1 ] || fired=0
+  elif [ "${act#queue-}" != "$act" ]; then   # (queued, and the first deploy passed the point after its hold)
+    { [ "${MX_RACED:-}" = 1 ] && dxs "grep -qx 'point=$pt' $MX_T/fired"; } || fired=0
   elif [ "$pt" != - ]; then mx_fired || fired=0; fi
   mx_spec_clear
   # the operation's release: what the client printed, else one that appeared on disk or in history
@@ -291,6 +351,7 @@ mx_cell() {
       fi
       [ -n "$MX_NEW" ] && mx_note_id "$MX_NEW" "$MXV";;
   esac
+  if [ -n "$MX_Q" ]; then mx_note_id "$MX_Q" "$MXQ"; MXV=$MXQ; fi
   if [ "$fired" = 0 ]; then
     NSKIP=$((NSKIP + 1)); skip "$id not reached (the point was not passed this time)"
     printf '%s\t%s\t%s\t%s\t%s\t%s\tskip\t\n' "$KIND" "$op" "$verb" "$pt#$nth" "$act" "$ph" >> "$CELLOUT"
@@ -408,9 +469,16 @@ j stop stop caddy.mv 1 fail after
 k rollback rollback post:activation 1 kill before
 l deploy begin post:upload 1 kill before
 l deploy activate act.mkdir 1 kill before
-x destroy destroy ds.site 1 kill none"
+x destroy destroy ds.site 1 kill none
+q deploy run-activation sw.caddy_up 1 queue-fail after"
 # k: a rollback killed after its progress file (result=running) and before its first state write: tando-watch's recover-all
 # (srv/watch/pretick.go rollbackCut) ends it; nothing did before
+# q: a deploy queued at run-activation's lock behind this one (mx_queue_prep), which is refused
+# before its switch: the queued one goes live with its own settings (more: QUEUE_CELLS)
+QUEUE_CELLS="
+q deploy run-activation sw.caddy_up 1 queue-fail after
+q deploy run-activation ra.restart 1 queue-fail after
+q deploy run-activation pre.stop 1 queue-kill after"
 # x: a destroy killed after its units went, before the Caddy site,
 # database and user (it left them, and the slice and firewall rules, until destroy ran again)
 # the other kinds: one or two cells where their path differs from node's (a static site has no
@@ -479,6 +547,7 @@ n deploy-bad run-activation ra.restart 2 fail after";;
   *) WEEKLY_CELLS="";;
 esac
 [ "$WEEKLY" = 0 ] || CELLS=$WEEKLY_CELLS
+[ "$QUEUE" = 0 ] || CELLS=$QUEUE_CELLS
 CELLS=${MX_CELLS:-$CELLS}     # (another list: MX_CELLS, same columns)
 if [ "$CELLSONLY" = 1 ]; then
   while read -r d op v p n act ph <&3; do

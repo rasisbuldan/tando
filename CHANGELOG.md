@@ -15,6 +15,10 @@ first, grouped by area.
   systemd once per second for the restart count and the state together (`systemctl show -p NRestarts
   -p ActiveState`) instead of two or three calls: server CPU in system.slice over a soak 600 ms to
   485 ms (whole container 994 ms to 742 ms); the poll stays at 1 s.
+- Tests: the fault matrix proves a deploy queued behind another one (a deploy key's, which has no
+  configure step) ends right when the one ahead fails before its switch, is rolled back, or is
+  killed and recovered: it goes live with its own settings, and history has both lines in order
+  (`test/e2e-matrix.sh --queue`; one of these cells runs in the quick tier).
 - Faster: every tando command starts about 0.3 s sooner (0.36 s to 0.06 s for `tando help`;
   `tando ls` and `tando status` from about 0.55 s to about 0.25 s): the help index no longer
   starts two processes per line of the help text.
