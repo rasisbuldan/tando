@@ -144,8 +144,10 @@ check "C6g backup holds the data volume ($id)" \
 
 # C7. keep 5 releases and their images
 for v in 4 5 6 7; do echo "container v$v" > www/index.html; "$R" deploy > /dev/null 2>&1; done
-nrel=$("$R" releases | grep -c '│ 20')
-nimg=$(srv "sudo podman images --format '{{.Repository}}' | grep -c '^localhost/tando-box$'")
+# (a poll: the old releases are pruned when the last one is verified, which may be a moment after
+# the deploy command returned; seen once under load: 6 kept)
+c7_n() { nrel=$("$R" releases | grep -c '│ 20'); nimg=$(srv "sudo podman images --format '{{.Repository}}' | grep -c '^localhost/tando-box$'"); [ "$nrel" = 5 ] && [ "$nimg" -le 5 ]; }
+t_until 30 c7_n
 check "C7 after 9 releases: $nrel kept, $nimg images" test "$nrel" = 5 -a "$nimg" -le 5
 check "C7b serves the last one" test "$(get box)" = "container v7"
 
