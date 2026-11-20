@@ -90,6 +90,9 @@ nothing_left() {
   # (what still holds a unit that has ended: its references, job and the processes that could)
   srv "for u in \$(systemctl list-units --all --plain --no-legend 'tando-*-studio-*' | cut -d' ' -f1); do systemctl show \$u -p Refs,Job,CollectMode,Transient,ActiveState,SubState,Result,RequiredBy,WantedBy,BoundBy,ConsistsOf,TriggeredBy | tr '\n' ' '; echo; done; busctl list --no-pager 2> /dev/null | grep -i 'systemd-run\|systemctl' | cut -c1-120; pgrep -af 'systemd-run|systemctl' | cut -c1-160" >&2
   srv "ls -d /sys/fs/cgroup/tando.slice/*studio* /sys/fs/cgroup/tando.slice/*/*studio* 2>&1 | head -4; for u in \$(systemctl list-units --all --plain --no-legend 'tando-*-studio-*' | cut -d' ' -f1); do systemctl show \$u -p ControlGroup,MainPID,ControlPID,NRestarts,StateChangeTimestamp | tr '\n' ' '; sudo systemctl stop \$u; sleep 1; echo; echo \"after a stop: \$(systemctl list-units --all --plain --no-legend \$u | tr -s ' ')\"; done" >&2
+  # (whether the unit is still the one that ran, or a file that loads it again; then whether
+  # systemd's next garbage collection pass, which a daemon-reload runs, unloads it)
+  srv "for u in \$(systemctl list-units --all --plain --no-legend 'tando-*-studio-*' | cut -d' ' -f1); do systemctl show \$u -p LoadState,FragmentPath,DropInPaths,InvocationID | tr '\n' ' '; sudo ls -d /run/systemd/transient/\$u 2>&1; done; sudo systemctl daemon-reload; echo \"after a daemon-reload: \$(systemctl list-units --all --plain --no-legend 'tando-*-studio-*' | tr -s ' \n' ' ')\"" >&2
   srv "systemctl list-units --all --plain --no-legend 'tando-*-studio-*'; pgrep -ax tando-studio; sudo ls -la /run/tando-studio /run/tando/studio; pgrep -af 'tando-agent db-studio'" >&2
   echo "SELECT pid, usename, state, application_name FROM pg_stat_activity WHERE application_name LIKE 'tando studio%'" | pgsu postgres >&2
   return 1

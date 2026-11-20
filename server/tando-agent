@@ -4407,6 +4407,21 @@ cmd_db_psql() { # interactive, over ssh -t; runs as the app user with the app's 
 # client's heartbeat through ssh (EOF or 45 s of silence end it); stdout the "ready" and
 # "stopped" lines. At most STUDIO_MAX at once on the host, counted and started under a lock. The
 # last arguments are for test/e2e-studio.sh (shorter heartbeat, idle time and statement limit).
+# units_unload unit...: wait (3 s at most) until these units, ended, are no longer loaded. systemd
+# unloads a unit nothing references on its next garbage collection pass; seen on systemd 259: a
+# transient unit stopped while a `systemd-run --wait` held a reference stayed "loaded inactive
+# dead" with no reference, job, process or cgroup (its transient file kept), through a stop,
+# until a daemon-reload, whose pass unloaded it at once. So: a reload when one is still there.
+units_unload() {
+  local i
+  for ((i = 0; i < 15; i++)); do
+    [[ -z $(systemctl list-units --all --plain --no-legend "$@" 2> /dev/null) ]] && return 0
+    sleep 0.2
+  done
+  # (only units that have ended: a running one is not ours to unload)
+  [[ -n $(systemctl list-units --all --plain --no-legend --state=active,activating,deactivating,reloading "$@" 2> /dev/null) ]] ||
+    systemctl daemon-reload
+}
 STUDIO=$R/bin/tando-studio STUDIO_RUN=/run/tando-studio STUDIO_CRED=/run/tando/studio STUDIO_MAX=2
 studio_units() { systemctl list-units --plain --no-legend --state=active,activating 'tando-*-studio-*' 2> /dev/null | awk '{ print $1 }'; }
 studio_rows() { # running studios: studio <app> <sid12> <started epoch> <mode> <admin>
@@ -4502,6 +4517,7 @@ cmd_db_studio() {
       esac
     done
   rm -rf "${d:?}" "$cred"   # (gone with the unit already; a unit that never started leaves them)
+  units_unload "$u"
   # the last one out removes the two directories (under the lock: a studio starting creates them)
   exec 8>"$R/.studio.lock"; flock -w 10 8 && rmdir "$STUDIO_RUN" "$STUDIO_CRED" 2> /dev/null; exec 8>&-
   [[ $reason =~ ^stopped\ reason=([a-z]+)\ queries=([0-9]+)$ ]] &&
@@ -4533,7 +4549,7 @@ cmd_db_studio_stop() { # [app]: stop the app's studios (all of the host's withou
   local us=() u
   if [[ -n ${1:-} ]]; then app "$1"; while IFS= read -r u; do [[ $u == tando-$A-studio-* ]] && us+=("$u"); done < <(app_units)
   else while IFS= read -r u; do us+=("$u"); done < <(studio_units); fi
-  ((${#us[@]})) && systemctl stop "${us[@]}" 2> /dev/null
+  ((${#us[@]})) && { systemctl stop "${us[@]}" 2> /dev/null; units_unload "${us[@]}"; }
   lockfile "$R/.studio.lock"; exec 8>"$R/.studio.lock"   # (the last one: its agent went with its ssh session)
   flock -w 10 8 && rmdir "$STUDIO_RUN" "$STUDIO_CRED" 2> /dev/null; exec 8>&-
   AUDIT_NOTE="${#us[@]} stopped"
@@ -4735,6 +4751,7 @@ destroy_finish() {
   systemctl reset-failed "tando-$A.service" ${units[@]+"${units[@]}"} "tando-down@tando-$A.service" 2> /dev/null
   # its slice: stopped once nothing of the app runs in it, so systemd unloads it (no file left)
   systemctl stop "$(app_slice)" 2> /dev/null; systemctl reset-failed "$(app_slice)" 2> /dev/null
+  units_unload "$(app_slice)"
   [[ $purge == purge ]] && rm -rf "${BK:?}/$A"
   # (the user is gone: fw_sync leaves the app out although its app.conf is still there)
   fp ds.fw

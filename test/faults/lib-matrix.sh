@@ -452,6 +452,19 @@ mx_inv() {
   [ -z "$MX_BROKEN" ]
 }
 
+# mx_unit_diag pattern...: for each unit still listed, what could hold it (its references, job,
+# file, transient file, cgroup), whether it is still listed 2 s later, and after a daemon-reload
+# (systemd unloads an unreferenced unit on its next garbage collection pass; a reload runs one)
+mx_unit_diag() {
+  local pats="" p
+  for p in "$@"; do pats="$pats '$p'"; done
+  dxs "us=\$(systemctl list-units --all --plain --no-legend $pats | cut -d' ' -f1)
+    for u in \$us; do echo \"diag \$u: \$(systemctl show \$u -p LoadState,ActiveState,SubState,Transient,Refs,Job,ReferencedBy,ConsistsOf,FragmentPath,DropInPaths,ControlGroup,StateChangeTimestamp | tr '\\n' ' ')\"
+      ls -d /run/systemd/transient/\$u /sys/fs/cgroup/tando.slice/\$u /sys/fs/cgroup/tando.slice/*/\$u 2> /dev/null | sed 's/^/diag   exists: /'; done
+    sleep 2; echo \"diag 2 s later: \$(systemctl list-units --all --plain --no-legend $pats | tr -s ' \\n' ' ')\"
+    systemctl daemon-reload; echo \"diag after a daemon-reload: \$(systemctl list-units --all --plain --no-legend $pats | tr -s ' \\n' ' ')\""
+}
+
 # mx_inv_gone: after a destroy (invariant 14), nothing of the app is left: its directory, unit
 # files and loaded units (timers, workers, slice), Caddy site, journal settings, user and groups,
 # firewall rules of its uid, database and role; its final backup is there, complete (kind data:
@@ -481,6 +494,8 @@ mx_inv_gone() {
     n=0; for b in /var/backups/tando/\$A/*-final; do [ -f \"\$b/meta\" ] && n=\$((n + 1)); done
     [ \$n = $want ] || echo \"final-backups \$n\"
     true" 2>> "$W/case.log")
+  # (a unit left loaded: what holds it, for the log; the verdict above stands whatever this finds)
+  case $left in *"unit "*) mx_unit_diag "tando-$A.*" "tando-$A-*" "tando-\${A}_*" >&2;; esac
   [ -z "$left" ] || mx_bad 14 "gone: $(printf '%s' "$left" | tr '\n' ';' | sed 's/;$//; s/;/, /g')"
   [ -z "$MX_BROKEN" ]
 }

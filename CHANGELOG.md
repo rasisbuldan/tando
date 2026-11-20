@@ -6,6 +6,12 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: an ended `tando db studio` session could stay listed by `systemctl list-units --all` as
+  `loaded inactive dead` (about 1 run in 3 of the studio suite), with nothing holding it: systemd
+  had not unloaded it and a stop did not help. A destroy left the app's slice listed the same way
+  (rarely). The agent now waits up to 3 s for an ended studio unit, or a destroyed app's slice,
+  to be unloaded, and runs a `systemctl daemon-reload` (whose garbage collection pass unloads it)
+  when it is still there.
 - Fixed: a rollback, revert or recovery to a release whose settings record (`start/<id>`) is older
   than a setting dropped that setting from the app (a record written before `assets`,
   `job_spread`, `job_missed` or `worker.*` existed: the app lost it, as if the release had it
