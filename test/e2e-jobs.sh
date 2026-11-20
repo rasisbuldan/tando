@@ -240,7 +240,7 @@ t_until 15 eval '! srv "test -e /etc/systemd/system/tando-jb_job-long.service"'
 srv "sudo rm -f $AD/jobhist/long $AD/jobhist/long.*"
 conf 'job.show = yearly | echo new-$(cat marker.txt)-${JOBENV:-none}' \
   'job.long = *:*:0/4 | d=$TANDO_DATA_DIR; if [ -e $d/busy4 ]; then echo overlap >> $d/bad4; fi; touch $d/busy4; date +%s.%N >> $d/starts4; sleep 5; date +%s.%N >> $d/ends4; rm -f $d/busy4' \
-  'job.pz = *:*:0/10 | echo pz' 'job.rm = yearly | sleep 25; echo done >> $TANDO_DATA_DIR/rmdone' 'job_spread = 0'
+  'job.pz = *:*:0/10 | echo pz' 'job.rm = yearly | sleep 45; echo done >> $TANDO_DATA_DIR/rmdone' 'job_spread = 0'
 up v4; rc=$?
 check "J7a deploy v4 with a job every 4 s that takes 5 s (rc=$rc)" t_eq "$rc" 0
 t_until 20 srv "sudo test -s $AD/shared/data/starts4"
@@ -257,7 +257,8 @@ starts4=$(srv "sudo cat $AD/shared/data/starts4 | wc -l")
 gap=$(srv "sudo cat $AD/shared/data/starts4; echo; sudo cat $AD/shared/data/ends4" |
   awk 'NF == 0 { e = 1; next } !e { s[n++] = $1; next } { f[m++] = $1 }
        END { g = 99; for (i = 0; i + 1 < n && i < m; i++) if (s[i + 1] - f[i] < g) g = s[i + 1] - f[i]; printf "%.1f", g }')
-span=$((SECONDS - t0)); most=$((span / 8 + 1))
+# (t0 is taken once the first start was seen, up to a few seconds after it: those count too)
+span=$((SECONDS - t0)); most=$(((span + 4) / 8 + 1))
 check "J7c in $span s the timer fired every 4 s, the job takes 5 s: it started $starts4 times (at most $most, at its times, 2 at least), never two at once, never at once after a run (at least ${gap} s between)" \
   eval '[ "$starts4" -ge 2 ] && [ "$starts4" -le "$most" ] && ! srv "sudo test -e $AD/shared/data/bad4" && awk -v g="$gap" "BEGIN { exit !(g >= 1) }"'
 check "J7d the runs are in the history with their duration (5 s)" \
@@ -299,9 +300,12 @@ srv "sudo systemctl start --no-block tando-jb_job-rm.service"
 t_until 10 eval '[ "$(srv "systemctl show -P ActiveState tando-jb_job-rm.service")" = activating ]'
 conf 'job.show = yearly | true'
 up v6
-check "J6h a job removed while a run of it goes on: its timer is gone at once, the run goes on" \
-  eval '! have rm && [ "$(srv "systemctl show -P ActiveState tando-jb_job-rm.service")" = activating ]'
-t_until 60 eval 'srv "sudo test -e $AD/shared/data/rmdone && ! test -e /etc/systemd/system/tando-jb_job-rm.service"'
+# (the job units follow the release once it is verified, after its short soak)
+t_until 20 eval '! have rm'
+rmst=$(srv "systemctl show -P ActiveState tando-jb_job-rm.service; ls /etc/systemd/system | grep -c tando-jb_job-rm.timer" | tr '\n' ' ')
+check "J6h a job removed while a run of it goes on: its timer goes with the release, the run goes on (state, timers: $rmst)" \
+  eval '[ "$rmst" = "activating 0 " ]'
+t_until 90 eval 'srv "sudo test -e $AD/shared/data/rmdone && ! test -e /etc/systemd/system/tando-jb_job-rm.service"'
 t_until 20 eval '[ -z "$(srv "systemctl list-units --all --no-legend tando-jb_job-rm.service")" ]'
 check "J6i that run finished (not killed) and is in the history (ok); then its unit went: no file, not listed, not failed" \
   eval 'srv "sudo test -e $AD/shared/data/rmdone" && srv "sudo tail -1 $AD/jobhist/rm" | grep -q "	success	" &&
