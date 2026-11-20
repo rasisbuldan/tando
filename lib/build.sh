@@ -89,6 +89,8 @@ cmd_init() {
     echo "# data = data                      # a directory that survives deploys (\$TANDO_DATA_DIR)"
     echo "# ${db:-database = postgres              # or sqlite; the app gets DATABASE_URL}"
     echo "# job.nightly = daily | node scripts/nightly.js"
+    [ "$recipe" = static ] || [ "$recipe" = container ] ||
+      echo "# release = node scripts/migrate.js  # run on the server at every deploy, before the switch (migrations)"
     echo "# path = /shop                     # serve under a sub-path"
     [ -n "$shell" ] || [ "$recipe" = static ] ||
       echo "# start_shell = true               # run start with sh -c (pipes, &&, \$VARS)"

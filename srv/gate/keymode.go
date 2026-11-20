@@ -141,7 +141,7 @@ func (g *Gate) info() error {
 }
 
 var deployStatusKeys = []string{"id", "phase", "result", "message", "link", "venv", "started", "soak",
-	"t_build", "t_upload", "t_copy", "t_preflight", "t_switch", "t_verify", "waiting_for", "waiting_phase", "waiting_left"}
+	"t_build", "t_upload", "t_copy", "t_preflight", "t_release", "t_switch", "t_verify", "waiting_for", "waiting_phase", "waiting_left"}
 
 // deployStatusKey: a deploy-status line the key may see (no log= lines: they can carry
 // customer data).

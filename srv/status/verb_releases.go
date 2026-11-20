@@ -150,7 +150,7 @@ func absCompare(na, fa, nb, fb string) int {
 }
 
 // History is the verb `history [app] [n]`: the last n (default 20) lines of each app's
-// history.tsv that have the 12 fields of a deploy record, as `hist <app> <fields...>` rows.
+// history.tsv that have the 12 fields of a deploy record (13 with a release command's seconds), as `hist <app> <fields...>` rows.
 // Without an app every directory under apps/ with a history.tsv counts.
 func (c *Collector) History(ctx context.Context, w io.Writer, name, count string) error {
 	n := int64(20)
@@ -189,14 +189,14 @@ func histCount(s string) int64 {
 // maxHistTail bounds how much of the end of a history file is read for its last n lines.
 const maxHistTail = 16 << 20
 
-// history adds `tail -n "$n" history.tsv | awk -F '\t' 'NF == 12' | sed "s/^/hist\t$app\t/"`.
+// history adds `tail -n "$n" history.tsv | awk -F '\t' 'NF == 12 || NF == 13' | sed "s/^/hist\t$app\t/"`.
 // Each field is cleaned again (they were written cleaned by the agent's row).
 func (c *Collector) history(s *sink, name string, n int64) {
 	if n <= 0 {
 		return
 	}
 	for _, l := range tailLines(filepath.Join(c.appDir(name), "history.tsv"), n, maxHistTail) {
-		if strings.Count(l, "\t") != 11 {
+		if n := strings.Count(l, "\t"); n != 11 && n != 12 { // (12: with the release command's seconds)
 			continue
 		}
 		// (not s.row: an empty field stays empty, as awk printed it)

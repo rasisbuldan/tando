@@ -12,7 +12,7 @@ import (
 // (systemd's own lines: start, stop, exit status). With namespaces, other apps' lines are not in
 // the files read anyway; this is the second check.
 type Filter struct {
-	Roles  map[string]string // unit -> what the text output calls it: app, journald, job:<name>, act, venv, pre
+	Roles  map[string]string // unit -> what the text output calls it: app, journald, job:<name>, act, venv, pre, release
 	JSON   bool              // one JSON object per line instead of text
 	Level  int               // show entries at this priority or worse; -1: all
 	Match  func([]byte) bool // the grep, on the displayed message; nil: all

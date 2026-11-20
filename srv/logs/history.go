@@ -13,7 +13,9 @@ import (
 
 // history.tsv (written by the agent), one row per deploy, rollback or rolled-back deploy:
 //
-//	time id kind result total build upload copy preflight switch verify note
+//	time id kind result total build upload copy preflight switch verify note [release]
+//
+// (release: the seconds of the release command, only on a deploy that ran one.)
 //
 // A row's time is when verify ended (whole seconds), so the switch is time - verify, to within a
 // second.

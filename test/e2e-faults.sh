@@ -3,7 +3,8 @@
 # a 2 GB, 1-CPU test server. Each scenario exits 0 when tando held (served the right release, told
 # the truth, and the next deploy worked untouched): a PASS here. By default the 27 scenarios that
 # failed in the review plus the baseline, and m1-m6 (soak rollback alert, deploy behind a soak,
-# unknown hosts, static pages, env before up/during a soak and job-run, failure hints), n1-n7 (jobs follow
+# unknown hosts, static pages, env before up/during a soak and job-run, failure hints), a21 (the
+# activation killed while the release command of tando.conf runs), n1-n7 (jobs follow
 # the verified release, env revert, same-user lease, domain lost update, idempotent re-runs, liveness
 # restart, load limits); --all runs
 # every scenario (the restarts and power losses are slow); --only a1,b3 runs those.
@@ -58,7 +59,7 @@ esac
 # once); a scenario not listed counts as DUR_DEFAULT. Only the cut of the list
 # into chunks of about equal time reads these: a stale number costs balance, nothing else.
 DUR_DEFAULT=90
-DUR=" s00=60 a1=40 a2=65 a3=230 a4=50 a5=70 b2=35 b3=75 d1=30 d2=75 d3=60 d4=70 e4=105 e5=105
+DUR=" s00=60 a1=40 a2=65 a3=230 a4=50 a5=70 a21=45 b2=35 b3=75 d1=30 d2=75 d3=60 d4=70 e4=105 e5=105
  e10=170 f3=70 g1=45 g3=70 g5=20 g6=25 g7=50 g8=55 g9=65 g10=120 h2=30 h5=55 j1=55 l1=105 m1=145
  m2=195 m3=70 m4=6 m5=130 m6=2 n1=105 n2=75 n3=90 n4=190 n5=320 n6=85 n7=75 "
 dur_of() {
@@ -129,7 +130,7 @@ chunks() {
 }
 chunk_n() { chunks "$SK" $2 | sed -n "$1p"; }       # chunk_n <i> "<ids>"
 
-list="s00 a1 a2 a3 a4 a5 b2 b3 d1 d2 d3 d4 e4 e5 e10 f3 g1 g3 g5 g6 g7 g8 g9 g10 h2 h5 j1 l1 m1 m2 m3 m4 m5 m6 n1 n2 n3 n4 n5 n6 n7"
+list="s00 a1 a2 a3 a4 a5 a21 b2 b3 d1 d2 d3 d4 e4 e5 e10 f3 g1 g3 g5 g6 g7 g8 g9 g10 h2 h5 j1 l1 m1 m2 m3 m4 m5 m6 n1 n2 n3 n4 n5 n6 n7"
 [ -n "$only" ] && list=$only
 if [ $all = 1 ]; then
   list=$(cd "$FD" && ls [a-z]*[0-9]-*.sh | sed 's/-.*//' | sort -t. -k1,1 | tr '\n' ' ')

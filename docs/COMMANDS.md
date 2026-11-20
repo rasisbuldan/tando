@@ -85,6 +85,8 @@ When the upload and the settings are exactly those of the live, verified release
 activated: "already live", no new release, no restart (`tando restart` restarts it). A deploy that
 finds another one's release soaking is queued and says what it waits for. While another deploy
 (also from another terminal of the same user) is uploading, a deploy is refused at once.
+`release = <command>` in tando.conf runs once per deploy on the server, between pre-flight and
+switch (database migrations): see [The release command](#the-release-command).
 Note: `-a` is accepted but not in the usage line (mismatch 8).
 Example: `tando deploy`
 
@@ -101,7 +103,8 @@ Example: `tando releases --json`
 ### history
 `tando history [app] [-n N] [-H host] [--json]`. Flags also `-a`. Arguments: 0-1.
 Deploys and rollbacks with result and phase times. Outside a project and without an app: every app
-of the server.
+of the server. `RELCMD` is the time of the release command, shown when a listed deploy ran one
+(`release_s` in `--json`).
 Example: `tando history -n 10`
 
 ## Run
@@ -376,6 +379,52 @@ Example: `tando adopt plan bakery -H vps --health /order/new`
 `tando help [command [subcommand]]`. Arguments: 0-3. The command list, or one command's help; words
 after the command are accepted and show the same help (`tando help alerts notifier`).
 Example: `tando help deploy`
+
+## The release command
+
+`release = <command>` in tando.conf: a command tando runs on the server once per deploy, before
+the new release takes traffic. It is meant for database migrations.
+
+```
+release = node scripts/migrate.js
+release_timeout = 120              # seconds, 1 to 3600; default 300
+# release_shell = true             # run it with sh -c (&&, |, $VARS, quotes)
+```
+
+- **When.** After the new release passed its pre-flight (started on a spare port, healthy) and
+  after the pre-deploy backup of the data directory and the database was taken, before the
+  switch. In the deploy box and in `tando history` it is its own phase (`release`, `RELCMD`).
+- **The pre-flight runs before it.** The new release is started and health-checked against the
+  data as the old release left it, so its health check must pass before the migration too.
+- **How.** In the new release's directory, as the app's user, with the app's environment
+  (`tando env`, `DATABASE_URL`, `TANDO_DATA_DIR`), sandbox and limits: what a scheduled job gets.
+  It cannot listen on a port. `PORT` is the app's port, `TANDO_RELEASE` the new release's id. A
+  Python app's virtualenv is on `PATH`. Without `release_shell = true` the command is split on
+  spaces and run with no shell, like `start`; shell syntax in it (quotes, `&&`, `|`, `$VAR`) is
+  refused, because it would reach the program as literal words.
+- **When it fails** (a non-zero exit, or longer than `release_timeout`): the deploy fails with a
+  non-zero exit status, nothing is switched, the old release keeps serving. The deploy box and
+  `tando history` say so with the command's last lines of output; all of its output:
+  `tando logs --deploy <release id>` (source `release`).
+- **tando never restores the database or the data by itself.** The old release is live and writes
+  to the same database while the command runs; putting a backup back would discard those writes.
+  What a failed command changed stays changed. The failure message names the pre-deploy backup
+  taken just before it: `tando backup restore <id>` puts it back when you decide to (what the backup holds comes back;
+  a table the command created after it is not dropped).
+- **`tando rollback` does not undo a migration.** It switches the code back; the database stays as
+  the command left it. Write migrations the previous release can still run with (add a column
+  first, remove it a deploy later).
+- **It must be safe to run twice.** It runs on every deploy, of unchanged code too (with a release
+  command a deploy is never "already live"), and again when a deploy is repeated after a failure.
+  It does not run on `tando rollback`, `restart`, `env set` or an automatic rollback.
+- **If the server restarts or the activation is killed while it runs**, the command is stopped
+  where it was, the deploy is recorded as failed ("interrupted during release") and the old
+  release keeps serving. A migration that was cut off is in whatever state its own transactions
+  left it.
+- **Recipes.** node, next and python. Refused for `static` (no process, nothing to run it as) and
+  for `container` (the release is an image: run the migration in its entrypoint).
+- With a deploy key (CI) the command is the one of the admin's last `tando up` or `tando deploy`,
+  like every other setting.
 
 ## Limits and load
 

@@ -153,6 +153,14 @@ its `sharp` module and answer for the pages' optimised images. switch: pre-deplo
 backup, atomic `current` swap, restart. verify: through Caddy. `recover` (boot and every mutating
 verb) reverts copy/preflight and finishes or reverts switch/verify/rollback.
 
+With `release = <command>` in tando.conf there is a phase `release` between the pre-deploy backup
+and the swap: `switch` (Caddy up, backup) → `release` → `switch` (swap). The command runs in the
+transient unit `tando-<app>-rel-<id>` (the job sandbox, `props - job`; `exec-release` reads the
+command from app.conf). A failure, a timeout (`RuntimeMaxSec`) or an interruption (`recover` in
+phase `release` stops the unit) ends like a failed pre-flight: bad, current untouched. Nothing is
+restored. Its seconds are `t_release` in the activation file and a 13th field of the deploy's
+history line (docs/COMMANDS.md, "The release command").
+
 ## Recipes
 | Recipe | Release | Process |
 |---|---|---|

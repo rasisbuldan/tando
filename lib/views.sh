@@ -358,9 +358,10 @@ rel_json() {
     [ "$r" = rel ] && printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$(id_epoch "$id")" "$st" "$c" "$g"
   done < "$TMPD/st" | to_json "id:s,deployed_at:n,status:s,current:b,last_good:b"
 }
-HIST_JSON="at:n,app:s,release:s,kind:s,result:s,total_s:n,build_s:n,upload_s:n,copy_s:n,preflight_s:n,switch_s:n,verify_s:n,note:s"
-hist_json() { grep "^hist$TAB" "$TMPD/st" | sort -t "$TAB" -k3,3nr | cut -f2-14 |
-  awk -F '\t' -v OFS='\t' '{ print $2, $1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13 }' | to_json "$HIST_JSON"; }
+HIST_JSON="at:n,app:s,release:s,kind:s,result:s,total_s:n,build_s:n,upload_s:n,copy_s:n,preflight_s:n,switch_s:n,verify_s:n,note:s,release_s:n"
+# (release_s: the seconds of the release command, null for a deploy without one)
+hist_json() { grep "^hist$TAB" "$TMPD/st" | sort -t "$TAB" -k3,3nr | cut -f2-15 |
+  awk -F '\t' -v OFS='\t' '{ print $2, $1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14 }' | to_json "$HIST_JSON"; }
 status_json() {
   printf '{"host":%s,"app":' "$(json_str "$HOST")"
   app_json_rows | to_json "$APP_JSON" | sed 's/^\[//; s/\]$//'
@@ -381,30 +382,34 @@ cmd_status() {
 
 cmd_history() {
   resolve 0
-  local r a ts id kind res tot b u c p s v note n=30
+  local r a ts id kind res tot b u c p s v note rc n=30 hasrc="" spec
   [ "$NLINES" != 100 ] && n=$NLINES
   [ "$n" -gt 999 ] && n=999
   agent_raw sudo history ${APP:+"$APP"} "$n" > "$TMPD/st" || exit 1
   NOW=$(now)
   if [ -n "$JSON" ]; then printf '{"host":%s,"history":' "$(json_str "$HOST")"; hist_json; printf '}\n'; return; fi
   : > "$TMPD/notes"
+  # RELCMD (the release command's seconds, a 15th field) is a column only when a deploy shown ran one
+  awk -F '\t' '$1 == "hist" && NF >= 15 { f = 1 } END { exit !f }' "$TMPD/st" && hasrc=1
   {
-    printf 'TIME (GMT)\tAPP\tRELEASE\tKIND\tRESULT\tTOTAL\tBUILD\tUPLOAD\tCOPY\tPRE\tSWITCH\tVERIFY\tNOTE\n'
+    printf 'TIME (GMT)\tAPP\tRELEASE\tKIND\tRESULT\tTOTAL\tBUILD\tUPLOAD\tCOPY\tPRE\t%sSWITCH\tVERIFY\tNOTE\n' "${hasrc:+RELCMD$TAB}"
     sort -t "$TAB" -k3,3nr "$TMPD/st" |
-    while IFS=$TAB read -r r a ts id kind res tot b u c p s v note; do
+    while IFS=$TAB read -r r a ts id kind res tot b u c p s v note rc; do
       [ "$r" = hist ] || continue
       hist_note "$id" "$kind" "$res" "$note" >> "$TMPD/notes"
       case $kind in deploy) ;; *) [ "$b" = 0 ] && b=-; [ "$u" = 0 ] && u=-;; esac   # not built or uploaded
       ui_utc_v "$ts"
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$UI_RET" "$a" "$id" "$kind" \
-        "$(badge "$res")" "$(secs "$tot")" "$b" "$u" "$c" "$p" "$s" "$v" "$note"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s%s\t%s\t%s\n' "$UI_RET" "$a" "$id" "$kind" \
+        "$(badge "$res")" "$(secs "$tot")" "$b" "$u" "$c" "$p" "${hasrc:+${TAB}${rc:--}}" "$s" "$v" "$note"
     done
   } > "$TMPD/rows"
   ui_box_open "history${APP:+ $APP}" "$HOST"
   # dropped first when narrow: note, phase times, app, release; never TIME (GMT) or RESULT
   if [ "$(wc -l < "$TMPD/rows")" -le 1 ]; then ui_box_line "No deploys yet: tando up"
   else
-    ui_table "l,l!5,l!4,l,l,r,r!6,r!7,r!8,r!9,r!10,r!11,l:4-30!12" < "$TMPD/rows"
+    spec="l,l!5,l!4,l,l,r,r!6,r!7,r!8,r!9,r!10,r!11,l:4-30!12"
+    [ -z "$hasrc" ] || spec="l,l!5,l!4,l,l,r,r!6,r!7,r!8,r!9,r!10,r!11,r!12,l:4-30!13"
+    ui_table "$spec" < "$TMPD/rows"
     # the NOTE column was dropped or cut: the reasons of rollbacks and failures, whole, below
     case $UI_TABLE_SHOWN in
       *0) hist_notes_box;;

@@ -68,6 +68,13 @@ deploy returns once the release is live; --wait (or TANDO_WAIT=1, for CI) waits
 for that.
 Changes to tando.conf are applied too (memory, jobs, data...): deploy and up do
 the same for an existing app.
+release = <command> in tando.conf (database migrations) runs on the server once
+per deploy, in the new release, as the app's user with its environment, after
+the pre-flight passed and the pre-deploy backup was taken, before the switch.
+When it fails or takes longer than release_timeout (300 s), nothing is switched
+and the old release keeps serving. It runs on every deploy, so it must be safe
+to run twice. tando never restores the database, and tando rollback does not
+undo a migration: docs/COMMANDS.md, "The release command".
 --force deploys although the app was last deployed from another directory;
 --yes deploys although tando.conf now names another app or server than the
 last deploy from this directory (otherwise tando asks).
@@ -96,7 +103,8 @@ flags: -a= -H= -n= --json
 args: 0-1
 usage: tando history [app] [-n N] [-H host] [--json]
 Deploys and rollbacks with their result and phase times, newest first. Without
-an app (and outside a project) it lists every app of the server.
+an app (and outside a project) it lists every app of the server. RELCMD is the
+time of the release command (release = in tando.conf), when a deploy ran one.
 Example: tando history -n 10
 
 @@ status

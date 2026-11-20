@@ -14,6 +14,9 @@ configure() {
     printf 'recipe=%s\n' "${C_recipe:-node}"
     [ -n "$C_start" ] && printf 'start=%s\n' "$C_start"
     [ -n "$C_start_shell" ] && printf 'start_shell=%s\n' "$C_start_shell"
+    [ -n "$C_release" ] && printf 'release=%s\n' "$C_release"
+    [ -n "$C_release_shell" ] && printf 'release_shell=%s\n' "$C_release_shell"
+    [ -n "$C_release_timeout" ] && printf 'release_timeout=%s\n' "$C_release_timeout"
     printf 'health=%s\nmemory=%s\n' "${C_health:-/}" "${C_memory:-256M}"
     [ -n "$C_timeout" ] && printf 'health_timeout=%s\n' "$C_timeout"
     # soak: seconds a new release must stay up after going live (TANDO_SOAK: tests use a short one)
@@ -67,7 +70,7 @@ busy_text() {
           [ -n "$left" ] && BUSY_WHAT="the soak of release $BUSY_ID: about $(ui_dur "$left") more";;
     rollback) if [ -n "$BUSY_ID" ]; then BUSY_WHAT="the rollback to $BUSY_ID to finish, up to about $(ui_dur "$BUSY_SOAK")"
               else BUSY_WHAT="the rollback of $APP to finish, up to about $(ui_dur "$BUSY_SOAK")"; fi;;
-    copy|preflight|switch|verify|queued)
+    copy|preflight|release|switch|verify|queued)
       BUSY_WHAT="release $BUSY_ID to finish activating ($BUSY_PHASE, then a soak of $(ui_dur "$BUSY_SOAK"))";;
     *) case ${BUSY_BY:-} in
          "a "[a-z]*|"an "[a-z]*|destroy) BUSY_WHAT="$BUSY_BY on $APP to finish";;
@@ -178,10 +181,17 @@ version_notice() {
   return 0
 }
 
+# PHASES: the server's phases in the deploy box, after build, stage and upload (1 to 3); with a
+# release command in tando.conf, `release` between pre-flight and switch (8 steps instead of 7)
+PHASES="copy preflight switch verify" PH_TOTAL=7
+phases_init() {
+  PHASES="copy preflight switch verify" PH_TOTAL=7
+  [ -z "$C_release" ] || { PHASES="copy preflight release switch verify"; PH_TOTAL=8; }
+}
 phase_line() { # n label state seconds [detail]
   local d=""
   [ -n "$4" ] && d=$(ui_dur "$4")
-  ui_step "$1" 7 "$2" "$3" "$d${5:+  $5}"
+  ui_step "$1" "$PH_TOTAL" "$2" "$3" "$d${5:+  $5}"
 }
 
 # client name shown to a second deploy that finds the upload lease taken
@@ -237,10 +247,10 @@ upload() { # sets UPLOAD_SECS, UPLOAD_FILES, UPLOAD_BYTES, TOKEN
 show_phases() {
   local ph n t
   n=4
-  for ph in copy preflight switch verify; do
+  for ph in $PHASES; do
     case " $SHOWN " in *" $ph "*) n=$((n + 1)); continue;; esac
     case $ph in
-      copy) t=$K_t_copy;; preflight) t=$K_t_preflight;;
+      copy) t=$K_t_copy;; preflight) t=$K_t_preflight;; release) t=$K_t_release;;
       switch) t=$K_t_switch;; verify) t=$K_t_verify;;
     esac
     [ -n "$t" ] || return 0
@@ -248,7 +258,9 @@ show_phases() {
     [ "$ph" = verify ] && [ "$K_result" = running ] && return 0
     # a failed pre-flight writes its time a moment before its result: wait for one or the other
     [ "$ph" = preflight ] && [ "$K_result" = running ] && [ "$K_phase" = preflight ] && return 0
-    if { [ "$K_result" = failed ] && [ "$ph" = preflight ]; } ||
+    # (a failed deploy: the last phase with a time is the one that failed)
+    if { [ "$K_result" = failed ] && [ "$ph" = preflight ] && [ -z "$K_t_release" ]; } ||
+       { [ "$K_result" = failed ] && [ "$ph" = release ]; } ||
        { [ "$K_result" = rolledback ] && [ "$ph" = verify ]; }; then
       phase_line $n $ph fail "$t"
     else
@@ -483,6 +495,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   dir_lock
   next_standalone
   node_install
+  phases_init
   ui_box_open "deploy $APP" "$HOST"
   t0=$(clock)
 
@@ -553,7 +566,8 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   trap 'echo; note "detached: release $id keeps activating on the server; follow it with tando status --watch 2"; exit 130' INT TERM
   SHOWN="" SOAKING="" QUEUED_SAID=""
   # a deadline: an activation that neither ends nor dies is reported, not waited for forever
-  local deadline=$(( $(now) + 2 * ${C_timeout:-60} + ${C_soak:-${TANDO_SOAK:-30}} + 900 ))
+  local rto=0; [ -z "$C_release" ] || rto=${C_release_timeout:-300}
+  local deadline=$(( $(now) + 2 * ${C_timeout:-60} + ${C_soak:-${TANDO_SOAK:-30}} + rto + 900 ))
   while :; do
     if [ "$(now)" -gt "$deadline" ]; then
       ui_box_close "release $id: still activating after $(ui_dur $(( deadline - ${t0%.*} )))"
@@ -566,7 +580,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
       continue
     fi
     errs=0
-    kv_read "$TMPD/ds" phase result message link venv t_copy t_preflight t_switch t_verify soak \
+    kv_read "$TMPD/ds" phase result message link venv t_copy t_preflight t_release t_switch t_verify soak \
       waiting_for waiting_phase waiting_left
     # queued behind another activation (its soak, a rollback): say for what, once
     if [ "$K_phase" = queued ] && [ -n "$K_waiting_phase" ] && [ -z "${QUEUED_SAID:-}" ]; then
@@ -597,7 +611,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   trap 'exit 130' INT TERM
 
   n=4
-  for ph in copy preflight switch verify; do
+  for ph in $PHASES; do
     case " $SHOWN " in *" $ph "*) ;; *) phase_line $n $ph skip "";; esac
     n=$((n + 1))
   done
