@@ -347,6 +347,10 @@ pull (2).
 Backups of the data directory and database. `restore` asks first and keeps a safety backup. `ls`
 and `pull` work for a destroyed app's final backup. `pull` creates the file mode 600 (it holds the
 data and a database dump) and refuses an existing file. `ls` heads its time column `TIME (GMT)`.
+A restore cut off by a kill or a reboot is ended by the server's recovery: the app runs its release
+again. When the database (or an adopted app's data directory) was being replaced at that moment,
+it may be partly restored: `tando doctor` says so, with the backup to restore again and the safety
+backup that holds the data from before.
 `tando backup offsite [status|set|test|hosts|sync|off]` · `tando backup offsite key --show|--saved|--import|--rotate`:
 copies of every backup in Cloudflare R2 or any S3-compatible store, encrypted on the server with a
 recovery key shown once (docs/BACKUP.md). `set` asks for the account id or endpoint, bucket, access
@@ -496,7 +500,9 @@ Example: `tando ci setup > ci-secrets.txt`
 ### destroy
 `tando destroy [app] [-H host] [--purge] [--yes]`. Arguments: 0-1 (the app).
 Removes the app: unit, Caddy site, user, releases, data, database. A final backup is kept unless
-`--purge`. Asks you to type the app name; `--yes` skips.
+`--purge`. Asks you to type the app name; `--yes` skips. A destroy cut off by a kill or a reboot
+is finished by the server's recovery (within a minute, or at boot), its final backup taken again
+when that was cut off too.
 Example: `tando destroy -a old-app --purge`
 
 ### unlock

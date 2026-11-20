@@ -6,7 +6,7 @@
 A=$1 H0=${2:-0} NEW=${3:-} D=/opt/tando/apps/$1
 g() { sed -n "s/^$1=//p" "$2" 2> /dev/null | head -1; }
 kv() { printf '%s=%s\n' "$1" "$2"; }
-for k in phase current last_good target kind stopped down prev fallback; do kv "s_$k" "$(g "$k" "$D/state")"; done
+for k in phase current last_good target kind stopped down prev fallback restore_cut restore_step destroy_step; do kv "s_$k" "$(g "$k" "$D/state")"; done
 l=$(readlink "$D/current" 2> /dev/null); kv link "${l##*/}"
 for r in "$D"/releases/*; do
   [ -d "$r" ] || continue

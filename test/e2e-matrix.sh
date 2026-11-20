@@ -25,7 +25,8 @@
 # Operations: deploy, deploy-rel (a release command), deploy-bad (fails after the switch),
 # deploy-pre (refused in the pre-flight), deploy-stopped (to a stopped app), rollback, restart,
 # stop, start, env (env set), env-bad (an env that breaks the app: reverted), recover (a second
-# fault inside the recovery of a first one).
+# fault inside the recovery of a first one), restore (backup restore of a backup taken before the
+# data changed; kind data), destroy (the app is removed: after it, nothing of it may be left but its final backup).
 # bash 3.2 compatible.
 set -u
 : "${TANDO_TEST_SSH_PORT:-2222}"   # the server comes from the environment (test/all.sh reads this line)
@@ -55,10 +56,11 @@ case $SHARD in "") ;; *[!0-9/]*|*/*/*|/*|*/) echo "e2e-matrix: --shard i/K" >&2;
 # release command; python, next, container, data: the paths that differ from node)
 if [ -z "$OPS" ]; then
   case $KIND in
-    node) OPS="deploy deploy-rel deploy-bad deploy-pre deploy-stopped rollback restart stop start env env-bad recover";;
+    node) OPS="deploy deploy-rel deploy-bad deploy-pre deploy-stopped rollback restart stop start env env-bad recover destroy";;
     static) OPS="deploy deploy-pre rollback";;
     container) OPS="deploy deploy-bad rollback restart";;
     worker) OPS="deploy deploy-bad deploy-pre rollback restart stop start env recover";;
+    data) OPS="deploy deploy-bad rollback restart restore destroy";;
     *) OPS="deploy deploy-bad rollback restart";;
   esac
 fi
@@ -104,6 +106,8 @@ mx_fresh || { fail "0 the baseline app could not be deployed"; t_done; }
 mx_killtree() { local c; for c in $(pgrep -P "$1" 2> /dev/null); do mx_killtree "$c"; done; kill "$1" 2> /dev/null; }
 # the state an operation starts from, set up without a fault
 mx_pre() {
+  # (a destroy cell removed the app: the next cell starts from a fresh baseline)
+  dx test -f "/opt/tando/apps/$A/app.conf" || mx_fresh || return 1
   local st; mx_facts > /dev/null 2>&1; st=$(fv s_stopped)
   [ -z "$(fv env_bad)" ] || mx_client "$W/pre.out" env unset MX_BAD
   case $1 in
@@ -111,6 +115,17 @@ mx_pre() {
     *) [ -z "$st" ] || mx_client "$W/pre.out" start || return 1;;
   esac
   [ "$1" != rollback ] || mx_deploy || return 1
+  if [ "$1" = restore ]; then
+    # a backup, then the data (and the database's rows) change: the restore must bring them back
+    mx_client "$W/pre.out" backup now || return 1
+    MX_BK=$(sed -n 's/^backed up [a-z0-9-]*: \([^ ]*\).*/\1/p' "$W/pre.out" | head -1)
+    [ -n "$MX_BK" ] || return 1
+    mx_facts > /dev/null 2>&1; MX_DATA_BK=$(fv data_sum) MX_DB_BK=$(fv db_rows)
+    mx_seed
+  fi
+  if [ "$1" = destroy ]; then   # (a final backup of an earlier destroy cell's must not count)
+    MX_UID=$(dx id -u "tando-$A" 2> /dev/null); dxs "rm -rf /var/backups/tando/$A"
+  fi
   return 0
 }
 # the operation itself (the client, as a user runs it): version MXV+1, env value e<MXE+1>
@@ -129,6 +144,8 @@ mx_go() {
     restart|stop|start) mx_client "$W/op.out" "$1";;
     env) mx_client "$W/op.out" env set "MXVAL=e$((MXE + 1))";;
     env-bad) mx_client "$W/op.out" env set MX_BAD=1;;
+    restore) mx_client "$W/op.out" backup restore "$MX_BK" --yes;;
+    destroy) mx_client "$W/op.out" destroy --yes;;
   esac
 }
 # the point where an operation has done what it was asked (after it, a kill must end in the new
@@ -166,6 +183,9 @@ mx_expect() { # op phase action
   esac
   [ "$op" = recover ] && [ "$ph" = after ] && MX_WANT=any
   MX_LOOPOK=1
+  # (a restore stops the app while its data is replaced: visitors are refused by design)
+  [ "$op" = restore ] && MX_LOOPOK=0
+  return 0
 }
 mx_reset() {
   log "resetting $A after a failed cell"
@@ -204,7 +224,7 @@ mx_cell() {
   mx_facts > /dev/null 2>&1
   MX_OLD=$(fv s_current) MX_H0=$(fv hist_n) MX_DATA0=$(fv data_sum) MX_DB0=$(fv db_rows) MX_ENV0=$(fv env_val)
   [ -n "$MX_ENV0" ] || MX_ENV0=""
-  before=$(mx_releases) MX_NEW="" MX_OP=$op MX_REBOOT_T=0 MX_UP_T=0 MX_RACED=""
+  before=$(mx_releases) MX_NEW="" MX_OP=$op MX_FAULT=$pt MX_REBOOT_T=0 MX_UP_T=0 MX_RACED=""
   if [ "$op" = rollback ]; then   # the newest verified release older than the current one
     MX_NEW=$(sed -n 's/^rel_\([^=]*\)=verified$/\1/p' "$W/facts" | grep -vx "$MX_OLD" | sort | tail -1)
   fi
@@ -387,9 +407,12 @@ e deploy run-activation run.queue 1 fail before
 j stop stop caddy.mv 1 fail after
 k rollback rollback post:activation 1 kill before
 l deploy begin post:upload 1 kill before
-l deploy activate act.mkdir 1 kill before"
+l deploy activate act.mkdir 1 kill before
+x destroy destroy ds.site 1 kill none"
 # k: a rollback killed after its progress file (result=running) and before its first state write: tando-watch's recover-all
 # (srv/watch/pretick.go rollbackCut) ends it; nothing did before
+# x: a destroy killed after its units went, before the Caddy site,
+# database and user (it left them, and the slice and firewall rules, until destroy ran again)
 # the other kinds: one or two cells where their path differs from node's (a static site has no
 # process: Caddy's file site is the switch; a container has a spawn and a stop of its own)
 case $KIND in
@@ -402,9 +425,12 @@ b deploy run-activation link.moved 1 kill after";;
   # workers (kind worker): a kill when the web process passed its check and the workers are about
   # to follow; going back after a failed check, the old workers could not be started at once
   # a database (kind data): a deploy refused in the pre-flight leaves the role's limits and the
-  # domains as the live release has them (milestone 3b: they took effect at configure)
+  # domains as the live release has them (milestone 3b: they took effect at configure); a restore
+  # killed just before pg_restore: the app runs again, the cut is recorded and named by doctor (the
+  # node app has no data = to back up: restore cells are this kind's)
   data) CELLS="
-m deploy-pre - - 0 none after";;
+m deploy-pre - - 0 none after
+r restore backup-restore rs.db 1 kill none";;
   worker) CELLS="
 w deploy run-activation wk.start 1 kill after
 w deploy-bad run-activation bad.workers 1 fail after";;
@@ -520,6 +546,7 @@ done
 [ "$LIST" = 1 ] && exit 0
 # a plain deploy at the end: the last cell left a state the next deploy works on
 mx_spec_clear
+dx test -f "/opt/tando/apps/$A/app.conf" || mx_fresh
 if mx_deploy && mx_facts > /dev/null 2>&1 && [ "$(mx_served_ver)" = "$MXV" ]; then pass "Z a plain deploy after the last cell goes live"
 else fail "Z a plain deploy after the last cell does not go live (rc=$MXRC, serves $(mx_served_ver))"; fi
 log "matrix $KIND: $NPASS cells passed, $NFAIL failed, $NKNOWN known failures, $NSKIP not reached"
