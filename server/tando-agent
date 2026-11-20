@@ -767,10 +767,15 @@ write_caddy() {
     # request (the file matcher), so the page goes away by itself when the release switches in,
     # with no site rewrite or reload; an app with a release never matches it (a later failed
     # deploy keeps serving the old one). Not while the stopped or down page is the answer.
+    # The link alone is not enough: with its release directory gone by hand the link dangles, but
+    # the app may still run. $D/live is made by switch_link before the link and removed with it
+    # (a cut-off between the two never shows the page for a live app); apps from before it
+    # existed get it here, as soon as their state names a release.
+    [[ -n ${S[current]:-} && ! -e $D/live ]] && : > "$D/live" 2> /dev/null
     if [[ -z ${S[stopped]:-}${S[down]:-} ]]; then
       echo "	@tandonew not file {"
       echo "		root $D"
-      echo "		try_files current/"
+      echo "		try_files current/ live"
       echo "	}"
       echo "	header @tandonew Retry-After 10"
       echo "	header @tandonew Content-Type \"text/html; charset=utf-8\""
@@ -1084,7 +1089,7 @@ static_ok() { # base curl-options...
 switch_to() {
   SW_MOVED=0
   if [[ -z $1 ]]; then
-    systemctl stop "tando-$A"; rm -f "$D/current"; st current ""
+    systemctl stop "tando-$A"; rm -f "$D/current" "$D/live"; st current ""
     return
   fi
   switch_link "$1" || return 1
@@ -1092,6 +1097,7 @@ switch_to() {
 }
 switch_link() { # id: the link and the state only
   [[ -d $D/releases/$1 ]] || { echo "tando-agent: release $1 is not on disk" >&2; return 1; }
+  : > "$D/live"      # tando's own record that the app has a release (before the link: see write_caddy)
   fp link.mv && ln -sfn "releases/$1" "$D/current.tmp" && mv -Tf "$D/current.tmp" "$D/current" || return 1
   SW_MOVED=1
   sync "$D" 2> /dev/null      # the new link reaches the disk before anything depends on it
