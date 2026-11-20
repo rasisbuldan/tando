@@ -186,10 +186,7 @@ MX_KNOWN="
 */activate/rec/enter#1/reboot| 6|same, with a reboot
 */activate/act.mkdir#1/kill| 6|same: a kill before the release id is reserved
 */activate/act.mkdir#1/reboot| 6|same, with a reboot
-*/activate/pre:upload#1/kill| 6|same: a kill before the lease is written with its release id
-*/run-activation/fail.start_back#1/fail| 2|start_back (app.conf says again how the live release starts and is checked) ignores a failed write and recovery does not repeat it: app.conf keeps the refused release's health path
-*/run-activation/pre:app.conf#2/fail| 2|same: the write of app.conf in that revert fails
-*/rollback/pre:app.conf#1/fail| 2|same: start_back of the rollback's target fails to write app.conf"
+*/activate/pre:upload#1/kill| 6|same: a kill before the lease is written with its release id"
 # mx_known <id>: the reason when the cell is listed, with its invariants in MX_KINV
 mx_known() {
   local l g

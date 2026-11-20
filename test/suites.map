@@ -10,7 +10,7 @@
 
 @local   = lint ui-test go install-test
 @alerts  = e2e-alerts e2e-alerts-timer e2e-alerts-daemon
-@faults  = e2e-faults-q1 e2e-faults-q2 e2e-faults-q3 e2e-faults-q4 e2e-matrix-quick
+@faults  = e2e-faults-q1 e2e-faults-q2 e2e-faults-q3 e2e-faults-q4 e2e-faults-q5 e2e-faults-q6 e2e-matrix-quick
 
 # ---- the core: everything depends on it
 bin/*                    ALL

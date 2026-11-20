@@ -15,7 +15,7 @@
 #   test/e2e-faults.sh --shard 1/2 --rotate 7     rotate the list by 7 before cutting it into chunks
 #   test/e2e-faults.sh --shard 1/2 --rotate auto  ... by the day of the year (see rotate_auto)
 #   test/e2e-faults.sh [--shard i/K ...] --plan   print the chunks and what they should take; run nothing
-# test/e2e-faults-q1.sh .. q4.sh are --shard i/4, test/e2e-faults-h1.sh and h2.sh --shard i/2
+# test/e2e-faults-q1.sh .. q6.sh are --shard i/6, test/e2e-faults-h1.sh and h2.sh --shard i/2
 # --rotate auto: suites of their own for test/all.sh.
 #
 # The soak: the deploy a scenario makes as the thing under test soaks TANDO_SOAK=25 s (e4 crashes
@@ -134,7 +134,7 @@ chunks() {
 }
 chunk_n() { chunks "$SK" $2 | sed -n "$1p"; }       # chunk_n <i> "<ids>"
 
-list="s00 a1 a2 a3 a4 a5 a21 b1 b2 b3 d1 d2 d3 d4 e4 e5 e10 f3 g1 g3 g5 g6 g7 g8 g9 g10 h2 h5 j1 l1 m1 m2 m3 m4 m5 m6 n1 n2 n3 n4 n5 n6 n7"
+list="s00 a1 a2 a3 a4 a5 a21 b1 b2 b3 b4 b5 c1 c3 c5 c6 d1 d2 d3 d4 e4 e5 e10 f2 f3 g1 g2 g3 g4 g5 g6 g7 g8 g9 g10 g11 h2 h5 j1 l1 m1 m2 m3 m4 m5 m6 n1 n2 n3 n4 n5 n6 n7"
 [ -n "$only" ] && list=$only
 if [ $all = 1 ]; then
   list=$(cd "$FD" && ls [a-z]*[0-9]-*.sh | sed 's/-.*//' | sort -t. -k1,1 | tr '\n' ' ')

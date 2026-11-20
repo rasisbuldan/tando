@@ -18,7 +18,7 @@ What to run when. [AGENTS.md](../AGENTS.md) has the short version and the rules.
 |---|---|---|---|
 | check | `test/check.sh` | after every edit | on the changed files only: `bash -n` (3.2, and the server's bash for `server/`), lint, gofmt/vet/test of the changed Go packages, the secret scan, and that `test/suites.map` knows the change. No server. |
 | quick | `test/all.sh --tier quick` | before saying a change works | the suites `test/select.sh` maps the changed files to (`test/suites.map`), plus `e2e-trial` as a smoke deploy. Go without the race detector; lint and Go may reuse cached results. A core file, or a file no rule knows, selects every suite. |
-| full | `test/all.sh` | before a push to main and before a tag | every suite, nothing cached, the fault scenarios as four parallel shards (`e2e-faults-q1` to `q4`) and the fault matrix's quick cells (`e2e-matrix-quick`: node, container, static). The map is not read. |
+| full | `test/all.sh` | before a push to main and before a tag | every suite, nothing cached, the fault scenarios as six parallel shards (`e2e-faults-q1` to `q6`) and the fault matrix's quick cells (`e2e-matrix-quick`: node, container, static). The map is not read. |
 | nightly | `test/all.sh --tier nightly` | by hand, when the machine is free for half an hour (not in CI) | full, with the fault scenarios as two chains (`e2e-faults-h1`, `h2`) whose split moves every day, so over a week every scenario runs right after every neighbour; the matrix's weekly cells of the other kinds of app (`e2e-matrix-weekly`). |
 | weekly | `test/all.sh --tier weekly` | by hand, about once a week and before a release that touched deploys (not in CI) | full, with the fault scenarios as one chain (`e2e-faults`) and the 25 s soak on every deploy (`FAULT_SETUP_SOAK=25`): the suite as it was before it was made faster, with every scenario file (`--all`, 49 more than the shards run) and `e2e-matrix-weekly`. |
 
@@ -170,7 +170,7 @@ each on its own server.
 `FAULT_SETUP_SOAK=25`: every deploy soaks 25 s, the suite as it was). `--shard i/K` runs the i-th
 of K chunks of the list, balanced by the scenarios' known durations, s00 first in each;
 `--rotate N` (or `auto`: by the day of the year) rotates the list before it is cut; `--plan`
-prints the chunks and runs nothing. `test/e2e-faults-q1.sh` to `q4.sh` are the four quarters (full
+prints the chunks and runs nothing. `test/e2e-faults-q1.sh` to `q6.sh` are the six shards (full
 and quick tiers), `test/e2e-faults-h1.sh` and `h2.sh` the two halves with `--rotate auto`
 (nightly). The script fails at once when a scenario of the list has no file or would be in no
 shard. Scenarios that need the long soak everywhere say so themselves (n5 compares the settings of
@@ -222,9 +222,7 @@ pass is either fixed or listed in `MX_KNOWN` in the driver with the invariant an
 cell prints as `SKIP KNOWN failure ...`, and fails when it starts to pass (remove it from the list
 then). One class is known: an agent killed after it took the upload lease and before the lease got
 its release id leaves the lease (invariant 6); it is stale after 30 s (5 s for the same
-user@machine asking again), `tando unlock` clears it, recovery does not. Another: a failed write
-of app.conf inside `start_back` (a disk full at that moment) is ignored and not repeated by
-recovery, so app.conf keeps the refused release's health path (invariant 2).
+user@machine asking again), `tando unlock` clears it, recovery does not. (A failed write of app.conf inside `start_back` was a second known class; state machine 2a fixed it and its cells pass.)
 
 ### The alerts suites
 
