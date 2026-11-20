@@ -1,0 +1,6 @@
+{
+  "name": "fixture-fastify-yarn",
+  "private": true,
+  "main": "src/app.js",
+  "dependencies": { "fastify": "^5.2.1" }
+}

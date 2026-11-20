@@ -1,0 +1,15 @@
+{
+  "name": "fixture-remix",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "react-router build", "start": "react-router-serve ./build/server/index.js" },
+  "dependencies": {
+    "@react-router/node": "^7.1.1",
+    "@react-router/serve": "^7.1.1",
+    "isbot": "^5.1.19",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router": "^7.1.1"
+  },
+  "devDependencies": { "@react-router/dev": "^7.1.1", "vite": "^6.0.7" }
+}

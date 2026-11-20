@@ -1,0 +1,11 @@
+{
+  "name": "fixture-express-berry",
+  "private": true,
+  "packageManager": "yarn@4.6.0",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

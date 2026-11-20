@@ -1,0 +1,4 @@
+[project]
+name = "fixture-flask"
+version = "0.1.0"
+dependencies = ["flask>=3.1", "gunicorn>=23"]

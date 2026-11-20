@@ -830,9 +830,11 @@ write_caddy() {
       echo "	respond \"$A is unavailable\" 503"
     elif ! has_unit; then
       # static: Caddy reads the current release (root:caddy, 750/640) itself. Clean URLs (/about
-      # serves about.html) and the project's 404.html as the page of a missing file
+      # serves about.html) and the project's 404.html as the page of a missing file; a single-page
+      # app (spa=true) gets its index.html for every path that is not a file (its router's routes)
       echo "	root * $D/current"
-      echo "	try_files {path} {path}.html"
+      if [[ ${C[spa]:-} == true ]]; then echo "	try_files {path} {path}.html /index.html"
+      else echo "	try_files {path} {path}.html"; fi
       echo "	file_server"
       echo "	handle_errors {"
       echo "		@tando404 expression {err.status_code} == 404"
@@ -2543,7 +2545,7 @@ cmd_configure() {
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" \
-    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]"
+    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -2561,6 +2563,7 @@ cmd_configure() {
       release_timeout) [[ $v =~ ^[1-9][0-9]{0,3}$ ]] && ((v <= 3600)) || die "bad release_timeout: $v (seconds, 1 to 3600)";;
       health) [[ $v =~ ^/[A-Za-z0-9._~/?=\&%-]*$ ]] || die "bad health path: $v";;
       path) [[ $v =~ ^(/[A-Za-z0-9._~-]+)+$ ]] || die "bad path: $v (like /shop)";;
+      spa) [[ $v =~ ^(true|false)$ ]] || die "spa must be true or false";;
       data) if [[ ${C[recipe]:-} == container ]]; then   # the volume's path inside the container
               [[ $v =~ ^(/[A-Za-z0-9_.-]+)+$ && $v != */../* ]] || die "bad data path: $v (like /data)"
             else

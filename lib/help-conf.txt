@@ -9,6 +9,7 @@ App
 Build
   build           command run here before the upload
   out             directory to upload, inside the project (default .)
+  spa             true: a static single-page app; paths that are not files get index.html
   dockerfile      Dockerfile for recipe = container (default Dockerfile)
   image           ready image the server pulls (container)
   container_port  port the container listens on

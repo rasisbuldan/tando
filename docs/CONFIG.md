@@ -38,6 +38,7 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 |---|---|---|---|---|---|
 | `build` | text | none | | A command run on your machine before the upload (`sh -c`). For a container without `image`, the image build is added after it. | `build = npm run build` |
 | `out` | path | `.` | | The directory that is uploaded (static sites: the built files). It must be inside the project. | `out = dist` |
+| `spa` | `true` or `false` | `false` (`tando init` writes `true` for a Vite app with a client-side router) | | Static sites only: a single-page app. A path that is not a file gets `index.html`, so the app's router answers deep links like `/about/team`. | `spa = true` |
 | `dockerfile` | path | `Dockerfile` | | The Dockerfile `recipe = container` builds when `image` is not set. | `dockerfile = docker/Dockerfile` |
 | `image` | text | none | | A ready image the server pulls instead of one built here (`recipe = container`). | `image = registry.example.com/shop:1.4` |
 | `container_port` | number | none | port | The port the container listens on (`recipe = container`). | `container_port = 3000` |
