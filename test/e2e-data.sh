@@ -332,6 +332,21 @@ check "D16c authentication_timeout 5s, role connection limit 10" \
   eval '[ "$(srv "sudo -u postgres psql -At -c \"SHOW authentication_timeout\"")" = 5s ] &&
         [ "$(srv "sudo -u postgres psql -At -c \"SELECT rolconnlimit FROM pg_roles WHERE rolname = '"'"'tando_notes'"'"'\"")" = 10 ]'
 
+# D17. database = postgres added to an app already live without one: the live release has no
+# database to back up (no pre-deploy dump), and the new release reaches its DATABASE_URL from the
+# pre-flight on (the database, its role and the loopback rule for the app's user come first)
+rm -rf "${W:?}/hpg"; cp -R "$ROOT/examples/hello" "$W/hpg"
+printf 'app = hpg\nrecipe = node\nstart = node server.js\nhealth = /health\n' > "$W/hpg/tando.conf"
+(cd "$W/hpg" && "$R" up > "$E/hpg1.out" 2>&1)
+echo 'database = postgres' >> "$W/hpg/tando.conf"
+(cd "$W/hpg" && "$R" up > "$E/hpg2.out" 2>&1); rc=$?; tail -5 "$E/hpg2.out" >&2
+pid=$(srv "systemctl show -P MainPID tando-hpg")
+hurl=$(srv "sudo cat /proc/$pid/environ" | tr '\0' '\n' | sed -n 's/^DATABASE_URL=//p')
+hres=none; [ -n "$hurl" ] &&
+  hres=$(srv "sudo systemd-run --quiet --wait --pipe --collect -p User=tando-hpg psql -X -At '$hurl' -c 'SELECT 1'" 2>&1 | tail -1)
+check "D17 database added to a deployed app: the deploy passes (rc=$rc, no pre-deploy dump), the new release's DATABASE_URL answers as its user ($hres)" \
+  eval '[ $rc = 0 ] && ! grep -q "pre-deploy backup failed" "$E/hpg2.out" && [ "$hres" = 1 ]'
+
 # S4 (F2, F2b). a symlink the app plants for shared/data is refused, never followed by root
 srv "sudo -u tando-notes sh -c 'cd /opt/tando/apps/notes/shared && mv data data.real && ln -s /etc/systemd/system data'"
 echo 3 > "$W/notes/VERSION"
