@@ -99,7 +99,7 @@ host web-1 192.0.2.10; rm -f "$TANDO_CONFIG_DIR/hosts/web-2"
 # ---- tando snapshot: behaviour -------------------------------------------------------------------
 q() { py -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if ($2) else 1)" "$1"; }   # file, python test on d
 SA=$T/out/snapshot-app.json SC=$T/out/snapshot.json
-: > "$T/log"; tando snapshot --json -H web-1 --app shop --range 24h > "$SA" 2> /dev/null
+: > "$T/log"; tando snapshot --json -H web-1 --app shop --range 24h > "$SA" 2> /dev/null; cp "$T/log" "$T/log.sa"
 check "N1 snapshot --app: one ssh exec for the host ($(grep -c . "$T/log") made)" test "$(grep -c . "$T/log")" = 1
 : > "$T/log"; tando snapshot --json -H web-1 > "$SC" 2> /dev/null
 check "N2 snapshot without --app: one exec, and it reads no releases, history, metrics, health or audit" \
@@ -127,6 +127,11 @@ check "N10c TANDO_FROM=dashboard (tando-dash's writes) goes in front of sudo in 
 check "N10d any other TANDO_FROM, or none: not in the ssh command" eval '! grep -q TANDO_FROM "$T/log" && test "$(grep -c "tando-agent releases" "$T/log")" = 2'
 check "N11 health: uptime, p95, 24 hourly probe points (null where none), incidents, database" \
   q "$SA" 'd["app"]["health"]["p95_ms"] == 85 and len(d["app"]["health"]["series"]["points"]) == 24 and d["app"]["health"]["series"]["points"][2]["avg_ms"] is None and d["app"]["health"]["incidents"][0]["check"] == "down" and d["app"]["database"]["connection_limit"] == 20'
+check "N11b database: 144 buckets like metrics, null where no sample, a reset bucket's rates null (never negative), counts and ages kept" \
+  q "$SA" 'len(d["app"]["database"]["series"]) == 144 and [(p["commits_per_s"], p["deadlocks"], p["longest_transaction_s"]) for p in d["app"]["database"]["series"][-4:]] == [(10.5, 0, 2), (None, None, None), (None, None, 5), (9.0, 1, 1)] and d["app"]["database"]["series"][-1]["t"] == 1795000003 // 600 * 600 and d["app"]["database"]["bytes"] == 12582912'
+check "N11c database.latest: the newest sample (version, sessions, wraparound %); top_queries: text as sent, quotes and backslashes escaped" \
+  q "$SA" 'd["app"]["database"]["latest"]["server_version_num"] == 170002 and d["app"]["database"]["latest"]["wraparound_pct"] == 0.05 and [q["query"] for q in d["app"]["database"]["top_queries"]["queries"]] == ["SELECT * FROM \"orders\" WHERE id = $1 AND note LIKE $2", "UPDATE stock SET n = n - $1 WHERE path = $2 -- a\\b"] and d["app"]["database"]["top_queries"]["queries"][0]["mean_ms"] == 4.41'
+check "N11d the snapshot asks tando-metrics read-db with the range's points and bucket" grep -q "tando-metrics read-db shop 144 600" "$T/log.sa"
 for r in 1h:60:60 7d:168:3600; do
   tando snapshot --json -H web-1 --app shop --range "${r%%:*}" > "$T/r.json" 2> /dev/null
   b=${r##*:} p=${r#*:}; p=${p%%:*}
