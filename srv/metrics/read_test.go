@@ -36,8 +36,8 @@ func TestReadApp(t *testing.T) {
 		"1800000150\t5000\t600000\t1\ta\n"+ // 0.6 s in 30 s: 20 permille; same bucket
 		"1800000280\t9000\t9") // still being written: not read
 	want := "mx\t60\t1800000300\n" +
-		"m\t1800000060\t2000\t500\t1\tr\n" +
-		"m\t1800000120\t4000\t20\t2\ta\n"
+		"m\t1800000060\t2000\t500\t1\tr\t-\n" +
+		"m\t1800000120\t4000\t20\t2\ta\t-\n"
 	if got := h.readOut("web", "5", "60"); got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
@@ -52,7 +52,7 @@ func TestReadGaps(t *testing.T) {
 		"1800000000\t1\t0\t0\tr\n"+
 		"1800001000\t1\t6000000\t0\tr\n"+
 		"1800000990\t1\t6000000\t0\tr\n")
-	want := "mx\t3600\t1800003000\n" + "m\t1800000000\t1\t66\t0\tr\n"
+	want := "mx\t3600\t1800003000\n" + "m\t1800000000\t1\t66\t0\tr\t-\n"
 	if got := h.readOut("web", "1", "3600"); got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -67,8 +67,8 @@ func TestReadHost(t *testing.T) {
 		"1800000060\t40\t400\t1000\n"+
 		"1800000300\t60\t600\t2000\n")
 	want := "mx\t300\t1800000300\n" +
-		"h\t1800000000\t30\t300\t1000\n" +
-		"h\t1800000300\t60\t600\t2000\n"
+		"h\t1800000000\t30\t300\t1000\t-\t-\t-\n" +
+		"h\t1800000300\t60\t600\t2000\t-\t-\t-\n"
 	if got := h.readOut("host", "2", "300"); got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
@@ -152,5 +152,45 @@ func TestFields(t *testing.T) {
 		if got := fields(tt.in); got != tt.want {
 			t.Errorf("fields(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+// host lines with cpu permille and disk used/total; older lines without them are gaps ("-")
+func TestReadHostCPUDisk(t *testing.T) {
+	h := newHost(t)
+	h.now = 1_800_000_300
+	h.write("lib/metrics/host.tsv", ""+
+		"1800000000\t20\t200\t1000\n"+ // an older version's line
+		"1800000060\t40\t400\t1000\t-\t50\t100\n"+ // the first sample after an upgrade: no cpu yet
+		"1800000120\t40\t400\t1000\t300\t60\t100\n"+
+		"1800000180\t40\t400\t1000\t100\t70\t200\n"+
+		"1800000300\t60\t600\t2000\n")
+	want := "mx\t300\t1800000300\n" +
+		"h\t1800000000\t35\t350\t1000\t200\t60\t200\n" +
+		"h\t1800000300\t60\t600\t2000\t-\t-\t-\n"
+	if got := h.readOut("host", "2", "300"); got != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
+	}
+}
+
+// app rows gain the disk bytes: the newest walk (<app>.disk, one line per 15 min or less) at or
+// before the bucket's end, if it is at most 20 minutes older than the bucket's start
+func TestReadAppDisk(t *testing.T) {
+	h := newHost(t)
+	h.now = 1_800_003_600
+	h.write("lib/metrics/web.disk.1", "1799990000\t5\n")
+	h.write("lib/metrics/web.disk", "1800000000\t1000\n1800000900\t2000\n")
+	h.write("lib/metrics/web.tsv", ""+
+		"1799999940\t1\t0\t0\tr\n"+ // before the first walk: no disk
+		"1800000060\t1\t0\t0\tr\n"+ // the 1800000000 walk
+		"1800000960\t1\t0\t0\tr\n"+ // the 1800000900 walk
+		"1800003500\t1\t0\t0\tr\n") // the last walk is 43 min old: no disk
+	got := h.readOut("web", "60", "60")
+	want := "mx\t60\t1800003600\n" +
+		"m\t1800000060\t1\t0\t0\tr\t1000\n" +
+		"m\t1800000960\t1\t0\t0\tr\t2000\n" +
+		"m\t1800003480\t1\t0\t0\tr\t-\n"
+	if got != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
 }

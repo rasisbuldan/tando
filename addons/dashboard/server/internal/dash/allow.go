@@ -276,9 +276,9 @@ func argvSnapshot(host, app, rng string) []string {
 	a := []string{"snapshot", "--json", "-H", host}
 	if app != "" {
 		a = append(a, "--app", app)
-		if rng != "" {
-			a = append(a, "--range", rng)
-		}
+	}
+	if rng != "" { // with an app: its series; without: the host's (the Server page)
+		a = append(a, "--range", rng)
 	}
 	return a
 }

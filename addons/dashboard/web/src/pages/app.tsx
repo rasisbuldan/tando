@@ -101,6 +101,9 @@ function OverviewTab({ d, v, app, range, setRange, nowS }: {
   const mem = useMemo(() => toPoints(m?.series, "memory_bytes"), [m]);
   const cpu = useMemo(() => toPoints(m?.series, "cpu_percent"), [m]);
   const rst = useMemo(() => toPoints(m?.series, "restarts"), [m]);
+  const disk = useMemo(() => toPoints(m?.series, "disk_bytes"), [m]);
+  const diskY = niceMax(describe(disk).max);
+  const diskTicks = useMemo(() => memoryTicks(diskY), [diskY]);
   const markers = useMemo(() => deployMarkers(d?.history, domain), [d?.history, domain]);
   const cap = status.memory_max_bytes && status.memory_max_bytes > 0 ? status.memory_max_bytes : null;
   const memYMax = cap ?? niceMax(describe(mem).max);
@@ -140,6 +143,7 @@ function OverviewTab({ d, v, app, range, setRange, nowS }: {
           <ChartCard title="CPU" name="CPU" range={range} span={RANGE_S[range]} metrics={m} deploys={markers.length} kind="area" points={cpu} domain={domain} yMax={cpuY} yTicks={cpuTicks} color="var(--chart-2)" fmt={fmtPct} markers={markers} syncId="m" />
           <ChartCard title="Restarts" name="Restarts" range={range} span={RANGE_S[range]} metrics={m} deploys={markers.length} kind="bar" zeroText={`No restarts in ${rangeWord}`} points={rst} domain={domain} yMax={rstY} yTicks={rstTicks} color="var(--chart-6)" fmt={(n) => String(Math.round(n))} markers={markers} syncId="m" />
           <ChartCard title="Avg probe time" name="Avg probe time" range="24h" span={RANGE_S["24h"]} metrics={null} deploys={0} kind="area" points={probePoints} domain={probeDomain} yMax={niceMax(Math.max(...probeNums, 0))} color="var(--chart-3)" fmt={fmtMs} />
+          <ChartCard title="Disk" name="Disk" range={range} span={RANGE_S[range]} metrics={m} deploys={markers.length} kind="area" points={disk} domain={domain} yMax={diskY} yTicks={diskTicks} color="var(--chart-4)" fmt={fmtBytes} markers={markers} syncId="m" />
         </div>
       )}
       <Section title="Uptime and incidents" aside={d?.health ? <span className="text-xs text-muted-foreground">24 h {fmtPct(d.health.uptime_24h_pct)} · 7 d {fmtPct(d.health.uptime_7d_pct)}</span> : null}>
@@ -179,7 +183,7 @@ function OverviewTab({ d, v, app, range, setRange, nowS }: {
           </ul>
         )}
       </Section>
-      <p className="m-0 text-xs text-muted-foreground">{d?.metrics ? `Chart times are the server's clock, GMT. Last bucket ${fmtTime(d.metrics.to)} (${fmtAgo(nowS, d.metrics.to)}).` : ""}</p>
+      <p className="m-0 text-xs text-muted-foreground">{d?.metrics ? `Chart times are the server's clock, GMT. Last bucket ${fmtTime(d.metrics.to)} (${fmtAgo(nowS, d.metrics.to)}). CPU is the share of one core; Linux keeps a load average for the whole server only, so there is no load per app (see the server page). Disk is the app's directory, its data and its journal, measured every 15 minutes.` : ""}</p>
     </>
   );
 }

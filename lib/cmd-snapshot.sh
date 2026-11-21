@@ -1,14 +1,15 @@
 # lib/cmd-snapshot.sh: `tando snapshot --json`, everything a dashboard shows of a server in ONE ssh
 # exec per host (built like top_fetch in lib/cmd-top.sh). bash 3.2.
 #
-#   tando snapshot --json [-H host | --all] [--app A [--range 1h|24h|7d]]
+#   tando snapshot --json [-H host | --all] [--app A] [--range 1h|24h|7d]
 #
 # One JSON document per host, one per line (hosts in parallel, each with a timeout; an unreachable
 # host is {"host", "reachable": false, "error", "checked_at"}). Without --app it is the cheap one
 # (status, the load averages, the server clock): what `tando ls --json` prints, plus state_reason,
 # the system object, server_now and the alerts. With --app the same exec also reads the app's
 # releases, history (with the deployer, from the audit log's who), metrics over the range (gap
-# filled: every bucket present, null where no sample) and health. Fields: docs/COMMANDS.md.
+# filled: every bucket present, null where no sample) and health. With --range and no --app, the
+# host's series over the range (load, cpu, memory, disk) instead. Fields: docs/COMMANDS.md.
 # Every server field is data: numbers are checked before they are printed as numbers.
 
 SNAP_TIMEOUT=${TANDO_SNAPSHOT_TIMEOUT:-15}
@@ -33,11 +34,13 @@ cmd_snapshot() {
     7d) SNAP_PTS=168 SNAP_BK=3600;;
     *) usage_err "--range is 1h, 24h or 7d" snapshot;;
   esac
-  [ -z "$range" ] || [ -n "$app" ] || usage_err "--range goes with --app (the metrics are the app's)" snapshot
   SNAP_RANGE=${range:-24h}
+  SNAP_HOSTM=""   # --range without --app: the host's series
+  [ -n "$range" ] && [ -z "$app" ] && SNAP_HOSTM=1
   if [ -n "$ALL" ]; then
     [ -z "$HOST" ] || usage_err "-H or --all, not both" snapshot
     [ -z "$app" ] || usage_err "--app goes with one host (-H)" snapshot
+    [ -z "$range" ] || usage_err "--range goes with one host (-H)" snapshot
     hosts=$(all_hosts)
     [ -n "$hosts" ] || die "no hosts registered: tando host add"
   else
@@ -62,6 +65,9 @@ snap_cmd() {
     c="$c sudo -n /opt/tando/bin/tando-metrics read $a $SNAP_PTS $SNAP_BK; else echo 'mx	none'; fi"
     c="$c; echo '@health'; if [ -x $WATCH_BIN ]; then sudo -n $WATCH_BIN health $a; fi"
     c="$c; echo '@audit'; sudo -n $AGENT_BIN audit-read $a 300"
+  elif [ -n "$SNAP_HOSTM" ]; then
+    c="$c; echo '@hostm'; if [ -x /opt/tando/bin/tando-metrics ]; then"
+    c="$c sudo -n /opt/tando/bin/tando-metrics read host $SNAP_PTS $SNAP_BK; else echo 'mx	none'; fi"
   fi
   printf '%s' "$c; printf 'clock\\t%s\\n' \"\$EPOCHREALTIME\""
 }
@@ -119,9 +125,9 @@ snap_render() {
   NOW=$(now)
   rc=$(cat "$TMPD/s.$h.rc")
   # the sections: status rows (and loadavg, clock) -> st; each @section -> its own file
-  : > "$TMPD/st"; : > "$TMPD/s.releases"; : > "$TMPD/s.history"; : > "$TMPD/s.metrics"; : > "$TMPD/s.health"; : > "$TMPD/s.audit"
+  : > "$TMPD/st"; : > "$TMPD/s.releases"; : > "$TMPD/s.history"; : > "$TMPD/s.metrics"; : > "$TMPD/s.health"; : > "$TMPD/s.audit"; : > "$TMPD/s.hostm"
   [ "$rc" = 0 ] && awk -v d="$TMPD" '
-    /^@(releases|history|metrics|health|audit)$/ { f = d "/s." substr($0, 2); next }
+    /^@(releases|history|metrics|health|audit|hostm)$/ { f = d "/s." substr($0, 2); next }
     /^clock\t/ { print > (d "/st"); next }
     { print > (f == "" ? d "/st" : f) }' "$TMPD/s.$h.out"
   if [ "$rc" != 0 ] || ! grep -q "^host$TAB" "$TMPD/st"; then
@@ -143,6 +149,8 @@ snap_render() {
   printf ',"alerts":'; alerts_json
   if [ -n "$a" ]; then
     printf ',"app":'; snap_app "$a" "${clk:-$NOW}"
+  elif [ -n "$SNAP_HOSTM" ]; then
+    printf ',"host_metrics":'; snap_host_metrics "${clk:-$NOW}"
   fi
   printf '}\n'
 }
@@ -188,7 +196,8 @@ snap_history() {
 
 # snap_metrics server-now: the range's buckets, every one present (null where no sample), oldest
 # first. mx row: bucket seconds and the server's now; m rows: start, memory, cpu per mille of a core,
-# restarts (the unit's counter, its maximum in the bucket), last state letter. restarts here is the
+# restarts (the unit's counter, its maximum in the bucket), last state letter, disk bytes (the
+# newest walk of the app's tree, every 15 min; "-" none). restarts here is the
 # per-bucket delta, clamped at 0 (a counter reset), null for a bucket without samples and 0 for
 # the first bucket with samples (nothing before it to compare with).
 snap_metrics() {
@@ -196,7 +205,7 @@ snap_metrics() {
     function n(v) { return (v ~ /^[0-9]+$/) ? v + 0 : "" }
     $1 == "mx" { if ($2 == "none") none = 1; else { if (n($3) != "") now = n($3) }; next }
     $1 == "m" { t = n($2); if (t == "") next; M[t] = n($3); C[t] = n($4); S[t] = n($5)
-      st = $6; ST[t] = (st ~ /^[a-z]$/) ? st : ""; if (first == "" || t < first) first = t; next }
+      st = $6; ST[t] = (st ~ /^[a-z]$/) ? st : ""; D[t] = n($7); if (first == "" || t < first) first = t; next }
     END {
       if (none) { printf "null"; exit }
       if (now == "") now = SN + 0
@@ -209,11 +218,37 @@ snap_metrics() {
           r = (prev == "" || S[t] == "") ? 0 : S[t] - prev; if (r < 0) r = 0
           if (S[t] != "") prev = S[t]
           c = C[t]; cs = (c == "") ? "null" : sprintf("%d.%d", int(c / 10), c % 10)
-          printf "%s{\"t\":%d,\"memory_bytes\":%s,\"cpu_percent\":%s,\"restarts\":%d,\"state\":%s}", (i ? "," : ""), t,
-            (M[t] == "" ? "null" : M[t]), cs, r, (ST[t] == "" ? "null" : "\"" ST[t] "\"")
-        } else printf "%s{\"t\":%d,\"memory_bytes\":null,\"cpu_percent\":null,\"restarts\":null,\"state\":null}", (i ? "," : ""), t
+          printf "%s{\"t\":%d,\"memory_bytes\":%s,\"cpu_percent\":%s,\"restarts\":%d,\"state\":%s,\"disk_bytes\":%s}", (i ? "," : ""), t,
+            (M[t] == "" ? "null" : M[t]), cs, r, (ST[t] == "" ? "null" : "\"" ST[t] "\""), (D[t] == "" ? "null" : D[t])
+        } else printf "%s{\"t\":%d,\"memory_bytes\":null,\"cpu_percent\":null,\"restarts\":null,\"state\":null,\"disk_bytes\":null}", (i ? "," : ""), t
       }
       printf "]}" }' "$TMPD/s.metrics"
+}
+
+# snap_host_metrics server-now: the host's buckets over the range, every one present (null where no
+# sample), oldest first. h rows: start, load x100, memory used, memory total, cpu per mille of all
+# cores, disk used, disk total of the filesystem holding /var/lib/tando ("-": not known; lines of
+# versions before 2026-11 have no cpu or disk).
+snap_host_metrics() {
+  awk -F '\t' -v P="$SNAP_PTS" -v B="$SNAP_BK" -v R="$SNAP_RANGE" -v SN="$1" '
+    function n(v) { return (v ~ /^[0-9]+$/) ? v + 0 : "" }
+    function j(v) { return (v == "") ? "null" : v }
+    function dec(v, d) { return (v == "") ? "null" : (d == 100 ? sprintf("%d.%02d", int(v / 100), v % 100) : sprintf("%d.%d", int(v / 10), v % 10)) }
+    $1 == "mx" { if ($2 == "none") none = 1; else { if (n($3) != "") now = n($3) }; next }
+    $1 == "h" { t = n($2); if (t == "") next; L[t] = n($3); MU[t] = n($4); MT[t] = n($5); C[t] = n($6); DU[t] = n($7); DT[t] = n($8)
+      if (first == "" || t < first) first = t; next }
+    END {
+      if (none) { printf "null"; exit }
+      if (now == "") now = SN + 0
+      from = (int(now / B) - P + 1) * B
+      printf "{\"range\":\"%s\",\"bucket_s\":%d,\"points\":%d,\"from\":%d,\"to\":%d,\"data_since\":%s,\"series\":[", R, B, P, from, from + (P - 1) * B, (first == "" ? "null" : first)
+      for (i = 0; i < P; i++) {
+        t = from + i * B
+        if (t in L) printf "%s{\"t\":%d,\"load\":%s,\"cpu_percent\":%s,\"memory_used_bytes\":%s,\"memory_total_bytes\":%s,\"disk_used_bytes\":%s,\"disk_total_bytes\":%s}", (i ? "," : ""), t,
+          dec(L[t], 100), dec(C[t], 10), j(MU[t]), j(MT[t]), j(DU[t]), j(DT[t])
+        else printf "%s{\"t\":%d,\"load\":null,\"cpu_percent\":null,\"memory_used_bytes\":null,\"memory_total_bytes\":null,\"disk_used_bytes\":null,\"disk_total_bytes\":null}", (i ? "," : ""), t
+      }
+      printf "]}" }' "$TMPD/s.hostm"
 }
 
 # snap_health app server-now: tando health --json's numbers for the app, its incidents, and the

@@ -126,7 +126,7 @@ func TestServerAllowlistBeforeRunner(t *testing.T) {
 	}
 	// names in the API are checked before the CLI is reached
 	e.login()
-	for _, q := range []string{"host=a;b", "host=..", "host=-x", "host=a%20b", "host=a&app=../x", "host=a&app=web&range=2h", "host=a&range=1h"} {
+	for _, q := range []string{"host=a;b", "host=..", "host=-x", "host=a%20b", "host=a&app=../x", "host=a&app=web&range=2h", "host=a&range=1d"} {
 		if st, _ := e.get("/api/snapshot?" + q); st != 400 {
 			t.Errorf("%s: %d", q, st)
 		}

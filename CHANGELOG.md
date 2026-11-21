@@ -6,6 +6,15 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: host and per-app resource history. `tando-metrics` samples the host's CPU (% of all cores,
+  from /proc/stat) and the disk used/total of the file system holding /var/lib/tando each minute,
+  as new columns at the end of `host.tsv` (older lines read as gaps), and each app's disk (its
+  directory, data and journal namespace, walked in-process at most every 15 minutes within a
+  500 ms budget per minute) into `<app>.disk`. `tando snapshot --json --range R` without `--app`
+  returns `host_metrics` (load, cpu, memory, disk); an app's series gains `disk_bytes`.
+- Added (dashboard add-on): the Server page has Load, CPU, Memory and Disk charts (1h/24h/7d; the
+  cores and the totals as dashed lines), host cards link to it, and App Overview has a Disk chart.
+
 - Added (dashboard add-on): the database studio from the dashboard. A "Database" row under each app
   with a database in the sidebar and "Open database" in the app header; every open is confirmed,
   then the studio's own page opens in a new browser window (the Mac window hands it to the default

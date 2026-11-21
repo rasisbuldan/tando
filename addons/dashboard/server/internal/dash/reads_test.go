@@ -41,19 +41,26 @@ func TestSnapshotCacheAndPollHint(t *testing.T) {
 	// another key runs
 	e.get("/api/snapshot?host=a&app=web&range=7d")
 	e.get("/api/snapshot?host=a&app=web&range=24h")
-	if n.Load() != 3 {
+	// the Server page: the host's series over a range, without an app
+	if st, _ := e.get("/api/snapshot?host=a&range=24h"); st != 200 {
+		t.Fatalf("host range: %d", st)
+	}
+	if n.Load() != 4 {
 		t.Fatalf("runs %d", n.Load())
 	}
 	mu.Lock()
 	if argvs[1] != "snapshot --json -H a --app web --range 7d" {
 		t.Fatalf("argv %q", argvs[1])
 	}
+	if argvs[3] != "snapshot --json -H a --range 24h" {
+		t.Fatalf("host range argv %q", argvs[3])
+	}
 	mu.Unlock()
 	// after 10 s it runs again
 	mu.Lock()
 	now = now.Add(11 * time.Second)
 	mu.Unlock()
-	if _, m := e.get("/api/snapshot?host=a"); m["cached"] != false || n.Load() != 4 {
+	if _, m := e.get("/api/snapshot?host=a"); m["cached"] != false || n.Load() != 5 {
 		t.Fatalf("after ttl: %v %d", m, n.Load())
 	}
 }
