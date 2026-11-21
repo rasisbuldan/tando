@@ -2585,13 +2585,36 @@ name_free() {
   [[ -z $NAME_WHY ]]
 }
 
+# ports_used: " <port> <pre-flight port> ... " of every app (its preflight_port, else port + 100)
+ports_used() {
+  local f p sp used=" "
+  for f in "$R"/apps/*/app.conf; do
+    [[ -f $f ]] || continue
+    p=$(sed -n 's/^port=//p' "$f"); sp=$(sed -n 's/^preflight_port=//p' "$f")
+    [[ $p =~ ^[0-9]+$ ]] && used+="$p ${sp:-$((p + 100))} "
+    [[ $sp =~ ^[0-9]+$ ]] && used+="$sp "
+  done
+  echo "$used"
+}
+# port_pick lo hi: a port for a new app (prints it; fails when there is none). The app port and
+# its pre-flight port (+100) must both be free: no other app's port or pre-flight port (its
+# preflight_port, else port + 100; a stopped app listens on neither, so ss alone misses them, and
+# a range wider than 100 ports would hand out another app's pre-flight port), and nothing listens
+port_pick() {
+  local p used; used=$(ports_used)
+  for ((p = $1; p <= $2; p++)); do
+    [[ $used == *" $p "* || $used == *" $((p + 100)) "* ]] && continue
+    ss -Hltn "sport = :$p or sport = :$((p + 100))" | grepq . || { echo "$p"; return 0; }
+  done
+  return 1
+}
 cmd_configure() {
   need_root
   valid_app "${1:-}" || die "invalid app name"
   A=$1 D=$R/apps/$1
   load "$R/host.conf" H
   [[ -n ${H[port_min]:-} ]] || die "host not set up (tando host setup)"
-  local k v new=0 jobs=() workers=() owner="${SUDO_USER:-root}" f p used=" " parts check=0 origin="" force=0 confdom="" confwww="" x
+  local k v new=0 jobs=() workers=() owner="${SUDO_USER:-root}" f p parts check=0 origin="" force=0 confdom="" confwww="" x
   # the settings first; then, for an existing app, its lock before app.conf is read: a domain add
   # or another configure in between would otherwise be overwritten by this one's stale copy
   local input; input=$(cat)
@@ -2782,15 +2805,7 @@ cmd_configure() {
     flock -w 120 8 || die "another app is being created on this server and takes too long ($R/.ports.lock); try again"
     # another `tando up` of this same app created it while this one waited
     [[ -f $D/app.conf ]] && die "another tando up created $A a moment ago; run this one again (it then deploys to it)"
-    for f in "$R"/apps/*/app.conf; do
-      [[ -f $f ]] && used+="$(sed -n 's/^port=//p;s/^preflight_port=//p' "$f" | tr '\n' ' ') "
-    done
-    # the app port and its pre-flight port (+100) must both be free
-    for ((p = H[port_min]; p <= H[port_max]; p++)); do
-      [[ $used == *" $p "* ]] && continue
-      ss -Hltn "sport = :$p or sport = :$((p + 100))" | grepq . || break
-    done
-    ((p <= H[port_max])) || die "no free port in ${H[port_min]}-${H[port_max]}"
+    p=$(port_pick "${H[port_min]}" "${H[port_max]}") || die "no free port in ${H[port_min]}-${H[port_max]}"
     C[port]=$p C[created]=$(now)
     # what an earlier app of this name left (an interrupted destroy: no app.conf, no user, not a
     # creation in progress) is removed first, so the new app starts with no old state or history

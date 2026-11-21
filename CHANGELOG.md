@@ -6,6 +6,14 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: a new app could get another app's pre-flight port (its port + 100) as its own port once
+  the port range was widened past 100 ports (what the docs advise when it is used up): that app's
+  every deploy and env change then failed with "pre-flight port in use", and the loopback rules let
+  its user reach the new app. A new app's port and its pre-flight port are now no other app's port
+  or pre-flight port, whether that app runs or not (also `tando adopt`'s pre-flight port).
+- Fixed: two deploys started at once from one project directory whose deploy lock was left by a
+  killed deploy could both take it over and build into the same `.tando/stage`; now one does and
+  the other says another deploy is running.
 - Added: live views every 5 s. tandod keeps a second loop beside the minute's checks (srv/live):
   every 5 s each app's memory, CPU, tasks and unit state and the host's load, memory, CPU and disk,
   from the cgroup v2 files, /proc and the bus connection it already has; no program started, no file

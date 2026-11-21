@@ -15,7 +15,7 @@
 AD=$R/adopt
 # the client installs this file from its own tree on every adopt call; the agent on the server may
 # be older and lack helpers used here: refuse with the way out instead of failing half-way
-for _f in lockfile fw_sync lock_mark app_slice job_unit old_job_owner; do
+for _f in lockfile fw_sync lock_mark app_slice job_unit old_job_owner ports_used; do
   declare -F "$_f" > /dev/null ||
     die "the tando agent on this server is older than this adopt helper: run tando host setup <host> first"
 done
@@ -380,8 +380,7 @@ adopt_scan() {
   p=$(( ${F[port]:-0} + 100 ))
   l=$(ss -Hltnp "sport = :$p" | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
   [[ -n $l ]] && ad_row risk medium "tando's default pre-flight port $p (port + 100) is taken by $(unit_of_pid "$l"): adopt sets preflight_port instead"
-  local used=" "
-  for f in "$R"/apps/*/app.conf; do [[ -f $f ]] && used+="$(sed -n 's/^port=//p;s/^preflight_port=//p' "$f" | tr '\n' ' ') "; done
+  local used; used=$(ports_used)   # (the agent's: other apps' ports and pre-flight ports)
   for ((p = ${H[port_min]:-4100}; p <= ${H[port_max]:-4199}; p++)); do
     [[ $used == *" $p "* ]] && continue
     ss -Hltn "sport = :$p" | grepq . || break

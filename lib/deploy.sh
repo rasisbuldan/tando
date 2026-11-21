@@ -319,7 +319,7 @@ dir_lock() {
   mkdir -p .tando
   # mkdir is the atomic step: whoever creates the directory holds the lock. A directory without a
   # pid yet belongs to a deploy that is just starting (wait for it to write one); a pid that is
-  # gone is a stale lock, moved away by exactly one taker (mv of a directory is atomic too).
+  # gone is a stale lock, moved away by exactly one taker (dir_unstale).
   while ! mkdir "$l" 2> /dev/null; do
     p=$(cat "$l/pid" 2> /dev/null)
     if is_num "$p"; then
@@ -327,16 +327,27 @@ dir_lock() {
       if kill -0 "$p" 2> /dev/null; then
         die "another tando deploy is running in this directory (pid $p); wait for it, or run this one from another checkout"
       fi
-      mv "$l" "$l.stale.$$" 2> /dev/null && rm -rf ".tando/deploy.lock.stale.$$"
+      dir_unstale "$l" "$p"
     else
       n=$((n + 1))
-      if [ "$n" -gt 30 ]; then
-        mv "$l" "$l.stale.$$" 2> /dev/null && rm -rf ".tando/deploy.lock.stale.$$"; n=0
-      fi
+      if [ "$n" -gt 30 ]; then dir_unstale "$l" ""; n=0; fi
       sleep 0.1
     fi
   done
   printf '%s\n' $$ > "$l/pid"
+}
+# dir_unstale lock pid: moves the lock away while it still holds that pid (the dead one). Two
+# deploys that found it dead at once do this one after the other (the directory lock.break), so
+# the second one sees the first one's pid and leaves its lock alone. A lock.break left by a deploy
+# killed in these few lines is cleared after a minute.
+dir_unstale() {
+  if ! mkdir "$1.break" 2> /dev/null; then
+    [ -n "$(find "$1.break" -maxdepth 0 -mmin +1 2> /dev/null)" ] && rmdir "$1.break" 2> /dev/null
+    sleep 0.1; return 0
+  fi
+  [ "$(cat "$1/pid" 2> /dev/null)" = "$2" ] && mv "$1" "$1.stale.$$" 2> /dev/null && rm -rf "$1.stale.$$"
+  rmdir "$1.break" 2> /dev/null
+  return 0
 }
 
 # node_install: the command that installs a Node project's dependencies when node_modules is

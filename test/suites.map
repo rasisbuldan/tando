@@ -107,6 +107,7 @@ test/go.sh               go
 test/ui-test*            ui-test lint
 test/native-test.sh      ui-test lint
 test/detect-test.sh      ui-test lint
+test/core-unit.sh        ui-test lint
 test/menubar-*           ui-test lint
 test/fixtures/menubar/*  ui-test
 test/json-*              ui-test lint

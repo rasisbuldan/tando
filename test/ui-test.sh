@@ -350,6 +350,16 @@ else
     echo "detect: ${dt_n% *} checks, ${dt_n#* } failed"
 fi
 
+# ---- the deploy engine's own logic on stubs (test/core-unit.sh: agent and client functions)
+cu=$("$BASH_BIN" "$here/test/core-unit.sh" 2>&1)
+printf '%s\n' "$cu" | grep '^FAIL' || true
+cu_n=$(printf '%s\n' "$cu" | sed -n 's/^core-unit: \([0-9]*\) checks, \([0-9]*\) failed$/\1 \2/p')
+if [[ -z $cu_n ]]; then bad "core-unit.sh did not finish: $(printf '%s\n' "$cu" | tail -3)"
+else
+    checks=$((checks + ${cu_n% *})); fails=$((fails + ${cu_n#* }))
+    echo "core-unit: ${cu_n% *} checks, ${cu_n#* } failed"
+fi
+
 # ---- tando.conf: the client's parser, the server's configure, docs/CONFIG.md and `tando help conf`
 # list the same keys. The keys are read from the code (the arms of the two `case $k in`), not from
 # a list kept here: a key added to either without a row in docs/CONFIG.md and a line in
