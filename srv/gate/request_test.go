@@ -89,6 +89,12 @@ func TestParseRequestRefuses(t *testing.T) {
 		{"if [ ! -x /opt/tando/bin/tando-watch ]; then echo 'x' >&2; exit 3; fi; sudo -n /opt/tando/bin/tando-watch health alpha", "not allowed with a deploy key: health"},
 		{"sudo -n " + tAgent + " doctor " + strings.Repeat("0123456789abcdef", 4) + " 0.1.2 status=" + strings.Repeat("a", 64) + " tandod=" + strings.Repeat("b", 64) + " offsite=" + strings.Repeat("c", 64) + " host=" + strings.Repeat("d", 64), "not allowed with a deploy key: doctor"},
 		{"sudo -n " + tAgent + " doctor a b c d e f g h i j k l m", "not allowed with a deploy key: doctor"},
+		// the database studio is the admin's (docs/STUDIO.md): a key can neither mint a code nor
+		// stop, lower or reach the service
+		{"sudo -n " + tAgent + " db-studio-code alpha 47100 prod", "not allowed with a deploy key: db-studio-code"},
+		{"sudo -n " + tAgent + " db-studio-stop alpha", "not allowed with a deploy key: db-studio-stop"},
+		{"sudo -n " + tAgent + " db-studio-lower", "not allowed with a deploy key: db-studio-lower"},
+		{"sudo -n /opt/tando/bin/tando-studio ctl code admin alpha 47100 prod", "not allowed with a deploy key"},
 		// shells and other programs
 		{"bash -c id", "not allowed with a deploy key"},
 		{"sh -c id", "not allowed with a deploy key"},
