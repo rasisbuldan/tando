@@ -702,8 +702,10 @@ write_slice() {
   [[ $cpu == *% ]] || { [[ -n $cpu ]] && cpu=$(awk -v c="$cpu" 'BEGIN { printf "%d%%", c * 100 }'); }
   { printf '[Unit]\nDescription=tando app %s: all its units together\n\n[Slice]\n' "$A"
     printf 'MemoryMax=%sM\nTasksMax=%s\nCPUWeight=100\n' $((mb * 3 + wmb)) "${C[tasks]:-1024}"
-    [[ -n $cpu ]] && printf 'CPUQuota=%s\n' "$cpu"
-    [[ ${C[priority]:-} == high ]] && printf 'MemoryLow=%sM\n' "$mb"
+    # (if, not &&: the group's status is its last command's, and "|| return 1" below read a
+    # priority that is not high as a failed write: no slice file at all)
+    if [[ -n $cpu ]]; then printf 'CPUQuota=%s\n' "$cpu"; fi
+    if [[ ${C[priority]:-} == high ]]; then printf 'MemoryLow=%sM\n' "$mb"; fi
   } > "/etc/systemd/system/.$(app_slice).new" || return 1
   WIC_CHANGED=0
   write_if_changed "/etc/systemd/system/$(app_slice)" < "/etc/systemd/system/.$(app_slice).new"
@@ -2547,7 +2549,7 @@ cmd_doctor() {
     else row check warn "metrics sample" "no sample in the last 3 minutes (tando-watch.timer)"; fi
   fi
   if [[ -n ${H[port_min]:-} && -n ${H[port_max]:-} && -n ${H[apps_domain]:-} ]]; then
-    row check ok "host.conf" "*.${H[apps_domain]} tls=${H[tls]:-off} ports ${H[port_min]}-${H[port_max]}, pre-flight ${H[preflight_min]:-$PREFLIGHT_MIN}-${H[preflight_max]:-$PREFLIGHT_MAX}"
+    row check ok "host.conf" "*.${H[apps_domain]} tls=${H[tls]:-off} ports ${H[port_min]}-${H[port_max]}, ${H[preflight_min]:-$PREFLIGHT_MIN}-${H[preflight_max]:-$PREFLIGHT_MAX}"
   elif [[ -f $R/host.conf ]]; then row check fail "host.conf" "empty or incomplete: tando host setup <host> rewrites it"
   else row check fail "host.conf" "missing: tando host setup <host>"; fi
   local PR_LO PR_HI PF_LO PF_HI; port_ranges
@@ -3023,7 +3025,11 @@ cmd_configure() {
     if [[ -d $D && ! -f $D/.creating ]] && ! id "tando-$A" &> /dev/null; then rm -rf "${D:?}"; fi
     install -d -m 755 -o root -g root "$D" && : > "$D/.creating" || die "could not create $D (disk full?)"
     if ! id "tando-$A" &> /dev/null; then
-      useradd --system --user-group --no-create-home --home-dir /nonexistent -u "$(new_uid)" \
+      # its group first, with the same id from the band: useradd --user-group gave the group a
+      # system gid (under 1000), which destroy did not retire (userdel removes the group first)
+      local nu; nu=$(new_uid)
+      getent group "tando-$A" > /dev/null || groupadd --system -g "$nu" "tando-$A" || die "groupadd tando-$A failed"
+      useradd --system -g "tando-$A" --no-create-home --home-dir /nonexistent -u "$nu" \
         --shell /usr/sbin/nologin "tando-$A" || die "useradd failed"
     fi
     install -d -m 755 -o root -g root "$D" "$D/releases"
@@ -5548,17 +5554,18 @@ destroy_finish() {
     find /dev/shm /tmp /var/tmp -xdev -user "$uid" -delete 2> /dev/null
     grep -qx "$uid" "$R/retired-uids" 2> /dev/null || echo "$uid" >> "$R/retired-uids"
   fi
-  fp ds.user
-  if getent passwd "tando-$A" > /dev/null && ! userdel "tando-$A"; then
-    die "could not remove the user tando-$A (userdel failed); run tando destroy again to finish"
-  fi
-  # the gids are retired like the uid (the same list: new_uid hands out neither again)
+  # the gids are retired like the uid (the same list: new_uid hands out neither again); read
+  # before userdel, which removes the user's own group
   local g gid
   for g in "tando-$A" "tando-m-$A"; do
     gid=$(getent group "$g" | cut -d: -f3)
     [[ $gid =~ ^[0-9]+$ ]] && { grep -qx "$gid" "$R/retired-uids" 2> /dev/null || echo "$gid" >> "$R/retired-uids"; }
-    groupdel "$g" 2> /dev/null
   done
+  fp ds.user
+  if getent passwd "tando-$A" > /dev/null && ! userdel "tando-$A"; then
+    die "could not remove the user tando-$A (userdel failed); run tando destroy again to finish"
+  fi
+  for g in "tando-$A" "tando-m-$A"; do groupdel "$g" 2> /dev/null; done
   systemctl reset-failed "tando-$A.service" ${units[@]+"${units[@]}"} "tando-down@tando-$A.service" 2> /dev/null
   # its slice: stopped once nothing of the app runs in it, so systemd unloads it (no file left)
   systemctl stop "$(app_slice)" 2> /dev/null; systemctl reset-failed "$(app_slice)" 2> /dev/null

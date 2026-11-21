@@ -233,6 +233,20 @@ check "U9e configure refuses unless --force" eval 'sed -n "/^cmd_configure() {/,
 # shellcheck disable=SC2016
 oa() { "$BASH" -c 'eval "$1"; C_priority=$2; oom_adj' _ "$(agent_fn oom_adj | sed 's/\${C\[priority\]:-}/${C_priority:-}/')" "$1"; }
 check "U9f priority: high 100, default 500, low 900" eq "$(oa high) $(oa '') $(oa low)" "100 500 900"
+# write_slice: the app's slice file is written whatever its priority (a priority that was not
+# high once ended the write as failed: no slice, the app's units in a slice without limits)
+ws() { # priority -> the slice file's MemoryMax and MemoryLow lines
+  rm -rf "${T:?}/etc"; mkdir -p "$T/etc/systemd/system"
+  # shellcheck disable=SC2016
+  # (bash 3.2 has no associative arrays: C[key] is C_key, and no workers)
+  "$BASH" -c 'eval "$1"; C_memory=128M C_priority=$2; A=a1; write_slice; echo "rc=$?"' _ \
+    "$(agent_fn write_slice size_mb write_if_changed app_slice | sed -e "s#/etc/#$T/etc/#g" \
+      -e 's/\${C\[\([a-z]*\)\]:-/${C_\1:-/g' -e 's/" \${!C\[\*\]}"/" "/')" "$1"
+  grep -h '^Memory' "$T/etc/systemd/system/tando-a1.slice" 2> /dev/null | tr '\n' ' '
+}
+check "U9g write_slice: written for every priority (normal, low, high with MemoryLow)" eq \
+  "$(ws '' | tr '\n' ' ')/$(ws low | tr '\n' ' ')/$(ws high | tr '\n' ' ')" \
+  "rc=0 MemoryMax=384M /rc=0 MemoryMax=384M /rc=0 MemoryMax=384M MemoryLow=128M "
 
 # ---- U10 jobs: the default spread is a sixth of the job's period, at most 10 minutes (100 apps'
 # hourly jobs started within 15 s), each timer at a fixed offset; at most job_slots runs at once
