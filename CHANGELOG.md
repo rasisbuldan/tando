@@ -6,6 +6,13 @@ first, grouped by area.
 
 ## Unreleased
 
+- Changed: `tando ls` (and `ls --all`, per server) above 50 apps shows a summary: the count per
+  state and only the apps that are down or have an alert firing; `--all-rows` lists every app;
+  `--json` is unchanged. The rows are built in one awk pass instead of several forks per app:
+  100 apps rendered in 0.9 s before, 0.1 s now (200: 1.8 s, 0.17 s).
+- Changed: tandod's 5 s live ring keeps 16 bytes per app per point (interned names and states,
+  the latest point whole) instead of about 165: an hour of 200 apps is 2.3 MiB, not 22 MiB;
+  GOMEMLIMIT stays 20MiB. The socket answers are unchanged.
 - Fixed: a new app could get another app's pre-flight port (its port + 100) as its own port once
   the port range was widened past 100 ports (what the docs advise when it is used up): that app's
   every deploy and env change then failed with "pre-flight port in use", and the loopback rules let

@@ -292,8 +292,139 @@ firing_of() {
     FIRED="${FIRED:+$FIRED,}${x#*:}" FIREN=$((FIREN + 1))
   done
 }
+# LS_ROWS: above this many apps ls shows a summary (problems and counts) unless --all-rows
+LS_ROWS=50
+# ls_awk: one awk pass over the status rows ($TMPD/st) for ls and ls --all: what per-row bash
+# functions did with a fork each (state word, badge, bytes, durations, ages), in awk. Variables
+# (-v): mode (ls|all), host, now, allrows (1: never summarize), limit (apps above it summarize),
+# sumf (ls: line 1 apps, 2 counts "90 running, 2 down", 3 "1" when summarized; all: appends
+# "host<TAB>apps<TAB>counts" for a summarized host), cntf (all: "apps attention"), attf (all: the
+# attention lines, appended) and the UI_ colours and glyphs. Prints the table rows (ls: header
+# first). The output equals the old per-row loop's (ui-test checks it against fixed rows).
+ls_awk() {
+  LC_ALL=C awk -F '\t' -v GREEN="$UI_GREEN" -v RED="$UI_RED" -v DIM="$UI_DIM" -v YELLOW="$UI_YELLOW" -v ACCENT="$UI_ACCENT" \
+    -v NC="$UI_NC" -v G_DOT="$UI_G_DOT" -v G_ODOT="$UI_G_ODOT" -v G_ERR="$UI_G_ERR" -v G_OK="$UI_G_OK" -v G_PEND="$UI_G_PEND" -v G_MID="$UI_G_MID" "$@" '
+    function isint(s) { return s ~ /^(0|[1-9][0-9]*)$/ && length(s) <= 18 }
+    function bytes(b,   d, u, t) {
+      if (b !~ /^[0-9]+$/ || length(b) > 18) b = 0
+      b += 0; d = 1; u = "B"
+      if (b >= 1099511627776) { d = 1099511627776; u = "TB" } else if (b >= 1073741824) { d = 1073741824; u = "GB" }
+      else if (b >= 1048576) { d = 1048576; u = "MB" } else if (b >= 1024) { d = 1024; u = "KB" }
+      if (d == 1) return b " B"
+      t = int((b * 10 + int(d / 2)) / d)
+      if (t < 100) return int(t / 10) "." (t % 10) " " u
+      return int((t + 5) / 10) " " u
+    }
+    function mb(v) { return (isint(v) && v + 0 > 0) ? bytes(v) : "-" }
+    function dur(x,   s, f, c) {
+      if (x == "" || x !~ /^[0-9]*\.?[0-9]*$/ || length(x) > 16) return "-"
+      s = int(substr(x, 1, index(x ".", ".") - 1) + 0)
+      if (s < 10 && index(x, ".")) { f = substr(x, index(x, ".") + 1) "00"; c = s * 100 + substr(f, 1, 2); return int(c / 100) "." int(c % 100 / 10) "s" }
+      if (s < 60) return s "s"
+      if (s < 3600) return int(s / 60) "m " (s % 60) "s"
+      if (s < 86400) return sprintf("%dh %02dm", int(s / 3600), int(s % 3600 / 60))
+      return int(s / 86400) "d " int(s % 86400 / 3600) "h"
+    }
+    function civil(t, withyear,   z, doe, yoe, doy, mp, y, tt) {
+      z = int(t / 86400) + 719468; doe = z % 146097
+      yoe = int((doe - int(doe / 1460) + int(doe / 36524) - int(doe / 146096)) / 365)
+      doy = doe - (365 * yoe + int(yoe / 4) - int(yoe / 100)); mp = int((5 * doy + 2) / 153)
+      y = yoe + int(z / 146097) * 400 + (mp < 10 ? 0 : 1); CY = y; tt = t % 86400
+      return sprintf(withyear ? "%04d-%02d-%02d %02d:%02d" : "%02d-%02d %02d:%02d", withyear ? y : (mp < 10 ? mp + 3 : mp - 9),
+        withyear ? (mp < 10 ? mp + 3 : mp - 9) : doy - int((153 * mp + 2) / 5) + 1,
+        withyear ? doy - int((153 * mp + 2) / 5) + 1 : int(tt / 3600), withyear ? int(tt / 3600) : int(tt % 3600 / 60), int(tt % 3600 / 60))
+    }
+    function ago(e,   d, y, r) {
+      if (!isint(e)) return "-"
+      d = now - e
+      if (d < 0) { d = -d
+        if (d < 60) return "in " d "s"; if (d < 3600) return "in " int(d / 60) "m"
+        if (d < 86400) return "in " int(d / 3600) "h " int(d % 3600 / 60) "m"
+        return adate(e) }
+      if (d < 10) return "just now"; if (d < 60) return d "s ago"; if (d < 3600) return int(d / 60) "m ago"
+      if (d < 86400) return int(d / 3600) "h " int(d % 3600 / 60) "m ago"
+      return adate(e)
+    }
+    function adate(e,   y, r) { civil(now, 0); y = CY; r = civil(e, 0); if (CY != y) r = civil(e, 1); return r " GMT" }
+    function idepoch(id,   n, y, m, d, era, yoe, doy, doe) {
+      n = length(id)
+      if (id ~ /[^0-9-]/ || !(n == 15 || ((n == 17 || n == 18) && substr(id, 16, 1) == "-")) || substr(id, 9, 1) != "-" ||
+          (substr(id, 1, 8) substr(id, 10, 6)) ~ /[^0-9]/) return "-"
+      y = substr(id, 1, 4) + 0; m = substr(id, 5, 2) + 0; d = substr(id, 7, 2) + 0
+      if (m <= 2) y--
+      era = int(y / 400); yoe = y - era * 400
+      doy = int((153 * ((m + 9) % 12) + 2) / 5) + d - 1; doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+      return (era * 146097 + doe - 719468) * 86400 + substr(id, 10, 2) * 3600 + substr(id, 12, 2) * 60 + substr(id, 14, 2)
+    }
+    function cpup(v,   x) {
+      if (isint(v) && length(v) <= 9) { x = v + 0; return (x >= 100) ? int(x / 10) "%" : int(x / 10) "." (x % 10) "%" }
+      return "-"
+    }
+    function badge(s,   g, c, l) {
+      l = s
+      if (s == "down") { s = "failed" } else if (s == "not deployed") { s = "new" } else if (s == "static") { s = "running" }
+      if (s ~ /^(running|active|ok|healthy|success|up)$/) { g = G_DOT; c = GREEN }
+      else if (s == "verified") { g = G_OK; c = GREEN }
+      else if (s ~ /^(stopped|inactive|down|dead)$/) { g = G_ODOT; c = DIM }
+      else if (s ~ /^(failed|fail|error|bad)$/) { g = G_ERR; c = RED }
+      else if (s ~ /^(deploying|activating|starting|restarting|reloading|rollback|rolled-back)$/) { g = G_DOT; c = YELLOW }
+      else if (s == "current") { g = G_DOT; c = ACCENT }
+      else if (s ~ /^(pending|queued|new)$/) { g = G_PEND; c = DIM }
+      else { g = G_MID; c = DIM }
+      return c g " " l NC
+    }
+    function badge2(h) { return RED G_ERR " " h NC }
+    $1 == "alert" { if ($3 == "down") downal[$2] = 1
+      if ($4 == "firing" && $2 $3 !~ /[^a-z0-9_.-]/) { fired[$2] = ($2 in fired) ? fired[$2] "," $3 : $3; nfire++ } next }
+    $1 == "app" { n++; A[n] = $0; names[$2] = 1 }
+    END {
+      acol = 0; for (a in fired) if (a in names) { acol = 1; break }
+      for (i = 1; i <= n; i++) {
+        split(A[i], f, "\t"); a = f[2]; st = f[3]; rel = f[5]; recipe = f[13]
+        if (rel == "-") w = "not deployed"
+        else if (st == "active") w = (recipe == "static") ? "static" : "running"
+        else if (st == "inactive") w = "down"
+        else w = st
+        if (w == "failed") w = "down"
+        else if (w == "stopped" && (a in downal)) w = "down"
+        cnt[w]++; if (!(w in seen)) { seen[w] = 1; order[++nw] = w }
+        isp = (w == "down" || (a in fired)); prob += isp
+        P[i] = isp; W[i] = w
+      }
+      summ = (!allrows && n > limit)
+            out1 = ""
+      for (i = 1; i <= nw; i++) { w = order[i]; if (w != "down" && w != "stopped" && w != "not deployed" && w != "static" && w != "running") out1 = out1 (out1 == "" ? "" : ", ") cnt[w] " " w }
+      counts = out1
+      nm = split("down|stopped|not deployed|static|running", pri, "|")
+      for (i = 1; i <= nm; i++) if (cnt[pri[i]]) counts = counts (counts == "" ? "" : ", ") cnt[pri[i]] " " pri[i]
+      if (mode == "ls") {
+        printf "APP\tSTATE%s\tDEPLOYED\tMEMORY\tCPU 1M\tUP\tLOGS\tLINK\n", acol ? "\tALERT" : ""
+      }
+      for (i = 1; i <= n; i++) {
+        if (summ && !P[i]) continue
+        split(A[i], f, "\t"); a = f[2]; w = W[i]; fr = (a in fired) ? RED fired[a] NC : "-"
+        mem = mb(f[7]); cpu = cpup(f[26]); up = (w == "running") ? dur(f[11]) : "-"
+        if (mode == "ls") {
+          doms = (f[21] == "") ? "-" : f[21]; link = f[12]
+          if (doms != "-") { if (index(doms, ",")) { k = split(doms, dd, ","); link = dd[1] " +" (k - 1) } else link = doms }
+          sub(/^http:\/\//, "", link); sub(/^https:\/\//, "", link)
+          dep = (w == "not deployed") ? "-" : ago(idepoch(f[5]))
+          printf "%s\t%s%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a, badge(w), acol ? "\t" fr : "", dep, mem, cpu, up, mb(f[17]), link
+        } else {
+          printf "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", P[i] ? 0 : 1, host, a, badge(w), fr, mem, cpu, up
+        }
+      }
+      if (mode == "all") {
+        for (i = 1; i <= n; i++) { split(A[i], f, "\t"); a = f[2]
+          if (W[i] == "down") print badge2(host) "  " a " is down: tando logs -a " a " -H " host >> attf
+          if (a in fired) print badge2(host) "  " a ": " fired[a] " firing: tando alerts -H " host >> attf }
+        print n, prob > cntf
+        if (summ) print host "\t" n "\t" counts >> sumf
+      } else { print n > sumf; print counts > sumf; print (summ ? 1 : 0) > sumf }
+    }' 
+}
 render_ls() {
-  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx n=0 upt dep
+  local n=0 sum=""
   if [ -n "$JSON" ]; then
     printf '{"host":%s' "$(json_str "$HOST")"; json_meta
     printf ',"apps":'; app_json_rows | to_json "$APP_JSON"
@@ -301,25 +432,11 @@ render_ls() {
     return
   fi
   firing_load
-  # ALERT (the checks firing for the app) is a column only while one fires
-  local acol="" ahd=""
-  for a in $FIRING; do grep -q "^app${TAB}${a%%:*}${TAB}" "$TMPD/st" && { acol=1; ahd="${TAB}ALERT"; break; }; done
-  {
-    printf 'APP\tSTATE%s\tDEPLOYED\tMEMORY\tCPU 1M\tUP\tLOGS\tLINK\n' "$ahd"
-    while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx; do
-      [ "$r" = app ] || continue
-      n=$((n + 1))
-      case ${doms:--} in -) ;; *,*) link="${doms%%,*} +$(printf '%s' "$doms" | tr -cd , | wc -c | tr -d ' ')";; *) link=$doms;; esac
-      state=$(down_word "$a" "$(state_word "$state" "$rel" "$recipe")")
-      cpu_min "${cpum:-}"
-      upt=- dep=-
-      [ "$state" = running ] && upt=$(ui_dur "$up")
-      [ "$state" = "not deployed" ] || dep=$(ago "$(id_epoch "$rel")")
-      if [ -n "$acol" ]; then firing_of "$a"; [ -n "$FIRED" ] && FIRED="${UI_RED}${FIRED}${UI_NC}"; FIRED="${TAB}${FIRED:--}"; fi
-      printf '%s\t%s%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(state_badge "$state")" "${acol:+$FIRED}" "$dep" "$(mb "$mem")" \
-        "$CPUP" "$upt" "$(mb "${lb:-}")" "$(short_link "$link")"
-    done < "$TMPD/st"
-  } > "$TMPD/rows"
+  # ALERT (the checks firing for the app) is a column only while one fires; above LS_ROWS apps only
+  # the ones that need attention get a row, and counts per state follow (--all-rows: every row)
+  ls_awk -v mode=ls -v now="$NOW" -v allrows="${ALLROWS:+1}" -v limit="$LS_ROWS" -v sumf="$TMPD/sum" < "$TMPD/st" > "$TMPD/rows"
+  local cnt="" cut=""
+  { read -r n; read -r cnt; read -r cut; } < "$TMPD/sum"
   ui_box_open "tando ls" "$HOST"
   watch_stale_line
   skew_line
@@ -328,17 +445,26 @@ render_ls() {
     ui_box_line "${UI_RED}caddy is not running: no app is reachable (tando doctor)${UI_NC}"
   ui_box_sep
   cache_apps
-  if [ $n -gt 0 ] && [ -n "$acol" ]; then ui_table "l,l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"
-  elif [ $n -gt 0 ]; then ui_table "l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"   # LINK whole: other columns go first
+  local hasalert=""
+  case $(sed -n 1p "$TMPD/rows") in *"${TAB}ALERT"*) hasalert=1;; esac
+  if [ "$cut" = 1 ]; then
+    ui_box_line "$(plural "$n" app): $cnt"
+    if [ "$(sed -n '$=' "$TMPD/rows")" -gt 1 ]; then
+      if [ -n "$hasalert" ]; then ui_table "l,l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"
+      else ui_table "l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"; fi
+    else ui_box_line "${UI_DIM}none down or alerting${UI_NC}"; fi
+    ui_box_line "${UI_DIM}tando ls --all-rows: every app${UI_NC}"
+  elif [ "$n" -gt 0 ] && [ -n "$hasalert" ]; then ui_table "l,l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"
+  elif [ "$n" -gt 0 ]; then ui_table "l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"   # LINK whole: other columns go first
   else ui_box_line "No apps on $HOST yet. In your app's directory: tando up"; fi
   worker_hint
   restore_hint
   hc_hint
   local na foot
   na=$(grep -c "^alert${TAB}[^${TAB}]*${TAB}[^${TAB}]*${TAB}firing" "$TMPD/st")
-  foot="$(plural $n app)"
+  foot="$(plural "$n" app)"
   [ "$na" -gt 0 ] && foot="$foot  ${UI_RED}$(plural "$na" alert) firing: tando alerts${UI_NC}"
-  [ $n -gt 0 ] && [ -z "$WATCH" ] && foot="$foot ${UI_G_MID} tando status <app> for details"
+  [ "$n" -gt 0 ] && [ -z "$WATCH" ] && foot="$foot ${UI_G_MID} tando status <app> for details"
   ui_box_close "$foot ${UI_G_MID} $(watch_note)"
 }
 # restore_cut_text: the restorecut row (app, backup to restore again, safety backup, what was being
@@ -1230,9 +1356,8 @@ render_ls_all() {
 # (a server not answering, an app down, an alert firing, host care to do, clock or version skew),
 # then every app of every server, those that need attention on top
 render_ls_summary() {
-  local h r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx
-  local nh=0 na=0 natt=0 rank upt x todo fail
-  : > "$TMPD/att"; : > "$TMPD/all.rows"
+  local h r a nh=0 na=0 natt=0 x todo fail
+  : > "$TMPD/att"; : > "$TMPD/all.rows"; : > "$TMPD/all.sum"
   for h in $LS_HOSTS; do
     nh=$((nh + 1))
     if [ "$(cat "$TMPD/h.$h.rc")" != 0 ]; then
@@ -1242,22 +1367,10 @@ render_ls_summary() {
     firing_load; skew_load
     grep -q "^check${TAB}fail${TAB}caddy" "$TMPD/st" 2> /dev/null &&
       printf '%s  caddy is not running: no app is reachable (tando doctor -H %s)\n' "$(ui_badge failed "$h")" "$h" >> "$TMPD/att"
-    while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx; do
-      [ "$r" = app ] || continue
-      na=$((na + 1)) rank=1
-      state=$(down_word "$a" "$(state_word "$state" "$rel" "$recipe")")
-      firing_of "$a"; cpu_min "${cpum:-}"
-      if [ "$state" = down ]; then
-        rank=0; printf '%s  %s is down: tando logs -a %s -H %s\n' "$(ui_badge failed "$h")" "$a" "$a" "$h" >> "$TMPD/att"
-      fi
-      if [ -n "$FIRED" ]; then
-        rank=0; printf '%s  %s: %s firing: tando alerts -H %s\n' "$(ui_badge failed "$h")" "$a" "$FIRED" "$h" >> "$TMPD/att"
-      fi
-      [ $rank = 0 ] && natt=$((natt + 1))
-      upt=-; [ "$state" = running ] && upt=$(ui_dur "$up")
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$h" "$a" "$(state_badge "$state")" \
-        "$( [ -n "$FIRED" ] && printf '%s%s%s' "$UI_RED" "$FIRED" "$UI_NC" || printf -- -)" "$(mb "$mem")" "$CPUP" "$upt" >> "$TMPD/all.rows"
-    done < "$TMPD/st"
+    ls_awk -v mode=all -v host="$h" -v now="$NOW" -v allrows="${ALLROWS:+1}" -v limit="$LS_ROWS" -v cntf="$TMPD/cnt" \
+      -v attf="$TMPD/att" -v sumf="$TMPD/all.sum" < "$TMPD/st" >> "$TMPD/all.rows"
+    read -r r a < "$TMPD/cnt"
+    na=$((na + r)) natt=$((natt + a))
     # alerts not of an app (the host's: disk, memory, ...)
     for x in $FIRING; do
       grep -q "^app${TAB}${x%%:*}${TAB}" "$TMPD/st" && continue
@@ -1282,6 +1395,8 @@ render_ls_summary() {
   if [ "$na" -gt 0 ]; then
     { printf 'HOST\tAPP\tSTATE\tALERT\tMEMORY\tCPU 1M\tUP\n'; sort -t "$TAB" -k1,1n -k2,2 -k3,3 "$TMPD/all.rows" | cut -f2-; } |
       ui_table "l,l,l,l,r!3,r!2,r!1"
+    # a server with more apps than LS_ROWS lists only its problems above: its counts here
+    while IFS=$TAB read -r h r x; do ui_box_line "${UI_DIM}$h: $(plural "$r" app): $x (tando ls --all-rows: every app)${UI_NC}"; done < "$TMPD/all.sum"
   else ui_box_line "no apps yet"; fi
   local foot; foot="$(plural "$na" app)"
   [ "$natt" -gt 0 ] && foot="$foot, ${UI_RED}$natt need attention${UI_NC}"

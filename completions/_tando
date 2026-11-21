@@ -88,7 +88,7 @@ _tando() {
         releases) subs="" flags="-H --json -a" args="apps" ;;
         history) subs="" flags="-n -H --json -a" args="apps" ;;
         status) subs="" flags="--watch --follow -H --json --check -a" args="apps" ;;
-        ls) subs="" flags="-H --all --watch --follow --json --check" args="" ;;
+        ls) subs="" flags="-H --all --all-rows --watch --follow --json --check" args="" ;;
         snapshot) subs="" flags="--json -H --all --app --range -a --follow" args="" ;;
         logs) subs="pull" flags="-f -n --since --until --grep -i --regex -E -a -H --level --release --deploy --worker --json" args="apps" ;;
         start) subs="" flags="-H -a" args="apps" ;;

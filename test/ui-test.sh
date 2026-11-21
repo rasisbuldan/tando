@@ -689,6 +689,45 @@ else bad "ls --json: no alerts_firing per app ($out)"; fi
 grep -v '^alert' "$MON_ST" > "$tmp/mon.st2"
 out=$(MON_ST=$tmp/mon.st2 mon_run 'render_ls')
 if grep -Eq '^│ APP +STATE +DEPLOYED' <<< "$out"; then ok; else bad "ls: an ALERT column with nothing firing ($out)"; fi
+# tando ls past 50 apps (stub rows): a summary (the counts per state, then only the apps down or
+# alerting) unless --all-rows; at 50 every row; ls --all does the same per server; --json is whole;
+# 100 and 200 rows render in one awk pass (the old per-row forks took 0.9 s and 1.8 s)
+mon_big() { # n -> a status stub with n apps: app003 failed, app004 stopped with a down alert, app005 alerting
+    local n=$1 i st
+    printf 'host\tvps\t2\t0.40\t2000000000\t500000000\t40000000000\t10000000000\t86400\n'
+    for ((i = 0; i < n; i++)); do
+        st=active; [[ $i == 3 ]] && st=failed; [[ $i == 4 ]] && st=inactive
+        printf 'app\tapp%03d\t%s\t3001\t20261101-101010\tok\t52428800\t134217728\t9000000000\t0\t3600\thttp://app%03d.example.test\tnode\toff\t-\t-\t1000\t2000\t10\t0\t-\t-\t1024\t256\t-\t123\n' "$i" "$st" "$i"
+    done
+    printf 'alert\tapp005\thttp\tfiring\t1\t5xx\n'
+    printf 'server\t%s\t%s\n' "$(date +%s)" "$(cat "$here/VERSION")"
+}
+strip() { perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g'; }
+mon_big 120 > "$tmp/big.st"; mon_big 50 > "$tmp/big50.st"
+out=$(MON_ST=$tmp/big.st mon_run 'render_ls' | strip)
+if [[ $out == *"120 apps: 1 down, 118 running"*  || $out == *"120 apps: 2 down, 118 running"* ]] && grep -Eq '^│ app003 +✗ down ' <<< "$out" &&
+   grep -Eq '^│ app005 +● running +http ' <<< "$out" && ! grep -Eq '^│ app010 ' <<< "$out" && [[ $out == *"--all-rows"* ]]; then ok
+else bad "ls past 50 apps is not a summary (problems, counts) ($out)"; fi
+out=$(MON_ST=$tmp/big.st mon_run 'ALLROWS=1; render_ls' | strip)
+if [[ $(grep -Ec '^│ app[0-9]{3} ' <<< "$out") == 120 && $out != *"118 running"* ]]; then ok; else bad "ls --all-rows: not every row ($(grep -Ec '^│ app[0-9]{3} ' <<< "$out") rows)"; fi
+out=$(MON_ST=$tmp/big50.st mon_run 'render_ls' | strip)
+if [[ $(grep -Ec '^│ app[0-9]{3} ' <<< "$out") == 50 ]]; then ok; else bad "ls at 50 apps: not every row"; fi
+out=$(MON_ST=$tmp/big.st mon_run 'JSON=1; render_ls')
+if (( $(grep -o '"deployed_at"' <<< "$out" | wc -l) == 120 )); then ok; else bad "ls --json past 50 apps lost rows"; fi
+# ls --all: the same per server
+out=$(MON_ST=$tmp/big.st mon_run 'LS_HOSTS="h1 h2"; for h in h1 h2; do cp "$TMPD/st" "$TMPD/h.$h.st"; echo 0 > "$TMPD/h.$h.rc"; done; render_ls_summary' | strip)
+if [[ $out == *"h1: 120 apps: "*"h2: 120 apps: "* && $(grep -Ec '^│ h[12] +app[0-9]{3} ' <<< "$out") == 6 && $out == *"app003 is down"* ]]; then ok
+else bad "ls --all past 50 apps per server is not a summary ($out)"; fi
+out=$(MON_ST=$tmp/big.st mon_run 'ALLROWS=1; LS_HOSTS=h1; cp "$TMPD/st" "$TMPD/h.h1.st"; echo 0 > "$TMPD/h.h1.rc"; render_ls_summary' | strip)
+if [[ $(grep -Ec '^│ h1 +app[0-9]{3} ' <<< "$out") == 120 ]]; then ok; else bad "ls --all --all-rows: not every row"; fi
+for n in 100 200; do
+    mon_big $n > "$tmp/bench.st"
+    # CPU time, not wall clock: the same on a machine busy with test servers
+    t=$( { TIMEFORMAT="%U %S"; time MON_ST=$tmp/bench.st mon_run 'ALLROWS=1; render_ls' > /dev/null; } 2>&1 )
+    ms=$(perl -e '@t = split " ", $ARGV[0]; printf "%d", ($t[0] + $t[1]) * 1000' "$t")
+    echo "timing: ls with $n stub rows (all rows, colour off): ${ms} ms of CPU"
+    if ((ms < 700)); then ok; else bad "ls with $n rows took ${ms} ms of CPU (limit 700; per-row forks took ~$((n * 9)) ms)"; fi
+done
 # status: memory says what it counts (anon + shmem, the same in ls, top, the graph and the alert)
 out=$(mon_run 'APP=web; render_status' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
 if grep -Eq '^│ memory .* 50 MB of 128 MB  in use, not cache' <<< "$out"; then ok; else bad "status: memory without its label ($out)"; fi

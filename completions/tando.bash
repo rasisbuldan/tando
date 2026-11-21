@@ -67,7 +67,7 @@ _tando() {
     releases) subs="" flags="$flags -H --json -a" args="apps";;
     history) subs="" flags="$flags -n -H --json -a" args="apps";;
     status) subs="" flags="$flags --watch --follow -H --json --check -a" args="apps";;
-    ls) subs="" flags="$flags -H --all --watch --follow --json --check" args="";;
+    ls) subs="" flags="$flags -H --all --all-rows --watch --follow --json --check" args="";;
     snapshot) subs="" flags="$flags --json -H --all --app --range -a --follow" args="";;
     logs) subs="pull" flags="$flags -f -n --since --until --grep -i --regex -E -a -H --level --release --deploy --worker --json" args="apps";;
     start) subs="" flags="$flags -H -a" args="apps";;
