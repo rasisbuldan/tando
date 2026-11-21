@@ -3374,7 +3374,7 @@ import_release() {
   # has are the ones chown and chmod below give it (they leave it as it is), and nothing writes
   # to it or changes its mode after the import; any other is copied (unshare_release)
   [[ -n $prev ]] && { fp imp.unshare; unshare_release "$rel" "$group" || fail "copy failed: could not copy a shared file"; }
-  chown -RhP "root:$group" "$rel" && chmod -R a-st,u=rwX,g=rX,o= "$rel" || fail "chown failed"
+  release_own "$rel" "$group" || fail "chown failed"
   open_public "$rel"
   while IFS= read -r -d '' l; do
     bad=$(readlink -f "$l") || bad=/
@@ -3388,6 +3388,18 @@ import_release() {
   make_writable "$rel"
   [[ ${C[recipe]:-node} == python ]] && build_venv
   return 0
+}
+
+# release_own rel group: what `chown -RhP root:group rel && chmod -R a-st,u=rwX,g=rX,o= rel` makes
+# (root, the group; directories and files with an execute bit 750, other files 640; a symbolic
+# link's own owner, never its mode), changing only what is not so already. A file shared with the
+# live release is left untouched (unshare_release kept only those that are so): no write to every
+# inode of both releases on each deploy, which a slow disk pays for in its journal
+release_own() {
+  local rel=$1 group=$2
+  find "$rel" \( ! -user root -o ! -group "$group" \) -exec chown -hP "root:$group" {} + &&
+    find "$rel" ! -type l \( \( \( -type d -o -perm /111 \) ! -perm 750 \) -o \( ! -type d ! -perm /111 ! -perm 640 \) \) \
+      -exec chmod a-st,u=rwX,g=rX,o= {} +
 }
 
 # unshare_release rel group: copy (a new file under the same name) every file the release shares

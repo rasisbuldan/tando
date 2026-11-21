@@ -1079,6 +1079,28 @@ check "HL4 a file of the assets directory is not shared with the other release (
   eval '[ "$(hl "$hl3" public/build/app-b81d40e5.js | cut -d" " -f1)" != "$(hl "$hl4" public/build/app-b81d40e5.js | cut -d" " -f1)" ]'
 check "HL5 every file the new release shares with another is root's with mode 640 or 750" \
   eval '[ -z "$(srv "sudo find $RA/$hl4 ! -type d ! -type l -links +1 ! -path \"*/public/build/*\" \\( ! -user root -o ! \\( -perm 640 -o -perm 750 \\) \\) -print")" ]'
+# HL6: the import sets owner and mode only where they differ (release_own, the agent's own
+# function): the same result as chown -R and chmod -R on a tree of every kind of entry, and a file
+# that is already right (as a shared one is) is not touched (its ctime stays)
+hl6=$(srv "sudo bash -s" 2>&1 <<'EOF'
+eval "$(sed -n '/^release_own() {/,/^}/p' /opt/tando/bin/tando-agent)"
+t=$(mktemp -d)
+for x in a b; do
+  mkdir -p $t/$x/d/e $t/$x/s; chmod 700 $t/$x/d; chmod 2775 $t/$x/s
+  for m in 600 644 755 4755 777 640 750 444 711; do echo $m > $t/$x/d/f$m; chmod $m $t/$x/d/f$m; done
+  echo n > $t/$x/d/e/nobody; chown nobody:nogroup $t/$x/d/e/nobody; ln -s d/f600 $t/$x/l; ln -s /etc/hostname $t/$x/d/out
+  chown -h nobody $t/$x/l; chown root:nogroup $t/$x/d/f640 $t/$x/d/f750
+done
+c0=$(stat -c %Z.%z $t/b/d/f640 $t/b/d/f750); sleep 0.1   # (proves nothing happens: a wait)
+chown -RhP root:nogroup $t/a && chmod -R a-st,u=rwX,g=rX,o= $t/a; release_own $t/b nogroup || echo "release_own failed"
+c1=$(stat -c %Z.%z $t/b/d/f640 $t/b/d/f750)
+diff <(cd $t/a && find . -printf '%P %U %G %m %y\n' | sort) <(cd $t/b && find . -printf '%P %U %G %m %y\n' | sort) || echo "differs from chown/chmod -R"
+[ "$c0" = "$c1" ] || echo "a file already right was changed (ctime $c0 -> $c1)"
+type release_own > /dev/null 2>&1 || echo "no release_own in the agent"
+rm -rf "$t"
+EOF
+)
+check "HL6 the import's owner and mode are those of chown -R and chmod -R, and a file already right is not touched (${hl6:-same})" test -z "$hl6"
 cd "$W" || exit 2
 
 for a in skew plain spa skewn; do "$R" destroy "$a" --purge --yes > /dev/null 2>&1; done   # (section 20 counts the host's apps)
