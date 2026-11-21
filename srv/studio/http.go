@@ -47,16 +47,18 @@ func (s *Studio) hostOK(h string) bool {
 	return h == "127.0.0.1"+p || h == "localhost"+p || h == "[::1]"+p
 }
 
-// ServeHTTP: the checks every request passes, then the route.
-func (s *Studio) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// precheck: the checks every request passes before its route, the same in the per-app studio
+// and in the service's front (service.go): Host (hostOK), Origin, Sec-Fetch-Site, no preflight,
+// GET or POST with a JSON body of at most MaxBody for the API. false: answered already.
+func precheck(w http.ResponseWriter, r *http.Request, hostOK func(string) bool, port string) bool {
 	headers(w.Header())
-	if !s.hostOK(r.Host) {
-		apiErr(w, 403, "host", "this page is only served as http://127.0.0.1:"+strconv.Itoa(s.cfg.Port))
-		return
+	if !hostOK(r.Host) {
+		apiErr(w, 403, "host", "this page is only served as http://127.0.0.1:"+port)
+		return false
 	}
 	if o := r.Header.Get("Origin"); o != "" && o != "http://"+r.Host {
 		apiErr(w, 403, "origin", "requests from another site are refused")
-		return
+		return false
 	}
 	// (the page itself may be reached by a link on another site, a web terminal or a chat page:
 	// a top-level GET of a static file, which holds no data; the key is in the link's fragment,
@@ -66,27 +68,38 @@ func (s *Studio) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Header.Get("Sec-Fetch-Mode") == "navigate" && r.Header.Get("Sec-Fetch-Dest") == "document"
 	if f := r.Header.Get("Sec-Fetch-Site"); f != "" && f != "same-origin" && f != "none" && !nav {
 		apiErr(w, 403, "origin", "requests from another site are refused")
-		return
+		return false
 	}
 	if r.Method == http.MethodOptions {
 		apiErr(w, 405, "bad_request", "no cross-origin requests")
+		return false
+	}
+	if !strings.HasPrefix(r.URL.Path, "/api/") {
+		return true
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		apiErr(w, 405, "bad_request", "GET or POST")
+		return false
+	}
+	if r.Method == http.MethodPost {
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" && !strings.HasPrefix(ct, "application/json;") {
+			apiErr(w, 415, "bad_request", "the body must be application/json")
+			return false
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, MaxBody)
+	}
+	return true
+}
+
+// ServeHTTP: the checks every request passes, then the route.
+func (s *Studio) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !precheck(w, r, s.hostOK, strconv.Itoa(s.cfg.Port)) {
 		return
 	}
 	path := r.URL.Path
 	if !strings.HasPrefix(path, "/api/") {
 		s.serveStatic(w, r)
 		return
-	}
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		apiErr(w, 405, "bad_request", "GET or POST")
-		return
-	}
-	if r.Method == http.MethodPost {
-		if ct := r.Header.Get("Content-Type"); ct != "application/json" && !strings.HasPrefix(ct, "application/json;") {
-			apiErr(w, 415, "bad_request", "the body must be application/json")
-			return
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, MaxBody)
 	}
 	if path == "/api/session" {
 		s.session(w, r)
