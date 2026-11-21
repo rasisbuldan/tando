@@ -573,7 +573,8 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
       ui_box_close "dependencies could not be installed; nothing was uploaded"
       exit 1
     fi
-    box_say "" "        installed dependencies: $NODE_INSTALL, ${NODE_INSTALL_DIR:+in $NODE_INSTALL_DIR}${NODE_INSTALL_DIR:-here}" \
+    local where=here; [ -z "$NODE_INSTALL_DIR" ] || where="in $NODE_INSTALL_DIR"
+    box_say "" "        installed dependencies: $NODE_INSTALL, $where" \
       "(node_modules was missing$lock; $(ui_dur "$(since "$ti")"))"
   fi
   needs_build && step_start "build: running ${C_build:-$ENGINE build} here"

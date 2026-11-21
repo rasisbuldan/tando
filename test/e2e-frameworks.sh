@@ -59,7 +59,8 @@ for pm in pnpm npm; do
     t_eq "$(get $pm-api)" "hello $pm workspace from the greet package (1m)"
   case $pm in pnpm) i="\(corepack \)\{0,1\}pnpm install --frozen-lockfile";; npm) i="npm ci";; esac
   check "F6b $pm: installed at the workspace root, detected as a member" \
-    eval 'grep -q "installed dependencies: $i, in ../.." "$E/ws-$pm.out" && grep -q "^  workspace: package apps/$pm-api of ../.., " "$E/ws-$pm.out"'
+    eval 'tr -d "│" < "$E/ws-$pm.out" | tr -s " \n" "  " | grep -q "installed dependencies: $i, in \.\./\.\. (node_modules was missing" &&
+          grep -q "^  workspace: package apps/$pm-api of ../.., " "$E/ws-$pm.out"'
 done
 
 t_done

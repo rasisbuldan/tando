@@ -99,6 +99,10 @@ for v in pnpm:pnpm-lock.yaml npm:package-lock.json; do
   fi
   awk 'length > 80 { exit 1 }' "$T/ws-${v%%:*}.out" || bad "ws-${v%%:*}: a line of tando init is wider than 80 columns"
 done
+# the lockfile that verifies swapped platform packages of a member is the workspace root's
+n=$((n + 1))
+v=$(cd "$T/ws-pnpm/apps/pnpm-api" && /bin/bash -c '. "$1/lib/common.sh"; . "$1/lib/build.sh"; C_recipe=node C_out=.; native_lockdir' _ "$ROOT" 2>&1)
+[ -n "$v" ] && [ "$(cd "$v" 2> /dev/null && pwd -P)" = "$(cd "$T/ws-pnpm" && pwd -P)" ] || bad "ws-pnpm: native_lockdir of a member is $v, not the workspace root"
 # a Yarn workspace member: still refused, at init and at deploy, saying which managers work
 n=$((n + 1)); rm -rf "${T:?}/ws"; mkdir -p "$T/ws/apps/web/node_modules" "$T/ws/node_modules/express"
 printf '{ "name": "root", "private": true, "workspaces": ["apps/*"] }\n' > "$T/ws/package.json"
