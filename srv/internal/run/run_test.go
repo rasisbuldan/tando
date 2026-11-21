@@ -56,6 +56,16 @@ func TestExec(t *testing.T) {
 	}
 }
 
+// Started counts the programs started (tandod's children a minute), and only those
+func TestStarted(t *testing.T) {
+	n := Started()
+	Exec{}.Output(context.Background(), Cmd{Argv: []string{"echo", "x"}})
+	Exec{}.Output(context.Background(), Cmd{Argv: []string{"no-such-program-tando"}})
+	if got := Started() - n; got != 1 {
+		t.Errorf("Started went up by %d, want 1 (a program not found never started)", got)
+	}
+}
+
 func TestExecStreams(t *testing.T) {
 	var b bytes.Buffer
 	got, err := Exec{}.Output(context.Background(), Cmd{Argv: []string{"echo", "x"}, Stdout: &b})

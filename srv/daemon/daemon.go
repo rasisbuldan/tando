@@ -71,6 +71,13 @@ type Daemon struct {
 	wdEvery  time.Duration // how often to ping systemd's watchdog (half of WatchdogSec), 0: none
 	bus      *busRunner
 	health   health
+	served   atomic.Int64 // socket requests answered, but ticks: the readers' (selfCounters)
+}
+
+// selfCounters: tandod's pid, the programs it has started and the readers' requests it has
+// answered (srv/metrics writes them a minute at a time, apart from its own cost).
+func (d *Daemon) selfCounters() (pid, children, requests int64) {
+	return int64(os.Getpid()), run.Started(), d.served.Load()
 }
 
 // New wires the daemon for the real machine; sd is what systemd said in the environment.
@@ -83,6 +90,7 @@ func New(e env.Env, sd Systemd) *Daemon {
 	d.Watch = watch.New(e, os.Getpid())
 	d.Watch.Cache = watch.NewCache()
 	d.Metrics = metrics.New(e, "")
+	d.Metrics.Self = d.selfCounters // (what the monitoring costs: srv/metrics tandod.x)
 	d.Logs = logs.New(e)
 	d.Logs.Cache = logs.NewScanCache() // kept across ticks: an idle app costs a few stat calls
 	d.Logs.Stderr = os.Stderr
@@ -286,6 +294,9 @@ func (d *Daemon) watchdog(ctx context.Context, iv time.Duration) {
 
 // handle answers a socket request with the rows of its verb.
 func (d *Daemon) handle(ctx context.Context, r proto.Request, w io.Writer) error {
+	if r.Verb != "tick" {
+		d.served.Add(1)
+	}
 	o := out.New(w)
 	defer o.Flush()
 	var args []string

@@ -36,8 +36,8 @@ func TestReadApp(t *testing.T) {
 		"1800000150\t5000\t600000\t1\ta\n"+ // 0.6 s in 30 s: 20 permille; same bucket
 		"1800000280\t9000\t9") // still being written: not read
 	want := "mx\t60\t1800000300\n" +
-		"m\t1800000060\t2000\t500\t1\tr\t-\n" +
-		"m\t1800000120\t4000\t20\t2\ta\t-\n"
+		"m\t1800000060\t2000\t500\t1\tr\t-\t-\t-\t-\t-\t-\n" +
+		"m\t1800000120\t4000\t20\t2\ta\t-\t-\t-\t-\t-\t-\n"
 	if got := h.readOut("web", "5", "60"); got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
@@ -52,7 +52,7 @@ func TestReadGaps(t *testing.T) {
 		"1800000000\t1\t0\t0\tr\n"+
 		"1800001000\t1\t6000000\t0\tr\n"+
 		"1800000990\t1\t6000000\t0\tr\n")
-	want := "mx\t3600\t1800003000\n" + "m\t1800000000\t1\t66\t0\tr\t-\n"
+	want := "mx\t3600\t1800003000\n" + "m\t1800000000\t1\t66\t0\tr\t-\t-\t-\t-\t-\t-\n"
 	if got := h.readOut("web", "1", "3600"); got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -140,13 +140,14 @@ func TestTail(t *testing.T) {
 func TestFields(t *testing.T) {
 	tests := []struct {
 		in   string
-		want [5]string
+		want [10]string
 	}{
-		{"1\t2\t3\t4\tr", [5]string{"1", "2", "3", "4", "r"}},
-		{"1\t2\t3\t4", [5]string{"1", "2", "3", "4", ""}},
-		{"\t1\t\t2\t3\t4\tr\t", [5]string{"1", "2", "3", "4", "r"}}, // runs of tabs are one separator
-		{"1\t2\t3\t4\tr\tmore", [5]string{"1", "2", "3", "4", "r\tmore"}},
-		{"", [5]string{}},
+		{"1\t2\t3\t4\tr", [10]string{"1", "2", "3", "4", "r"}},
+		{"1\t2\t3\t4", [10]string{"1", "2", "3", "4", ""}},
+		{"\t1\t\t2\t3\t4\tr\t", [10]string{"1", "2", "3", "4", "r"}}, // runs of tabs are one separator
+		// the state is the fifth field alone: the slice's columns follow it (since 2026-11)
+		{"1\t2\t3\t4\tr\t5\t-\t7\t8\t9\tlater", [10]string{"1", "2", "3", "4", "r", "5", "-", "7", "8", "9"}},
+		{"", [10]string{}},
 	}
 	for _, tt := range tests {
 		if got := fields(tt.in); got != tt.want {
@@ -187,9 +188,9 @@ func TestReadAppDisk(t *testing.T) {
 		"1800003500\t1\t0\t0\tr\n") // the last walk is 43 min old: no disk
 	got := h.readOut("web", "60", "60")
 	want := "mx\t60\t1800003600\n" +
-		"m\t1800000060\t1\t0\t0\tr\t1000\n" +
-		"m\t1800000960\t1\t0\t0\tr\t2000\n" +
-		"m\t1800003480\t1\t0\t0\tr\t-\n"
+		"m\t1800000060\t1\t0\t0\tr\t1000\t-\t-\t-\t-\t-\n" +
+		"m\t1800000960\t1\t0\t0\tr\t2000\t-\t-\t-\t-\t-\n" +
+		"m\t1800003480\t1\t0\t0\tr\t-\t-\t-\t-\t-\t-\n"
 	if got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}

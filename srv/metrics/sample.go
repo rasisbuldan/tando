@@ -59,6 +59,9 @@ func (m Metrics) Sample(ctx context.Context) error {
 		return err
 	}
 	m.sampleDisk(now, names, next)
+	if err := m.sampleHostX(now); err != nil {
+		return err
+	}
 	if err := atomicfile.Write(statePath, next.format(keysIn(next, keys)), atomicfile.Mode(fileMode)); err != nil {
 		return err
 	}
@@ -97,14 +100,79 @@ func (m Metrics) sampleApps(ctx context.Context, now int64, names []string, prev
 		if _, err := strconv.ParseUint(restarts, 10, 64); err != nil {
 			restarts = "0"
 		}
-		e, err := m.appendLine(a, now, p, fmt.Sprintf("%d\t%d\t%d\t%s\t%s", now, mem, d, restarts, stateLetter(props[i]["ActiveState"])))
+		sl := readSlice(dir, p, seen)
+		e, err := m.appendLine(a, now, p, fmt.Sprintf("%d\t%d\t%d\t%s\t%s\t%s", now, mem, d, restarts, stateLetter(props[i]["ActiveState"]), sl.line))
 		if err != nil {
 			return err
 		}
 		e.usec, e.x = usec, p.x
+		e.periods, e.throttled, e.ooms = sl.periods, sl.throttled, sl.ooms
 		next[a] = e
 	}
 	return nil
+}
+
+// slice is what an app's slice (tando-<app>.slice, where tando sets its MemoryMax, TasksMax and
+// CPUQuota) says this minute, as the line's columns 6 to 10: CPU throttled (per mille of the
+// scheduler periods, "-" without a CPU limit), OOM kills since the last sample, tasks, the task
+// limit ("-": none) and the slice's memory pressure (PSI some avg60 x 100). The raw counters go
+// to .state for the next sample.
+type slice struct {
+	line                      string
+	periods, throttled, ooms int64
+}
+
+// readSlice reads the slice that holds the unit's cgroup dir (an app set up before the per-app
+// slices, under system.slice, has none: every column "-").
+func readSlice(dir string, p entry, seen bool) slice {
+	sl := slice{line: "-\t-\t-\t-\t-", periods: -1, throttled: -1, ooms: -1}
+	sd := filepath.Dir(dir)
+	if !strings.HasSuffix(sd, ".slice") || filepath.Base(sd) == "system.slice" {
+		return sl
+	}
+	col := [5]string{"-", "-", "-", "-", "-"}
+	np, nt := int64(-1), int64(0)
+	keyed(filepath.Join(sd, "cpu.stat"), func(k, v string) {
+		switch k {
+		case "nr_periods":
+			np, _ = strconv.ParseInt(v, 10, 64)
+		case "nr_throttled":
+			nt, _ = strconv.ParseInt(v, 10, 64)
+		}
+	})
+	if np >= 0 {
+		sl.periods, sl.throttled = np, nt
+		if seen && p.periods >= 0 && np > p.periods && nt >= p.throttled {
+			col[0] = strconv.FormatInt((nt-p.throttled)*1000/(np-p.periods), 10)
+		} else if seen && p.periods > 0 && np == p.periods {
+			col[0] = "0" // a CPU limit, and no period ran: nothing throttled
+		}
+	}
+	if k, ok := cgroup.Value(filepath.Join(sd, "memory.events"), "oom_kill"); ok {
+		sl.ooms = k
+		if seen && p.ooms >= 0 && k >= p.ooms {
+			col[1] = strconv.FormatInt(k-p.ooms, 10)
+		}
+	}
+	col[2], col[3] = oneNumber(filepath.Join(sd, "pids.current")), oneNumber(filepath.Join(sd, "pids.max"))
+	if v, ok := psiSome(filepath.Join(sd, "memory.pressure")); ok {
+		col[4] = strconv.FormatInt(v, 10)
+	}
+	sl.line = strings.Join(col[:], "\t")
+	return sl
+}
+
+// oneNumber is a one-number file's number, or "-" (absent, or "max")
+func oneNumber(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "-"
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return "-"
+	}
+	return strconv.FormatInt(n, 10)
 }
 
 // stateLetter: r running, f failed, s stopped, a anything else (activating, deactivating, ...).
@@ -222,7 +290,11 @@ func meminfo(path string) (total, avail int64, err error) {
 // appendLine adds line to who's file, rotating it first when it is full, and returns the
 // file's new entry (start time and line count).
 func (m Metrics) appendLine(who string, now int64, p entry, line string) (entry, error) {
-	f := m.file(who)
+	return m.appendFile(m.file(who), now, p, line)
+}
+
+// appendFile is appendLine to the file f.
+func (m Metrics) appendFile(f string, now int64, p entry, line string) (entry, error) {
 	start, lines := p.start, p.lines
 	if lines >= maxLines || (start > 0 && now-start >= span) {
 		// full: it becomes .1 and the old .1 goes

@@ -16,7 +16,7 @@ import (
 
 // ReadArgs are the checked arguments of `read <app|host> <points> <bucket seconds>`.
 type ReadArgs struct {
-	Who    string // an app, or "host"
+	Who    string // an app, "host", or an x file (host.x, tandod.x: readx.go)
 	Points int64  // buckets wanted, 1..2000
 	Bucket int64  // seconds per bucket, 60..86400
 }
@@ -31,7 +31,7 @@ func ParseReadArgs(args []string) (ReadArgs, error) {
 		return def
 	}
 	a := ReadArgs{Who: word(0, "")}
-	if a.Who != "host" && !valid.App(a.Who) {
+	if a.Who != "host" && !IsX(a.Who) && !valid.App(a.Who) {
 		return a, errors.New("bad app name")
 	}
 	var ok bool
@@ -47,6 +47,7 @@ func ParseReadArgs(args []string) (ReadArgs, error) {
 // Read writes "mx <bucket> <now>", then one row per bucket that has samples, oldest first:
 //
 //	app:  m <bucket start> <mem avg> <cpu permille of one core, avg> <restarts max> <last state> <disk bytes>
+//	        <throttled permille avg> <oom kills sum> <tasks max> <task limit max> <memory pressure x100 avg>
 //	host: h <bucket start> <load x100 avg> <mem used avg> <mem total> <cpu permille of all cores, avg>
 //	        <disk used avg> <disk total>
 //
@@ -56,6 +57,10 @@ func ParseReadArgs(args []string) (ReadArgs, error) {
 // the bucket's start. Readers split on tabs and take the fields they know: columns are only
 // ever added at the end.
 func (m Metrics) Read(w *out.Writer, a ReadArgs) {
+	if IsX(a.Who) {
+		m.readX(w, a)
+		return
+	}
 	now := m.Env.Now().Unix()
 	from := (now/a.Bucket - a.Points + 1) * a.Bucket
 	need := a.Points*a.Bucket/60 + 2 // lines: one a minute, and a little slack
@@ -131,6 +136,7 @@ func (m Metrics) Read(w *out.Writer, a ReadArgs) {
 			b.s2 += v1
 			b.mx = max(b.mx, v3)
 			b.last = f[4]
+			b.sl.add(f[5:])
 		}
 	}
 	flush(&b)
@@ -144,6 +150,7 @@ type bucket struct {
 	cN, cS, dN, dS   int64  // host: cpu and disk-used samples that had a value, and their sums
 	dTotal           int64  // host: disk total of the last sample that had one (-1: none)
 	disk             int64  // app: disk bytes (-1: none)
+	sl               xsum   // app: the slice's columns (appCols)
 }
 
 func (b *bucket) flush(w *out.Writer, host bool) {
@@ -154,7 +161,8 @@ func (b *bucket) flush(w *out.Writer, host bool) {
 		w.Row("h", decimal.Itoa(b.start), decimal.Itoa(b.s1/b.n), decimal.Itoa(b.s2/b.n), decimal.Itoa(b.total),
 			avgOrDash(b.cS, b.cN), avgOrDash(b.dS, b.dN), avgOrDash(b.dTotal, 1))
 	} else {
-		w.Row("m", decimal.Itoa(b.start), decimal.Itoa(b.s2/b.n), decimal.Itoa(b.s1/b.n), decimal.Itoa(b.mx), b.last, avgOrDash(b.disk, 1))
+		w.Row(append([]string{"m", decimal.Itoa(b.start), decimal.Itoa(b.s2/b.n), decimal.Itoa(b.s1/b.n), decimal.Itoa(b.mx), b.last, avgOrDash(b.disk, 1)},
+			b.sl.values(appCols)...)...)
 	}
 }
 
@@ -231,16 +239,16 @@ func tail(b []byte, n int64) []byte {
 	return b[i+1:]
 }
 
-// fields splits a line as `IFS=$'\t' read -r t a b c d` did: runs of tabs are one separator,
-// and the fifth field takes the rest of the line. Missing fields are "".
-func fields(l string) [5]string {
-	var f [5]string
+// fields splits an app line: runs of tabs are one separator (as `IFS=$'\t' read` did), the
+// first ten fields (time, memory, cpu, restarts, state, then the slice's five since 2026-11);
+// missing ones are "", and later columns are not read.
+func fields(l string) [10]string {
+	var f [10]string
 	l = strings.Trim(l, "\t")
-	for i := 0; i < 4 && l != ""; i++ {
+	for i := 0; i < len(f) && l != ""; i++ {
 		f[i], l, _ = strings.Cut(l, "\t")
 		l = strings.TrimLeft(l, "\t")
 	}
-	f[4] = l
 	return f
 }
 

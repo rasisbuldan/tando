@@ -43,6 +43,8 @@ type Metrics struct {
 	Dir        string
 	Journal    string        // /var/log/journal: the apps' journal namespaces, counted in their disk
 	DiskBudget time.Duration // walking time one sample may spend (0: diskBudget)
+	Sys        string        // /sys ("": /sys): the main disk's name (host.x)
+	Self       SelfCounters  // tandod's own counters (tandod.x); nil: not known (a one-shot)
 }
 
 // New uses dir, or Env.Lib/metrics when dir is "" (the shell's TANDO_METRICS_DIR override).
