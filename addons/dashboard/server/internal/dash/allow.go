@@ -79,6 +79,9 @@ var shapes = []shape{
 		flags: map[string]flagRule{"-a": {vApp, true}, "--json": {vNone, true}, "-H": {vHost, true}}},
 	{name: "alerts", verb: []string{"alerts"}, flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}}},
 	{name: "history", verb: []string{"history"}, flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}}},
+	// the database studio (studio.go): a long-running child; --json implies no browser
+	{name: "studio", verb: []string{"db", "studio"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"-H": {vHost, true}, "--json": {vNone, true}}},
 	// writes (M4). Never --force or --yes: deploy runs in the app's recorded folder and stops
 	// where the CLI would ask; env set takes the value on stdin, never in argv.
 	{name: "deploy", verb: []string{"deploy"}, flags: map[string]flagRule{"-a": {vApp, true}, "-H": {vHost, true}}, write: true},

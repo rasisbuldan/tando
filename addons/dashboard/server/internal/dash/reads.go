@@ -234,7 +234,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeLsAll(out)
-	writeJSON(w, 200, map[string]any{"hosts": out, "next_poll_s": s.pollHint(r)})
+	writeJSON(w, 200, map[string]any{"hosts": out, "studios": s.studios.list(), "next_poll_s": s.pollHint(r)})
 }
 
 // GET /api/doctor?host= and /api/hoststatus?host=: at most one run a minute per host

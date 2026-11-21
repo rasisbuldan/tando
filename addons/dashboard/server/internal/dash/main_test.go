@@ -80,6 +80,9 @@ func fakeTando(args []string) int {
 		host = args[len(args)-2] // doctor <host> --json, host status <host> --json
 	}
 	mode := strings.TrimRight(host, "0123456789")
+	if len(args) >= 2 && args[0] == "db" && args[1] == "studio" {
+		return fakeStudio(dir, mode, args)
+	}
 	if args[0] == "logs" {
 		return fakeLogs(dir, host, mode, args)
 	}
@@ -256,7 +259,7 @@ func newEnv(t *testing.T, runner Runner, mod func(*Config)) *env {
 	e.ts = httptest.NewUnstartedServer(e.srv)
 	e.ts.Listener = ln
 	e.ts.Start()
-	t.Cleanup(func() { e.srv.Close(); e.ts.Close(); e.srv.wg.Wait(); e.srv.hub.wg.Wait() })
+	t.Cleanup(func() { e.srv.Close(); e.ts.Close(); e.srv.wg.Wait(); e.srv.hub.wg.Wait(); e.srv.studios.wg.Wait() })
 	return e
 }
 

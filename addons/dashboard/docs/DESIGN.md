@@ -114,6 +114,7 @@ Alerts                         3
 SERVERS
 ● web-1                        2
     ● shop                     2
+        Database          open  Stop
     ● blog
 ◌ db-2                            (not answering)
     ◌ api
@@ -126,6 +127,7 @@ SERVERS
 - **States:** hover `bg-muted`; selected `bg-muted`, weight 600, 2 px `--foreground` bar at the left edge, `aria-current="page"`; alert: dot and count as above, the parent server shows the worst child dot; unreachable: stale ring dot, name `text-muted-foreground`, apps keep their last state dot as stale rings; collapsed: 56 px, icons and dots only, names in tooltips (300 ms delay), counts become a 6 px dot at the icon's top right.
 - **Keyboard:** the sidebar is one `role="tree"` (servers expandable). Up/Down move, Right expands/enters, Left collapses/goes to parent, Enter opens, Home/End jump. `[` toggles collapse. Tab leaves the tree into main content.
 - Server expand state is remembered; a server with a firing alert opens by default.
+- **Database row:** under an app with a database (never for one without; not while its server is not answering), a 32 px row indented under the app: database icon, "Database" in `text-muted-foreground`; "open" (`text-ok`) and a "Stop" button while the dashboard's studio of that app runs. Enter or a click opens the confirmation dialog; the studio itself opens in a new browser window (SPEC "Database studio").
 
 ## 6. Components
 

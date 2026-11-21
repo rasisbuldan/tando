@@ -11,6 +11,7 @@ import { Table, Td, Th, Tr } from "@/components/ui/table";
 import { cn } from "@/lib/cn";
 import { refreshAll, snapshotPoller, useNowMs, usePoller } from "@/lib/resources";
 import { appKind, chartDomain, cpuMax, deployMarkers, describe, memoryTicks, niceMax, RANGE_S, roundTicks, restartsTotal, stateWithReason, toPoints, uptimeCells, type RangeKey } from "@/lib/shape";
+import { StudioButton } from "@/components/studio";
 import { AppActions, ProgressPanel, useRollbackTo, type AppCtx } from "@/components/actions";
 import { DASH, fmtAgo, fmtBytes, fmtDateTime, fmtDur, fmtMs, fmtPct, fmtTime, pctOf } from "@/lib/format";
 
@@ -54,7 +55,7 @@ export default function AppPage() {
             {" · "}<Mono>{host}</Mono>
           </>
         ) : <Mono>{host}</Mono>}
-        actions={ctx ? <AppActions ctx={ctx} /> : undefined}
+        actions={ctx ? <>{status?.database && v?.reachable && <StudioButton host={host} app={app} />}<AppActions ctx={ctx} /></> : undefined}
       />
       <Freshness st={st} />
       <ProgressPanel host={host} app={app} />

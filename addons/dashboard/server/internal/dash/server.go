@@ -111,6 +111,7 @@ type Server struct {
 	hub        *hub
 	wg         sync.WaitGroup // running writes
 	actStreams atomic.Int64   // open progress streams
+	studios    *studios       // studio.go
 }
 
 // New: a server; it loads the sessions and the idempotency records from ConfigDir
@@ -131,6 +132,8 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 		return nil, err
 	}
 	s.writes = newWriteLocks()
+	sp, senv := studioPath(cfg.Runner)
+	s.studios = newStudios(filepath.Join(cfg.ConfigDir, "cache", "dash-studios.json"), sp, senv, cfg.Now, s.logf)
 	s.hub = newHub(s, cfg.Logs)
 	s.lastUse.Store(cfg.Now().UnixNano())
 	// writes that ran when tando-dash stopped: their app stays taken until tando says how they ended
@@ -145,13 +148,14 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 	return s, nil
 }
 
-// Close: the reads' children are killed; running writes are left alone (tando owns them)
-func (s *Server) Close() { s.stop() }
+// Close: the reads' children are killed, the studios' children are stopped; running writes are
+// left alone (tando owns them)
+func (s *Server) Close() { s.stop(); s.studios.closeAll() }
 
 // WaitStreams: after Close, wait (up to d) for the log streams' children to be killed and reaped
 func (s *Server) WaitStreams(d time.Duration) {
 	done := make(chan struct{})
-	go func() { s.hub.wg.Wait(); close(done) }()
+	go func() { s.hub.wg.Wait(); s.studios.wg.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(d):
@@ -317,6 +321,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.logsStream(w, r)
 	case "/api/confirm":
 		s.confirm(w, r)
+	case "/api/studio/open":
+		s.studioOpen(w, r)
+	case "/api/studio/stop":
+		s.studioStop(w, r)
 	case "/api/action/stream":
 		s.actionStream(w, r)
 	case "/api/action":

@@ -9,6 +9,7 @@ import { appKind, worstKind, type Kind } from "@/lib/shape";
 import type { HostView } from "@/lib/types";
 import { applyTheme, getTheme, lsGet, lsSet, type Theme } from "@/lib/theme";
 import { prefetchRoute } from "@/routes";
+import { StudioRow } from "./studio";
 
 import { forwardRef, type ComponentProps } from "react";
 // a link whose class depends on the route; a plain string className so Radix Slot (tooltips) can merge it
@@ -58,7 +59,7 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
     const firing = alerts.filter((a) => a.state === "firing").length, pending = alerts.filter((a) => a.state !== "firing").length;
     const apps = [...(h.data?.apps ?? [])].sort((a, b) => a.app.localeCompare(b.app)).map((a) => {
       const k = h.reachable ? appKind(a) : { kind: "stale" as Kind, word: appKind(a).word };
-      return { app: a.app, kind: k.kind, word: k.word, n: a.alerts_firing ?? 0 };
+      return { app: a.app, kind: k.kind, word: k.word, n: a.alerts_firing ?? 0, db: !!a.database };
     });
     const kind: Kind = !h.reachable ? "stale" : worstKind(apps.map((a) => a.kind).concat(firing ? ["fail"] : pending ? ["warn"] : []));
     return { host: h.host, reachable: h.reachable, firing, pending, apps, kind };
@@ -87,11 +88,11 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
       }
       case "ArrowLeft": {
         const h = cur.dataset.host;
-        if (cur.dataset.level === "app") go(items.find((x) => x.dataset.level === "server" && x.dataset.host === h));
+        if (cur.dataset.level === "app" || cur.dataset.level === "studio") go(items.find((x) => x.dataset.level === "server" && x.dataset.host === h));
         else if (cur.dataset.level === "server" && h && cur.getAttribute("aria-expanded") === "true") { e.preventDefault(); setOpen(h, false); }
         break;
       }
-      case "Enter": e.preventDefault(); nav(cur.getAttribute("href") ?? "/"); if (sb.mobile) sb.setOpen(false); break;
+      case "Enter": e.preventDefault(); if (cur.dataset.level === "studio") { cur.click(); break; } nav(cur.getAttribute("href") ?? "/"); if (sb.mobile) sb.setOpen(false); break;
     }
   };
 
@@ -149,8 +150,8 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
                   </button>
                 )}
               </div>
-              {open && !collapsed && r.apps.map((a) => (
-                <NavLink key={a.app} to={`/s/${encodeURIComponent(r.host)}/${a.app}`} active={on(`/s/${encodeURIComponent(r.host)}/${a.app}`, false)} role="treeitem" data-level="app" data-host={r.host} tabIndex={-1}
+              {open && !collapsed && r.apps.map((a) => (<div key={a.app}>
+                <NavLink to={`/s/${encodeURIComponent(r.host)}/${a.app}`} active={on(`/s/${encodeURIComponent(r.host)}/${a.app}`, false)} role="treeitem" data-level="app" data-host={r.host} tabIndex={-1}
                   aria-label={`${a.app}, ${r.reachable ? a.word : "last state " + a.word + ", stale"}${a.n ? `, ${a.n} alert${a.n > 1 ? "s" : ""}` : ""}`}
                   onMouseEnter={() => prefetchRoute("/s/x/y")} onFocus={() => prefetchRoute("/s/x/y")}
                   className={cn(ROW, "pl-5", on(`/s/${encodeURIComponent(r.host)}/${a.app}`, false) && SEL, !r.reachable && "text-muted-foreground")}>
@@ -158,7 +159,8 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
                   <span className="truncate">{a.app}</span>
                   {a.n > 0 && <span className="ml-auto text-xs leading-4 font-medium text-fail">{a.n}</span>}
                 </NavLink>
-              ))}
+                {a.db && r.reachable && <StudioRow host={r.host} app={a.app} />}
+              </div>))}
             </div>
           );
         })}

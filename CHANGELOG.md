@@ -6,6 +6,15 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added (dashboard add-on): the database studio from the dashboard. A "Database" row under each app
+  with a database in the sidebar and "Open database" in the app header; every open is confirmed,
+  then the studio's own page opens in a new browser window (the Mac window hands it to the default
+  browser). One dashboard studio per server (the other server slot stays free for the terminal),
+  "open · Stop" in the sidebar while it runs, the row closes when the studio ends on its own. The
+  child never outlives tando-dash: stdin EOF ends it, shutdown stops its group, and a tando-dash
+  started after a crash stops what an earlier one left (pid and command line checked).
+- Added: `tando db studio --json`: one JSON line `{url, port, sid}` instead of the box and the
+  browser, and the session ends when stdin closes (for programs such as the dashboard).
 - `tando menubar`: "Open status in Terminal" opens the live view (`--watch 5`, refreshing until
   Ctrl-C) instead of printing once.
 - Added (dashboard add-on): the web app's writes: Deploy, Roll back (to the target, or "Roll back to

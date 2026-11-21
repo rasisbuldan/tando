@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# lib/studio.sh: `tando db studio [app] [--no-open] [--idle M] [--stop]` (sourced by cmd_db). bash 3.2.
+# lib/studio.sh: `tando db studio [app] [--no-open] [--json] [--idle M] [--stop]` (sourced by cmd_db). bash 3.2.
 #
 # A read-only web UI and SQL editor for the app's database. tando-studio (srv/studio) runs on the
 # server as the app's user, on a unix socket; this command opens its own ssh connection (not the
@@ -10,6 +10,10 @@
 # heartbeat end it; afterwards the server is asked whether anything is left. The URL carries a
 # code that works once (the page trades it for its key), so a URL in the browser history or in
 # open's arguments is worth nothing later. docs/COMMANDS.md "tando db studio".
+#
+# --json (for a program, tando-dash): no browser and no box; one line {"url","port","sid"} on
+# stdout when the studio answers, and the session ends when this command's stdin reaches EOF (the
+# program that started it closed the pipe or died), as Ctrl-C would end it.
 #
 # Test hooks (test/e2e-studio.sh): TANDO_STUDIO_TEST="hb=1 idle-s=3 timeout=2" (the studio's
 # heartbeat, idle time in seconds and statement limit), TANDO_STUDIO_HB (seconds between this
@@ -37,6 +41,7 @@ studio_msgs() { agent_msgs | sed -e 's/^tando-studio: /tando: /'; }
 
 # studio_end: stop the ssh session (the studio sees EOF and stops) and wait for it
 studio_end() {
+  [ -z "${STUDIO_WATCH:-}" ] || { kill "$STUDIO_WATCH" 2> /dev/null; STUDIO_WATCH=""; }
   [ -n "${STUDIO_SSH:-}" ] || return 0
   kill "$STUDIO_SSH" 2> /dev/null
   wait "$STUDIO_SSH" 2> /dev/null
@@ -93,7 +98,7 @@ studio_pick() {
 }
 
 cmd_db_studio() {
-  local noopen="" stop="" idle=30 i=2 a knobs="${TANDO_STUDIO_TEST:-}" hb=${TANDO_STUDIO_HB:-10}
+  local noopen="" json=${JSON:-} stop="" idle=30 i=2 a knobs="${TANDO_STUDIO_TEST:-}" hb=${TANDO_STUDIO_HB:-10}
   while [ $i -lt ${#ARGS[@]} ]; do
     a=${ARGS[i]}
     case $a in
@@ -101,10 +106,11 @@ cmd_db_studio() {
       --stop) stop=1;;
       --idle) i=$((i + 1)); idle=${ARGS[i]:-}
         { is_num "$idle" && [ "$idle" -ge 5 ] && [ "$idle" -le 240 ]; } || usage_err "--idle is 5 to 240 minutes" db;;
-      *) usage_err "db studio takes an app name and --no-open, --idle M, --stop (got $a)" db;;
+      *) usage_err "db studio takes an app name and --no-open, --json, --idle M, --stop (got $a)" db;;
     esac
     i=$((i + 1))
   done
+  [ -z "$json" ] || noopen=1   # (--json is a global flag: bin/tando sets JSON)
   for a in $knobs; do case $a in hb=[0-9]*|idle-s=[0-9]*|timeout=[0-9]*|conn-idle=[0-9]*|prio=off) ;; *) die "bad TANDO_STUDIO_TEST: $a";; esac; done
   is_num "$hb" || die "bad TANDO_STUDIO_HB"
   # which app: -a or a word, else tando.conf, else ask (studio_pick)
@@ -124,10 +130,16 @@ cmd_db_studio() {
   case $STUDIO_SID in [0-9a-f]*) ;; *) die "could not make a session id";; esac
   local port n=0 out=$TMPD/studio.out err=$TMPD/studio.err code="" probe="" t
   port=$(( STUDIO_PORT0 + $(printf '%s/%s' "$HOST" "$APP" | cksum | cut -d' ' -f1) % STUDIO_PORTS ))
-  STUDIO_SSH=""
+  STUDIO_SSH="" STUDIO_WATCH=""
   trap 'studio_end; exit 130' INT
   trap 'studio_end; exit 143' TERM
   trap 'studio_end; exit 129' HUP
+  if [ -n "$json" ]; then   # stdin's EOF (the program that started this is gone) ends the session
+    exec 4<&0
+    ( while IFS= read -r a; do :; done; kill -TERM $$ 2> /dev/null ) <&4 > /dev/null 2>&1 &
+    STUDIO_WATCH=$!
+    exec 4<&-
+  fi
   while :; do
     n=$((n + 1)); [ $n -le 10 ] || die "no free port between $((port - 10)) and $((port - 1)) on this computer"
     if ! studio_port_free "$port"; then port=$((port + 1)); continue; fi
@@ -171,19 +183,24 @@ cmd_db_studio() {
     exit 1
   fi
   local url="http://127.0.0.1:$port/#c=$code" opened="open it in your browser (the link works once)"
-  if [ -z "$noopen" ] && open_url "$url"; then opened="opened"; fi
-  ui_box_open "$APP" "database studio"
-  ui_kv studio "read-only, port $port of this computer" 10
-  ui_kv browser "$opened" 10
-  ui_kv stops "Ctrl-C here, Stop in the page, or after $idle min unused" 10
-  ui_box_close "tando_${APP//-/_} on $HOST · through this ssh session only"
-  printf '%s\n' "$url"   # (whole, on a line of its own: it is copied)
+  if [ -n "$json" ]; then
+    printf '{"url":"%s","port":%s,"sid":"%s"}\n' "$url" "$port" "${STUDIO_SID:0:12}"   # (checked words and digits only)
+  else
+    if [ -z "$noopen" ] && open_url "$url"; then opened="opened"; fi
+    ui_box_open "$APP" "database studio"
+    ui_kv studio "read-only, port $port of this computer" 10
+    ui_kv browser "$opened" 10
+    ui_kv stops "Ctrl-C here, Stop in the page, or after $idle min unused" 10
+    ui_box_close "tando_${APP//-/_} on $HOST · through this ssh session only"
+    printf '%s\n' "$url"   # (whole, on a line of its own: it is copied)
+  fi
   # until the session ends (a signal's trap stops it and exits; the post-check runs below)
   trap 'studio_end; studio_after "Ctrl-C"; exit 130' INT
   trap 'studio_end; studio_after "terminated"; exit 143' TERM HUP
   wait "$STUDIO_SSH" 2> /dev/null
   STUDIO_SSH=""
   trap - INT TERM HUP
+  [ -z "$STUDIO_WATCH" ] || { kill "$STUDIO_WATCH" 2> /dev/null; STUDIO_WATCH=""; }
   local why
   why=$(sed -n 's/^stopped reason=\([a-z]*\) .*/\1/p' "$out" | head -1)
   case $why in

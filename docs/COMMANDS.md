@@ -265,7 +265,7 @@ Example: `tando jobs run nightly` · `tando jobs log nightly -n 5` · `tando job
 
 ### db
 `tando db [info] [app]` · `tando db psql [app]` · `tando db url [app] --show` ·
-`tando db studio [app] [--no-open] [--idle M] [--stop]`. Flags: `-a -H --show --no-open --idle --stop`.
+`tando db studio [app] [--no-open] [--json] [--idle M] [--stop]`. Flags: `-a -H --show --no-open --json --idle --stop`.
 Subcommands: info (default, 0-1: the app), psql, url, studio (0-1).
 The app's PostgreSQL database (`database = postgres`). Without a subcommand: its size, the
 connections in use and the limits of its role as PostgreSQL holds them. `url` refuses to print
@@ -345,6 +345,10 @@ statement, the error's position selected in the editor, notices, CSV download). 
   `tando db studio --stop [app]` from another terminal. Then nothing of it is left on the server;
   the command checks and says so. The page shows "This studio session ended" with the command to
   run again; your editor text is kept.
+- **For programs: `--json`.** No browser and no box: one line `{"url":"http://127.0.0.1:<port>/#c=<code>","port":<port>,"sid":"<12 hex>"}`
+  on stdout when the studio answers, and the session ends when the command's stdin reaches EOF
+  (the program that started it closed the pipe or died), as Ctrl-C would. The dashboard add-on
+  runs it so (addons/dashboard/docs/SPEC.md "Database studio").
 - **History** of your queries (the last 100) and the editor's text stay in the browser, encrypted
   (AES-GCM with a key the studio derives from the role's password: nothing else on the computer
   can read them, not even a later page on the same port). They are per app and port, so a second

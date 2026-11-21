@@ -547,6 +547,21 @@ st_wait_exit 15
 check "S7g tando db studio --stop from another shell: stopped 1, the first client ends, nothing left" \
   eval 'grep -q "stopped 1 studio session" "$E/stop.out" && nothing_left'
 check "S7h the stable port is the same each time ($ST_PORT)" eval 'grep -q "127.0.0.1:$ST_PORT/" "$E/s1.out"'
+# --json (tando-dash runs it so): one JSON line when ready; the end of its stdin ends the session
+rm -f "$E/s7i.in"; mkfifo "$E/s7i.in"
+"$R" db studio -a shop --json < "$E/s7i.in" > "$E/s7i.out" 2> "$E/s7i.err" &
+ST_PID=$!
+exec 5> "$E/s7i.in"   # (the writer end: held here, as tando-dash holds its pipe)
+T_UNTIL_STEP=0.2 t_until 30 eval 'grep -q . "$E/s7i.out" || ! kill -0 $ST_PID 2> /dev/null'
+s7k=0
+grep -qE "^\{\"url\":\"http://127\.0\.0\.1:([0-9]+)/#c=[A-Za-z0-9_-]+\",\"port\":[0-9]+,\"sid\":\"[0-9a-f]{12}\"\}$" "$E/s7i.out" &&
+  [ "$(wc -l < "$E/s7i.out" | tr -d " ")" = 1 ] && [ "$(studio_units)" = 1 ] && s7k=1
+check "S7k --json prints one line {url, port, sid} and no box, the session runs ($(head -c 40 "$E/s7i.out"))" eval '[ $s7k = 1 ]'
+exec 5>&-
+s7l=0; T_UNTIL_STEP=0.2 t_until 20 eval '! kill -0 $ST_PID 2> /dev/null' && s7l=1
+kill -INT "$ST_PID" 2> /dev/null; wait "$ST_PID" 2> /dev/null   # (when it did not end: not left running)
+check "S7l --json: the end of stdin (the program that started it is gone) ends it; nothing left ($(grep -o 'studio stopped[^;]*' "$E/s7i.err" | head -1))" \
+  eval '[ $s7k = 1 ] && [ $s7l = 1 ] && nothing_left'
 
 # ---- S8 CI keys -----------------------------------------------------------------------------
 log "S8 CI keys"

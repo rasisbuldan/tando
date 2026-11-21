@@ -91,6 +91,33 @@ the review itself is not in the repository). The design guideline is docs/DESIGN
    - What changed: between two releases, env changes and deploy notes.
    Cut from v1: the Database and Backups pages (a line each), the job output viewer (M-later).
 
+## Database studio (owner, 21 Nov: a new window, never a view inside the dashboard)
+- Under each app with a database (`database` in its status row) the sidebar has a "Database"
+  row; the app header has "Open database" (the same action). Every open is confirmed: "Open a
+  read-only SQL session on <app> (<server>)? It ends when you press Stop, after 30 min unused, or
+  when the dashboard stops." (confirm token of kind `studio`), then `POST /api/studio/open
+  {host, app, confirm}` with an `Idempotency-Key` (the same key: the same answer, no second
+  studio; kept in memory only).
+- tando-dash runs `tando db studio <app> -H <host> --json` (exact argv in the allowlist) as a
+  long-running child and answers with the studio's one-time link (`http://127.0.0.1:<port>/#c=`,
+  single use, 60 s), never logged or written to disk. The page opens it with
+  `window.open(url, "_blank", "noopener")` (the Mac window hands it to the default browser) and
+  keeps "Nothing opened? Open it here" for a blocked pop-up. The studio's page trades the code
+  itself; its key never passes through tando-dash; no proxy.
+- At most 1 dashboard studio per server (the server allows 2: the other stays free for the
+  terminal), 4 in all, counted apart from the 3-per-host limiter of reads and log streams (the
+  studio has its own ssh connection). A second app on the same server: 409 naming the open one.
+  The CLI's refusal ("2 studios are open on ... already") is the message.
+- The overview poll carries `studios` ([{host, app, since, state}]): the row shows "open · Stop".
+  Stop is `POST /api/studio/stop {host, app}`: SIGTERM to the child's process group (the CLI
+  ends its session as Ctrl-C does). A child that ends on its own (Stop in the studio page, idle,
+  sleep) is noticed and the row closes.
+- Never orphaned: the child's stdin is a pipe tando-dash holds; `--json` ends the session at its
+  EOF (tando-dash died). On shutdown every child's group gets SIGTERM. The children's pids are in
+  `cache/dash-studios.json` (0600); a tando-dash started after a crash sends SIGTERM to each one
+  whose command line is still that studio's (pid leads its group), then empties the file.
+- The audit line's `from` says `dashboard` (TANDO_FROM, as for writes).
+
 ## Milestones (implementation: Opus for critical parts, Sonnet for straightforward ones)
 - **M1 data + server (Opus):** `snapshot --json`, `env-names`, `state_reason`, deployer, host
   row in JSON; a JSON contract test (test/json-contract.sh, key:type schemas, stub ssh);
