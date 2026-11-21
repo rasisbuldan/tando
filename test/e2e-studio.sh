@@ -660,6 +660,7 @@ T_UNTIL_STEP=0.2 t_until 10 eval '[ "$(srv "ps -o ni= -p $bpid" | tr -d " ")" = 
 hn=$(helpers)
 check "S9i unused, the database connection is closed (the helper runs on: $hn); the next request opens one ($again), its priority lowered again ($bpid)" \
   eval '[ $gone = 0 ] && [ "$hn" -ge 1 ] && [ "$again" = 2 ] && [ "$(srv "ps -o ni= -p $bpid" | tr -d " ")" = 19 ]'
+api /api/end '{}'   # (its helper has 30 s of idle time: Stop ends it now)
 kill -INT "$ST_PID"; st_wait_exit 15
 knobs "timeout=4 idle-s=8"
 
