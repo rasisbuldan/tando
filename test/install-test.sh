@@ -51,6 +51,15 @@ check_tree() {
     [ -e "$home/$p" ] || missing="$missing $p"
   done
   check "$L.1 every \$TANDO_HOME path the code uses is installed${missing:+ (missing:$missing)}" test -z "$missing"
+  # and every whole file path the code names there (the first component alone let a missing
+  # lib/native.js through: tando 0.2.0's archive lacked it and every Node.js deploy failed at stage)
+  missing=""
+  for p in $(grep -rhoE 'TANDO_HOME/[A-Za-z0-9_./-]+' bin lib | sed 's|TANDO_HOME/||' | sort -u); do
+    case $p in srv/*|dist/*|scripts/*|*/) continue;; esac
+    [ -f "$ROOT/$p" ] || continue   # (a prefix such as lib/cmd- or server/linux- is not a file)
+    [ -e "$home/$p" ] || missing="$missing $p"
+  done
+  check "$L.1b every file the code names under \$TANDO_HOME is installed${missing:+ (missing:$missing)}" test -z "$missing"
   for p in templates/github-deploy.yml templates/pre-push lib/help.txt lib/help-conf.txt VERSION; do
     [ -e "$ROOT/$p" ] && { [ -e "$home/$p" ] || missing="$missing $p"; }
   done

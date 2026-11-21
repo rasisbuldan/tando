@@ -19,6 +19,12 @@ first, grouped by area.
   were linked before are not compressed again. The bench Next.js app itself was not built here.
   Tests: CG0 and CZ in e2e.sh, N13 in e2e-next.sh. Not done: `.zst` copies (a visitor that
   accepts both gets the .gz).
+## 0.2.1 - 2026-11-21
+
+- Fixed: the 0.2.0 release archive lacked `lib/native.js`, so every Node.js or Next.js deploy from
+  an installed 0.2.0 stopped at stage ("could not read the staged node_modules"). The archive now
+  packs `lib/*.js`, and install-test checks every file the code names under `$TANDO_HOME` (it
+  checked only the first path component). A checkout was not affected.
 - Fixed: the upgrade from 0.1.1 left each replaced job unit of the old name in `systemctl --failed`
   ("not-found failed") when its last run had failed, until the server rebooted. Seen on a real
   server during the 0.2.0 game day; the replaced units' failed state is now cleared (e2e-upgrade U3a2).
