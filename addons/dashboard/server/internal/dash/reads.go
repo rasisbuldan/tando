@@ -129,8 +129,13 @@ func (c *cache) stats() (entries, runs int) {
 
 // jsonRun: run argv and insist on JSON
 func (s *Server) jsonRun(host string, argv []string) func(context.Context) (json.RawMessage, error) {
+	return s.jsonRunIn("", host, argv)
+}
+
+// jsonRunIn: the same, run in dir
+func (s *Server) jsonRunIn(dir, host string, argv []string) func(context.Context) (json.RawMessage, error) {
 	return func(ctx context.Context) (json.RawMessage, error) {
-		res, err := s.run(ctx, Req{Argv: argv, Host: host})
+		res, err := s.run(ctx, Req{Argv: argv, Host: host, Dir: dir})
 		if err != nil {
 			return nil, err
 		}

@@ -34,6 +34,7 @@ type Config struct {
 	ConfirmTTL       time.Duration // confirm token: 60 s
 	CacheTTL         time.Duration // snapshot cache: 10 s
 	HostCareTTL      time.Duration // doctor, host status: 60 s
+	AppReadTTL       time.Duration // jobs, requests, errors, env names and log, alerts, history: 60 s
 	ReadTimeout      time.Duration // one read run: 30 s
 	WriteTimeout     time.Duration // one write run: 30 min
 	IdemTTL          time.Duration // idempotency records: 24 h
@@ -62,6 +63,7 @@ func (c *Config) defaults() {
 	d(&c.ConfirmTTL, 60*time.Second)
 	d(&c.CacheTTL, 10*time.Second)
 	d(&c.HostCareTTL, 60*time.Second)
+	d(&c.AppReadTTL, 60*time.Second)
 	d(&c.ReadTimeout, 30*time.Second)
 	d(&c.WriteTimeout, 30*time.Minute)
 	d(&c.IdemTTL, 24*time.Hour)
@@ -99,6 +101,7 @@ type Server struct {
 	sess       *sessions
 	snaps      *cache
 	care       *cache
+	more       *cache // appreads.go
 	confirms   *confirms
 	idem       *idemStore
 	writes     *writeLocks
@@ -118,7 +121,8 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 	s.sess = newSessions(filepath.Join(cfg.ConfigDir, "cache", "dash-sessions.json"), cfg.Now)
 	s.snaps = newCache(cfg.MaxCache, false)
 	s.care = newCache(cfg.MaxCache, true)
-	s.snaps.logw, s.care.logw = cfg.Log, cfg.Log
+	s.more = newCache(cfg.MaxCache, false)
+	s.snaps.logw, s.care.logw, s.more.logw = cfg.Log, cfg.Log, cfg.Log
 	s.confirms = newConfirms(cfg.Now)
 	var err error
 	s.idem, err = openIdem(filepath.Join(cfg.ConfigDir, "cache", "dash-idem.json"), filepath.Join(cfg.ConfigDir, "cache", "dash-ops"), cfg.MaxIdem, cfg.IdemTTL, cfg.Now)
@@ -320,6 +324,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.action(w, r)
 		}
 	default:
+		if d, ok := appReads[r.URL.Path]; ok && r.Method == http.MethodGet {
+			s.appRead(w, r, d)
+			return
+		}
 		apiErr(w, 404, "not_found", "no such endpoint")
 	}
 }

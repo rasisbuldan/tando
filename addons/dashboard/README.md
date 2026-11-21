@@ -62,8 +62,16 @@ the page shows "Session ended"). Errors are `{"error":{"code","message"}}`, the 
 | GET | `/api/logs?host=&app=&n=&since=&level=&grep=&worker=&release=` | `logs <app> -H <host> --json -n <n> [--since T] [--level L] [--grep TEXT] [--worker W] [--release ID]` | none | cookie |
 | GET | `/api/logs/stream?host=&app=&level=&worker=` | `logs <app> -H <host> --json -f -n 200 [--level L] [--worker W]` (a restart: `-n 1000 --since @<epoch>`) | one child per (host, app, level, worker), shared | cookie |
 | POST | `/api/confirm` `{action,host,app}` | none | token 60 s, single use | cookie |
-| POST | `/api/action` `{action,host,app,confirm,params?}` | the action's argv (M1b: `noop` = `--version`) | idempotency record 24 h | cookie + confirm token + `Idempotency-Key` |
+| GET | `/api/jobs?host=&app=` | `jobs ls <app> --json -H <host>` | 60 s per (endpoint, host, app, range), single flight | cookie |
+| GET | `/api/requests?host=&app=&range=1h\|24h\|7d` | `requests summary <app> --json -H <host> --since <range>` (default 1h) | as jobs | cookie |
+| GET | `/api/errors?host=&app=` | `errors <app> --json -H <host>` (24 h) | as jobs | cookie |
+| GET | `/api/envnames?host=&app=` | `env ls <app> --names --json -H <host>` (names only; never `env ls` without `--names`) | as jobs | cookie |
+| GET | `/api/envlog?host=&app=` | `env log -a <app> --json -H <host>` | as jobs | cookie |
+| GET | `/api/alerts?host=` | `alerts --json -H <host>` | as jobs | cookie |
+| GET | `/api/history?host=` | `history --json -H <host>` (every app of the server) | as jobs | cookie |
+| POST | `/api/action` `{action,host,app,confirm,params?}` | the action's argv (below) | idempotency record 24 h | cookie + confirm token + `Idempotency-Key` |
 | GET | `/api/action?key=` | none | the record | cookie |
+| GET | `/api/action/stream?key=` | none (the write's output file) | none | cookie |
 
 Snapshot answers: `{host, app, range, fetched_at, age_s, cached, next_poll_s, data}` where `data` is
 the CLI's JSON as it is; `next_poll_s` is 15 with `visible=1` (default) and 60 with `visible=0`.
@@ -72,7 +80,56 @@ Doctor and host status: `{host, ran_at, cached, next_run_s, data | error}`.
 Action: 202 `{key, action, host, app, status: "running", started_at, replay}`; the same key again
 returns that record (`replay: true`, 200 once ended); the same key with another body 422; another
 write of the same app while one runs 409 `{"error":{"code":"running","running":{action,since,key}}}`.
-`GET /api/action?key=` adds `output` (the last 8 KB) and, once ended, `ended_at` and `exit`.
+`GET /api/action?key=` adds `output` (the last 8 KB) and, once ended, `ended_at`, `exit`, `code`
+(`busy`: another operation held the app; `message` is then `busy: ` and the CLI's own words),
+`message` and `outcome`.
+
+The app reads above answer `{host, app, ran_at, cached, next_poll_s, data}` (`range` too for
+requests; no `app` for alerts and history), `data` the CLI's JSON as it is (test/fixtures/json),
+or the error shape with `error` instead of `data`. They run in `/`, so a `tando.conf` in the
+folder tando-dash was started from never picks the app or the server.
+
+### Writes
+
+| action | params | tando argv |
+|---|---|---|
+| `deploy` | none | `deploy -a <app> -H <host>`, run in the app's recorded folder |
+| `rollback` | `{release?}` (an id from releases; none: the CLI's rollback target) | `rollback <app> [<release>] -H <host>` |
+| `stop`, `start`, `restart` | none | `<action> <app> -H <host>` |
+| `env-set` | `{key, value}` | `env set <KEY> -a <app> -H <host>`, the value on stdin |
+
+- **deploy** runs where tando recorded the app was last deployed from: the server keeps
+  `origin=user@machine:path` in the app's app.conf (written by every deploy, checked by the agent:
+  "was last deployed from X, not from here"); `tando releases` sends it as an `origin` row and
+  `tando snapshot --app` as `app.origin`. tando-dash refuses (422 `deploy_folder`, one line saying
+  why and what to do) when there is no record (a server set up by an older tando), when the record
+  is another machine's (`user@machine` is not this one's, as lib/deploy.sh `client_name` makes it),
+  when the folder is gone, or when its `tando.conf` names another app or another server. It never
+  passes `--force` or `--yes`: where the CLI would ask, it stops and says so in the output.
+- **env-set**: the value is one line of text (no line break or other control character, 32 KB at
+  most; refused before anything runs, in words that never repeat it). It goes to the CLI on stdin
+  and nowhere else: not in argv, the idempotency record (the value is not part of the body the
+  HMAC covers; a reused key with another value is refused while tando-dash runs, from a key kept in
+  memory only), the output file, a log line or an error.
+- Every write runs with `TANDO_FROM=dashboard`: the CLI puts it in front of `sudo` in its ssh
+  command, and the server's audit line says `from` dashboard instead of the address (a deploy
+  key's gate refuses such a command, so no key can set it).
+- **Outcome from the server.** When the CLI ends, tando-dash reads the app back with `snapshot`:
+  for deploy and rollback the history entry newer than the one before the write (waiting while the
+  app is `deploying`, a soak, up to 15 min), for the others its state. The record's `status` is
+  `done` when the server agrees (a deploy whose CLI was killed after the server finished is
+  `done`), `failed` with the CLI's last `tando:` line and the server's word otherwise. `outcome`:
+  `{checked_at, state, release, history?, verdict: ok|failed|unknown, summary}`.
+- **Reattach.** A write that was running when tando-dash stopped is not killed (its own process
+  group, output to its file) and is taken over at the next start: its app stays taken (409) until
+  that CLI is gone, then its outcome is read from the server as above. Only an env set (the state
+  says nothing of it) and the test action end as `unknown`, with where to look.
+
+The progress stream is Server-Sent Events, read from the write's output file, so a reloaded page,
+a second tab and a restarted tando-dash see the same lines: `hello` (`{key, action, host, app,
+status, started_at}`), `line` (`{n, text}`, `id:` n; with `Last-Event-ID` only the lines after it),
+`end` (the record as `GET /api/action` gives it, without `output`; the last event). A comment every
+15 s keeps it open; 32 streams at most.
 
 Logs: a tail answers `{host, app, ran_at, lines: [...], notes: [...]}`: `lines` are the CLI's JSON
 lines as they are (`{time, usec, src, unit, priority, level, msg}`), `notes` its other lines.
@@ -98,7 +155,9 @@ close its EventSource on `error` and `dropped` (otherwise the browser reconnects
 The allowlist (`server/internal/dash/allow.go`) is the only list of what tando-dash may run:
 `--version`, `help snapshot`, `snapshot`, `doctor`, `host status`, `health <app> --json -H <host>`,
 `logs <app> -H <host> --json -n N` with the filters above (and `-f` with `--level` and `--worker`
-only) and `restart <app> -H <host>` (for M4), each with an exact set of flags and positionals. Names
+only), the app reads above, and the writes (`deploy -a <app> -H <host>`, `rollback <app>
+[<release>] -H <host>`, `stop|start|restart <app> -H <host>`, `env set <KEY> -a <app> -H <host>`;
+never `--force`, `--yes`, `KEY=VALUE` or a value), each with an exact set of flags and positionals. Names
 follow tando's rules (app `^[a-z][a-z0-9-]{1,23}$`; host: letters, digits, `.`, `_`, `-`, and
 here also no leading `-` or `.` and no `..`) and the host must be one of `~/.config/tando/hosts`.
 
@@ -110,6 +169,9 @@ soak; the quick tier skips it with `-short`; `TANDO_DASH_SOAK=30m` for the long 
 release archive holding nothing of `addons/`, the stripped build, and the VERSION match. The Go
 tests run a fake tando CLI (the test binary itself) with fault injection chosen by host name:
 slow, hang (with a grandchild), garbage, a non-zero exit, killed mid-output, too large. For logs it
-keeps a fake journal (4 lines a second) and leaves a grandchild holding stdout like ssh;
+keeps a fake journal (4 lines a second) and leaves a grandchild holding stdout like ssh; for the
+writes it keeps each app's state and history (snapshot shows them) and records every write's argv,
+`TANDO_FROM` and folder: `busy*` hosts refuse as a held app does, `flop*` fail, `cut*` kill
+themselves after the server finished, `soak*` stay deploying for one more read;
 `drop*` hosts exit after 6 lines, `flood*` hosts write as fast as they can. A second 2-minute soak
 has viewers joining and leaving streams.

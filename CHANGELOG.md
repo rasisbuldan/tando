@@ -6,6 +6,17 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added (dashboard add-on): writes in tando-dash: deploy (from the folder tando recorded as the
+  app's last deploy origin; refused for another machine's, a missing or a foreign folder), rollback
+  (to the target or a release), stop, start, restart and env set (the value on stdin only). Progress
+  as Server-Sent Events from the write's output file (`/api/action/stream`, Last-Event-ID resume);
+  the outcome read back from the server (history, state), also for a write that ran while tando-dash
+  restarted; "busy: ..." in the CLI's words when another operation holds the app. Read endpoints for
+  the app pages: jobs, requests, errors, env names, env log, alerts, history.
+- Added: the audit line's `from` says `dashboard` for changes made from the tando dashboard
+  (`TANDO_FROM=dashboard` in the CLI's environment); `tando releases` sends the app's last deploy
+  origin as an `origin` row, and `tando snapshot --app` has `app.origin`.
+
 - Added (dashboard add-on, not in the main archive): the web app, `addons/dashboard/web` (React, Vite,
   Tailwind, Recharts in a lazy chunk): sidebar, Overview, Server page, App page with the Overview
   and Deploys tabs; the other pages are placeholders. Bundle budgets and design rules are checked

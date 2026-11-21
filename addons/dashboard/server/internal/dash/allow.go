@@ -66,6 +66,19 @@ var shapes = []shape{
 	{name: "logs-follow", verb: []string{"logs"}, pos: []valueKind{vApp},
 		flags: map[string]flagRule{"-H": {vHost, true}, "--json": {vNone, true}, "-f": {vNone, true},
 			"-n": {vCount, true}, "--since": {vSince, false}, "--level": {vLevel, false}, "--worker": {vWorker, false}}},
+	// the app pages' reads (M5): exact shapes; `env ls` only with --names (never a value)
+	{name: "jobs", verb: []string{"jobs", "ls"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}}},
+	{name: "requests", verb: []string{"requests", "summary"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}, "--since": {vRange, true}}},
+	{name: "errors", verb: []string{"errors"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}}},
+	{name: "envnames", verb: []string{"env", "ls"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"--names": {vNone, true}, "--json": {vNone, true}, "-H": {vHost, true}}},
+	{name: "envlog", verb: []string{"env", "log"},
+		flags: map[string]flagRule{"-a": {vApp, true}, "--json": {vNone, true}, "-H": {vHost, true}}},
+	{name: "alerts", verb: []string{"alerts"}, flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}}},
+	{name: "history", verb: []string{"history"}, flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}}},
 	// writes (M4). Never --force or --yes: deploy runs in the app's recorded folder and stops
 	// where the CLI would ask; env set takes the value on stdin, never in argv.
 	{name: "deploy", verb: []string{"deploy"}, flags: map[string]flagRule{"-a": {vApp, true}, "-H": {vHost, true}}, write: true},
