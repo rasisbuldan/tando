@@ -514,7 +514,7 @@ dockerfile_port() {
 }
 
 do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) when missing
-  local t0 id errs=0 ph n l existed=1 current=""
+  local t0 id ph n l existed=1 current=""
   BUILD_SECS=0 BUILD_SUMMARY="" STAGE_NOTE="" SWAPPED="" VENV_SHOWN="" STARTED=""
   # Next.js without standalone output is refused (or fixed with --yes) before anything is installed
   next_standalone
@@ -656,6 +656,36 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   phase_start copy
 
   # follow the activation; it runs on the server whether or not we keep watching
+  act_follow "$id" "$t0" || { [ $? = 3 ] && return 0; return 1; }   # (3: live; the server watches its soak)
+  trap 'exit 130' INT TERM
+
+  n=4
+  for ph in $PHASES; do
+    case " $SHOWN " in *" $ph "*) ;; *) phase_line $n $ph skip "";; esac
+    n=$((n + 1))
+  done
+  case $K_result in
+    ok|verified)
+      ui_box_close "live in $(ui_dur "$(since "$t0")")  $K_link"
+      after_live
+      return 0;;
+  esac
+  fail_report
+  box_say "$UI_DIM" "all of it: tando logs --release $id ${UI_G_MID} the server: tando doctor"
+  if [ "$K_result" = rolledback ]; then
+    ui_box_close "release $id: rolled back to the last good release"
+  elif [ -z "$current" ]; then
+    ui_box_close "release $id: $K_result; nothing is live yet"
+  else
+    ui_box_close "release $id: $K_result; the running app was not touched"
+  fi
+  return 1
+}
+
+# act_follow id t0: follows the activation of release id until its result (K_* from deploy-status;
+# returns 0), or until it is live and soaking (the box closed, after_live done: returns 3)
+act_follow() {
+  local id=$1 t0=$2 errs=0 late=""
   trap 'echo; note "detached: release $id keeps activating on the server; follow it with tando status --watch 2"; exit 130' INT TERM
   SHOWN="" SOAKING="" QUEUED_SAID=""
   # a deadline: an activation that neither ends nor dies is reported, not waited for forever
@@ -665,10 +695,6 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   local dlen=$(( 2 * ${C_timeout:-60} + ${C_soak:-${TANDO_SOAK:-30}} + rto + 900 ))
   local deadline=$(( $(now) + dlen ))
   while :; do
-    if [ "$(now)" -gt "$deadline" ]; then
-      ui_box_close "release $id: still activating after $(ui_dur $(( deadline - ${t0%.*} )))"
-      die "the activation of $id has not finished; it may still be running on $HOST: tando status -a $APP, tando doctor"
-    fi
     if ! agent_raw sudo deploy-status "$APP" "$id" > "$TMPD/ds"; then
       errs=$((errs + 1))
       [ $errs -lt 60 ] || die "lost contact; the activation continues on the server: tando releases"
@@ -698,36 +724,21 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
         note "if it falls over within those ${K_soak:-30} s, the server rolls back by itself" \
           "(tando status; --wait waits)"
         after_live
-        return 0
+        return 3
       fi
       ui_box_line "        live; watching it ${K_soak:-30} s before calling it verified"
     fi
     case $K_result in ok|failed|rolledback|bad|verified|unknown) break;; esac
+    # (past it, one more answer is asked for first: a laptop that slept through the activation
+    # reports its result, not that it has not finished)
+    if [ "$(now)" -gt "$deadline" ]; then
+      [ -n "$late" ] || { late=1; continue; }
+      ui_box_close "release $id: still activating after $(ui_dur $(( deadline - ${t0%.*} )))"
+      die "the activation of $id has not finished; it may still be running on $HOST: tando status -a $APP, tando doctor"
+    fi
     sleep 0.5
   done
-  trap 'exit 130' INT TERM
-
-  n=4
-  for ph in $PHASES; do
-    case " $SHOWN " in *" $ph "*) ;; *) phase_line $n $ph skip "";; esac
-    n=$((n + 1))
-  done
-  case $K_result in
-    ok|verified)
-      ui_box_close "live in $(ui_dur "$(since "$t0")")  $K_link"
-      after_live
-      return 0;;
-  esac
-  fail_report
-  box_say "$UI_DIM" "all of it: tando logs --release $id ${UI_G_MID} the server: tando doctor"
-  if [ "$K_result" = rolledback ]; then
-    ui_box_close "release $id: rolled back to the last good release"
-  elif [ -z "$current" ]; then
-    ui_box_close "release $id: $K_result; nothing is live yet"
-  else
-    ui_box_close "release $id: $K_result; the running app was not touched"
-  fi
-  return 1
+  return 0
 }
 
 # after_live: what else the deploy did, in the user's words: new domains (a domain that does not

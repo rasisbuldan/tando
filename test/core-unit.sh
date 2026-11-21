@@ -89,5 +89,24 @@ both() { # the two deploys never held the lock at once (the second one waited, o
 check "U2a a stale deploy lock is taken over by one of two deploys, not by both" both
 check "U2b ... and one of them has it" grep -q '^in ' "$T/dl1" "$T/dl2"
 
+# ---- U3 act_follow (lib/deploy.sh): the laptop slept (or the CI runner stalled) while the
+# server activated the release. On waking, the client asks for the result before it gives up on
+# its deadline: a deploy that went live (or failed) is reported as such, not as "has not finished".
+# (now: a stub; the first deploy-status says running and the clock then jumps a day ahead, the
+# next one says ok)
+af() { # [stuck] -> act_follow's output and status (stuck: deploy-status never says more than running)
+  rm -rf "${T:?}/af"; mkdir -p "$T/af"
+  [ -z "${1:-}" ] || : > "$T/af/stuck"
+  # shellcheck disable=SC2016
+  TMPD=$T/af "$BASH" -c '. "$1/lib/common.sh"; . "$1/lib/deploy.sh"
+    now() { if [ -f "$TMPD/woke" ]; then echo 90000; else echo 1000; fi; }
+    agent_raw() { if [ -f "$TMPD/woke" ] && [ ! -f "$TMPD/stuck" ]; then printf "phase=done\nresult=ok\n"; else : > "$TMPD/woke"; printf "phase=copy\nresult=running\n"; fi; }
+    show_phases() { :; }; ui_box_close() { :; }; ui_dur() { echo "$1"; }
+    APP=a HOST=h C_release="" C_timeout="" C_soak=""
+    act_follow 20260101-000000 1000; echo "rc=$? result=$K_result"' _ "$ROOT" 2>&1
+}
+check "U3a after a long sleep the deploy's result is read before the deadline gives up" eq "$(af | tail -1)" "rc=0 result=ok"
+check "U3b an activation that never ends is still given up at the deadline" eval 'af stuck | grep -q "has not finished"'
+
 echo "core-unit: $n checks, $nf failed"
 [ "$nf" = 0 ]
