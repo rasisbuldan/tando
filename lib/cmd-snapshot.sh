@@ -67,15 +67,16 @@ snap_cmd() {
 }
 WATCH_BIN=${WATCH_BIN:-/opt/tando/bin/tando-watch}
 
-# snap_fetch app host...: the command on every host in parallel -> $TMPD/s.<host>.{out,err,rc}
+# snap_fetch app host...: the command on every host in parallel -> $TMPD/s.<host>.{out,err,rc}.
+# A watchdog ends a host's fetch at SNAP_TIMEOUT (rc 124); the fetches are waited for, not polled.
 snap_fetch() {
-  local a=$1 h missing end pids cmd
+  local a=$1 h cmd pids="" wd p
   shift
   cmd=$(snap_cmd "$a")
   for h; do
     (
       host_use "$h"
-      local try=0 rc
+      try=0
       while :; do
         ssh -n "${SSHO[@]}" "$TARGET" "$cmd" > "$TMPD/s.$h.out" 2> "$TMPD/s.$h.err"
         rc=$?
@@ -85,21 +86,24 @@ snap_fetch() {
       done
       echo "$rc" > "$TMPD/s.$h.rc.tmp" && mv "$TMPD/s.$h.rc.tmp" "$TMPD/s.$h.rc"
     ) < /dev/null > /dev/null 2>&1 &
+    pids="$pids $!"
   done
-  end=$((SECONDS + SNAP_TIMEOUT))
-  while [ $SECONDS -lt $end ]; do
-    missing=0
-    for h; do [ -f "$TMPD/s.$h.rc" ] || { missing=1; break; }; done
-    [ $missing = 0 ] && break
-    sleep 0.05
-  done
-  for h; do
-    [ -f "$TMPD/s.$h.rc" ] && continue
-    echo 124 > "$TMPD/s.$h.rc"; echo "no answer within $SNAP_TIMEOUT s" > "$TMPD/s.$h.err"
-  done
-  pids=$(jobs -p)
+  # the watchdog: after the timeout, every host still without an answer is marked and its fetch
+  # (the subshell and its ssh) killed
+  (
+    sleep "$SNAP_TIMEOUT"
+    for h; do
+      [ -f "$TMPD/s.$h.rc" ] && continue
+      echo "no answer within $SNAP_TIMEOUT s" > "$TMPD/s.$h.err"; echo 124 > "$TMPD/s.$h.rc"
+    done
+    # shellcheck disable=SC2086  # a list of pids
+    for p in $pids; do pkill -P "$p" 2> /dev/null; kill "$p" 2> /dev/null; done
+  ) < /dev/null > /dev/null 2>&1 &
+  wd=$!
   # shellcheck disable=SC2086  # a list of pids
-  [ -n "$pids" ] && { pkill -P "$(echo $pids | tr ' ' ',')" 2> /dev/null; kill $pids 2> /dev/null; }
+  for p in $pids; do wait "$p" 2> /dev/null; done
+  pkill -P "$wd" 2> /dev/null; kill "$wd" 2> /dev/null; wait "$wd" 2> /dev/null
+  for h; do [ -f "$TMPD/s.$h.rc" ] || { echo "no answer" > "$TMPD/s.$h.err"; echo 124 > "$TMPD/s.$h.rc"; }; done
   return 0
 }
 
