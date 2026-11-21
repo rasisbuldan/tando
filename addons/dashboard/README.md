@@ -15,7 +15,35 @@ archive. Its version matches the tando CLI it is installed for (`VERSION`).
   without a server: `web/dev/restart.sh` builds both and runs tando-dash against `web/dev/fake-tando.sh`
   (fixtures; one reachable host, one not).
 
-## Running it
+## Install, run, uninstall
+
+```sh
+tando addon install dashboard      # the asset of this tando's version, checksum verified
+tando dashboard                    # opens the browser with a one-time link (--no-open prints it)
+tando addon status                 # installed version against the client's, running or not
+tando addon uninstall dashboard    # stops it; removes binary, links, dash.lock, the cache files
+```
+
+`tando addon install dashboard` puts `tando-dash` in `~/.local/lib/tando-dash/<v>/` (with a
+`current` link) and links it as `~/.local/bin/tando-dash`; `--from PATH|URL` and `--sha256 HEX` install
+a downloaded or local archive (a checksum is always needed), `--version V` another version.
+The release assets are `tando-dash-<v>-darwin-universal.tar.gz`, `-linux-amd64.tar.gz` and
+`-linux-arm64.tar.gz`, each with a `.sha256`, built by `scripts/release-dashboard.sh` (web app,
+then `tando-dash`; `--check` proves two builds give the same bytes). The add-on's version is the
+client's: after a tando update run `tando addon install dashboard` again.
+
+### The Mac window
+
+On macOS the menu bar app (`tando menubar install`) has **Open dashboard** (⌘D): a window of its own
+instead of a browser tab. It uses the installed `tando-dash` (the row says "Install dashboard…" and
+shows the command when there is none), starts it when `dash.lock` names no running process, asks it
+for a fresh one-time link and loads it. One window, reused; at least 900x600, its size and place are
+remembered; ⌘R reloads, ⌘W closes the window (the app stays). Links to other sites open in your
+default browser; the window never shows anything but `127.0.0.1:<port>`. While `tando-dash` runs, the
+menu bar reads `cache/ls-all.json` when it is younger than its interval instead of running
+`tando ls --all --json`. Rebuild the app after a tando update: `tando menubar install`.
+
+## Running it from a checkout
 
 ```sh
 cd addons/dashboard/server
