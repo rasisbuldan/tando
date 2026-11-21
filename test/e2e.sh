@@ -1120,7 +1120,7 @@ cp tando.conf "$E/cz-keep.conf"; echo "compress = maybe" >> tando.conf
 czbad=$("$R" deploy 2>&1); cp "$E/cz-keep.conf" tando.conf
 check "CZ9 a bad value is refused by the client and by the server" \
   eval 'echo "$czbad" | grep -q "compress must be on or off" && agent_check node "compress=maybe" | grep -q "compress must be on or off"'
-cd "$W" || exit 2
+cd "$W/skewn" || exit 2   # (the next section, HL, works in the node app of AS7)
 # HL. a release shares the live release's unchanged files by hard link (docs/ARCHITECTURE.md "copy"):
 # never a file of a writable or assets directory, never one the app can write, and no change to one
 # release shows in another
