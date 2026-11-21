@@ -1,0 +1,31 @@
+{
+ "host": "web-1",
+ "app": "shop",
+ "entries": [
+  {
+   "n": 1,
+   "time": "2026-11-21 06:42 UTC",
+   "by": "alice",
+   "verb": "set",
+   "note": "rotate the session key",
+   "added": [],
+   "changed": [
+    "SESSION_SECRET"
+   ],
+   "removed": []
+  },
+  {
+   "n": 2,
+   "time": "2026-11-20 06:48 UTC",
+   "by": "alice",
+   "verb": "import",
+   "note": "-",
+   "added": [
+    "DATABASE_URL",
+    "PUBLIC_BASE_URL"
+   ],
+   "changed": [],
+   "removed": []
+  }
+ ]
+}

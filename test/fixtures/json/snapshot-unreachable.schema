@@ -1,0 +1,5 @@
+:object
+checked_at:number
+error:string
+host:string
+reachable:bool

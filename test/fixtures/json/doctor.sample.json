@@ -1,0 +1,27 @@
+{
+ "host": "web-1",
+ "checks": [
+  {
+   "name": "ssh",
+   "state": "ok",
+   "detail": "connected as admin"
+  },
+  {
+   "name": "agent",
+   "state": "ok",
+   "detail": "0.2.2"
+  },
+  {
+   "name": "disk",
+   "state": "warn",
+   "detail": "81% used on /: tando host status web-1 lists what to clean"
+  },
+  {
+   "name": "caddy",
+   "state": "fail",
+   "detail": "not running: sudo systemctl start caddy"
+  }
+ ],
+ "failed": 1,
+ "warnings": 1
+}

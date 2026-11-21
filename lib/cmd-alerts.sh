@@ -75,8 +75,9 @@ fetch_alerts() {
   NOW=$(now)
 }
 
-# alerts --json: one object for scripts and the menu bar app: every firing or pending alert and
-# every notifier (last delivery, failures in a row, the error), with reachable and checked_at
+# alerts --json: one object for scripts and the menu bar app: every firing or pending alert,
+# every notifier (last delivery, failures in a row, the error) and the recent history (the last 8
+# events), with reachable and checked_at
 alerts_show_json() {
   printf '{"host":%s,"reachable":true,"checked_at":%s,"alerts":' "$(json_str "$HOST")" "$NOW"
   awk -F '\t' -v OFS='\t' '$1 == "alert" { print $2, $3, $4, $5, $6, $8 }' "$TMPD/al" |
@@ -84,6 +85,11 @@ alerts_show_json() {
   printf ',"notifiers":'
   awk -F '\t' -v OFS='\t' '$1 == "notifier" { print $2, $3, $5, $6, $7, $9 }' "$TMPD/al" |
     to_json "name:s,type:s,last_ok:n,failures:n,queued:n,error:s"
+  # the recent events of the alert history (show's hist rows: fired, resolved, flapping, a restart
+  # it made...), newest first: at, event, app, check, detail
+  printf ',"history":'
+  awk -F '\t' -v OFS='\t' '$1 == "hist" { print $2, $3, $4, $5, $6 }' "$TMPD/al" | sort -t "$TAB" -k1,1nr |
+    to_json "at:n,event:s,app:s,check:s,detail:s"
   printf '}\n'
 }
 render_alerts() {
@@ -329,6 +335,7 @@ alerts_history() {
 
 cmd_alerts() {
   local op=${ARGS[1]:-} want=$APP
+  [ "$op" = --json ] && op=show   # (a plugin keeps --json in ARGS: tando alerts --json is show)
   resolve 0
   APP=$want
   [ "$op" = history ] && [ -n "${ARGS[2]:-}" ] && APP=${ARGS[2]}

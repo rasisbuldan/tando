@@ -144,12 +144,30 @@ app_json_rows() {
     cpu_min "${cpum:-}"
     lim_clean
     firing_of "$a"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(state_word "$state" "$rel" "$recipe")" \
+    state_reason_v "$a" "$state" "$rel" "$recipe"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(state_word "$state" "$rel" "$recipe")" \
       "$recipe" "$port" "$rel" "$(id_epoch "$rel")" "$rst" "$mem" "$max" "$CPUN" "$rs" "$up" "$link" "$db" "${lb:-}" "${doms:-}" \
-      "$lcpu" "$ltasks" "$lconns" "$lreq" "$FIREN" "$FIRED"
+      "$lcpu" "$ltasks" "$lconns" "$lreq" "$FIREN" "$FIRED" "$SR"
   done < "$TMPD/st"
 }
-APP_JSON="app:s,state:s,recipe:s,port:n,release:s,deployed_at:n,release_status:s,memory_bytes:n,memory_max_bytes:n,cpu_percent:n,restarts:n,uptime_s:n,link:s,database:s,log_bytes:n,domains:s,cpu_limit:s,tasks_max:n,max_conns:n,max_requests:n,alerts_firing:n,firing:s"
+APP_JSON="app:s,state:s,recipe:s,port:n,release:s,deployed_at:n,release_status:s,memory_bytes:n,memory_max_bytes:n,cpu_percent:n,restarts:n,uptime_s:n,link:s,database:s,log_bytes:n,domains:s,cpu_limit:s,tasks_max:n,max_conns:n,max_requests:n,alerts_firing:n,firing:s,state_reason:s"
+# state_reason_v app agent-state release recipe -> SR, the one word a UI shows (no fork): running,
+# static, deploying, stopped (tando stop), down (it died: not running, or stopped with a down
+# alert, as down_word), failed (tando gave up on it: the agent's failed), not_deployed (no
+# release yet). Needs firing_load (DOWN_APPS) first. Any other agent state passes through.
+state_reason_v() {
+  case $2 in
+    deploying) SR=deploying; return 0;;
+  esac
+  case ${3:--} in -) SR=not_deployed; return 0;; esac
+  case $2 in
+    active) if [ "$4" = static ]; then SR=static; else SR=running; fi;;
+    failed) SR=failed;;
+    inactive) SR=down;;
+    stopped) case " $DOWN_APPS " in *" $1 "*) SR=down;; *) SR=stopped;; esac;;
+    *) SR=$2;;
+  esac
+}
 # lim_clean: the app's limits from the server (cpu "50%" or "1.5" cores, "-" = no cap), else "-"
 lim_clean() {
   case ${lcpu:-} in [0-9]%|[0-9][0-9]%|[0-9][0-9][0-9]%|[0-9]|[0-9].[0-9]|[0-9].[0-9][0-9]|[0-9][0-9]|[0-9][0-9].[0-9]) ;; *) lcpu=-;; esac
@@ -228,12 +246,36 @@ json_meta() {
     "$NOW" "$( [ -n "$SRV_VER" ] && json_str "$SRV_VER" || printf null)" \
     "$( [ -n "$CLI_VER" ] && json_str "$CLI_VER" || printf null)" "${SKEW:-null}"
 }
+# system_json: ,"system":{...}, the machine's numbers from the host row of $TMPD/st (and the loadavg
+# row `tando snapshot` adds): hostname, cpus, load_1/5/15, memory and disk (the file system of /,
+# which holds /opt/tando) used and total in bytes, uptime_s. Unknown is null. No fork.
+system_json() {
+  local r f1 f2 f3 f4 f5 f6 f7 f8 x n=null c=null mt=null mu=null dt=null du=null up=null l1=null l5=null l15=null found=""
+  while IFS=$TAB read -r r f1 f2 f3 f4 f5 f6 f7 f8 x; do
+    case $r in
+      host) found=1 n=$f1
+        ui_int "$f2" && c=$f2; ui_int "$f4" && mt=$f4; ui_int "$f5" && mu=$f5
+        ui_int "$f6" && dt=$f6; ui_int "$f7" && du=$f7; ui_int "$f8" && up=$f8
+        [ "$l5" != null ] || { sys_load_v "$f3"; l1=$UI_RET; };;
+      loadavg) sys_load_v "$f1"; l1=$UI_RET; sys_load_v "$f2"; l5=$UI_RET; sys_load_v "$f3"; l15=$UI_RET;;
+    esac
+  done < "$TMPD/st"
+  [ -n "$found" ] || { printf ',"system":null'; return 0; }
+  case $n in ""|-|*[!A-Za-z0-9._-]*) n=null;; *) n="\"$n\"";; esac   # a host name: plain words only
+  printf ',"system":{"hostname":%s,"cpus":%s,"load_1":%s,"load_5":%s,"load_15":%s,"memory_used_bytes":%s,"memory_total_bytes":%s,"disk_used_bytes":%s,"disk_total_bytes":%s,"uptime_s":%s}' \
+    "$n" "$c" "$l1" "$l5" "$l15" "$mu" "$mt" "$du" "$dt" "$up"
+}
+sys_load_v() { # "0.42" -> UI_RET, the number as JSON ("0.42"), else null
+  case $1 in [0-9]*.[0-9]*|[0-9]*) case $1 in *[!0-9.]*|*.*.*) UI_RET=null;; *) UI_RET=$1;; esac;; *) UI_RET=null;; esac
+}
 # firing_load: FIRING = " app:check ..." for every firing alert in $TMPD/st (no fork)
 firing_load() {
   local r fa fc fs _x
-  FIRING=""
+  FIRING="" DOWN_APPS=""
   while IFS=$TAB read -r r fa fc fs _x; do
-    [ "$r" = alert ] && [ "$fs" = firing ] || continue
+    [ "$r" = alert ] || continue
+    [ "$fc" = down ] && DOWN_APPS="$DOWN_APPS $fa"   # (down_word's rule: a down alert in any state)
+    [ "$fs" = firing ] || continue
     case $fa$fc in *[!a-z0-9_.-]*) continue;; esac   # plain words only: the list is word-split
     FIRING="$FIRING $fa:$fc"
   done < "$TMPD/st"
@@ -253,7 +295,7 @@ render_ls() {
   if [ -n "$JSON" ]; then
     printf '{"host":%s' "$(json_str "$HOST")"; json_meta
     printf ',"apps":'; app_json_rows | to_json "$APP_JSON"
-    printf ',"alerts":'; alerts_json; printf '}\n'
+    printf ',"alerts":'; alerts_json; system_json; printf '}\n'
     return
   fi
   firing_load
@@ -524,6 +566,7 @@ status_json() {
   printf ',"history":'; hist_json
   printf ',"alerts":'; alerts_json
   pg_json "$TMPD/st" "$APP"
+  system_json
   printf '}\n'
 }
 cmd_status() {
@@ -669,6 +712,27 @@ jobs_pause() {
   fi
 }
 
+# jobs --json: {"host", "app", "zone", "zone_name", "jobs": [...]}; per job its schedule, state (on,
+# paused, running), next and last run (epoch), result and exit code of the last run, how long it
+# took (seconds), the command, and next_runs: the next three times by the server's clock and zone,
+# as the server writes them ("2026-11-21 09:00").
+jobs_json() {
+  printf '{"host":%s,"app":%s' "$(json_str "$HOST")" "$(json_str "$APP")"
+  awk -F '\t' '
+    function s(v) { if (v == "-" || v == "") return "null"; gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); return "\"" v "\"" }
+    function n(v) { return (v ~ /^-?[0-9]+(\.[0-9]+)?$/) ? v : "null" }
+    $1 == "zone" { zone = $2; zn = $3; next }
+    $1 == "job" { N[++nj] = $2; CAL[$2] = $3; NX[$2] = $4; LA[$2] = $5; RE[$2] = $6; CO[$2] = $7; CM[$2] = $8; next }
+    $1 == "jobx" { ST[$2] = $3; DU[$2] = $4; R1[$2] = $5; R2[$2] = $6; R3[$2] = $7; next }
+    END {
+      printf ",\"zone\":%s,\"zone_name\":%s,\"jobs\":[", s(zone), s(zn)
+      for (i = 1; i <= nj; i++) { j = N[i]
+        r = ""; if (R1[j] != "" && R1[j] != "-") r = s(R1[j]); if (R2[j] != "" && R2[j] != "-") r = r "," s(R2[j]); if (R3[j] != "" && R3[j] != "-") r = r "," s(R3[j])
+        printf "%s{\"name\":%s,\"schedule\":%s,\"state\":%s,\"next_run\":%s,\"last_run\":%s,\"result\":%s,\"exit_code\":%s,\"duration_s\":%s,\"command\":%s,\"next_runs\":[%s]}",
+          (i > 1 ? "," : ""), s(j), s(CAL[j]), s(ST[j] == "" ? "on" : ST[j]), n(NX[j]), n(LA[j]), s(RE[j]), n(CO[j]), n(DU[j]), s(CM[j]), r
+      }
+      printf "]}\n" }' "$TMPD/st"
+}
 cmd_jobs() {
   resolve 1
   case "${ARGS[1]:-ls}" in
@@ -679,6 +743,7 @@ cmd_jobs() {
   local r n cal next last res code cmd lastw resw st dur n1 n2 n3 nextw tw zone zname x pd
   agent_raw sudo jobs "$APP" full > "$TMPD/st" || exit 1
   NOW=$(now)
+  if [ -n "$JSON" ]; then jobs_json; return 0; fi
   {
     printf 'JOB\tSCHEDULE\tNEXT\tLAST\tRESULT\tTOOK\tCOMMAND\n'
     while IFS=$TAB read -r r n cal next last res code cmd; do
@@ -742,7 +807,25 @@ cmd_jobs() {
 
 cmd_env_ls() {
   resolve 1
-  local r k v
+  local r k v a names=""
+  for a in ${ARGS[@]+"${ARGS[@]}"}; do [ "$a" = --names ] && names=1; done
+  # --names, and always with --json: the names only, read by the agent's env-names (no value ever
+  # leaves the server, and it is not audited as a reveal, as env-ls is)
+  if [ -n "$names$JSON" ]; then
+    [ -z "$SHOW" ] || usage_err "--show prints values; --names and --json list names only" env
+    agent_raw sudo env-names "$APP" > "$TMPD/st" || exit 1
+    if [ -n "$JSON" ]; then
+      printf '{"host":%s,"app":%s,"names":' "$(json_str "$HOST")" "$(json_str "$APP")"
+      awk -F '\t' '$1 == "env" && $2 ~ /^[A-Za-z_][A-Za-z0-9_]*$/ { printf "%s\"%s\"", (n++ ? "," : "["), $2 } END { printf (n ? "]" : "[]") }' "$TMPD/st"
+      printf '}\n'; return 0
+    fi
+    ui_box_open "env $APP" "$HOST"
+    if grep -q "^env$TAB" "$TMPD/st"; then
+      { printf 'KEY\n'; awk -F '\t' '$1 == "env" { print $2 }' "$TMPD/st"; } | ui_table "l"
+    else ui_box_line "No variables yet: tando env set KEY=VALUE (or tando env import .env)"; fi
+    ui_box_close "names only: tando env ls shows them with their values hidden"
+    return 0
+  fi
   agent_raw sudo env-ls "$APP" > "$TMPD/st" || exit 1
   {
     printf 'KEY\tVALUE\n'
@@ -858,6 +941,17 @@ cmd_doctor() {
   agent_raw sudo doctor $(server_sums) "$(client_version)" "status=$(server_sums tando-status | tr -d ' ')" \
     "tandod=$(server_sums tandod | tr -d ' ')" "offsite=$(server_sums tando-offsite | tr -d ' ')" \
     "host=$(server_sums tando-host | tr -d ' ')" "studio=$(server_sums tando-studio | tr -d ' ')" > "$TMPD/st" || exit 1
+  if [ -n "$JSON" ]; then
+    # {"host", "checks": [{name, state (ok, warn, fail), detail}], "failed", "warnings"}: every
+    # check as the agent wrote it (each program on its own row, as --verbose); exit 1 on a failure
+    printf '{"host":%s,"checks":' "$(json_str "$HOST")"
+    awk -F '\t' -v OFS='\t' -v h="$HOST" '$1 == "check" { d = $4; gsub(/<host>/, h, d); print $3, $2, d }' "$TMPD/st" |
+      to_json "name:s,state:s,detail:s"
+    fail=$(awk -F '\t' '$1 == "check" && $2 != "ok" && $2 != "warn"' "$TMPD/st" | grep -c .)
+    warn=$(awk -F '\t' '$1 == "check" && $2 == "warn"' "$TMPD/st" | grep -c .)
+    printf ',"failed":%s,"warnings":%s}\n' "$fail" "$warn"
+    [ "$fail" -eq 0 ]; return
+  fi
   # after a client upgrade every program differs: nine near-identical rows would bury the findings
   # that matter, so they become one row (--verbose lists each)
   while IFS=$TAB read -r r state name detail; do
@@ -947,6 +1041,16 @@ cmd_backup_ls() {
   local r id kind created size what where off="" err=""
   agent_raw sudo backup-ls "$APP" > "$TMPD/st" || exit 1
   NOW=$(now)
+  if [ -n "$JSON" ]; then
+    # {"host", "app", "backups": [{id, kind, created, size_bytes, holds, where}], "offsite_error"};
+    # where: local, both, offsite, local+pending, local+uploading, local+failed (null: no offsite)
+    printf '{"host":%s,"app":%s,"backups":' "$(json_str "$HOST")" "$(json_str "$APP")"
+    awk -F '\t' -v OFS='\t' '$1 == "backup" { print $2, $3, $4, $5, $6, $7 }' "$TMPD/st" |
+      to_json "id:s,kind:s,created:n,size_bytes:n,holds:s,where:s"
+    err=$(awk -F '\t' '$1 == "offsite-error" { e = $2 } END { print e }' "$TMPD/st")
+    printf ',"offsite_error":%s}\n' "$( [ -n "$err" ] && json_str "$err" || printf null)"
+    return 0
+  fi
   # WHERE (a 7th field from an agent with offsite copies): local, both, offsite, local+pending ...
   grep -Eq '	(offsite|both|local\+[a-z]+)$' "$TMPD/st" && off=1
   {

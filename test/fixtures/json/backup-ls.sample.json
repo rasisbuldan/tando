@@ -1,0 +1,23 @@
+{
+ "host": "web-1",
+ "app": "shop",
+ "backups": [
+  {
+   "id": "20261117-030000-daily",
+   "kind": "daily",
+   "created": 1795168128,
+   "size_bytes": 10485760,
+   "holds": "data, database",
+   "where": "both"
+  },
+  {
+   "id": "20261116-030000-daily",
+   "kind": "daily",
+   "created": 1795081728,
+   "size_bytes": 10400000,
+   "holds": "data, database",
+   "where": "local+failed"
+  }
+ ],
+ "offsite_error": "the bucket did not answer (timeout)"
+}

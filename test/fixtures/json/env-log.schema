@@ -1,0 +1,12 @@
+:object
+app:string
+entries:array
+entries[].added:array
+entries[].by:null-or-string
+entries[].changed:array
+entries[].n:null-or-number
+entries[].note:null-or-string
+entries[].removed:array
+entries[].time:null-or-string
+entries[].verb:null-or-string
+host:string

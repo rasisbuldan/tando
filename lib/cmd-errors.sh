@@ -26,7 +26,7 @@ cmd_errors() {
   [ "$n" = 100 ] && n=10
   ui_int "$n" && [ "$n" -le 200 ] || die "-n is 1 to 200"
   agent_raw sudo errors "$APP" "$w" "$n" > "$TMPD/er" || exit 1
-  if [ -n "$JSON" ]; then er_json; return; fi
+  if [ -n "$JSON" ]; then er_json "$w"; return; fi
   er_render "$since"
 }
 
@@ -47,11 +47,41 @@ er_rows() {
   done < "$TMPD/er"
 }
 
+# er_json window: each group with "series", its errors per hour over the window, oldest first (t:
+# the hour's start, GMT epoch; 0 where there were none), from the server's hours rows; null from
+# a server that sends none (older than this client)
 er_json() {
   er_rows > "$TMPD/er.rows"
   printf '{"host":%s,"app":%s,"errors":' "$(json_str "$HOST")" "$(json_str "$APP")"
-  to_json "id:s,count:n,total:n,first_seen:n,last_seen:n,release:s,kind:s,label:s,title:s" < "$TMPD/er.rows"
+  to_json "id:s,count:n,total:n,first_seen:n,last_seen:n,release:s,kind:s,label:s,title:s" < "$TMPD/er.rows" > "$TMPD/er.j"
+  # the series of each group, one line per group in the order of er.rows; spliced in before each
+  # object's closing brace by position (the k-th object gets the k-th line), not by its text
+  LC_ALL=C awk -F '\t' -v now="$(now)" -v w="$1" '
+    FILENAME == ARGV[1] { if ($1 == "hours" && $2 ~ /^[0-9a-f]+$/) { H[$2] = $3; any = 1 }; next }
+    { if (!any) { print "null"; next }
+      delete C; n = split(H[$1], p, ","); for (i = 1; i <= n; i++) { split(p[i], kv, ":"); C[kv[1] + 0] = kv[2] + 0 }
+      t0 = int((now - w) / 3600) * 3600; r = ""
+      for (t = t0; t <= now; t += 3600) r = r (r == "" ? "" : ",") sprintf("{\"t\":%d,\"count\":%d}", t, (t in C) ? C[t] : 0)
+      print "[" r "]" }' "$TMPD/er" "$TMPD/er.rows" > "$TMPD/er.s"
+  er_splice "$TMPD/er.j" "$TMPD/er.s"
   printf '}\n'
+}
+# er_splice json series: to_json's array with ,"series":<line k> added to its k-th object. The
+# objects are found by to_json's own framing: "{" starts one only after "[" or "},", and every
+# string value has its quotes and backslashes escaped, so "}," or "}]" outside a string ends one.
+er_splice() {
+  LC_ALL=C awk -v sf="$2" 'BEGIN { RS = "\001" }
+    { s = $0; out = ""; ins = 0; k = 0; st = 1
+      while ((getline l < sf) > 0) all = all l   # (RS is \001: the whole file at once)
+      ns = split(all, S, "\n")
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (ins) { if (c == "\\") i++; else if (c == "\"") ins = 0; continue }
+        if (c == "\"") { ins = 1; continue }
+        if (c == "}") { k++; out = out substr(s, st, i - st) ",\"series\":" (k in S ? S[k] : "null"); st = i }
+      }
+      out = out substr(s, st)
+      printf "%s", out }' "$1"
 }
 
 er_render() { # since-label

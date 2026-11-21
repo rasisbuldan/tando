@@ -1,0 +1,9 @@
+:object
+app:string
+host:string
+releases:array
+releases[].current:bool
+releases[].deployed_at:null-or-number
+releases[].id:string
+releases[].last_good:bool
+releases[].status:null-or-string

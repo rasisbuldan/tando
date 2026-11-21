@@ -329,6 +329,17 @@ else
     echo "menubar: ${mt_n% *} checks, ${mt_n#* } failed"
 fi
 
+# ---- every --json against its schema (test/json-contract.sh: a stub ssh, test/fixtures/json; the
+# snapshot's one exec per host, gap-filled metrics, names-only env; SKIP lines without python3)
+jt=$("$BASH_BIN" "$here/test/json-contract.sh" 2>&1)
+printf '%s\n' "$jt" | grep -A12 '^FAIL\|^SKIP' || true
+jt_n=$(printf '%s\n' "$jt" | sed -n 's/^json: \([0-9]*\) checks, \([0-9]*\) failed$/\1 \2/p')
+if [[ -z $jt_n ]]; then bad "json-contract.sh did not finish: $(printf '%s\n' "$jt" | tail -3)"
+else
+    checks=$((checks + ${jt_n% *})); fails=$((fails + ${jt_n#* }))
+    echo "json: ${jt_n% *} checks, ${jt_n#* } failed"
+fi
+
 # ---- what tando init detects for each framework fixture (test/detect-test.sh: test/fixtures/apps)
 dt=$("$BASH_BIN" "$here/test/detect-test.sh" 2>&1)
 printf '%s\n' "$dt" | grep '^FAIL' || true

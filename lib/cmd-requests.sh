@@ -24,7 +24,7 @@ cmd_requests() {
   local sub=${ARGS[1]:-} i=1 a last=15m w four=""
   case $sub in
     tail|errors|summary) i=2;;
-    ""|--last|--since) sub=summary;;
+    ""|--last|--since|--json) sub=summary;;
     *) die "requests: summary (default), tail or errors";;
   esac
   while [ "$i" -lt "${#ARGS[@]}" ]; do
@@ -32,16 +32,43 @@ cmd_requests() {
     case $a in
       --last|--since) last=${ARGS[$((i + 1))]:-}; i=$((i + 2));;   # --since: the name logs uses
       --4xx) four=4xx; i=$((i + 1));;
+      --json) i=$((i + 1));;
       *) die "requests: unknown argument: $a";;
     esac
   done
   w=$(rq_window "$last") || die "bad --last: $last (15m, 1h, 24h)"
   [ "$w" -ge 60 ] && [ "$w" -le 604800 ] || die "--last must be between 1m and 7d"
+  [ -z "$JSON" ] || [ "$sub" = summary ] || die "requests: --json goes with the summary (tando requests --json)"
   case $sub in
-    summary) rq_summary "$w" "$last";;
+    summary) if [ -n "$JSON" ]; then rq_json "$w"; else rq_summary "$w" "$last"; fi;;
     tail) rq_tail;;
     errors) rq_errors "$w" "$last" "$four";;
   esac
+}
+
+# rq_json seconds: the summary as one object. series: one point per bucket (bucket_s: 60 up to a
+# window of an hour, else the window in 60), oldest first, t its start (server clock): requests and
+# 5xx answers in it (the server counts no other class per bucket). status_classes: the window's
+# totals per class. Latencies in ms; paths with ids folded (the same keys as the box).
+rq_json() {
+  agent_raw sudo req-summary "$APP" "$1" > "$TMPD/rq" || exit 1
+  printf '{"host":%s,"app":%s,' "$(json_str "$HOST")" "$(json_str "$APP")"
+  LC_ALL=C awk -F '\t' '
+    function s(v) { gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); return "\"" v "\"" }
+    function n(v) { return (v ~ /^-?[0-9]+(\.[0-9]+)?$/) ? v + 0 : "null" }
+    /^[a-z0-9_]+=/ { k = substr($0, 1, index($0, "=") - 1); K[k] = substr($0, index($0, "=") + 1); next }
+    $1 == "code" && $2 ~ /^[0-9]+$/ { codes = codes (codes == "" ? "" : ",") sprintf("{\"code\":%d,\"count\":%s}", $2, n($3)); next }
+    $1 == "path" { paths = paths (paths == "" ? "" : ",") sprintf("{\"path\":%s,\"count\":%s,\"mean_ms\":%s,\"max_ms\":%s,\"count_5xx\":%s}", s($2), n($3), n($4), n($5), n($6)); next }
+    END {
+      from = n(K["from"]); bw = n(K["bucket"])
+      printf "\"window_s\":%s,\"from\":%s,\"to\":%s,\"bucket_s\":%s,\"total\":%s,", n(K["window"]), from, n(K["to"]), bw, n(K["total"])
+      printf "\"status_classes\":{\"1xx\":%s,\"2xx\":%s,\"3xx\":%s,\"4xx\":%s,\"5xx\":%s},", n(K["c1xx"]), n(K["c2xx"]), n(K["c3xx"]), n(K["c4xx"]), n(K["c5xx"])
+      printf "\"p50_ms\":%s,\"p95_ms\":%s,\"p99_ms\":%s,\"max_ms\":%s,\"avg_ms\":%s,\"unparsed\":%s,\"oldest\":%s,\"files\":%s,", n(K["p50_ms"]), n(K["p95_ms"]), n(K["p99_ms"]), n(K["max_ms"]), n(K["avg_ms"]), n(K["unparsed"]), n(K["oldest"]), n(K["files"])
+      nc = split(K["counts"], C, ","); split(K["counts_5xx"], E, ",")
+      printf "\"series\":["
+      for (i = 1; i <= nc; i++) printf "%s{\"t\":%s,\"requests\":%s,\"c5xx\":%s}", (i > 1 ? "," : ""),
+        (from == "null" || bw == "null") ? "null" : int(from + (i - 1) * bw), n(C[i]), n(E[i])
+      printf "],\"codes\":[%s],\"paths\":[%s]}\n", codes, paths }' "$TMPD/rq"
 }
 
 rq_summary() { # seconds label

@@ -1,0 +1,4 @@
+:object
+app:string
+host:string
+names:array

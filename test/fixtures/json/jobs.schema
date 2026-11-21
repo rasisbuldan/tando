@@ -1,0 +1,16 @@
+:object
+app:string
+host:string
+jobs:array
+jobs[].command:null-or-string
+jobs[].duration_s:null-or-number
+jobs[].exit_code:null-or-number
+jobs[].last_run:null-or-number
+jobs[].name:string
+jobs[].next_run:null-or-number
+jobs[].next_runs:array
+jobs[].result:null-or-string
+jobs[].schedule:null-or-string
+jobs[].state:null-or-string
+zone:null-or-string
+zone_name:null-or-string

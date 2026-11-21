@@ -122,20 +122,26 @@ hl_one() {
   ui_box_close "probed through Caddy once a minute; tando errors -a $APP" "$(date -u '+%H:%M GMT')"
 }
 
+# health --json: per app its uptime, minutes judged, incidents, probe percentiles, last class and
+# firing checks, and series: the average probe time of each of the last 24 hours (tando-watch's
+# hourly figure; hour i starts at now - 86400 + i * 3600, now being this laptop's clock when read),
+# null where no probe ran; then every incident
 hl_json() {
-  local r a u1 u7 n1 n7 ni p50 p95 sp lc lm fir
-  while IFS=$TAB read -r r a u1 u7 n1 n7 ni p50 p95 sp lc lm fir; do
-    [ "$r" = up ] || continue
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(hl_pct "$u1" | tr -d %)" "$(hl_pct "$u7" | tr -d %)" \
-      "$n1" "$n7" "$ni" "$p50" "$p95" "$lc" "$fir"
-  done < "$TMPD/hl" > "$TMPD/hl.j1"
-  while IFS=$TAB read -r r a u1 u7 n1 n7; do
-    [ "$r" = inc ] && printf '%s\t%s\t%s\t%s\t%s\n' "$a" "$u1" "$u7" "$n1" "$n7"
-  done < "$TMPD/hl" > "$TMPD/hl.j2"
   printf '{"host":%s,"apps":' "$(json_str "$HOST")"
-  to_json "app:s,uptime_24h_pct:n,uptime_7d_pct:n,minutes_24h:n,minutes_7d:n,incidents_7d:n,p50_ms:n,p95_ms:n,last:s,firing:s" < "$TMPD/hl.j1"
+  LC_ALL=C awk -F '\t' -v now="$NOW" '
+    function n(v) { return (v ~ /^[0-9]+$/) ? v + 0 : "null" }
+    function pct(v) { return (v ~ /^[0-9]+$/) ? sprintf("%d.%02d", int(v / 100), v % 100) : "null" }
+    function s(v) { if (v == "-" || v == "") return "null"; gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); return "\"" v "\"" }
+    BEGIN { printf "[" }
+    $1 == "up" {
+      printf "%s{\"app\":%s,\"uptime_24h_pct\":%s,\"uptime_7d_pct\":%s,\"minutes_24h\":%s,\"minutes_7d\":%s,\"incidents_7d\":%s,\"p50_ms\":%s,\"p95_ms\":%s,\"last\":%s,\"firing\":%s",
+        (k++ ? "," : ""), s($2), pct($3), pct($4), n($5), n($6), n($7), n($8), n($9), s($11), s($13)
+      m = split($10, v, ","); r = ""
+      for (i = 1; i <= 24; i++) r = r (i > 1 ? "," : "") sprintf("{\"t\":%d,\"avg_ms\":%s}", now - 86400 + (i - 1) * 3600, (i <= m ? n(v[i]) : "null"))
+      printf ",\"series\":[%s]}", r }
+    END { printf "]" }' "$TMPD/hl"
   printf ',"incidents":'
-  to_json "app:s,start:n,end:n,check:s,cause:s" < "$TMPD/hl.j2"
+  awk -F '\t' -v OFS='\t' '$1 == "inc" { print $2, $3, $4, $5, $6 }' "$TMPD/hl" | to_json "app:s,start:n,end:n,check:s,cause:s"
   [ -z "$APP" ] || pg_json "$TMPD/hl" "$APP"
   printf '}\n'
 }

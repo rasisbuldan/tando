@@ -1,0 +1,11 @@
+:object
+app:string
+backups:array
+backups[].created:null-or-number
+backups[].holds:null-or-string
+backups[].id:string
+backups[].kind:null-or-string
+backups[].size_bytes:null-or-number
+backups[].where:null-or-string
+host:string
+offsite_error:null-or-string

@@ -1,0 +1,88 @@
+{
+ "host": "web-1",
+ "reachable": true,
+ "checked_at": 1795247325,
+ "server_version": "0.2.2",
+ "client_version": "0.2.2",
+ "clock_skew_s": 3,
+ "app": {
+  "app": "shop",
+  "state": "running",
+  "recipe": "node",
+  "port": 3000,
+  "release": "20261117-101010",
+  "deployed_at": 1794910210,
+  "release_status": "verified",
+  "memory_bytes": 104857600,
+  "memory_max_bytes": 268435456,
+  "cpu_percent": 3.4,
+  "restarts": 1,
+  "uptime_s": 7200,
+  "link": "https://shop.example.com/",
+  "database": "shop",
+  "log_bytes": 5242880,
+  "domains": "shop.example.com",
+  "cpu_limit": "50%",
+  "tasks_max": 64,
+  "max_conns": 100,
+  "max_requests": 200,
+  "alerts_firing": 0,
+  "firing": null,
+  "state_reason": "running"
+ },
+ "releases": [
+  {
+   "id": "20261117-101010",
+   "deployed_at": 1794910210,
+   "status": "verified",
+   "current": true,
+   "last_good": true
+  },
+  {
+   "id": "20261116-101010",
+   "deployed_at": 1794823810,
+   "status": "verified",
+   "current": false,
+   "last_good": false
+  }
+ ],
+ "history": [
+  {
+   "at": 1795240125,
+   "app": "shop",
+   "release": "20261117-101010",
+   "kind": "deploy",
+   "result": "verified",
+   "total_s": 48.2,
+   "build_s": 30.1,
+   "upload_s": 4.0,
+   "copy_s": 1.2,
+   "preflight_s": 2.0,
+   "switch_s": 0.4,
+   "verify_s": 10.5,
+   "note": null,
+   "release_s": 3.1
+  }
+ ],
+ "alerts": [
+  {
+   "app": "host",
+   "check": "disk",
+   "state": "pending",
+   "since": 1795247205,
+   "detail": "85% used"
+  }
+ ],
+ "system": {
+  "hostname": "web-1",
+  "cpus": 2,
+  "load_1": 0.42,
+  "load_5": null,
+  "load_15": null,
+  "memory_used_bytes": 1024000000,
+  "memory_total_bytes": 2048000000,
+  "disk_used_bytes": 12000000000,
+  "disk_total_bytes": 40000000000,
+  "uptime_s": 864000
+ }
+}

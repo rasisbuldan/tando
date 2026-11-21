@@ -1,0 +1,56 @@
+{
+ "host": "web-1",
+ "reachable": true,
+ "checked_at": 1795247329,
+ "alerts": [
+  {
+   "app": "api",
+   "check": "down",
+   "state": "firing",
+   "since": 1795246429,
+   "detail": "exited",
+   "silenced": false
+  },
+  {
+   "app": "host",
+   "check": "disk",
+   "state": "pending",
+   "since": 1795247209,
+   "detail": "85% used",
+   "silenced": true
+  }
+ ],
+ "notifiers": [
+  {
+   "name": "phone",
+   "type": "ntfy",
+   "last_ok": 1795246429,
+   "failures": 0,
+   "queued": 0,
+   "error": null
+  }
+ ],
+ "history": [
+  {
+   "at": 1795246429,
+   "event": "fire",
+   "app": "api",
+   "check": "down",
+   "detail": "exited"
+  },
+  {
+   "at": 1795242329,
+   "event": "resolve",
+   "app": "shop",
+   "check": "http",
+   "detail": "back to normal"
+  },
+  {
+   "at": 1795241329,
+   "event": "fire",
+   "app": "shop",
+   "check": "http",
+   "detail": "5xx at 12%"
+  }
+ ]
+}

@@ -136,6 +136,16 @@ The apps of a server: state, when deployed, memory, cpu, uptime and link.
 down, an alert fires or (with --all) a server does not answer; 0 when not.
 Example: tando ls --all
 
+@@ snapshot
+flags: -a= -H= --all --app= --range= --json
+args: 0
+usage: tando snapshot --json [-H host | --all] [--app A [--range 1h|24h|7d]]
+Everything a dashboard shows of a server, in one ssh call per server: apps
+with their state and its reason, load, memory, disk, clock, versions, alerts.
+--app adds that app's releases, deploys (with who deployed), metrics over the
+range (every bucket present, null where there was no sample) and health.
+--all: every registered server in parallel, one JSON line each.
+
 @@ logs
 flags: -a= -H= -f -n= --since= --until= --grep= --regex -E -i --level= --release= --deploy= --worker= --json
 args: 0-2
@@ -181,9 +191,9 @@ and history; start, stop, restart and rollback from the keyboard (not with
 --read-only). --watch N refreshes every N seconds (default 2). q quits.
 
 @@ env
-flags: -a= -H= --show --note= --json
+flags: -a= -H= --show --names --note= --json
 subs: ls=0-1 set=1+ unset=1+ import=0-1 log=0-1 default=ls
-usage: tando env ls [app] [--show]
+usage: tando env ls [app] [--show | --names] [--json]
 usage: tando env set KEY=VALUE ... [--note "text"]
 usage: tando env set KEY [--note "text"]
 usage: tando env unset KEY ... [--note "text"]
@@ -193,7 +203,8 @@ The app's environment variables, stored on the server (root, 640), never in
 the release or in git. set and unset restart the app once; set KEY alone reads
 the value from the terminal without echo (or from stdin). import sets every
 KEY=VALUE line of a file (.env by default); ls lists the keys (values hidden;
---show prints them).
+--show prints them); ls --names (and ls --json, always) reads the names only:
+no value leaves the server.
 log is the changelog of the env: every set, unset and import adds one entry
 (when, who, the note, and the key names added, changed and removed; never a
 value, a length or a hash). --note "text" (one line, 200 characters) says why;
@@ -207,9 +218,9 @@ Set by tando: PORT, HOME, TANDO_DATA_DIR (and DATABASE_URL with database =).
 Example: tando env set STRIPE_KEY        (paste, then Enter)
 
 @@ jobs
-flags: -a= -H= -n=
+flags: -a= -H= -n= --json
 subs: ls=0-1 run=1 log=1 pause=1 resume=1 default=ls
-usage: tando jobs [ls [app]] [-H host]
+usage: tando jobs [ls [app]] [-H host] [--json]
 usage: tando jobs run <name>
 usage: tando jobs log <name> [-n N]
 usage: tando jobs pause <name> | resume <name>
@@ -256,9 +267,9 @@ timeouts. One PostgreSQL major version is used and kept: tando doctor says when
 a newer one appears (docs/COMMANDS.md, "Upgrading PostgreSQL").
 
 @@ backup
-flags: -a= -H= --yes --show --saved --import --rotate
+flags: -a= -H= --yes --show --saved --import --rotate --json
 subs: ls=0-1 now=0-1 restore=1 pull=2 offsite=0+ default=ls
-usage: tando backup ls [app]
+usage: tando backup ls [app] [--json]
 usage: tando backup now [app]
 usage: tando backup restore <id> [--yes]
 usage: tando backup pull <id> <file>
@@ -359,9 +370,9 @@ at tando up. The app's own link (<app>.<apps_domain>) keeps working.
 Example: tando domain add example.com
 
 @@ doctor
-flags: -H= --verbose
+flags: -H= --verbose --json
 args: 0-1
-usage: tando doctor [host] [--verbose]
+usage: tando doctor [host] [--verbose] [--json]
 Check a server: connection, sudo, every tando piece and its version, Caddy,
 DNS, disk, memory, timers and every app. Works on a server that is not set up
 yet (it then says what setup would do). After a client upgrade the programs
@@ -437,9 +448,9 @@ counts as one, grouped by exception type and the app's first frame. For each:
 how often, first and last seen, the release it appeared in, one sample.
 
 @@ requests
-flags: -a= -H= --last= --since= -n= -f --4xx
+flags: -a= -H= --last= --since= -n= -f --4xx --json
 subs: summary=0-1 tail=0-1 errors=0-1 default=summary
-usage: tando requests [summary [app]] [--since 15m|1h|24h]
+usage: tando requests [summary [app]] [--since 15m|1h|24h] [--json]
 usage: tando requests tail [app] [-n N] [-f]
 usage: tando requests errors [app] [--since W] [--4xx]
 The app's request log as Caddy wrote it: counts, status codes, latency

@@ -57,6 +57,7 @@ lib/cmd-requests.sh      lint ui-test e2e-cli e2e-logs
 lib/cmd-restore.sh       lint ui-test e2e-cli e2e-data e2e-offsite
 lib/cmd-ssh.sh           lint ui-test e2e-cli e2e
 lib/cmd-top.sh           lint ui-test e2e-cli e2e-top
+lib/cmd-snapshot.sh      lint ui-test e2e-cli e2e-status e2e-top
 lib/hostcare.sh          lint ui-test e2e-cli e2e-host
 lib/offsite.sh           lint ui-test e2e-cli e2e-offsite e2e-data
 lib/studio.sh            lint ui-test e2e-cli e2e-studio
@@ -69,7 +70,7 @@ server/legacy/*          lint install-test e2e-status @alerts
 srv/watch/*              go @alerts e2e-status e2e-host e2e-faults-q4 e2e-upgrade
 srv/logs/*               go e2e-logs e2e e2e-ci @alerts e2e-workers e2e-upgrade
 srv/offsite/*            go e2e-offsite e2e-data e2e-upgrade
-srv/status/*             go e2e-status e2e-top e2e-cli e2e-workers e2e-upgrade
+srv/status/*             go ui-test e2e-status e2e-top e2e-cli e2e-workers e2e-upgrade
 srv/metrics/*            go e2e-status e2e-top e2e-sec2 @alerts e2e-upgrade
 srv/gate/*               go e2e-ci e2e-sec2 e2e-upgrade
 srv/hostcare/*           go e2e-host @alerts e2e-upgrade
@@ -104,6 +105,8 @@ test/native-test.sh      ui-test lint
 test/detect-test.sh      ui-test lint
 test/menubar-*           ui-test lint
 test/fixtures/menubar/*  ui-test
+test/json-*              ui-test lint
+test/fixtures/json/*     ui-test
 test/fixtures/apps/*     ui-test e2e-frameworks
 test/e2e-frameworks.sh   e2e-frameworks lint
 test/pty-run.sh          ui-test e2e-top lint

@@ -29,6 +29,7 @@ _tando() {
     'history:Deploys and rollbacks with their result and phase times, newest first. Without'
     'status:One app in detail - state, release, memory, cpu, the last 16 minutes, logs,'
     'ls:The apps of a server - state, when deployed, memory, cpu, uptime and link.'
+    'snapshot:Everything a dashboard shows of a server, in one ssh call per server - apps'
     'logs:The apps output (stdout and stderr), from its own journal on the server.'
     'start:Start a stopped app. Requests are held while it starts, so none is dropped.'
     'stop:Stop the app. Visitors get 503 <app> is stopped until tando start; jobs'
@@ -86,20 +87,21 @@ _tando() {
         history) subs="" flags="-n -H --json -a" args="apps" ;;
         status) subs="" flags="--watch -H --json --check -a" args="apps" ;;
         ls) subs="" flags="-H --all --watch --json --check" args="" ;;
+        snapshot) subs="" flags="--json -H --all --app --range -a" args="" ;;
         logs) subs="pull" flags="-f -n --since --until --grep -i --regex -E -a -H --level --release --deploy --worker --json" args="apps" ;;
         start) subs="" flags="-H -a" args="apps" ;;
         stop) subs="" flags="-H -a" args="apps" ;;
         restart) subs="" flags="-H -a" args="apps" ;;
         top) subs="" flags="--watch --read-only -H" args="hosts" ;;
-        env) subs="ls set unset import log" flags="--show -a -H --note --json" args="apps" ;;
-        jobs) subs="run log pause resume ls" flags="-H -a -n" args="apps" ;;
+        env) subs="ls set unset import log" flags="--show --names --json -a -H --note" args="apps" ;;
+        jobs) subs="run log pause resume ls" flags="-H --json -a -n" args="apps" ;;
         db) subs="psql url studio info" flags="-a -H --show --no-open --idle --stop" args="apps" ;;
-        backup) subs="ls now restore pull offsite" flags="-a -H --yes --show --saved --import --rotate" args="apps" ;;
+        backup) subs="ls now restore pull offsite" flags="--json -a -H --yes --show --saved --import --rotate" args="apps" ;;
         restore) subs="" flags="-a --yes -H --from-host --all" args="" ;;
         host) subs="add setup ls rm status care update reboot" flags="--port --key --yes --force --insecure-test --no-check --deploy --json --watch --all --now --updates --reboot --window --tz --lead --even-with-other-sites" args=""
           [[ $CURRENT -eq 3 && $words[2] == (setup|rm) ]] && { _tando_hosts; return } ;;
         domain) subs="add rm ls" flags="--www --wait --force -a -H" args="apps" ;;
-        doctor) subs="" flags="--verbose -H" args="hosts" ;;
+        doctor) subs="" flags="--verbose --json -H" args="hosts" ;;
         version) subs="" flags="-H" args="" ;;
         destroy) subs="" flags="-H --purge --yes -a" args="apps" ;;
         unlock) subs="" flags="-H -a" args="apps" ;;
@@ -108,7 +110,7 @@ _tando() {
         alerts) subs="enable disable test history set silence notifier rm ls heartbeat backup-ping show notifiers" flags="--watch --json -n -a -H" args="apps" ;;
         health) subs="" flags="--json -a -H --forget" args="apps" ;;
         errors) subs="" flags="--since -n --json -a -H --last" args="apps" ;;
-        requests) subs="tail errors summary" flags="--since -a -H --last -n -f --4xx" args="apps" ;;
+        requests) subs="tail errors summary" flags="--since --json -a -H --last -n -f --4xx" args="apps" ;;
         audit) subs="" flags="-n -H -a" args="apps" ;;
         adopt) subs="plan apply undo status site" flags="--health --no-jobs --yes --accept-502 -H --apply" args="apps" ;;
         help) subs="" flags="" args="" ;;
