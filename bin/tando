@@ -94,6 +94,7 @@ setup_steps() {
   while IFS= read -r l; do
     case $l in step=*) ;; *) continue;; esac
     l=${l#step=}; name=${l%% *}; l=${l#"$name"}; l=${l# }; st=${l%% *}; d=${l#"$st"}; d=${d# }
+    d=${d//<host>/$HOST}   # (the server's name for it, as in the agent's messages)
     setup_tick_stop "$tick"; tick=""
     if [ "$st" = run ]; then
       run=$name
@@ -118,7 +119,8 @@ setup_steps() {
 setup_tick() { # n total name: the running step, repainted every second until killed
   local s=0 l what=working
   case $3 in packages) what="installing packages";; caddy) what="installing or checking Caddy";;
-    postgres|podman|python|node*) what="installing $3 (can take a minute or two)";; esac
+    postgres|podman|python|node*) what="installing $3 (can take a minute or two)";;
+    database) what="sizing PostgreSQL, setting up pgbouncer";; esac
   trap 'exit 0' TERM
   while :; do
     l=$(ui_step "$1" "$2" "$3" run "${s}s  $what")
@@ -145,7 +147,7 @@ public_ip() {
 }
 
 cmd_host() {
-  local kv feats="" pgss=""
+  local kv feats="" pgss="" pgrs=""
   case ${1:-ls} in
     add) shift; host_add "$@";;
     ls) host_ls;;
@@ -169,6 +171,8 @@ cmd_host() {
           request_log_max=*) ;;
           care=on|care=off) ;;   # host care's security updates (tando-host install; not the agent's)
           --pg-stat-statements) pgss=1;;   # PostgreSQL's top statements (a restart: asked below)
+          --pg-restart) pgrs=1;;           # PostgreSQL's new memory settings (a restart: asked below)
+          pg_max_connections=auto|pg_max_connections=[1-9][0-9]|pg_max_connections=[1-9][0-9][0-9]|pg_max_connections=[1-9][0-9][0-9][0-9]) ;;
           *) usage_err "bad setting: $kv" host;;
         esac
         case $kv in tls=*) case ${kv#tls=} in off|internal|auto) ;; *) usage_err "tls must be off, internal or auto" host;; esac;; esac
@@ -176,17 +180,24 @@ cmd_host() {
       host_check > /dev/null 2>&1 || { host_check; exit 1; }   # connection and sudo, explained
       # pg_stat_statements is loaded at PostgreSQL's start: never without the owner's yes
       [ -z "$pgss" ] || confirm "host setup --pg-stat-statements restarts PostgreSQL on $HOST once (the first time only): every app's database is unavailable for a few seconds." "$HOST"
+      # so is a new max_connections or shared_buffers (sized from the server's RAM)
+      [ -z "$pgrs" ] || confirm "host setup --pg-restart restarts PostgreSQL on $HOST if its memory settings wait for it: every app's database is unavailable for a few seconds." "$HOST"
       ui_box_open "host setup $HOST" "$TARGET"
       local t0 total n sargs=() care=""
-      for kv in "$@"; do case $kv in care=*) care=$kv;; --pg-stat-statements) sargs+=(pg_stat_statements=yes);; *) sargs+=("$kv");; esac; done
+      for kv in "$@"; do
+        case $kv in care=*) care=$kv;; --pg-stat-statements) sargs+=(pg_stat_statements=yes);;
+          --pg-restart) sargs+=(pg_restart=yes);; *) sargs+=("$kv");; esac
+      done
       total=$((9 + $(printf '%s' "$feats" | wc -w)))
       [ -z "$pgss" ] || total=$((total + 1))
       t0=$(clock)
       install_agent
-      ui_step 1 $total agent ok "$(client_version) in /opt/tando/bin"
       # a host without apps_domain: <app>.<ip-with-dashes>.sslip.io, so a new server gives working
       # https links with no DNS set up (sslip.io answers such names with the IP inside them)
-      agent info > "$TMPD/o"; kv_read "$TMPD/o" apps_domain
+      agent info > "$TMPD/o"; kv_read "$TMPD/o" apps_domain postgres
+      # the server's database step (sizing, pgbouncer): with PostgreSQL there or installed now
+      case "$K_postgres $feats " in yes*|*" postgres "*) total=$((total + 1));; esac
+      ui_step 1 $total agent ok "$(client_version) in /opt/tando/bin"
       case " $* " in *" apps_domain="*) ;; *)
         if [ -z "$K_apps_domain" ] && ip=$(public_ip "${TARGET#*@}"); then
           sargs+=("apps_domain=$(printf '%s' "$ip" | tr . -).sslip.io")
@@ -423,10 +434,17 @@ db_limit_show() {
 db_info() {
   agent sudo db-info "$APP" > "$TMPD/o"
   kv_read "$TMPD/o" role cluster server size conns conn_limit statement_timeout \
-    idle_in_transaction_session_timeout temp_file_limit
+    idle_in_transaction_session_timeout temp_file_limit via pool db_direct
   ui_box_open "$APP" "database"
   ui_kv database "$K_role  ${UI_DIM}PostgreSQL ${K_cluster:-$K_server}, $(ui_bytes "${K_size:-0}")${UI_NC}" 19
   ui_kv connections "${K_conns:-0} of ${K_conn_limit:-?}" 19
+  if [ "$K_via" = pgbouncer ]; then
+    ui_kv "connects via" "pgbouncer, at most ${K_pool:-5} at once  ${UI_DIM}db_pool; db_direct = true for a direct connection${UI_NC}" 19
+  elif [ "$K_db_direct" = true ]; then
+    ui_kv "connects via" "PostgreSQL directly  ${UI_DIM}db_direct = true${UI_NC}" 19
+  else
+    ui_kv "connects via" "PostgreSQL directly  ${UI_DIM}pgbouncer from the next deploy${UI_NC}" 19
+  fi
   ui_kv "statement timeout" "$(db_limit_show "$K_statement_timeout" 0)  ${UI_DIM}db_statement_timeout${UI_NC}" 19
   ui_kv "idle in transaction" "$(db_limit_show "$K_idle_in_transaction_session_timeout" 0)  ${UI_DIM}db_idle_tx_timeout${UI_NC}" 19
   ui_kv "temporary files" "$(db_limit_show "$K_temp_file_limit" -1)  ${UI_DIM}db_temp_limit${UI_NC}" 19

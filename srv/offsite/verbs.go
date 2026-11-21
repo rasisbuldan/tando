@@ -677,6 +677,7 @@ var confKeys = map[string]bool{
 	"log_keep": true, "log_rate": true, "access_log": true, "request_log_max": true,
 	"health_expect": true, "health_fails": true, "health_recover": true,
 	"db_statement_timeout": true, "db_idle_tx_timeout": true, "db_temp_limit": true,
+	"db_pool": true, "db_direct": true,
 }
 
 func (o Offsite) drOpen(host string) (*session, error) {
@@ -815,7 +816,7 @@ func envLines(b []byte, postgres bool) []string {
 		switch k {
 		case "PORT", "HOME", "TANDO_DATA_DIR", "DATABASE_PATH":
 			continue
-		case "DATABASE_URL":
+		case "DATABASE_URL", "DATABASE_URL_DIRECT":
 			if postgres {
 				continue
 			}

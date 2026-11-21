@@ -100,6 +100,8 @@ PostgreSQL only (`database = postgres`); `off` turns a limit off.
 | `db_statement_timeout` | time or `off` | `30s` | `ms`, `s`, `m`, `h` | How long one statement may run. | `db_statement_timeout = 2m` |
 | `db_idle_tx_timeout` | time or `off` | `5m` | `ms`, `s`, `m`, `h` | How long a connection may sit idle inside an open transaction. | `db_idle_tx_timeout = 1m` |
 | `db_temp_limit` | size or `off` | `1G` | `M`, `G` | Temporary files of one connection (large sorts, index builds). | `db_temp_limit = 4G` |
+| `db_pool` | number | `5` | connections | Server connections pgbouncer gives the app (with `db_direct = true`: what its own pool should stay within). The apps' pools together must fit in max_connections. | `db_pool = 10` |
+| `db_direct` | `true`, `false` | `false` | | `true`: `DATABASE_URL` is PostgreSQL itself, not pgbouncer. For LISTEN/NOTIFY, session advisory locks, session SET, prepared statements on old drivers (docs/COMMANDS.md, "Database connections and pgbouncer"). | `db_direct = true` |
 
 ## Release command
 

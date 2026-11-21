@@ -434,6 +434,10 @@ conf_chk_extra() {
     db_temp_limit) CHK_MSG="db_temp_limit is a size like 512M or 2G (up to 999G), or off"
       case $2 in off) return 0;; *M) set -- "$n" 6;; *G) set -- "$n" 3;; *) return 1;; esac
       ui_int "$1" && [ "${1#0}" = "$1" ] && [ ${#1} -le "$2" ];;
+    # the app's connections through pgbouncer (or its own pool's size with db_direct = true)
+    db_pool) CHK_MSG="db_pool is a number of connections, 1 to 999"
+      ui_int "$2" && [ "${2#0}" = "$2" ] && [ "$2" -ge 1 ] && [ "$2" -le 999 ];;
+    db_direct) CHK_MSG="db_direct is true or false"; case $2 in true|false) true;; *) false;; esac;;
   esac
 }
 # ---- job schedules: the 5-field cron syntax as systemd's OnCalendar ---------------------------
@@ -667,7 +671,7 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       backup) C_backup=$v;;
       database) C_database=$v;;
       log_max|log_keep|log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|\
-      db_statement_timeout|db_idle_tx_timeout|db_temp_limit)
+      db_statement_timeout|db_idle_tx_timeout|db_temp_limit|db_pool|db_direct)
         conf_chk_extra "$k" "$v" || die "$f:$n: $CHK_MSG (got \"$v\")"
         C_logs="$C_logs$k=$v
 ";;
