@@ -75,7 +75,9 @@ fi
 # ---- the fast loop on the socket ----------------------------------------------------------------
 points() { ask "ring web" | grep -c '^rapp	web	'; }   # (the points that have web)
 check "L1 tandod keeps a point every 5 s (two within 12 s)" t_until 12 eval '[ "$(points)" -ge 2 ]'
-ask live > "$E/live.rows"
+# (a point taken before setup started the 24 hand-written units has only web: ask until one has them all)
+live_rows() { ask live > "$E/live.rows"; [ "$(grep -c "^lapp	" "$E/live.rows")" = 25 ]; }
+T_UNTIL_STEP=1 t_until 20 live_rows
 check "L2 live: a host row and the 25 app rows (web active and running, a CPU per mille)" eval '
   [ "$(grep -c "^lapp	" "$E/live.rows")" = 25 ] && grep -q "^lhost	[0-9]*	[0-9.]*	[0-9]*	[0-9]*	[0-9]*	" "$E/live.rows" &&
   grep -Eq "^lapp	web	[0-9]+	active	running	[0-9]+	[1-9][0-9]*	[1-9][0-9]*	[0-9]+	[1-9]" "$E/live.rows"'
