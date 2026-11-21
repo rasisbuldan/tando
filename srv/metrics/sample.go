@@ -80,7 +80,8 @@ func (m Metrics) sampleApps(ctx context.Context, now int64, names []string, prev
 	}
 	for i, a := range names {
 		dir := cgroup.AppDir(m.Env.Cgroup, a)
-		mem, _ := cgroup.Value(filepath.Join(dir, "memory.stat"), "anon")
+		// anon + shmem: the memory tando status, ls, top and the memory alert show (one definition)
+		mem := cgroup.Sum(filepath.Join(dir, "memory.stat"), "anon", "shmem")
 		usec, _ := cgroup.Value(filepath.Join(dir, "cpu.stat"), "usage_usec")
 		p, seen := prev[a]
 		d := int64(0) // the first sample of an app has nothing to compare with

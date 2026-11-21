@@ -24,6 +24,32 @@ func AppDir(root, app string) string {
 	return filepath.Join(root, "system.slice", "tando-"+app+".service")
 }
 
+// Sum is the total of keys in a flat keyed file (memory.stat: "anon", "shmem"); 0 for a file that
+// cannot be read or keys it lacks.
+func Sum(file string, keys ...string) int64 {
+	f, err := os.Open(file)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	var n int64
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		k, v, ok := strings.Cut(sc.Text(), " ")
+		if !ok {
+			continue
+		}
+		for _, want := range keys {
+			if k == want {
+				if x, err := strconv.ParseInt(v, 10, 64); err == nil {
+					n += x
+				}
+			}
+		}
+	}
+	return n
+}
+
 // Value is key's number in a flat-keyed file ("anon 1234" lines: memory.stat, cpu.stat,
 // memory.events), and whether it was there. A missing or unreadable file (the unit is not
 // running) is "not there", like a key that is absent.

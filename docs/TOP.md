@@ -70,10 +70,11 @@ Deploying needs a project directory, so the dashboard has no deploy key.
 
 ## Metric history (`tando-metrics`, Go: `srv/metrics`)
 
-- **Sampling.** A root-owned program run once a minute by `tando-watch.service` (below); nothing
-  stays running. Go since the port (srv/README.md); the shell original, whose file format and output
-  it keeps, is `server/legacy/tando-metrics`. Each run appends one line per app to `/var/lib/tando/metrics/<app>.tsv`: time, anon
-  memory, cpu µs since the last sample, restarts, state. It also appends one line to `host.tsv`:
+- **Sampling.** A root-owned program run once a minute by tandod's tick (by `tando-watch.timer`
+  when tandod is handed to the timer, docs/MONITORING.md); nothing of its own stays running. Go since the port (srv/README.md); the shell original, whose file format and output
+  it keeps, is `server/legacy/tando-metrics`. Each run appends one line per app to `/var/lib/tando/metrics/<app>.tsv`: time,
+  memory (anon + shmem: the same as status, ls, top's live number and the `memory` alert; anon
+  only before 2026-11), cpu µs since the last sample, restarts, state. It also appends one line to `host.tsv`:
   load, memory used and total.
 - **Rotation.** A file becomes `<app>.tsv.1` after 3.5 days or 5100 lines, so an app keeps at most
   7 days, about 2 × 160 KB.

@@ -656,6 +656,9 @@ else bad "ls --json: no alerts_firing per app ($out)"; fi
 grep -v '^alert' "$MON_ST" > "$tmp/mon.st2"
 out=$(MON_ST=$tmp/mon.st2 mon_run 'render_ls')
 if grep -Eq '^│ APP +STATE +DEPLOYED' <<< "$out"; then ok; else bad "ls: an ALERT column with nothing firing ($out)"; fi
+# status: memory says what it counts (anon + shmem, the same in ls, top, the graph and the alert)
+out=$(mon_run 'APP=web; render_status' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if grep -Eq '^│ memory .* 50 MB of 128 MB  in use, not cache' <<< "$out"; then ok; else bad "status: memory without its label ($out)"; fi
 # tando top: the firing check after the app's state, the count in the host strip
 out=$("$BASH_BIN" -c '
     . "$1/lib/ui.sh"; . "$1/lib/common.sh"; set +u; TAB=$(printf "\t"); AGENT_BIN=/opt/tando/bin/tando-agent; . "$1/lib/cmd-top.sh"

@@ -7,7 +7,7 @@
 #                                              the last <points> buckets, averaged
 #
 # Files: /var/lib/tando/metrics/<app>.tsv (and <app>.tsv.1, the previous half), one line a minute:
-#   time  anon_bytes  cpu_usec_since_last_sample  restarts  state(r|s|f|a)
+#   time  mem_bytes (anon + shmem)  cpu_usec_since_last_sample  restarts  state(r|s|f|a)
 # host.tsv: time  load1x100  mem_used_bytes  mem_total_bytes
 # Each file covers at most 3.5 days or 5100 lines, then becomes .1 (the old .1 is dropped), so an
 # app keeps at most 7 days, about 2 x 160 KB. Reading needs no root (files are 644).
@@ -60,7 +60,7 @@ cmd_sample() {
       cgd=/sys/fs/cgroup/tando.slice/tando-${a//-/\\x2d}.slice/tando-$a.service   # (its app's slice)
       [[ -d $cgd ]] || cgd=$CG/tando-$a.service
       if [[ -r $cgd/memory.stat ]]; then
-        while read -r k v; do [[ $k == anon ]] && { mem=$v; break; }; done < "$cgd/memory.stat"
+        while read -r k v; do [[ $k == anon || $k == shmem ]] && mem=$((mem + v)); done < "$cgd/memory.stat"
       fi
       if [[ -r $cgd/cpu.stat ]]; then
         while read -r k v; do [[ $k == usage_usec ]] && { usec=$v; break; }; done < "$cgd/cpu.stat"

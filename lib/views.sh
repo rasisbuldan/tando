@@ -367,9 +367,9 @@ render_status() {
   else ui_kv release "$rel"; fi
   ui_kv uptime "$upt   ${UI_DIM}restarts${UI_NC} $rs"
   if ui_int "$max" && [ "$max" -gt 0 ]; then
-    ui_kv memory "$(ui_bar "$mem" "$max" 20) $(mb "$mem") of $(mb "$max")"
+    ui_kv memory "$(ui_bar "$mem" "$max" 20) $(mb "$mem") of $(mb "$max")  ${UI_DIM}in use, not cache${UI_NC}"
   else
-    ui_kv memory "$(mb "$mem") (no cap)"
+    ui_kv memory "$(mb "$mem") (no cap)  ${UI_DIM}in use, not cache${UI_NC}"
   fi
   ui_kv cpu "$CPUP%"
   worker_lines

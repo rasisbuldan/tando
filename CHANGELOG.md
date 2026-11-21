@@ -6,6 +6,11 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: one memory definition everywhere. The per-minute history (`tando status`'s 16-minute
+  trend, `tando top`'s graph) counted anon memory only, while the live numbers and the `memory`
+  alert count anon + shmem: a shmem-heavy app read lower in the graph, with a step where live
+  and history met. tando-metrics now samples anon + shmem too; status labels it
+  (`in use, not cache`).
 - Added: firing alerts per app. `tando ls` gets an ALERT column (only while something fires) with
   the checks firing for each app; `tando top` shows them in red after the app's state and counts
   them in the host strip (it showed none). `ls --json` and `status --json` have `alerts_firing`
