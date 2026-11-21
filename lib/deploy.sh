@@ -297,6 +297,8 @@ target_guard() {
   local last="" want="$HOST $APP $PWD" a
   [ -n "${DEPLOY_KEY:-}" ] && return 0
   [ -f .tando/target ] && last=$(cat .tando/target 2> /dev/null)
+  # (the server renamed since: tando host rename left its old name as an alias of this one)
+  case $last in "$HOST "*|"") ;; *) [ ! -f "$CFG/hosts/${last%% *}" ] && [ "$(host_alias "${last%% *}")" = "$HOST" ] && last="$HOST ${last#* }";; esac
   # (a copy of the directory elsewhere is a new project: only the same path counts)
   if [ -n "$last" ] && [ "${last#* * }" = "$PWD" ] && [ "$last" != "$want" ] && [ -z "$YES$FORCE" ]; then
     last=${last% "$PWD"}

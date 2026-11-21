@@ -24,7 +24,7 @@ Deploy     up · deploy · rollback [id] · releases · history
 Run        status · logs [-f] · start · stop · restart · top
 Configure  env · jobs [run|log|pause] · db · backup [offsite] · restore
 Observe    ls · health · errors · alerts · requests · audit
-Servers    host add|ls|setup|status|care|update|reboot|rm · domain · doctor
+Servers    host add|ls|setup|status|care|update|reboot|rename|rm · domain · doctor
 CI         ci setup|ls|revoke|rotate|github|hook
 More       init · destroy · unlock · recipes · adopt
 
@@ -304,13 +304,14 @@ tando backup offsite hosts lists the servers.
 Example: tando restore --from-host 3f9a01c2b7de --all -H newvps
 
 @@ host
-flags: --port= --key= --insecure-test --no-check --deploy --force --yes --json --watch= --all --now --updates --reboot --window= --tz= --lead= --even-with-other-sites
-subs: add=2 ls=0 setup=1+ rm=1 status=0-1 care=0-3 update=0-1 reboot=0-1 default=ls
+flags: --port= --key= --insecure-test --no-check --deploy --force --yes --json --watch= --all --now --updates --reboot --window= --tz= --lead= --even-with-other-sites --drop-alias
+subs: add=2 ls=0 setup=1+ rm=1 rename=1-2 status=0-1 care=0-3 update=0-1 reboot=0-1 default=ls
 usage: tando host add <name> <user@address> [--port N] [--key FILE] [--yes] [--force]
 usage:                [--no-check] [--deploy] [--insecure-test]
 usage: tando host setup <name> [apps_domain=D] [tls=auto|internal|off] [setting=value ...]
 usage: tando host ls
 usage: tando host rm <name>
+usage: tando host rename <old> <new> | rename --drop-alias <old>
 usage: tando host status [name] [--json] [--watch N]
 usage: tando host care [name]
 usage: tando host care on [name] [--updates] [--reboot] [--window 02:00-04:00]
@@ -339,6 +340,10 @@ add saves the server only once tando logs in with it; run the same command again
 after fixing what it says (--yes trusts the host key without asking, --no-check
 saves it without connecting, --force replaces a different entry of that name).
 rm forgets a server here; nothing on the server changes.
+rename changes a server's name here (its address, apps and history stay):
+refused while a deploy or another change runs on it. The old name keeps
+working as an alias, with a note, for a tando.conf or script that says it;
+--drop-alias removes it. ls shows each server's user@address.
 status is the server itself: OS, kernel, pending and security updates, a needed
 reboot, open ports, ssh, firewall, failed services, disks, clock, backups, and
 a to-do list with the command that fixes each item (docs/HOSTCARE.md).

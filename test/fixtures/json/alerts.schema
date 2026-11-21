@@ -22,3 +22,5 @@ notifiers[].name:string
 notifiers[].queued:null-or-number
 notifiers[].type:null-or-string
 reachable:bool
+address:string
+user:string

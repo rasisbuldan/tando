@@ -79,7 +79,7 @@ fetch_alerts() {
 # every notifier (last delivery, failures in a row, the error) and the recent history (the last 8
 # events), with reachable and checked_at
 alerts_show_json() {
-  printf '{"host":%s,"reachable":true,"checked_at":%s,"alerts":' "$(json_str "$HOST")" "$NOW"
+  printf '{"host":%s%s,"reachable":true,"checked_at":%s,"alerts":' "$(json_str "$HOST")" "$(host_addr_json "$HOST")" "$NOW"
   awk -F '\t' -v OFS='\t' '$1 == "alert" { print $2, $3, $4, $5, $6, $8 }' "$TMPD/al" |
     to_json "app:s,check:s,state:s,since:n,detail:s,silenced:b"
   printf ',"notifiers":'

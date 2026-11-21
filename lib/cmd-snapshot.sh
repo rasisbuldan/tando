@@ -132,7 +132,7 @@ snap_render() {
     { print > (f == "" ? d "/st" : f) }' "$TMPD/s.$h.out"
   if [ "$rc" != 0 ] || ! grep -q "^host$TAB" "$TMPD/st"; then
     local e; e=$(snap_err "$h")
-    printf '{"host":%s,"reachable":false,"error":%s,"checked_at":%s}\n' "$(json_str "$h")" \
+    printf '{"host":%s%s,"reachable":false,"error":%s,"checked_at":%s}\n' "$(json_str "$h")" "$(host_addr_json "$h")" \
       "$(json_str "${e:-unreachable}")" "$NOW"
     return 0
   fi

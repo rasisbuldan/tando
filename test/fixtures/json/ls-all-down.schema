@@ -4,3 +4,5 @@ hosts[].host:string
 hosts[].reachable:bool
 hosts[].error:string
 hosts[].checked_at:number
+hosts[].address:string
+hosts[].user:string

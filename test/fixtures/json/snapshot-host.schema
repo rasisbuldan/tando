@@ -62,3 +62,5 @@ host_metrics.series[].memory_used_bytes:null-or-number
 host_metrics.series[].memory_total_bytes:null-or-number
 host_metrics.series[].disk_used_bytes:null-or-number
 host_metrics.series[].disk_total_bytes:null-or-number
+address:string
+user:string

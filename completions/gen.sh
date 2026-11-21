@@ -79,7 +79,7 @@ fi
       }
     }
   }
-  $cmd{host}{subargs} = "setup|rm:hosts" if $cmd{host};
+  $cmd{host}{subargs} = "setup|rm|rename:hosts" if $cmd{host};
   $cmd{$_}{subs} = [uniq @{ $cmd{$_}{subs} }], $cmd{$_}{flags} = [uniq @{ $cmd{$_}{flags} }] for keys %cmd;
   for my $c (@order) {
     my $x = $cmd{$c};

@@ -2,6 +2,8 @@
  "hosts": [
   {
    "host": "web-2",
+   "address": "192.0.2.99",
+   "user": "nobody",
    "error": "connection refused",
    "reachable": false,
    "checked_at": 1795247325

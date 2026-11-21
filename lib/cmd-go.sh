@@ -184,7 +184,7 @@ go_tkey() {
 
 q_host() {
   local f n=0
-  [ -n "$A_host" ] && [ ! -f "$CFG/hosts/$A_host" ] && A_host=""
+  [ -n "$A_host" ] && [ ! -f "$CFG/hosts/$A_host" ] && { A_host=$(host_alias "$A_host") || A_host=""; }
   if go_given host || go_given addr; then GO_NAV=auto; return; fi
   for f in "$CFG"/hosts/*; do [ -f "$f" ] && [ "$(host_get "${f##*/}" kind)" != deploy ] && n=$((n + 1)); done
   [ $n -gt 0 ] || { A_host=""; GO_NAV=auto; return; }
