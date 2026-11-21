@@ -682,7 +682,13 @@ srv 'sudo systemctl stop tando-watch.timer'
 check "31p host setup --pg-stat-statements: the step says PostgreSQL restarted once, the module is preloaded with track_utility off" \
   eval 'grep -q "pg_stat_statements.*PostgreSQL restarted once" "$E/setup-pgss.out" &&
         [ "$(srv "sudo -u postgres psql -At -c \"SHOW pg_stat_statements.track_utility\"")" = off ]'
-wruns 3
+# statements in ops's database as its role (pg_stat_statements records from the restart on: without
+# any, nothing is written and top_queries stays null); the top statements go with the minute's
+# line, at most one a minute: runs until the file is there
+srv 'url=$(sudo /opt/tando/bin/tando-agent db-url ops | sed -n "s/^url=//p"); for i in 1 2 3; do psql -q "$url" -c "SELECT count(*) FROM pg_class" > /dev/null; done' ||
+  echo "31q: the statements in ops's database failed" >&2
+dbtop() { srv 'sudo test -s /var/lib/tando/metrics/ops.dbtop'; }
+T_UNTIL_STEP=5 until_ 120 wrun_and dbtop
 check "31q its top statements: ops.dbtop (0600), in snapshot's top_queries; the history file has no statement text" \
   eval '"$R" snapshot --json -H t --app ops --range 1h > "$E/snap-db2.json" 2>&1 &&
         python3 -I -c "import json,sys; d=json.load(open(sys.argv[1]))[\"app\"][\"database\"]; sys.exit(0 if d[\"top_queries\"] and d[\"top_queries\"][\"queries\"] else 1)" "$E/snap-db2.json" &&

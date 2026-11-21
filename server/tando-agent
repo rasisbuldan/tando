@@ -2405,9 +2405,10 @@ EOF
   fi
   if ((pgss)); then
     [[ ${H[postgres]:-} == yes ]] || die "pg_stat_statements needs PostgreSQL on this server: tando host setup <host> postgres=yes --pg-stat-statements"
-    step pg_stat_statements run
+    # (the step's name is the box's short label column: "pg_stat_statements" came out "pg_stat_s…")
+    step queries run
     pg_stat_statements_on
-    step pg_stat_statements ok "$RT_DETAIL"
+    step queries ok "$RT_DETAIL"
   fi
   step apps run
   # settings such as tls change every site: re-render them. O(apps), not O(apps squared): the units
@@ -4902,7 +4903,7 @@ pg_stat_statements_on() {
   fi
   pgsql -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" || die "could not create the extension pg_stat_statements"
   H[pg_stat_statements]=yes; save "$R/host.conf" H; chmod 644 "$R/host.conf"
-  RT_DETAIL="on${restart:+ (PostgreSQL restarted once)}; top statements in tando snapshot within 2 minutes"
+  RT_DETAIL="pg_stat_statements on${restart:+ (PostgreSQL restarted once)}; top statements in tando snapshot within 2 minutes"
 }
 
 # pg_host_sync (host setup, with PostgreSQL on the host): what an older tando did not set yet: the
