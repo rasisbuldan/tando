@@ -75,7 +75,23 @@ Deploying needs a project directory, so the dashboard has no deploy key.
   it keeps, is `server/legacy/tando-metrics`. Each run appends one line per app to `/var/lib/tando/metrics/<app>.tsv`: time,
   memory (anon + shmem: the same as status, ls, top's live number and the `memory` alert; anon
   only before 2026-11), cpu µs since the last sample, restarts, state. It also appends one line to `host.tsv`:
-  load, memory used and total.
+  load × 100, memory used and total, then (since 2026-11) cpu per mille of all cores since the last
+  sample (`/proc/stat`'s busy and total jiffies, kept in `.state`; `-` on the first sample) and the
+  used and total bytes of the file system holding /var/lib/tando (statfs; `-` if it failed).
+  Columns are only added at the end: an older reader takes the first four, a newer one reads an
+  older line's missing ones as gaps.
+- **App disk.** Every 15 minutes at most, the sample walks each app's tree in-process (no `du`):
+  `/opt/tando/apps/<app>` (releases, shared data, incoming, home), its `data_dir` when that is
+  outside, and its journal namespace (`/var/log/journal/<id>.tando-<app>`); allocated blocks, a hard
+  link once, symlinks not followed. Not its PostgreSQL database nor its backups. The result goes to
+  its own small file, `<app>.disk` (`time bytes`, at most one line per 15 minutes; `.disk.1` past
+  24 KB), not into the per-minute line: a column there would cost 1440 numbers a day per app for a
+  value that changes every 15 minutes, and would break older readers of the app line (its last
+  field takes the rest of the line). The walks of one sample share a 500 ms budget, oldest walk
+  first; a walk that runs out is dropped (a gap) and waits its 15 minutes, so one huge tree cannot
+  take every minute. A walk of 50,000 files takes about 170 ms (BenchmarkWalk50k, macOS APFS on an
+  M1 laptop; ext4 is usually faster). `read` carries the newest walk into the buckets after it, up
+  to 20 minutes older than the bucket.
 - **Rotation.** A file becomes `<app>.tsv.1` after 3.5 days or 5100 lines, so an app keeps at most
   7 days, about 2 × 160 KB.
 - **Cost.** One sample costs about 4–5 ms of CPU for 1–2 apps (measured on the arm64 test
@@ -83,8 +99,9 @@ Deploying needs a project directory, so the dashboard has no deploy key.
   3.8 ms each against 5.4 ms for the shell version). A `read` of 60 one-minute points from 7 days of
   data takes about 2 ms wall (shell: 8 ms); 2000 five-minute points about 3 ms (shell: 360 ms).
 - **Reading.** `tando-metrics read <app|host> <points> <bucket seconds>` returns the last `points`
-  buckets, averaged (`m` rows: start, memory, cpu per mille of a core, restarts, state). It needs no
-  root.
+  buckets, averaged (`m` rows: start, memory, cpu per mille of a core, restarts, state, disk bytes;
+  `h` rows: start, load × 100, memory used, memory total, cpu per mille of all cores, disk used,
+  disk total; `-` where not known). It needs root (the directory is 700).
 - **Live samples.** While the dashboard is open, its own 2-second samples fill the newest bucket.
 
 `tando status` can use the same data for its sparkline: add

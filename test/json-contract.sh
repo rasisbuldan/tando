@@ -57,6 +57,7 @@ history|history --json
 releases|releases shop --json
 snapshot|snapshot --json -H web-1
 snapshot-app|snapshot --json -H web-1 --app shop --range 24h
+snapshot-host|snapshot --json -H web-1 --range 24h
 snapshot-unreachable|snapshot --json -H web-2
 env-ls|env ls shop --json
 env-log|env log -a shop --json
@@ -145,6 +146,15 @@ assert L[1][\"error\"] == \"connection refused\" and L[2][\"error\"] == \"no ans
 check "N15 a hung host's ssh is not left running" eval '! pgrep -f "sleep 60" > /dev/null || ! ps -o command= -p $(pgrep -f "sleep 60" | head -1) | grep -q .'
 rm -f "$TANDO_CONFIG_DIR/hosts/web-2" "$TANDO_CONFIG_DIR/hosts/web-3"
 out=$(tando snapshot --json --all --app shop 2>&1); check "N16 --app goes with one host: --all --app is refused" eval 'printf "%s" "$out" | grep -q "goes with one host"'
+check "N17 app metrics carry disk_bytes: the newest walk, null where none" \
+  q "$SA" '[p["disk_bytes"] for p in d["app"]["metrics"]["series"][-6:]] == [52428800, None, None, 52428800, 53477376, 53477376]'
+SH=$T/out/snapshot-host.json
+: > "$T/log"; tando snapshot --json -H web-1 --range 1h > "$SH" 2> /dev/null
+check "N18 snapshot --range without --app: one exec, the host's series (tando-metrics read host), no app reads" \
+  eval 'test "$(grep -c . "$T/log")" = 1 && grep -q "tando-metrics read host 60 60" "$T/log" && ! grep -qE "@releases|tando-watch|audit-read" "$T/log"'
+check "N19 host_metrics 1h: 60 buckets, gaps null; load, cpu %, memory and disk used/total; data_since" \
+  q "$SH" '(m := d["host_metrics"]) and (s := m["series"]) and len(s) == 60 and [p["load"] for p in s[-4:]] == [0.42, None, 1.05, 0.5] and [p["cpu_percent"] for p in s[-4:]] == [None, None, 12.5, 3.0] and s[-1]["memory_used_bytes"] == 1024000000 and s[-1]["memory_total_bytes"] == 2048000000 and s[-1]["disk_used_bytes"] == 12000000000 and s[-1]["disk_total_bytes"] == 40000000000 and s[-4]["disk_used_bytes"] is None and m["data_since"] == s[-4]["t"] and "app" not in d'
+out=$(tando snapshot --json --all --range 1h 2>&1); check "N20 --range goes with one host: --all --range is refused" eval 'printf "%s" "$out" | grep -q "goes with one host"'
 
 # ---- names only, and the series ------------------------------------------------------------------
 : > "$T/log"; tando env ls shop --json > "$T/env.json" 2> /dev/null

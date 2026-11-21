@@ -1,5 +1,5 @@
 // Data shaping: everything the pages derive from tando's JSON, pure and tested against the fixtures.
-import type { Alert, AppRow, HistoryRow, HostView, Metrics, Release, Snapshot, ApiErrorBody, MetricPoint } from "./types";
+import type { Alert, AppRow, HistoryRow, HostView, Metrics, Release, Snapshot, ApiErrorBody, MetricPoint, HostMetricPoint } from "./types";
 import { share } from "./share";
 
 export type Kind = "ok" | "warn" | "fail" | "stale" | "info" | "neutral";
@@ -183,16 +183,31 @@ export const RANGE_S: Record<RangeKey, number> = { "1h": 3600, "24h": 86400, "7d
 
 export interface ChartDomain { from: number; to: number }
 /** fixed domain [now - range, now], now = the server's clock (the metrics' own `to` as fallback) */
-export function chartDomain(range: RangeKey, serverNow: number | null | undefined, m: Metrics | null): ChartDomain {
+export function chartDomain(range: RangeKey, serverNow: number | null | undefined, m: Pick<Metrics, "to"> | null): ChartDomain {
   const to = serverNow ?? m?.to ?? Math.floor(Date.now() / 1000);
   return { from: to - RANGE_S[range], to };
 }
 
-export type SeriesKey = "memory_bytes" | "cpu_percent" | "restarts";
+export type SeriesKey = "memory_bytes" | "cpu_percent" | "restarts" | "disk_bytes";
 export interface ChartPoint { t: number; v: number | null; w?: number | null } // w: an optional second series (5xx)
 /** buckets as points; null stays null (a gap), never zero and never interpolated */
 export function toPoints(series: MetricPoint[] | undefined, key: SeriesKey): ChartPoint[] {
   return (series ?? []).map((p) => ({ t: p.t, v: p[key] ?? null }));
+}
+export type HostKey = "load" | "cpu_percent" | "memory_used_bytes" | "disk_used_bytes" | "memory_total_bytes" | "disk_total_bytes";
+/** the Server page's series: one point per bucket, null a gap (older samples have no cpu or disk) */
+export function hostPoints(series: HostMetricPoint[] | undefined, key: HostKey): ChartPoint[] {
+  return (series ?? []).map((p) => ({ t: p.t, v: p[key] ?? null }));
+}
+/** the newest non-null value of a key (memory and disk totals: the charts' limit lines) */
+export function lastValue(series: HostMetricPoint[] | undefined, key: HostKey): number | null {
+  const s = series ?? [];
+  for (let i = s.length - 1; i >= 0; i--) { const v = s[i][key]; if (v != null) return v; }
+  return null;
+}
+/** load axis: a round number above both the data and the cores line */
+export function loadMax(dataMax: number | null, cpus: number | null | undefined): number {
+  return niceMax(Math.max(dataMax ?? 0, cpus ?? 0));
 }
 export interface Gaps { points: number; gaps: number; first: number | null; last: number | null; min: number | null; max: number | null }
 export function describe(points: ChartPoint[]): Gaps {
@@ -207,7 +222,7 @@ export function describe(points: ChartPoint[]): Gaps {
   return { points: points.length, gaps, first, last, min, max };
 }
 /** the "data since" label: only when the retained data starts after the domain start */
-export function dataSince(m: Metrics | null, domain: ChartDomain): number | null {
+export function dataSince(m: Pick<Metrics, "data_since" | "bucket_s"> | null, domain: ChartDomain): number | null {
   if (!m || m.data_since == null) return null;
   return m.data_since > domain.from + (m.bucket_s || 0) ? m.data_since : null;
 }

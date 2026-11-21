@@ -1,11 +1,11 @@
 {
  "host": "web-1",
  "reachable": true,
- "checked_at": 1795247326,
+ "checked_at": 1795263235,
  "server_version": "0.2.2",
  "client_version": "0.2.2",
  "clock_skew_s": 3,
- "server_now": 1795247329,
+ "server_now": 1795263238,
  "system": {
   "hostname": "web-1",
   "cpus": 2,
@@ -150,20 +150,19 @@
    "app": "api",
    "check": "down",
    "state": "firing",
-   "since": 1795246426,
+   "since": 1795262335,
    "detail": "exited"
   },
   {
    "app": "host",
    "check": "disk",
    "state": "pending",
-   "since": 1795247206,
+   "since": 1795263115,
    "detail": "85% used"
   }
  ],
  "app": {
   "name": "shop",
-  "origin": "alice@laptop:/src/shop",
   "status": {
    "app": "shop",
    "state": "running",
@@ -212,9 +211,10 @@
     "last_good": false
    }
   ],
+  "origin": "alice@laptop:/src/shop",
   "history": [
    {
-    "at": 1795240126,
+    "at": 1795256035,
     "app": "shop",
     "release": "20261117-101010",
     "kind": "deploy",
@@ -231,7 +231,7 @@
     "deployer": "ci-bot"
    },
    {
-    "at": 1795157326,
+    "at": 1795173235,
     "app": "shop",
     "release": "20261116-101010",
     "kind": "rollback",
@@ -248,7 +248,7 @@
     "deployer": "alice"
    },
    {
-    "at": 1795067326,
+    "at": 1795083235,
     "app": "shop",
     "release": "20261115-101010",
     "kind": "deploy",
@@ -269,1017 +269,1161 @@
    "range": "24h",
    "bucket_s": 600,
    "points": 144,
-   "from": 1795161000,
-   "to": 1795246800,
-   "data_since": 1795243800,
+   "from": 1795177200,
+   "to": 1795263000,
+   "data_since": 1795260000,
    "series": [
-    {
-     "t": 1795161000,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795161600,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795162200,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795162800,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795163400,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795164000,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795164600,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795165200,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795165800,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795166400,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795167000,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795167600,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795168200,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795168800,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795169400,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795170000,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795170600,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795171200,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795171800,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795172400,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795173000,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795173600,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795174200,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795174800,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795175400,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795176000,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
-    {
-     "t": 1795176600,
-     "memory_bytes": null,
-     "cpu_percent": null,
-     "restarts": null,
-     "state": null
-    },
     {
      "t": 1795177200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795177800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795178400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795179000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795179600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795180200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795180800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795181400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795182000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795182600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795183200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795183800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795184400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795185000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795185600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795186200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795186800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795187400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795188000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795188600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795189200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795189800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795190400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795191000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795191600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795192200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795192800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795193400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795194000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795194600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795195200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795195800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795196400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795197000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795197600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795198200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795198800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795199400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795200000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795200600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795201200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795201800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795202400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795203000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795203600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795204200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795204800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795205400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795206000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795206600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795207200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795207800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795208400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795209000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795209600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795210200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795210800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795211400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795212000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795212600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795213200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795213800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795214400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795215000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795215600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795216200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795216800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795217400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795218000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795218600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795219200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795219800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795220400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795221000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795221600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795222200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795222800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795223400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795224000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795224600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795225200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795225800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795226400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795227000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795227600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795228200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795228800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795229400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795230000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795230600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795231200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795231800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795232400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795233000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795233600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795234200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795234800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795235400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795236000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795236600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795237200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795237800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795238400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795239000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795239600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795240200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795240800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795241400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795242000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795242600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795243200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795243800,
-     "memory_bytes": 100000000,
-     "cpu_percent": 12.0,
-     "restarts": 0,
-     "state": "a"
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795244400,
-     "memory_bytes": 101000000,
-     "cpu_percent": 13.0,
-     "restarts": 1,
-     "state": "a"
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795245000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
-     "state": null
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795245600,
-     "memory_bytes": 102000000,
-     "cpu_percent": 14.0,
-     "restarts": 0,
-     "state": "a"
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795246200,
-     "memory_bytes": 103000000,
-     "cpu_percent": 15.0,
-     "restarts": 1,
-     "state": "a"
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
     },
     {
      "t": 1795246800,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795247400,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795248000,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795248600,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795249200,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795249800,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795250400,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795251000,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795251600,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795252200,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795252800,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795253400,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795254000,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795254600,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795255200,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795255800,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795256400,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795257000,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795257600,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795258200,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795258800,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795259400,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795260000,
+     "memory_bytes": 100000000,
+     "cpu_percent": 12.0,
+     "restarts": 0,
+     "state": "a",
+     "disk_bytes": 52428800
+    },
+    {
+     "t": 1795260600,
+     "memory_bytes": 101000000,
+     "cpu_percent": 13.0,
+     "restarts": 1,
+     "state": "a",
+     "disk_bytes": null
+    },
+    {
+     "t": 1795261200,
+     "memory_bytes": null,
+     "cpu_percent": null,
+     "restarts": null,
+     "state": null,
+     "disk_bytes": null
+    },
+    {
+     "t": 1795261800,
+     "memory_bytes": 102000000,
+     "cpu_percent": 14.0,
+     "restarts": 0,
+     "state": "a",
+     "disk_bytes": 52428800
+    },
+    {
+     "t": 1795262400,
+     "memory_bytes": 103000000,
+     "cpu_percent": 15.0,
+     "restarts": 1,
+     "state": "a",
+     "disk_bytes": 53477376
+    },
+    {
+     "t": 1795263000,
      "memory_bytes": 104857600,
      "cpu_percent": 3.4,
      "restarts": 0,
-     "state": "a"
+     "state": "a",
+     "disk_bytes": 53477376
     }
    ]
   },
@@ -1299,107 +1443,107 @@
     "stat": "avg_ms",
     "points": [
      {
-      "t": 1795160929,
+      "t": 1795176838,
       "avg_ms": 40
      },
      {
-      "t": 1795164529,
+      "t": 1795180438,
       "avg_ms": 42
      },
      {
-      "t": 1795168129,
+      "t": 1795184038,
       "avg_ms": null
      },
      {
-      "t": 1795171729,
+      "t": 1795187638,
       "avg_ms": 38
      },
      {
-      "t": 1795175329,
+      "t": 1795191238,
       "avg_ms": 39
      },
      {
-      "t": 1795178929,
+      "t": 1795194838,
       "avg_ms": 41
      },
      {
-      "t": 1795182529,
+      "t": 1795198438,
       "avg_ms": 40
      },
      {
-      "t": 1795186129,
+      "t": 1795202038,
       "avg_ms": 40
      },
      {
-      "t": 1795189729,
+      "t": 1795205638,
       "avg_ms": 39
      },
      {
-      "t": 1795193329,
+      "t": 1795209238,
       "avg_ms": 38
      },
      {
-      "t": 1795196929,
+      "t": 1795212838,
       "avg_ms": 37
      },
      {
-      "t": 1795200529,
+      "t": 1795216438,
       "avg_ms": 36
      },
      {
-      "t": 1795204129,
+      "t": 1795220038,
       "avg_ms": 40
      },
      {
-      "t": 1795207729,
+      "t": 1795223638,
       "avg_ms": 41
      },
      {
-      "t": 1795211329,
+      "t": 1795227238,
       "avg_ms": 42
      },
      {
-      "t": 1795214929,
+      "t": 1795230838,
       "avg_ms": 43
      },
      {
-      "t": 1795218529,
+      "t": 1795234438,
       "avg_ms": 44
      },
      {
-      "t": 1795222129,
+      "t": 1795238038,
       "avg_ms": 40
      },
      {
-      "t": 1795225729,
+      "t": 1795241638,
       "avg_ms": 39
      },
      {
-      "t": 1795229329,
+      "t": 1795245238,
       "avg_ms": 38
      },
      {
-      "t": 1795232929,
+      "t": 1795248838,
       "avg_ms": 37
      },
      {
-      "t": 1795236529,
+      "t": 1795252438,
       "avg_ms": 36
      },
      {
-      "t": 1795240129,
+      "t": 1795256038,
       "avg_ms": 35
      },
      {
-      "t": 1795243729,
+      "t": 1795259638,
       "avg_ms": 34
      }
     ]
    },
    "incidents": [
     {
-     "start": 1795197326,
-     "end": 1795197626,
+     "start": 1795213235,
+     "end": 1795213535,
      "check": "down",
      "cause": "exited with status 1"
     }

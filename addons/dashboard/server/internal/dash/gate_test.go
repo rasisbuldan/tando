@@ -17,6 +17,7 @@ func TestAllowlist(t *testing.T) {
 		{"snapshot", "--json", "-H", "web-1"},
 		{"snapshot", "-H", "web-1", "--json", "--app", "shop", "--range", "7d"},
 		{"snapshot", "--json", "-H", "vps.example_2", "--app", "shop"},
+		{"snapshot", "--json", "-H", "web-1", "--range", "24h"}, // the host's series (Server page)
 		{"doctor", "web-1", "--json"},
 		{"host", "status", "web-1", "--json"},
 		{"health", "shop", "--json", "-H", "web-1"},
@@ -44,7 +45,7 @@ func TestAllowlist(t *testing.T) {
 		{"snapshot", "--json", "-H", "a", "--verbose"},     // unknown flag
 		{"snapshot", "--json", "-H", "a", "--app=shop"},    // = form
 		{"snapshot", "--json"},                             // -H required
-		{"snapshot", "--json", "-H", "a", "--range", "1h"}, // --range needs --app
+		{"snapshot", "--json", "-H", "a", "--range", "2h"}, // not a range
 		{"snapshot", "--json", "-H", "a", "--range", "2h", "--app", "shop"},
 		{"snapshot", "--json", "-H", "a", "-H", "b"},
 		{"snapshot", "--json", "-H", ".."},
@@ -126,7 +127,7 @@ func TestServerAllowlistBeforeRunner(t *testing.T) {
 	}
 	// names in the API are checked before the CLI is reached
 	e.login()
-	for _, q := range []string{"host=a;b", "host=..", "host=-x", "host=a%20b", "host=a&app=../x", "host=a&app=web&range=2h", "host=a&range=1h"} {
+	for _, q := range []string{"host=a;b", "host=..", "host=-x", "host=a%20b", "host=a&app=../x", "host=a&app=web&range=2h", "host=a&range=1d"} {
 		if st, _ := e.get("/api/snapshot?" + q); st != 400 {
 			t.Errorf("%s: %d", q, st)
 		}

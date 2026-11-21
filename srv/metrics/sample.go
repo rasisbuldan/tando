@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"tando/srv/internal/apps"
 	"tando/srv/internal/atomicfile"
@@ -57,6 +58,7 @@ func (m Metrics) Sample(ctx context.Context) error {
 	if err := m.sampleHost(now, prev[hostKey], next); err != nil {
 		return err
 	}
+	m.sampleDisk(now, names, next)
 	if err := atomicfile.Write(statePath, next.format(keysIn(next, keys)), atomicfile.Mode(fileMode)); err != nil {
 		return err
 	}
@@ -99,7 +101,7 @@ func (m Metrics) sampleApps(ctx context.Context, now int64, names []string, prev
 		if err != nil {
 			return err
 		}
-		e.usec = usec
+		e.usec, e.x = usec, p.x
 		next[a] = e
 	}
 	return nil
@@ -130,12 +132,67 @@ func (m Metrics) sampleHost(now int64, prev entry, next state) error {
 	if err != nil {
 		return err
 	}
-	e, err := m.appendLine("host", now, prev, fmt.Sprintf("%d\t%d\t%d\t%d", now, la, (total-avail)*1024, total*1024))
+	// cpu: permille of all cores busy since the last sample ("-": the first, or not known)
+	cpu := "-"
+	busy, jiffies, ok := procStat(filepath.Join(m.Env.Proc, "stat"))
+	if ok && prev.x > 0 && jiffies > prev.x && busy >= prev.usec {
+		cpu = strconv.FormatInt((busy-prev.usec)*1000/(jiffies-prev.x), 10)
+	}
+	// disk: the filesystem that holds /var/lib/tando (the metrics directory is in it)
+	dUsed, dTotal := "-", "-"
+	if u, t, err := statDisk(m.Dir); err == nil {
+		dUsed, dTotal = strconv.FormatInt(u, 10), strconv.FormatInt(t, 10)
+	}
+	e, err := m.appendLine("host", now, prev, fmt.Sprintf("%d\t%d\t%d\t%d\t%s\t%s\t%s", now, la, (total-avail)*1024, total*1024, cpu, dUsed, dTotal))
 	if err != nil {
 		return err
 	}
+	if ok {
+		e.usec, e.x = busy, jiffies
+	}
 	next[hostKey] = e
 	return nil
+}
+
+// procStat: busy and total jiffies of all cpus, from the first line of /proc/stat
+// ("cpu user nice system idle iowait irq softirq steal guest guest_nice"; guest is inside user).
+// Idle is idle + iowait.
+func procStat(path string) (busy, total int64, ok bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, false
+	}
+	line, _, _ := strings.Cut(string(b), "\n")
+	f := strings.Fields(line)
+	if len(f) < 6 || f[0] != "cpu" {
+		return 0, 0, false
+	}
+	var idle int64
+	for i := 1; i < len(f) && i <= 8; i++ {
+		n, err := strconv.ParseInt(f[i], 10, 64)
+		if err != nil {
+			return 0, 0, false
+		}
+		total += n
+		if i == 4 || i == 5 {
+			idle += n
+		}
+	}
+	return total - idle, total, total > 0
+}
+
+// statDisk is diskOf (a test's fake filesystem replaces it).
+var statDisk = diskOf
+
+// diskOf: used and total bytes of the filesystem holding path (as df: total is the size,
+// used is size minus free)
+func diskOf(path string) (used, total int64, err error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, 0, err
+	}
+	bs := int64(st.Bsize)
+	return int64(st.Blocks-st.Bfree) * bs, int64(st.Blocks) * bs, nil
 }
 
 // meminfo: MemTotal and MemAvailable in kB.

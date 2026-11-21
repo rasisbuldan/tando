@@ -19,6 +19,9 @@ type entry struct {
 	usec  int64 // the unit's cpu usage_usec at the last sample (-1: not known); the next line holds the difference
 	start int64 // when the current .tsv file began (0: not known yet)
 	lines int64 // lines in the current .tsv file
+	// x: an app's last disk walk (tried or done, unix time; 0: never); the host's total cpu
+	// jiffies of /proc/stat (0: not known), whose busy jiffies are in usec
+	x int64
 }
 
 // state maps an app (or hostKey) to its entry.
@@ -53,6 +56,9 @@ func loadState(path string) (state, error) {
 		if len(f) > 3 {
 			e.lines, _ = strconv.ParseInt(f[3], 10, 64)
 		}
+		if len(f) > 4 {
+			e.x, _ = strconv.ParseInt(f[4], 10, 64)
+		}
 		st[f[0]] = e
 	}
 	return st, nil
@@ -63,7 +69,7 @@ func (st state) format(keys []string) []byte {
 	var b bytes.Buffer
 	for _, k := range keys {
 		e := st[k]
-		fmt.Fprintf(&b, "%s %d %d %d\n", k, e.usec, e.start, e.lines)
+		fmt.Fprintf(&b, "%s %d %d %d %d\n", k, e.usec, e.start, e.lines, e.x)
 	}
 	return b.Bytes()
 }

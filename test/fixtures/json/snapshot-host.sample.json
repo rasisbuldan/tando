@@ -1,0 +1,1470 @@
+{
+ "host": "web-1",
+ "reachable": true,
+ "checked_at": 1795263235,
+ "server_version": "0.2.2",
+ "client_version": "0.2.2",
+ "clock_skew_s": 3,
+ "server_now": 1795263238,
+ "system": {
+  "hostname": "web-1",
+  "cpus": 2,
+  "load_1": 0.42,
+  "load_5": 0.37,
+  "load_15": 0.3,
+  "memory_used_bytes": 1024000000,
+  "memory_total_bytes": 2048000000,
+  "disk_used_bytes": 12000000000,
+  "disk_total_bytes": 40000000000,
+  "uptime_s": 864000
+ },
+ "apps": [
+  {
+   "app": "shop",
+   "state": "running",
+   "recipe": "node",
+   "port": 3000,
+   "release": "20261117-101010",
+   "deployed_at": 1794910210,
+   "release_status": "verified",
+   "memory_bytes": 104857600,
+   "memory_max_bytes": 268435456,
+   "cpu_percent": 3.4,
+   "restarts": 1,
+   "uptime_s": 7200,
+   "link": "https://shop.example.com/",
+   "database": "shop",
+   "log_bytes": 5242880,
+   "domains": "shop.example.com",
+   "cpu_limit": "50%",
+   "tasks_max": 64,
+   "max_conns": 100,
+   "max_requests": 200,
+   "alerts_firing": 0,
+   "firing": null,
+   "state_reason": "running"
+  },
+  {
+   "app": "api",
+   "state": "down",
+   "recipe": "node",
+   "port": 3001,
+   "release": "20261117-090909",
+   "deployed_at": 1794906549,
+   "release_status": "verified",
+   "memory_bytes": 0,
+   "memory_max_bytes": 0,
+   "cpu_percent": null,
+   "restarts": 4,
+   "uptime_s": 0,
+   "link": "https://api.example.com/",
+   "database": null,
+   "log_bytes": null,
+   "domains": null,
+   "cpu_limit": null,
+   "tasks_max": null,
+   "max_conns": null,
+   "max_requests": null,
+   "alerts_firing": 1,
+   "firing": "down",
+   "state_reason": "down"
+  },
+  {
+   "app": "docs",
+   "state": "static",
+   "recipe": "static",
+   "port": null,
+   "release": "20261116-080808",
+   "deployed_at": 1794816488,
+   "release_status": "verified",
+   "memory_bytes": 0,
+   "memory_max_bytes": 0,
+   "cpu_percent": null,
+   "restarts": 0,
+   "uptime_s": 0,
+   "link": "https://docs.example.com/",
+   "database": null,
+   "log_bytes": null,
+   "domains": null,
+   "cpu_limit": null,
+   "tasks_max": null,
+   "max_conns": null,
+   "max_requests": null,
+   "alerts_firing": 0,
+   "firing": null,
+   "state_reason": "static"
+  },
+  {
+   "app": "jobs",
+   "state": "stopped",
+   "recipe": "python",
+   "port": 3002,
+   "release": "20261115-070707",
+   "deployed_at": 1794726427,
+   "release_status": "verified",
+   "memory_bytes": 0,
+   "memory_max_bytes": 0,
+   "cpu_percent": null,
+   "restarts": 0,
+   "uptime_s": 0,
+   "link": null,
+   "database": null,
+   "log_bytes": null,
+   "domains": null,
+   "cpu_limit": null,
+   "tasks_max": null,
+   "max_conns": null,
+   "max_requests": null,
+   "alerts_firing": 0,
+   "firing": null,
+   "state_reason": "stopped"
+  },
+  {
+   "app": "fresh",
+   "state": "not deployed",
+   "recipe": "node",
+   "port": 3003,
+   "release": null,
+   "deployed_at": null,
+   "release_status": null,
+   "memory_bytes": 0,
+   "memory_max_bytes": 0,
+   "cpu_percent": null,
+   "restarts": 0,
+   "uptime_s": 0,
+   "link": null,
+   "database": null,
+   "log_bytes": null,
+   "domains": null,
+   "cpu_limit": null,
+   "tasks_max": null,
+   "max_conns": null,
+   "max_requests": null,
+   "alerts_firing": 0,
+   "firing": null,
+   "state_reason": "deploying"
+  }
+ ],
+ "alerts": [
+  {
+   "app": "api",
+   "check": "down",
+   "state": "firing",
+   "since": 1795262335,
+   "detail": "exited"
+  },
+  {
+   "app": "host",
+   "check": "disk",
+   "state": "pending",
+   "since": 1795263115,
+   "detail": "85% used"
+  }
+ ],
+ "host_metrics": {
+  "range": "24h",
+  "bucket_s": 600,
+  "points": 144,
+  "from": 1795177200,
+  "to": 1795263000,
+  "data_since": 1795261200,
+  "series": [
+   {
+    "t": 1795177200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795177800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795178400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795179000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795179600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795180200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795180800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795181400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795182000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795182600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795183200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795183800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795184400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795185000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795185600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795186200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795186800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795187400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795188000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795188600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795189200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795189800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795190400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795191000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795191600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795192200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795192800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795193400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795194000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795194600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795195200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795195800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795196400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795197000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795197600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795198200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795198800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795199400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795200000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795200600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795201200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795201800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795202400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795203000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795203600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795204200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795204800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795205400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795206000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795206600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795207200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795207800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795208400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795209000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795209600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795210200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795210800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795211400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795212000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795212600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795213200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795213800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795214400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795215000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795215600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795216200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795216800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795217400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795218000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795218600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795219200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795219800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795220400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795221000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795221600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795222200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795222800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795223400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795224000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795224600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795225200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795225800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795226400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795227000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795227600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795228200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795228800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795229400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795230000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795230600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795231200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795231800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795232400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795233000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795233600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795234200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795234800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795235400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795236000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795236600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795237200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795237800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795238400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795239000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795239600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795240200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795240800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795241400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795242000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795242600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795243200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795243800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795244400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795245000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795245600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795246200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795246800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795247400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795248000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795248600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795249200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795249800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795250400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795251000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795251600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795252200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795252800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795253400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795254000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795254600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795255200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795255800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795256400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795257000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795257600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795258200,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795258800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795259400,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795260000,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795260600,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795261200,
+    "load": 0.42,
+    "cpu_percent": null,
+    "memory_used_bytes": 1000000000,
+    "memory_total_bytes": 2048000000,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795261800,
+    "load": null,
+    "cpu_percent": null,
+    "memory_used_bytes": null,
+    "memory_total_bytes": null,
+    "disk_used_bytes": null,
+    "disk_total_bytes": null
+   },
+   {
+    "t": 1795262400,
+    "load": 1.05,
+    "cpu_percent": 12.5,
+    "memory_used_bytes": 1010000000,
+    "memory_total_bytes": 2048000000,
+    "disk_used_bytes": 11900000000,
+    "disk_total_bytes": 40000000000
+   },
+   {
+    "t": 1795263000,
+    "load": 0.5,
+    "cpu_percent": 3.0,
+    "memory_used_bytes": 1024000000,
+    "memory_total_bytes": 2048000000,
+    "disk_used_bytes": 12000000000,
+    "disk_total_bytes": 40000000000
+   }
+  ]
+ }
+}

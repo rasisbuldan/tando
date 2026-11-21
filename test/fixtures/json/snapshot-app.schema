@@ -56,6 +56,7 @@ app.metrics.points:number
 app.metrics.range:string
 app.metrics.series:array
 app.metrics.series[].cpu_percent:null-or-number
+app.metrics.series[].disk_bytes:null-or-number
 app.metrics.series[].memory_bytes:null-or-number
 app.metrics.series[].restarts:null-or-number
 app.metrics.series[].state:null-or-string
