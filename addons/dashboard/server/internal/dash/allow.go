@@ -40,7 +40,7 @@ type shape struct {
 	verb  []string
 	pos   []valueKind
 	flags map[string]flagRule
-	needs map[string]string // flag -> flag it needs (--range needs --app)
+	needs map[string]string // flag -> flag it needs
 	write bool
 }
 
@@ -49,8 +49,8 @@ var shapes = []shape{
 	{name: "version", verb: []string{"--version"}},
 	{name: "help-snapshot", verb: []string{"help", "snapshot"}},
 	{name: "snapshot", verb: []string{"snapshot"}, flags: map[string]flagRule{
-		"--json": {vNone, true}, "-H": {vHost, true}, "--app": {vApp, false}, "--range": {vRange, false}},
-		needs: map[string]string{"--range": "--app"}},
+		"--json": {vNone, true}, "-H": {vHost, true}, "--app": {vApp, false}, "--range": {vRange, false}}},
+	// (--range without --app: the host's series, for the Server page)
 	{name: "doctor", verb: []string{"doctor"}, pos: []valueKind{vHost},
 		flags: map[string]flagRule{"--json": {vNone, true}}},
 	{name: "hoststatus", verb: []string{"host", "status"}, pos: []valueKind{vHost},
