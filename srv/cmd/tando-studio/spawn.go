@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -136,7 +137,9 @@ func (sp *Spawner) Spawn(h *studio.Helper) error {
 	stdin, err1 := cmd.StdinPipe()
 	stdout, err2 := cmd.StdoutPipe()
 	errb := &capBuf{}
-	cmd.Stderr = errb
+	// (the helper's stderr: its start and stop and internal errors, never SQL or a value; kept
+	// for the reason it did not start, and passed on to the journal)
+	cmd.Stderr = io.MultiWriter(errb, os.Stderr)
 	if err1 != nil || err2 != nil {
 		f.Close()
 		os.Remove(path)

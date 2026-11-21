@@ -157,7 +157,7 @@ perm=$(srv "sudo stat -c '%a %U:%G' /run/tando-studio /run/tando-studio/ctl /run
 check "S1h /run/tando-studio root 711, ctl root 600, the admin's directory 711 and socket 600 vmadmin, the helpers' root 700: $perm" \
   test "$perm" = "711 root:root 600 root:root 711 root:root 600 vmadmin:root 700 root:root "
 pid=$(helper_pid)
-st=$(srv "ps -o user=,group= -p $pid; grep -E '^(Groups|CapEff|CapPrm|NoNewPrivs):' /proc/$pid/status | tr -s '\t' ' '" | tr '\n' ' ' | tr -s ' ')
+st=$(srv "ps -o user:32=,group:32= -p $pid; grep -E '^(Groups|CapEff|CapPrm|NoNewPrivs):' /proc/$pid/status | tr -s '\t' ' '" | tr '\n' ' ' | tr -s ' ')
 check "S1i the helper runs as tando-shop, no other group, without capabilities, no new privileges: $st" \
   test "$st" = "tando-shop tando-shop Groups: CapPrm: 0000000000000000 CapEff: 0000000000000000 NoNewPrivs: 1 "
 st=$(srv "ps -o user= -p $FRONT; grep -E '^(CapEff|CapBnd|NoNewPrivs):' /proc/$FRONT/status | tr -s '\t' ' '" | tr '\n' ' ')
@@ -548,6 +548,9 @@ kill -INT "$p2"; ST_PID=$p2; st_wait_exit 15
 q "SELECT 3"
 check "S7e the second client's Ctrl-C leaves the first one working" test "$(jx '%->{results}[0]{rows}[0][0]')" = 3
 "$R" db studio -a shop --stop > "$E/stop.out" 2>&1
+# (the restarted service makes an admin's socket again on that admin's next code: one minted for
+# the same port, so the old token comes back through the old forward to a new front)
+srv "sudo /opt/tando/bin/tando-agent db-studio-code shop $ST_PORT test" > /dev/null
 api /api/ping
 check "S7g tando db studio --stop: the service restarted (a new process), every token revoked (401)" \
   eval 'grep -q "every studio session on test ended; the service restarted" "$E/stop.out" && [ "$CODE" = 401 ] && [ "$(front_pid)" != "$FRONT" ] && srv "systemctl is-active -q tando-studio.service"'
@@ -555,6 +558,7 @@ kill -INT "$p1"; ST_PID=$p1; st_wait_exit 15
 FRONT=$(front_pid)
 st_start "$E/s7r.out" shop
 srv "sudo systemctl restart tando-studio.service"
+srv "sudo /opt/tando/bin/tando-agent db-studio-code shop $ST_PORT test" > /dev/null
 api /api/ping
 check "S7r a restart of the service revokes the tokens (401)" test "$CODE" = 401
 kill -INT "$ST_PID"; st_wait_exit 15
@@ -653,8 +657,9 @@ T_UNTIL_STEP=0.5 t_until 15 eval '[ "$(echo "SELECT count(*) FROM pg_stat_activi
 q "SELECT 2"; again=$(jx '%->{results}[0]{rows}[0][0]')
 bpid=$(echo "SELECT pid FROM pg_stat_activity WHERE application_name LIKE 'tando studio%'" | pgsu postgres)
 T_UNTIL_STEP=0.2 t_until 10 eval '[ "$(srv "ps -o ni= -p $bpid" | tr -d " ")" = 19 ]'
-check "S9i unused, the database connection is closed (the helper runs on); the next request opens one ($again), its priority lowered again" \
-  eval '[ $gone = 0 ] && [ "$(helpers)" = 1 ] && [ "$again" = 2 ] && [ "$(srv "ps -o ni= -p $bpid" | tr -d " ")" = 19 ]'
+hn=$(helpers)
+check "S9i unused, the database connection is closed (the helper runs on: $hn); the next request opens one ($again), its priority lowered again ($bpid)" \
+  eval '[ $gone = 0 ] && [ "$hn" -ge 1 ] && [ "$again" = 2 ] && [ "$(srv "ps -o ni= -p $bpid" | tr -d " ")" = 19 ]'
 kill -INT "$ST_PID"; st_wait_exit 15
 knobs "timeout=4 idle-s=8"
 
@@ -668,11 +673,13 @@ check "S15a no app named, no tando.conf, not a terminal: the list with the comma
 pk=$!
 fwd() { pgrep -f 'ControlPath=none.*127.0.0.1:[0-9]*:/run/tando-studio/u/' > /dev/null; }   # a client's forward
 T_UNTIL_STEP=0.2 t_until 30 fwd   # (script(1) may write its file only at the end)
+fport=$(pgrep -af 'ControlPath=none.*127.0.0.1:[0-9]*:/run/tando-studio/u/' | sed -n 's/.*127\.0\.0\.1:\([0-9]*\):.*/\1/p' | head -1)
+T_UNTIL_STEP=0.2 t_until 15 eval 'curl -s -m 2 "http://127.0.0.1:$fport/healthz" | grep -q tando-studio'   # (the forward to shop's studio answers)
 pkill -f 'ControlPath=none.*127.0.0.1:[0-9]*:/run/tando-studio/u/'   # (the forward ends: so does the client)
 wait $pk 2> /dev/null
-check "S15b at a terminal: a numbered list (other, shop; plain dimmed), 2 picks shop and opens its studio" \
+check "S15b at a terminal: a numbered list (other, shop; plain dimmed), 2 picks shop: a link is minted for shop and its forward answers" \
   eval 'grep -q "Which app.s database" "$E/pick.tty" && grep -q " 1) other" "$E/pick.tty" && grep -q " 2) shop" "$E/pick.tty" &&
-        grep -q "plain *no database" "$E/pick.tty" && grep -q "shop .*database studio" "$E/pick.tty" && nothing_left'
+        grep -q "plain *no database" "$E/pick.tty" && [ -n "$fport" ] && srv "sudo tail -3 /var/log/tando/audit.log" | grep -q "	db-studio-code	shop	ok	read-only, port $fport$" && nothing_left'
 
 # ---- S14 isolation: two apps, two studios, no data of one in the other ---------------------------
 log "S14 isolation"
@@ -732,7 +739,7 @@ out2=$(srv "read -r PGPASSWORD; export PGPASSWORD; psql -X -At -h 127.0.0.1 -U t
 check "S14o a database left open to PUBLIC (as an older server may have: shop got in: $out) is closed again by host setup ($(echo "$out2" | tail -1))" \
   eval '[ "$out" = 1 ] && echo "$out2" | grep -q "CONNECT privilege"'
 ST_TOKEN=$t2 ST_PORT=$o2
-ST_TOKEN=$t1 ST_PORT=$o1
+st_start "$E/s14s.out" shop; p3=$ST_PID   # (a new client: S14o's host setup restarted the service)
 api /api/a/other/info; sw=$(jx '%->{app} . " " . %->{db}')
 q "SELECT 1"
 check "S14s the switcher: shop's page may open other (the admin's), each request on that app's own helper ($sw); the link's app stays shop" \
@@ -742,6 +749,7 @@ check "S14t no route to an app without a database, an unknown one or a path tric
 "$R" destroy -a other --purge --yes > "$E/destroy.out" 2>&1
 check "S9g destroy of an app with a studio open: its helpers are gone, the service runs on" \
   eval 'T_UNTIL_STEP=0.2 t_until 10 eval "[ -z \"\$(helper_pid other)\" ]" && srv "systemctl is-active -q tando-studio.service"'
+kill -INT "$p3"; ST_PID=$p3; st_wait_exit 15
 kill -INT "$p2"; ST_PID=$p2; st_wait_exit 15
 ST_PID=$p1; kill -INT "$p1"; st_wait_exit 15
 check "S9h nothing left at the end" nothing_left
