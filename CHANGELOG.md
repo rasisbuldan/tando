@@ -6,6 +6,8 @@ first, grouped by area.
 
 ## Unreleased
 
+## 0.2.2 - 2026-11-21
+
 - `tando menubar`: a server the laptop cannot reach counts as a problem from the second check in a
   row, like an app's link (one slow or dropped ssh answer turned the badge red in a real use); the
   menu shows the error from the first.

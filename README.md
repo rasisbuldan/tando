@@ -79,7 +79,7 @@ runs on one server. tando does not do clusters or load balancing across servers.
 
 From a release archive (see the Releases page; the `.sha256` file is checked for you):
 
-    ./install.sh --from tando-0.2.1.tar.gz
+    ./install.sh --from tando-0.2.2.tar.gz
 
 From a checkout (needs Go to build the server programs):
 
@@ -118,7 +118,7 @@ checks are `care`, `updates`, `reboot`, `exposed`, `ssh`, `units`, `readonly`, `
 
 ## Status
 
-Pre-1.0 (version 0.2.1). Tested on Ubuntu 26.04. Offsite backup is tested against a fake S3 only.
+Pre-1.0 (version 0.2.2). Tested on Ubuntu 26.04. Offsite backup is tested against a fake S3 only.
 See [docs/STATUS.md](docs/STATUS.md) for what is verified and what is open.
 
 ## Documentation
