@@ -8,7 +8,7 @@
 # - This map is a shortcut for the quick tier only. The full tier never reads it. When a suite
 #   starts using another part of the tree, add the rule here; when in doubt, write ALL.
 
-@local   = lint ui-test go install-test
+@local   = lint ui-test go install-test runner-test
 @alerts  = e2e-alerts e2e-alerts-timer e2e-alerts-daemon
 @faults  = e2e-faults-q1 e2e-faults-q2 e2e-faults-q3 e2e-faults-q4 e2e-faults-q5 e2e-faults-q6 e2e-matrix-quick
 
@@ -28,10 +28,19 @@ srv/go.mod               ALL
 srv/daemon/*             ALL
 VERSION                  ALL
 test/lib.sh              ALL
-test/all.sh              ALL
-test/select.sh           ALL
-test/suites.map          ALL
-test/server/*            ALL
+test/server/Dockerfile   ALL
+test/server/files/*      ALL
+test/server/ssh.sh       ALL
+# the runner: its own check runs it with fakes, the smoke deploy runs it for real; the map is
+# read only by the quick tier (the full tier, before a push, runs every suite whatever it says)
+test/all.sh              runner-test lint e2e-trial
+test/select.sh           runner-test lint e2e-trial
+test/suites.map          runner-test lint
+test/durations.tsv       runner-test lint
+test/runner-test.sh      runner-test lint
+test/server/up.sh        runner-test lint e2e-trial
+test/server/down.sh      runner-test lint e2e-trial
+test/server/README.md    lint
 
 # ---- laptop side
 lib/ui.sh                lint ui-test e2e-cli e2e-ease e2e-top e2e-status
@@ -39,6 +48,7 @@ lib/views.sh             lint ui-test e2e-cli e2e-status e2e-live e2e-data e2e e
 lib/help.txt             lint ui-test e2e-cli install-test
 lib/help-conf.txt        lint ui-test e2e-cli install-test
 docs/CONFIG.md           lint ui-test
+docs/*.patch             lint e2e-ci
 completions/*            lint ui-test e2e-cli install-test
 lib/cmd-adopt.sh         lint ui-test e2e-cli e2e-adopt
 lib/cmd-alerts.sh        lint ui-test e2e-cli @alerts
@@ -89,10 +99,15 @@ scripts/*                lint install-test go e2e-bootstrap
 packaging/*              lint install-test
 examples/*               lint e2e e2e-next e2e-recipes e2e-ease e2e-bootstrap e2e-data e2e-logs e2e-trial
 templates/*              lint e2e-ci
-docs/*                   lint ui-test e2e-cli install-test
-*.md                     lint ui-test e2e-cli install-test
+# (ui-test compares docs/CONFIG.md, docs/COMMANDS.md and the READMEs with the code; the release
+# archive, install-test, packs README.md and CHANGELOG.md; no suite reads other pages)
+docs/*                   lint ui-test
+README.md                lint ui-test install-test
+CHANGELOG.md             lint install-test
+*.md                     lint ui-test
 LICENSE                  lint
 .gitignore               lint
+.shellcheckrc            lint
 .github/*                lint
 bench/*                  lint
 
@@ -121,7 +136,6 @@ test/dashboard-test.sh   dashboard-test lint
 test/addon-test.sh       addon-test lint
 test/secret-scan-test.sh lint
 test/check.sh            lint
-test/durations.tsv       lint
 test/portability*        lint
 test/offsite-r2-check.sh lint
 test/ui-demo.sh          lint
@@ -130,7 +144,7 @@ test/e2e-alerts*         @alerts lint
 test/e2e-faults*         @faults lint
 test/e2e-jobs.sh         e2e-jobs lint
 test/cron-ref.py         e2e-jobs lint
-test/test/e2e-matrix*         e2e-matrix-quick e2e-matrix-weekly lint
+test/e2e-matrix*         e2e-matrix-quick e2e-matrix-weekly lint
 test/e2e-workers.sh      e2e-workers lint
 test/e2e-upgrade.sh      e2e-upgrade lint
 test/faults/*            @faults e2e-matrix-quick e2e-matrix-weekly lint

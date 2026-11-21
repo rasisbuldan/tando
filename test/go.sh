@@ -61,7 +61,7 @@ g7_run() { # writes $E/g7.* ; the check itself is made in g7 below, in order
     echo build > "$E/g7.state"
   else
     # (internal/lock too: its probe on Linux's flock, as on the servers)
-    docker run --rm --name "tando-go-unit-$$" -v "$E/gate.test:/gate.test:ro" -v "$E/lock.test:/lock.test:ro" ubuntu:24.04 sh -c \
+    docker run --rm --name "tando-go-unit-$$" ${TANDO_TEST_RUN:+--label "tando.run=$TANDO_TEST_RUN"} -v "$E/gate.test:/gate.test:ro" -v "$E/lock.test:/lock.test:ro" ubuntu:24.04 sh -c \
       'useradd -m u && su u -c "cd /tmp && /gate.test -test.count=1" && cd /tmp && /gate.test -test.count=1 && /lock.test -test.count=1' > "$E/gate-linux.out" 2>&1
     echo "run $?" > "$E/g7.state"
   fi

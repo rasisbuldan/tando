@@ -1,35 +1,47 @@
-# test/durations.tsv: seconds each suite took in a passing run on the reference machine
-# (Apple M1 Pro, 10 CPUs, 8 servers at once; written by
-# test/all.sh --save-durations on 2026-11-19). test/all.sh warns when a suite takes over 1.5 times
-# its line here and at least 60 s more, and starts the longest suites first by it.
-e2e	296
-e2e-adopt	99
-e2e-alerts	582
-e2e-alerts-daemon	245
-e2e-alerts-timer	728
-e2e-bootstrap	198
-e2e-ci	432
-e2e-cli	163
-e2e-data	95
-e2e-ease	158
-e2e-faults-q1	802
-e2e-faults-q2	885
-e2e-faults-q3	839
-e2e-faults-q4	722
-e2e-host	72
-e2e-logs	246
-e2e-next	59
-e2e-offsite	171
-e2e-recipes	134
-e2e-sec2	222
-e2e-status	144
-e2e-studio	248
-e2e-top	123
-e2e-trial	15
-go	155
-install-test	37
-lint	108
-ui-test	54
+# test/durations.tsv: seconds each suite takes, the median of its passing times in the last 5
+# runs that have it (Apple M1 Pro, 10 CPUs; written by
+# test/all.sh --save-durations on 2026-11-21). test/all.sh starts the longest suites first by it,
+# the smoke tier takes the suites of at most TANDO_SMOKE_MAX s, and a run warns when a suite takes
+# over 1.5 times its line here and at least 60 s more.
+addon-test	53
+dashboard-test	170
+e2e	691
+e2e-adopt	78
+e2e-alerts	545
+e2e-alerts-daemon	199
+e2e-alerts-timer	607
+e2e-bootstrap	90
+e2e-ci	316
+e2e-cli	59
+e2e-data	157
+e2e-ease	140
+e2e-faults-q1	593
+e2e-faults-q2	617
+e2e-faults-q3	603
+e2e-faults-q4	524
+e2e-faults-q5	566
+e2e-faults-q6	478
+e2e-frameworks	185
+e2e-host	58
+e2e-jobs	178
+e2e-live	418
+e2e-logs	203
+e2e-matrix-quick	540
+e2e-next	116
+e2e-offsite	164
+e2e-recipes	131
+e2e-sec2	286
+e2e-status	148
+e2e-studio	143
+e2e-top	119
+e2e-trial	12
+e2e-upgrade	196
+e2e-workers	189
+go	177
+install-test	44
+lint	168
+ui-test	135
 e2e-faults	5749
 e2e-faults-h1	1780
 e2e-faults-h2	1773
+runner-test	8

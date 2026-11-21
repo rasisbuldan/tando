@@ -2,8 +2,14 @@
 # test/all.sh: run every test suite, in parallel where it is safe, each on its own test server.
 #
 #   test/all.sh                      the full tier: every suite (docs/TESTING.md, "Tiers")
+#   test/all.sh --tier smoke         the inner loop, about 3 minutes: test/check.sh, then of the suites
+#                                    the quick tier would run only the short ones (reference time in
+#                                    test/durations.tsv at most TANDO_SMOKE_MAX, default 120 s), plus
+#                                    the smoke deploy; it names the suites it left for the quick tier
+#   test/all.sh --smoke              the same
 #   test/all.sh --tier quick         only the suites the changed files can break (test/suites.map),
 #                                    plus one smoke deploy; --base REF or --files a b choose the change
+#   test/all.sh --changed            the same as --tier quick
 #   test/all.sh --tier full          every suite; the fault scenarios as six parallel shards
 #   test/all.sh --tier nightly       full, the fault scenarios as two chains split at a place that
 #                                    moves every day
@@ -11,9 +17,12 @@
 #   test/all.sh --failed             only the suites that failed in the last run
 #   test/all.sh --slow [N]           where the last run's time went: the N longest waits between
 #                                    two checks (default 25), and the suites by duration
-#   test/all.sh --save-durations     record the last run's suite times in test/durations.tsv (only
-#                                    when every suite passed): later runs warn about a suite that
-#                                    takes half as long again, so the time does not creep back
+#   test/all.sh --save-durations     record suite times in test/durations.tsv: per suite the median
+#                                    of its passing times in the last 5 runs that have it (the
+#                                    longest-first order reads them); later runs warn about a suite
+#                                    that takes half as long again, so the time does not creep back
+#   test/all.sh --fail-fast          stop at the first suite that fails: the running ones are
+#                                    stopped, their servers removed, the rest not started
 #   test/all.sh --only e2e,lint      just these suites (names without .sh)
 #   test/all.sh --skip e2e-next      all but these
 #   test/all.sh --repeat 3           run everything 3 times and report checks that do not pass
@@ -23,7 +32,8 @@
 #                                    tando-testvm (2222/8080), the way a person runs them by hand
 #   test/all.sh --fast               (accepted; hard-coded suites now always run in parallel)
 #   test/all.sh --keep               leave the test servers running afterwards
-#   test/all.sh --list               show the suites and how each would run
+#   test/all.sh --list               show the suites and how each would run, in the order they
+#                                    start (longest first), and about how long the run takes
 #   test/all.sh --report DIR         print the summary (and flaky checks) of an earlier run's logs
 #   test/all.sh --allow-skip         a suite whose checks were all SKIP does not fail the run
 #                                    (also TANDO_ALLOW_SKIP=1)
@@ -56,8 +66,19 @@ case $ncpu in ""|*[!0-9]*) ncpu=4;; esac
 defslots=$((ncpu - 2)); [ "$defslots" -gt 8 ] && defslots=8; [ "$defslots" -lt 2 ] && defslots=2
 NSLOTS=${TANDO_ALL_SLOTS:-$defslots}
 repeat=1 only="" skipl="" keep=0 list=0 asis=0 porta=0 report="" allow_skip=${TANDO_ALLOW_SKIP:-0}
-tier=${TANDO_TIER:-full} failed=0 slow="" selargs=() savedur=0
+tier=${TANDO_TIER:-full} failed=0 slow="" selargs=() savedur=0 failfast=0
+SMOKE_MAX=${TANDO_SMOKE_MAX:-120}
+case $SMOKE_MAX in ""|*[!0-9]*) echo "all: TANDO_SMOKE_MAX is a number of seconds" >&2; exit 2;; esac
 DUR=$ROOT/test/durations.tsv
+# est <suite>: its reference seconds in test/durations.tsv (else a built-in guess), to start
+# the longest suites first: the run then ends when the longest suite does, not after a queue
+# (from test/durations.tsv, the same order on every machine and in every run; a suite without a
+# line there is taken for a long one, so a new suite is not what the run waits for at the end)
+est() {
+  local secs
+  secs=$(awk -F'\t' -v n="$1" '$1 == n { print $2; exit }' "$DUR" 2> /dev/null)
+  echo "${secs:-900}"
+}
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -65,6 +86,9 @@ while [ $# -gt 0 ]; do
       case $repeat in ""|*[!0-9]*|0) echo "all: --repeat needs a number" >&2; exit 2;; esac;;
     --only) only=,${2:-},; shift;;
     --tier) tier=${2:-}; shift;;
+    --smoke) tier=smoke;;
+    --changed) tier=quick;;
+    --fail-fast) failfast=1;;
     --base) selargs=(--base "${2:?--base needs a ref}"); shift;;
     --files) selargs=(--files)   # the paths up to the next option
       while [ $# -gt 1 ]; do case $2 in --*) break;; *) selargs+=("$2"); shift;; esac; done
@@ -89,8 +113,8 @@ while [ $# -gt 0 ]; do
 done
 case $tier in
   check) exec "$ROOT/test/check.sh" ${selargs[@]+"${selargs[@]}"};;
-  quick|full|nightly|weekly) ;;
-  *) echo "all: --tier is check, quick, full, nightly or weekly (got '$tier')" >&2; exit 2;;
+  smoke|quick|full|nightly|weekly) ;;
+  *) echo "all: --tier is check, smoke, quick, full, nightly or weekly (got '$tier')" >&2; exit 2;;
 esac
 
 # ---- the reference durations (--save-durations) ------------------------------------------------
@@ -99,17 +123,32 @@ rundir() { local d=$1 r n=0; ls "$d"/*.rc > /dev/null 2>&1 && { echo "$d"; retur
   for r in "$d"/round-*; do [ -d "$r" ] && [ "${r##*-}" -gt "$n" ] && n=${r##*-}; done
   if [ "$n" -gt 0 ]; then echo "$d/round-$n"; else echo "$d"; fi; }
 if [ "$savedur" = 1 ]; then
-  d=$(rundir "$ROOT/.tando/all/latest")
-  ls "$d"/*.rc > /dev/null 2>&1 || { echo "all: no run in $d" >&2; exit 2; }
-  for f in "$d"/*.rc; do read -r rc _ < "$f"; [ "$rc" = 0 ] || { echo "all: ${f##*/} did not pass in the last run: durations not saved" >&2; exit 1; }; done
+  # the passing times of every run, newest run first ("<suite> <seconds>"); per suite the median
+  # of its first 5: one slow or fast run under load does not move the order
+  for d in $(ls -d "$ROOT"/.tando/all/2*/ 2> /dev/null | sort -r); do
+    d=$(rundir "${d%/}")
+    for f in "$d"/*.rc; do
+      [ -f "$f" ] || continue
+      read -r rc secs < "$f"; [ "$rc" = 0 ] || continue
+      f=${f##*/}; echo "${f%.rc} $secs"
+    done
+  done > "$DUR.runs"
+  [ -s "$DUR.runs" ] || { rm -f "$DUR.runs"; echo "all: no passing suite in .tando/all: durations not saved" >&2; exit 1; }
   {
-    echo "# test/durations.tsv: seconds each suite took in a passing run on the reference machine"
-    echo "# ($(sysctl -n machdep.cpu.brand_string 2> /dev/null || uname -m), $ncpu CPUs, $NSLOTS servers at once; written by"
-    echo "# test/all.sh --save-durations on $(date +%F)). test/all.sh warns when a suite takes over 1.5 times"
-    echo "# its line here and at least 60 s more, and starts the longest suites first by it."
-    for f in "$d"/*.rc; do read -r rc secs < "$f"; f=${f##*/}; printf '%s\t%.0f\n' "${f%.rc}" "$secs"; done | sort
+    echo "# test/durations.tsv: seconds each suite takes, the median of its passing times in the last 5"
+    echo "# runs that have it ($(sysctl -n machdep.cpu.brand_string 2> /dev/null || uname -m), $ncpu CPUs; written by"
+    echo "# test/all.sh --save-durations on $(date +%F)). test/all.sh starts the longest suites first by it,"
+    echo "# the smoke tier takes the suites of at most TANDO_SMOKE_MAX s, and a run warns when a suite takes"
+    echo "# over 1.5 times its line here and at least 60 s more."
+    awk '{ if (n[$1] < 5) { n[$1]++; v[$1, n[$1]] = $2 } }
+      END { for (s in n) { k = n[s]
+              for (i = 1; i <= k; i++) a[i] = v[s, i]
+              for (i = 2; i <= k; i++) { x = a[i]; for (j = i - 1; j >= 1 && a[j] > x; j--) a[j + 1] = a[j]; a[j + 1] = x }
+              m = (k % 2) ? a[(k + 1) / 2] : (a[k / 2] + a[k / 2 + 1]) / 2
+              printf "%s\t%.0f\n", s, m } }' "$DUR.runs" | sort
   } > "$DUR.tmp" && { grep -v '^#' "$DUR" 2> /dev/null | while IFS='	' read -r n secs; do
       grep -q "^$n	" "$DUR.tmp" || printf '%s\t%s\n' "$n" "$secs"; done >> "$DUR.tmp"; } && mv "$DUR.tmp" "$DUR"
+  rm -f "$DUR.runs"
   echo "all: saved $(grep -vc '^#' "$DUR") suite durations in test/durations.tsv"
   exit 0
 fi
@@ -136,7 +175,7 @@ fi
 # pinned (hard-codes another server: skipped, it would reset a server all.sh does not own)
 suite_kind() {
   case ${1##*/} in
-    ui-test.sh|lint.sh|go.sh|install-test.sh|portability.sh|dashboard-test.sh|addon-test.sh) echo local; return;;
+    ui-test.sh|lint.sh|go.sh|install-test.sh|portability.sh|dashboard-test.sh|addon-test.sh|runner-test.sh) echo local; return;;
   esac
   # param: reads the server from the environment with a default (or uses test/lib.sh)
   local code
@@ -150,7 +189,7 @@ suite_kind() {
 # every suite there is, in a fixed order: a server suite's number n is its place among the server
 # suites of this list, so it is the same whatever --only/--skip select
 ALL=()
-for f in test/ui-test.sh test/lint.sh test/go.sh test/install-test.sh test/dashboard-test.sh test/addon-test.sh test/e2e.sh test/e2e-next.sh test/e2e-*.sh test/portability.sh; do
+for f in test/ui-test.sh test/lint.sh test/go.sh test/install-test.sh test/runner-test.sh test/dashboard-test.sh test/addon-test.sh test/e2e.sh test/e2e-next.sh test/e2e-*.sh test/portability.sh; do
   [ -f "$f" ] || continue
   n=${f##*/}; n=${n%.sh}
   case " ${ALL[*]+${ALL[*]}} " in *" $n "*) continue;; esac
@@ -163,10 +202,10 @@ in_tier() {
   case $1 in
     e2e-faults) [ "$tier" = weekly ];;
     e2e-faults-h[0-9]*) [ "$tier" = nightly ];;
-    e2e-faults-q[0-9]*) [ "$tier" = full ] || [ "$tier" = quick ];;
+    e2e-faults-q[0-9]*) [ "$tier" = full ] || [ "$tier" = quick ] || [ "$tier" = smoke ];;
     # the fault matrix: the cells of the fixed defects in full and quick, the weekly cells of the
     # other kinds of app in nightly and weekly; the driver itself (every option) only by name
-    e2e-matrix-quick) [ "$tier" = full ] || [ "$tier" = quick ];;
+    e2e-matrix-quick) [ "$tier" = full ] || [ "$tier" = quick ] || [ "$tier" = smoke ];;
     e2e-matrix-weekly) [ "$tier" = nightly ] || [ "$tier" = weekly ];;
     e2e-matrix) return 1;;
     *) return 0;;
@@ -174,12 +213,13 @@ in_tier() {
 }
 # the quick tier: what the changed files can break (test/select.sh), and one smoke deploy
 QUICK=""
-if [ "$tier" = quick ] && [ -z "$only" ] && [ "$failed" = 0 ] && [ -z "$report" ]; then
+if { [ "$tier" = quick ] || [ "$tier" = smoke ]; } && [ -z "$only" ] && [ "$failed" = 0 ] && [ -z "$report" ]; then
   QUICK=$("$ROOT/test/select.sh" ${selargs[@]+"${selargs[@]}"}) || { echo "all: test/select.sh failed (see above)" >&2; exit 2; }
   case $QUICK in
-    NONE) echo "all: nothing changed${selargs[*]+ (${selargs[*]})}: nothing to run in the quick tier"; exit 0;;
-    ALL) echo "all: quick tier: a core file changed (test/select.sh --why says which): every suite";;
-    *) QUICK="$QUICK e2e-trial"; echo "all: quick tier: $QUICK";;
+    NONE) [ "$tier" = smoke ] && [ "$list" = 0 ] && exec "$ROOT/test/check.sh" ${selargs[@]+"${selargs[@]}"}
+          echo "all: nothing changed${selargs[*]+ (${selargs[*]})}: nothing to run in the $tier tier"; exit 0;;
+    ALL) echo "all: $tier tier: a core file changed (test/select.sh --why says which): every suite";;
+    *) QUICK="$QUICK e2e-trial"; echo "all: $tier tier: $QUICK";;
   esac
 fi
 # --failed: the suites of the last run that did not pass
@@ -193,7 +233,7 @@ if [ "$failed" = 1 ]; then
   [ -n "$FAILED" ] || { echo "all: no suite failed in the last run (.tando/all/latest)"; exit 0; }
   echo "all: rerunning the failed suites:$FAILED"
 fi
-SUITES=()
+SUITES=() DEFERRED=""
 for n in ${ALL[@]+"${ALL[@]}"}; do
   case $n in portability) [ "$porta" = 1 ] || continue;; esac
   case $skipl in *",$n,"*) continue;; esac
@@ -202,13 +242,20 @@ for n in ${ALL[@]+"${ALL[@]}"}; do
   else
     in_tier "$n" || continue
     case $QUICK in ""|ALL) ;; *) case " $QUICK " in *" $n "*) ;; *) continue;; esac;; esac
+    # the smoke tier: the short suites only (and always the smoke deploy); the rest is named
+    if [ "$tier" = smoke ] && [ "$n" != e2e-trial ] && [ "$(est "$n")" -gt "$SMOKE_MAX" ]; then
+      DEFERRED="$DEFERRED $n"; continue
+    fi
   fi
   SUITES+=("$n")
 done
+if [ -n "$DEFERRED" ]; then
+  echo "all: smoke tier: left for the quick tier (over ${SMOKE_MAX} s in test/durations.tsv):$DEFERRED"
+fi
 # what a tier means for the suites themselves: the quick tier may reuse cached results and skips
 # the race detector; the others recompute everything; weekly keeps the long soak in every deploy
 case $tier in
-  quick) export GO_QUICK=${GO_QUICK:-1};;
+  quick|smoke) export GO_QUICK=${GO_QUICK:-1};;
   *) export GO_NOCACHE=${GO_NOCACHE:-1} LINT_NO_CACHE=${LINT_NO_CACHE:-1};;
 esac
 [ "$tier" = weekly ] && export FAULT_SETUP_SOAK=${FAULT_SETUP_SOAK:-25} TANDO_TEST_NODE=${TANDO_TEST_NODE:-latest}
@@ -285,10 +332,32 @@ check_plan() {
 }
 check_plan || exit 2
 
+# start_order: the suite indexes, longest first (test/durations.tsv); round and --list use it
+start_order() {
+  local i=0 n
+  for n in "${SUITES[@]}"; do echo "$(est "$n") $i"; i=$((i + 1)); done | sort -rn | awk '{ printf " %s", $2 }'
+}
 if [ "$list" = 1 ]; then
-  i=0
-  for n in "${SUITES[@]}"; do printf '%-14s %s\n' "$n" "$(how $i)"; i=$((i + 1)); done
+  # in the order they start, and the run's length if every suite takes its reference time: the
+  # server suites fill TANDO_ALL_SLOTS slots, each next one on the slot that frees first
+  ests="" sk=""
+  for i in $(start_order); do
+    n=${SUITES[$i]}
+    printf '%-14s %5s s  %s\n' "$n" "$(est "$n")" "$(how "$i")"
+    if [ "${PLAN_SLOT[$i]}" != 0 ]; then ests="$ests $(est "$n")"; else sk="$sk $(est "$n")"; fi
+  done
+  echo "$NSLOTS $ests | $sk" | awk '{ k = $1; for (j = 1; j <= k; j++) free[j] = 0; loc = 0; side = 0
+      for (i = 2; i <= NF; i++) { if ($i == "|") { side = 1; continue }
+        if (side) { if ($i > loc) loc = $i; continue }
+        m = 1; for (j = 2; j <= k; j++) if (free[j] < free[m]) m = j; free[m] += $i }
+      end = loc; for (j = 1; j <= k; j++) if (free[j] > end) end = free[j]
+      printf "about %d min %02d s with %d server slots (TANDO_ALL_SLOTS), from test/durations.tsv\n", end / 60, end % 60, k }'
   exit 0
+fi
+
+# the smoke tier starts with the static checks: a typo fails in seconds, before any server
+if [ "$tier" = smoke ] && [ -z "$report" ]; then
+  "$ROOT/test/check.sh" ${selargs[@]+"${selargs[@]}"} || { echo "all: smoke tier: test/check.sh failed (above); no suite started" >&2; exit 1; }
 fi
 
 # drop the pinned suites (shown by --list); a --report has nothing to plan
@@ -342,16 +411,29 @@ slot_down() {
     case " $CREATED " in *" $name "*) TANDO_TEST_NAME=$name "$ROOT/test/server/down.sh" > /dev/null 2>&1;; esac
   done < <(slot_servers "$1")
 }
+# tree_pids <pid>: the process and all its descendants, children first (a suite runs ssh, docker,
+# tando, perl ... below its subshell; killing only the subshell leaves them running)
+tree_pids() { local c; for c in $(pgrep -P "$1" 2> /dev/null); do tree_pids "$c"; done; echo "$1"; }
+kill_tree() { local ps; ps=$(tree_pids "$1"); [ -z "$ps" ] || kill -TERM $ps 2> /dev/null; return 0; }
+# remove_ours: every container this run made, in one docker call: the servers it created (CREATED)
+# and whatever carries its label tando.run=$TANDO_TEST_RUN (test/server/up.sh and the suites' own
+# helper containers set it). Never a container of another run or of the owner.
+remove_ours() {
+  local names ids p
+  [ "$keep" = 0 ] && command -v docker > /dev/null 2>&1 || return 0
+  names=$(docker ps -a --format '{{.Names}}' 2> /dev/null | awk -v want=" $CREATED " 'index(want, " " $0 " ")')
+  ids=""; [ -n "${TANDO_TEST_RUN:-}" ] && ids=$(docker ps -aq --filter "label=tando.run=$TANDO_TEST_RUN" 2> /dev/null)
+  for p in $CREATED; do rm -f "$ROOT/test/server/.ready-$p"; done
+  # shellcheck disable=SC2086  # names and ids are word lists
+  [ -z "$names$ids" ] || docker rm -f $names $ids > /dev/null 2>&1
+  return 0
+}
 cleanup() {
   local p
   for p in ${PIDS[@]+"${PIDS[@]}"}; do
-    [ -n "$p" ] && kill -0 "$p" 2> /dev/null && { pkill -TERM -P "$p" 2> /dev/null; kill "$p" 2> /dev/null; }
+    [ -n "$p" ] && kill -0 "$p" 2> /dev/null && kill_tree "$p"
   done
-  if [ "$keep" = 0 ] && [ -n "$CREATED" ]; then
-    for p in $CREATED; do
-      TANDO_TEST_NAME=$p "$ROOT/test/server/down.sh" > /dev/null 2>&1
-    done
-  fi
+  remove_ours
   [ "${LOCKED:-0}" = 1 ] && rm -rf "${LOCK:?}"
   ui_frame_cleanup 2> /dev/null
 }
@@ -377,6 +459,8 @@ fi
 if [ -z "$report" ]; then
   RUN=$ROOT/.tando/all/$(date +%Y%m%d-%H%M%S)
   mkdir -p "$RUN"
+  # the label of every container this run makes (remove_ours): one run per prefix at a time (the lock)
+  export TANDO_TEST_RUN=$PREFIX-$$
   ln -sfn "$RUN" "$ROOT/.tando/all/latest"
 else
   # an earlier run: its suites and rounds come from the files it left
@@ -463,15 +547,6 @@ counts() {
   esac
 }
 
-# est <suite>: how long it took in the last run that has it (else a built-in guess), to start
-# the longest suites first: the run then ends when the longest suite does, not after a queue
-# (from test/durations.tsv, the same order on every machine and in every run; a suite without a
-# line there is taken for a long one, so a new suite is not what the run waits for at the end)
-est() {
-  local secs
-  secs=$(awk -F'\t' -v n="$1" '$1 == n { print $2; exit }' "$DUR" 2> /dev/null)
-  echo "${secs:-900}"
-}
 # round <dir>: run all suites once. Local suites (no server) start at once; a server suite
 # starts as soon as fewer than TANDO_ALL_SLOTS run, the longest first. Suites sharing a server
 # (hard-coded ones with --as-is) run one after the other.
@@ -479,7 +554,7 @@ round() {
   local out=$1 i=0 n queue
   mkdir -p "$out"
   PIDS=()
-  queue=$(for n in "${SUITES[@]}"; do echo "$(est "$n") $i"; i=$((i + 1)); done | sort -rn | awk '{ printf " %s", $2 }')
+  queue=$(start_order)
   run_queue "$out" "$queue"
 }
 
@@ -496,6 +571,23 @@ drop_word() {
   local w r=""
   for w in $2; do [ "$w" = "$1" ] || r="$r $w"; done
   printf '%s' "$r"
+}
+
+# stop_rest <dir>: --fail-fast: every suite of the round without a result is stopped (its
+# processes killed) or not started; its result says so ("143": shown as stopped). The servers go
+# with remove_ours.
+stop_rest() {
+  local out=$1 i=0 n
+  for n in "${SUITES[@]}"; do
+    if [ ! -f "$out/$n.rc" ]; then
+      [ -n "${PIDS[$i]:-}" ] && kill -0 "${PIDS[$i]}" 2> /dev/null && kill_tree "${PIDS[$i]}"
+      echo "---- stopped by --fail-fast" >> "$out/$n.log"
+      echo "143 0" > "$out/$n.rc"; touch "$out/$n.seen"
+    fi
+    i=$((i + 1))
+  done
+  remove_ours
+  STOPPED=1
 }
 
 # run_queue <dir> <indexes>: start each queued suite when its server key is free and fewer than
@@ -525,6 +617,10 @@ run_queue() {
             "${out#"$ROOT"/}/$n.log"
           k=$(slot_key "$i")
           if [ -n "$k" ]; then busy=$(drop_word "$k" "$busy"); [ "$k" = testvm ] || nbusy=$((nbusy - 1)); fi
+          if [ "$failfast" = 1 ] && [ "$rc" != 0 ]; then
+            echo "all: --fail-fast: $n failed; stopping the rest" >&2
+            stop_rest "$out"; return 0
+          fi
         fi
       elif [ -n "${PIDS[$i]:-}" ]; then
         running=$((running + 1))
@@ -549,12 +645,21 @@ if [ -z "$report" ]; then
   echo "test/all.sh: ${#SUITES[@]} suites, $repeat round(s); logs in ${RUN#"$ROOT"/}"
   for n in "${SUITES[@]}"; do printf '  %-14s %s\n' "$n" "$(how $i)"; i=$((i + 1)); done
   claim_servers || exit 2
-  r=1
-  while [ "$r" -le "$repeat" ]; do
+  # the test server image, once for the run: otherwise the first TANDO_ALL_SLOTS suites all ask
+  # docker to build (check) it at the same moment, beside the local suites' compiles
+  for s in ${PLAN_SLOT[@]+"${PLAN_SLOT[@]}"}; do
+    [ "$s" = 0 ] && continue
+    img=$("$ROOT/test/server/up.sh" --build-only) || { echo "all: could not build the test server image (test/server/up.sh)" >&2; exit 2; }
+    export TANDO_TEST_IMAGE_BUILT=$img
+    break
+  done
+  r=1 STOPPED=0
+  while [ "$r" -le "$repeat" ] && [ "$STOPPED" = 0 ]; do
     if [ "$repeat" = 1 ]; then OUT=$RUN; else OUT=$RUN/round-$r; echo "round $r/$repeat"; fi
     round "$OUT"
     r=$((r + 1))
   done
+  [ "$STOPPED" = 0 ] || repeat=$((r - 1))
   awk -v a="$T0" -v b="$(clock)" 'BEGIN { printf "%d\n", b - a }' > "$RUN/elapsed"
 fi
 
@@ -581,6 +686,7 @@ for n in "${SUITES[@]}"; do
     tot=$((tot + 1)) r=$((r + 1))
   done
   if [ "$okr" = "$tot" ]; then ui_badge_v ok "pass"
+  elif [ "$rc" = 143 ]; then ui_badge_v failed "stopped"; fails=$((fails + 1))
   elif [ "$allskip" -gt 0 ] && [ "$allow_skip" = 0 ]; then ui_badge_v failed "skipped"; fails=$((fails + 1))
   else ui_badge_v failed "fail"; fails=$((fails + 1)); fi
   res=$UI_RET
