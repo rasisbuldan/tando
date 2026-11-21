@@ -138,7 +138,7 @@ for r in 1h:60:60 7d:168:3600; do
   check "N12 --range ${r%%:*}: $p points of $b s" q "$T/r.json" "d['app']['metrics']['points'] == $p and len(d['app']['metrics']['series']) == $p and d['app']['metrics']['bucket_s'] == $b"
 done
 host web-2 192.0.2.99; host web-3 192.0.2.98   # refused; hangs
-: > "$T/log"; s0=$SECONDS
+: > "$T/log"; rm -f "$T/log.hung"; s0=$SECONDS
 TANDO_SNAPSHOT_TIMEOUT=2 tando snapshot --json --all > "$T/all.json" 2> /dev/null
 el=$((SECONDS - s0))
 check "N13 --all: one JSON line per host, in parallel, one exec each ($(grep -c . "$T/log") for 3 hosts)" \
@@ -148,7 +148,9 @@ check "N14 an unreachable host is reachable:false with the reason; one that hang
 L=[json.loads(l) for l in open(sys.argv[1])]
 assert [x[\"reachable\"] for x in L] == [True, False, False], L
 assert L[1][\"error\"] == \"connection refused\" and L[2][\"error\"] == \"no answer\"" "$T/all.json"'
-check "N15 a hung host's ssh is not left running" eval '! pgrep -f "sleep 60" > /dev/null || ! ps -o command= -p $(pgrep -f "sleep 60" | head -1) | grep -q .'
+# (this run's hung ssh only, by the pid the stub wrote: other test runs' stubs may be sleeping)
+gone() { local p; [ -s "$T/log.hung" ] || return 1; for p in $(cat "$T/log.hung"); do ! kill -0 "$p" 2> /dev/null || return 1; done; }
+check "N15 a hung host's ssh is not left running" gone
 rm -f "$TANDO_CONFIG_DIR/hosts/web-2" "$TANDO_CONFIG_DIR/hosts/web-3"
 out=$(tando snapshot --json --all --app shop 2>&1); check "N16 --app goes with one host: --all --app is refused" eval 'printf "%s" "$out" | grep -q "goes with one host"'
 check "N17 app metrics carry disk_bytes: the newest walk, null where none" \
