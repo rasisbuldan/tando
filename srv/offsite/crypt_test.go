@@ -7,6 +7,7 @@ import (
 	"io"
 	mrand "math/rand/v2"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -154,6 +155,11 @@ func TestCryptLargeBoundedMemory(t *testing.T) {
 		t.Skip("short")
 	}
 	const n = 1536 << 20
+	// The heap is measured as HeapInuse, which counts garbage the collector has not swept yet. On
+	// a loaded machine the collector's workers are starved and the heap overshoots (74 MB seen
+	// with a 12 MB real peak). A soft memory limit makes the collector keep up whatever the
+	// load; a real leak (live data above the limit) still grows past the 64 MB bound.
+	defer debug.SetMemoryLimit(debug.SetMemoryLimit(24 << 20))
 	k := testKey(t)
 	pr, pw := io.Pipe()
 	go func() {

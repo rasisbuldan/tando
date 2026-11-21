@@ -76,6 +76,7 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 | `hold` | number | `15`, or `health_timeout` if larger | seconds | How long Caddy holds a request while the app (re)starts, 1 to 999. | `hold = 20` |
 | `stop_timeout` | number | `10` | seconds | How long a stopping process may finish its requests before it is killed, 1 to 999. | `stop_timeout = 30` |
 | `priority` | `high`, `normal` or `low` | `normal` | | Which app the kernel stops last (`high`) or first (`low`) when the server runs out of memory. `high` also keeps the app's memory, up to its cap, from being reclaimed while other apps have more. | `priority = high` |
+| `idle_stop` | time or `on` or `off` | `off` | `s`, `m`, `h` | Scale to zero: stop the app's web process after this long without a request and start it on the next one (`on` is `6h`). Only the web process stops; workers and scheduled jobs keep running. Not for `static` sites or containers. The first request after idle waits while the app starts; no down alert is raised while it is idle (docs/COMMANDS.md, "Scale to zero"). | `idle_stop = 10m` |
 
 ## Assets
 
