@@ -641,6 +641,8 @@ pghas() { [ "$(pgconns)" = "$1" ]; }
 pghold() { srv "sudo systemd-run -q --collect --unit=pghold /bin/sh /root/pghold.sh $1"; until_ 30 pghas "$1"; }
 pgfree() { srv 'sudo systemctl stop pghold.service' 2> /dev/null; until_ 30 pghas 0; }
 aset db_conn_for=2
+# (the deploy asked pgbouncer as the role once: its server connection closes after 60 s idle)
+until_ 90 pghas 0
 mark; wruns 2
 "$R" status -a ops > "$E/status-ops.out" 2>&1; "$R" health ops > "$E/health-ops.out" 2>&1
 "$R" status -a ops --json > "$E/status-ops.json" 2>&1

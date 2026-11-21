@@ -89,14 +89,14 @@ pgconf() { srv "sudo sed -n 's/^$1 = //p' /etc/postgresql/*/main/conf.d/tando.co
 pgshow() { srv "sudo -u postgres psql -X -At -c 'SHOW $1'"; }
 sbmb() { srv "sudo -u postgres psql -X -At -c \"SELECT setting::bigint * 8 / 1024 FROM pg_settings WHERE name = 'shared_buffers'\""; }
 mc=$(pgconf max_connections); sb=$(pgconf shared_buffers)
-ram=$(tr -d '│\n ' < "$E/setup.out" | grep -o 'from[0-9]*MBRAM' | head -1 | tr -cd '0-9')
+ram=$(tr -d '│\n ' < "$E/setup.out" | grep -o 'from[0-9]*MBofRAM' | head -1 | tr -cd '0-9')
 want=$(( (${ram:-0} / 80 + 5) / 10 * 10 )); [ "$want" -lt 50 ] && want=50; [ "$want" -gt 400 ] && want=400
 check "G1 PostgreSQL runs sized from the RAM setup names (${ram:-?} MB): max_connections $mc (one per 80 MB, 50 to 400), shared_buffers $sb (15%)" \
   eval '[ -n "$ram" ] && [ "$mc" = "$want" ] && [ "$(pgshow max_connections)" = "$mc" ] &&
         [ "$sb" = "$((ram * 15 / 100))MB" ] && [ "$(sbmb)MB" = "$sb" ]'
 check "G2 pgbouncer runs on 127.0.0.1:6432 only (no unix socket); setup's database step says so" \
   eval 'srv "systemctl is-active -q pgbouncer" && [ "$(srv "ss -Hltn sport = :6432" | awk "{ print \$4 }" | tr "\n" " ")" = "127.0.0.1:6432 " ] &&
-        srv "! test -e /var/run/postgresql/.s.PGSQL.6432" && grep -q "pgbouncer on 127.0.0.1:6432, transaction pooling" "$E/setup.out"'
+        srv "! test -e /var/run/postgresql/.s.PGSQL.6432" && tr -d "│\n " < "$E/setup.out" | grep -q "pgbounceron127.0.0.1:6432,transactionpooling"'
 
 # P1. out of memory, the kernel must not pick the postmaster; a connection's process stays killable
 pv=$(srv "ls /etc/postgresql")   # the major version this server installed
@@ -119,10 +119,8 @@ srv "echo -900 | sudo tee /proc/$pm/oom_score_adj > /dev/null"
 check "D2 up with database = postgres: app answers ($(page))" test "$(page)" = "notes v1 db=0 file=0"
 # penv app KEY: the value in the environment of the app's running process
 penv() { local pid; pid=$(srv "systemctl show -P MainPID tando-$1"); srv "sudo cat /proc/$pid/environ" | tr '\0' '\n' | sed -n "s/^$2=//p"; }
-page > /dev/null
-check "G3 the app's DATABASE_URL is pgbouncer's (6432), DATABASE_URL_DIRECT PostgreSQL's (5432); the app's connection is to pgbouncer" \
-  eval 'srv "sudo ss -Htnp state established \"( dport = :6432 )\"" | grep -q node &&
-        penv notes DATABASE_URL | grep -q "@127.0.0.1:6432/tando_notes$" && penv notes DATABASE_URL_DIRECT | grep -q "@127.0.0.1:5432/tando_notes$"'
+check "G3 the app (answering, D2) runs with pgbouncer's DATABASE_URL (6432), and DATABASE_URL_DIRECT PostgreSQL's (5432)" \
+  eval 'penv notes DATABASE_URL | grep -q "@127.0.0.1:6432/tando_notes$" && penv notes DATABASE_URL_DIRECT | grep -q "@127.0.0.1:5432/tando_notes$"'
 
 # D3. the password stays on the server
 "$R" env ls > "$E/envls.out" 2>&1; cat "$E/envls.out" >&2

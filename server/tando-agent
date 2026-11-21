@@ -4669,7 +4669,8 @@ pg_host_sync() {
   done
   pgb_sync || echo "tando-agent: could not update pgbouncer's databases (tando doctor)" >&2
   pg_sizing
-  PG_DETAIL="max_connections $PGS_MC, shared_buffers ${PGS_SB}MB, work_mem ${PGS_WM}MB (from $PGS_MEM MB RAM)"
+  # (short parts: the client shows the first on the step's line, cut to fit, the others below it)
+  PG_DETAIL="max_connections $PGS_MC, shared_buffers ${PGS_SB}MB; work_mem ${PGS_WM}MB, from $PGS_MEM MB of RAM"
   [[ -n $PG_RESTARTED ]] && PG_DETAIL+=", PostgreSQL restarted"
   if [[ -n $PG_PENDING ]]; then
     PG_DETAIL+="; PostgreSQL keeps its old $PG_PENDING until a restart, which drops every app's connections for seconds: tando host setup <host> --pg-restart"
