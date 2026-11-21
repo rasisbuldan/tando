@@ -435,13 +435,13 @@ an alert fires (with `--all`: also a server that did not answer), 0 when nothing
 Example: `tando ls --all`
 
 ### snapshot
-`tando snapshot --json [-H host | --all] [--app A [--range 1h|24h|7d]]`,
+`tando snapshot --json [-H host | --all] [--app A] [--range 1h|24h|7d]`,
 `tando snapshot --json --follow [-H host]`. Flags: `-a -H --all
 --app --range --json --follow`. Arguments: none.
-`--follow` (one host, no app): the same line as without `--app`, every 5 s, until killed, from the
-frames the server pushes over one ssh session (`tando status --follow`); exit status 3 at once,
-nothing printed, when the server has no live view (then poll without `--follow`). The dashboard
-uses it.
+`--follow` (one host, no app, no range): the same line as without `--app`, every 5 s, until killed,
+from the frames the server pushes over one ssh session (`tando status --follow`); exit status 3 at
+once, nothing printed, when the server has no live view (then poll without `--follow`). The
+dashboard uses it.
 Everything a dashboard shows of a server in ONE ssh exec per host (as `tando top` reads its
 data): one JSON document per host, one per line; `--all` asks every registered server in
 parallel, each with a timeout (`TANDO_SNAPSHOT_TIMEOUT`, 15 s); a server that did not answer is
@@ -459,12 +459,17 @@ before the first deploy or from an older server), `history` (as `history --json`
 null once the audit log has rotated past it), `metrics` (`range`, `bucket_s`, `points`, `from`,
 `to`, `data_since`, `series`: every bucket of the range present, oldest first, `t` its start in
 server epoch seconds, `memory_bytes`, `cpu_percent`, `restarts` (new restarts in that bucket,
-clamped at 0 when the counter reset), `state`; null where there was no sample, never
+clamped at 0 when the counter reset), `state`, `disk_bytes` (the app's tree on the server,
+measured every 15 minutes: docs/TOP.md); null where there was no sample, never
 interpolated; 1h = 60 x 60 s, 24h = 144 x 600 s (the default), 7d = 168 x 3600 s; metrics keep 3.5
 to 7 days), `health` (as `health --json` for the app, plus `last_ms`, `series` (the average probe
 time of each of the last 24 hours, `t` from the server's clock) and `incidents`; null without
-alerts) and `database` (when the app has one).
-Example: `tando snapshot --json -H vps --app shop --range 24h`
+alerts) and `database` (when the app has one). `--range` without `--app` (one host) adds
+`host_metrics` instead: the same `range` .. `data_since` and a `series` of `t`, `load` (the
+1-minute load average), `cpu_percent` (of all cores), `memory_used_bytes`, `memory_total_bytes`,
+`disk_used_bytes`, `disk_total_bytes` (the file system holding /var/lib/tando); null where there was
+no sample, and cpu and disk null for samples taken before 2026-11.
+Example: `tando snapshot --json -H vps --app shop --range 24h`, `tando snapshot --json -H vps --range 7d`
 
 ### alerts
 `tando alerts [--watch N] [--json]` · `enable` · `disable` · `test [name]` · `history [app] [-n N]` ·

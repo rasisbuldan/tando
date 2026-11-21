@@ -15,6 +15,7 @@ import (
 
 	"tando/srv/internal/apps"
 	"tando/srv/internal/atomicfile"
+	"tando/srv/internal/fsinfo"
 	"tando/srv/internal/kvfile"
 	"tando/srv/internal/out"
 	"tando/srv/internal/run"
@@ -132,8 +133,16 @@ func (a *app) setup(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if changed {
-		a.applyJournal(ctx, maxUse, kh)
+	// the cap is applied when the config changed, and also whenever the namespace holds more
+	// than it: journald trims only at its own rotations, and the vacuum of a change that met an
+	// idle (stopped) instance or failed was never tried again, the config being unchanged since
+	over := false
+	if d := a.nsDir(); d != "" && fsinfo.DirFollow(d) {
+		n, err := diskUsage(d)
+		over = err == nil && n > sizeBytes(maxUse)
+	}
+	if changed || over {
+		a.applyJournal(ctx, maxUse, kh, changed)
 	}
 	caddy, err1 := a.l.Users.UID("caddy")
 	grp, err2 := a.l.Users.GID("tando-" + a.name)
@@ -174,19 +183,22 @@ func (a *app) setup(ctx context.Context) error {
 // systemd's file descriptor store (FileDescriptorStoreMax in systemd-journald@.service) and takes
 // them back, so no line is lost (measured: 13 of 13 once-a-second lines across two restarts).
 // Then the limits are applied now instead of at the next file rotation: vacuum to the size cap
-// and retention.
-func (a *app) applyJournal(ctx context.Context, maxUse string, keepH int64) {
+// and retention. The vacuum works on the files, so it runs also when the instance is not running
+// (journald's namespace instances stop when idle: it then reads the new config at its next
+// start); only the rotation needs it. A vacuum that fails is a warning (host setup and deploy
+// try again while the namespace is over its cap).
+func (a *app) applyJournal(ctx context.Context, maxUse string, keepH int64, restart bool) {
 	unit := "systemd-journald@" + a.ns() + ".service"
-	if a.l.systemctl(ctx, "-q", "is-active", unit) != nil {
-		return
+	if a.l.systemctl(ctx, "-q", "is-active", unit) == nil {
+		if !restart || a.l.systemctl(ctx, "restart", unit) == nil {
+			a.l.Env.Run.Output(ctx, run.Cmd{Argv: []string{"journalctl", "-q", "--namespace=" + a.ns(), "--rotate"}})
+		}
 	}
-	if a.l.systemctl(ctx, "restart", unit) != nil {
-		return
+	if _, err := a.l.Env.Run.Output(ctx, run.Cmd{Argv: []string{"journalctl", "-q", "--namespace=" + a.ns(), "--vacuum-size=" + maxUse,
+		"--vacuum-time=" + strconv.FormatInt(keepH, 10) + "h"}}); err != nil {
+		msg, _, _ := strings.Cut(strings.TrimSpace(err.Error()), "\n")
+		a.l.warn("warning=could not trim the journal of %s to %s: %s", a.name, maxUse, msg)
 	}
-	r := a.l.Env.Run
-	r.Output(ctx, run.Cmd{Argv: []string{"journalctl", "-q", "--namespace=" + a.ns(), "--rotate"}})
-	r.Output(ctx, run.Cmd{Argv: []string{"journalctl", "-q", "--namespace=" + a.ns(), "--vacuum-size=" + maxUse,
-		"--vacuum-time=" + strconv.FormatInt(keepH, 10) + "h"}})
 }
 
 // AppRemove (app-remove <app>) removes the app's journal namespace, request logs and caches.

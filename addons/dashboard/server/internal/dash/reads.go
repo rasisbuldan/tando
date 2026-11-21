@@ -173,7 +173,7 @@ type snapOut struct {
 func (s *Server) fetchSnap(ctx context.Context, host, app, rng string, visible bool) (entry, bool, error) {
 	key := host + "\x00" + app + "\x00" + rng
 	live, at, ok := s.liveFrame(host, visible)
-	if ok && app == "" {
+	if ok && app == "" && rng == "" {
 		return entry{data: live, at: at}, true, nil
 	}
 	e, cached, err := s.snaps.get(ctx, s.base, key, s.cfg.CacheTTL, s.cfg.ReadTimeout, s.cfg.Now, s.jsonRun(host, argvSnapshot(host, app, rng)))
@@ -194,8 +194,8 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 	case app != "" && !ValidApp(app):
 		apiErr(w, 400, "bad_request", "app: a-z, 0-9, -; 2-24 characters")
 		return
-	case rng != "" && (!ValidRange(rng) || app == ""):
-		apiErr(w, 400, "bad_request", "range: 1h, 24h or 7d, with an app")
+	case rng != "" && !ValidRange(rng):
+		apiErr(w, 400, "bad_request", "range: 1h, 24h or 7d")
 		return
 	case !s.knownHost(host):
 		apiErr(w, 404, "no_host", "no host named "+host+" (tando host ls)")

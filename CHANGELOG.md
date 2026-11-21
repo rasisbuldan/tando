@@ -17,6 +17,28 @@ first, grouped by area.
   --json --follow` per server (new: a line every 5 s over one ssh session) answers the polls; an
   app's page lays the live row over its own snapshot. The follow ends 30 s after the page is hidden.
 - `tando menubar`: an app's "Open status in Terminal" uses `tando status --follow`.
+- Monitoring, lighter (slice 1): tandod's `MemoryMax` is 160M instead of 64M. At 64M its cgroup
+  evicted the page cache of the journals and programs it reads every minute and read them again
+  (on a real server: about 300 MB a minute of re-reads); its own memory still stays under 20 MB.
+  `tando host setup` rewrites the unit of an existing server and restarts tandod.
+- Monitoring: how an app last ended (`last: exit status 3`) is read from the system journal only
+  when the app restarted or its state changed, never for a stopped or static app. A stopped or
+  failed app used to start a `journalctl` over the whole system journal every minute.
+- Logs: the default journal cap of an app is min(256M, 5% of the disk) instead of min(2G, 5%).
+  On a disk of 40 GB or more an app without `log_max` could keep 2 GB of journal, and every scan
+  of it mapped those files. The next `tando host setup` or deploy trims such a journal to the new
+  cap (oldest first); an explicit `log_max` is kept. Host setup and deploys now also trim a journal
+  that is over its cap while its config is unchanged (before, the trim ran only when the config
+  changed and the app's journald was running, and its failure was ignored).
+- Added: host and per-app resource history. `tando-metrics` samples the host's CPU (% of all cores,
+  from /proc/stat) and the disk used/total of the file system holding /var/lib/tando each minute,
+  as new columns at the end of `host.tsv` (older lines read as gaps), and each app's disk (its
+  directory, data and journal namespace, walked in-process at most every 15 minutes within a
+  500 ms budget per minute) into `<app>.disk`. `tando snapshot --json --range R` without `--app`
+  returns `host_metrics` (load, cpu, memory, disk); an app's series gains `disk_bytes`.
+- Added (dashboard add-on): the Server page has Load, CPU, Memory and Disk charts (1h/24h/7d; the
+  cores and the totals as dashed lines), host cards link to it, and App Overview has a Disk chart.
+
 - Added (dashboard add-on): the database studio from the dashboard. A "Database" row under each app
   with a database in the sidebar and "Open database" in the app header; every open is confirmed,
   then the studio's own page opens in a new browser window (the Mac window hands it to the default

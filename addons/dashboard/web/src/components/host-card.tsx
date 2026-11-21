@@ -36,8 +36,9 @@ export const HostCard = memo(function HostCard({ h }: { h: HostView }) {
           <dt className="text-muted-foreground">Headroom</dt><dd className="m-0">{hr ? <>caps {fmtBytes(hr.capBytes)} of {fmtBytes(hr.ramBytes)} RAM<span className="text-muted-foreground"> · {fmtPct(hr.pct)}</span></> : <span className="text-faint">—</span>}</dd>
         </dl>
       ) : null}
-      <div className="mt-2 truncate text-xs leading-4 text-muted-foreground">
-        {d ? <>tando {d.server_version ?? "—"}{skew ? ` · ${skew}` : ""}{!h.reachable && h.fetchedAtS ? ` · data from ${fmtTime(h.fetchedAtS)}` : ""}</> : null}
+      <div className="mt-2 flex items-center justify-between gap-2 text-xs leading-4 text-muted-foreground">
+        <span className="min-w-0 truncate">{d ? <>tando {d.server_version ?? "—"}{skew ? ` · ${skew}` : ""}{!h.reachable && h.fetchedAtS ? ` · data from ${fmtTime(h.fetchedAtS)}` : ""}</> : null}</span>
+        {s ? <Link to={`/s/${encodeURIComponent(h.host)}`} className="inset-focus shrink-0 underline-offset-2 hover:underline">History</Link> : null}
       </div>
     </Card>
   );

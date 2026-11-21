@@ -56,7 +56,10 @@ func TestLiveFollow(t *testing.T) {
 	if m["next_poll_s"].(float64) != 5 {
 		t.Fatalf("next_poll_s %v, want 5 with live views", m["next_poll_s"])
 	}
-	if err := waitFor(func() bool { _, m := e.get("/api/snapshot?host=a&visible=1"); return m["data"].(map[string]any)["src"] == "live" }); err != nil {
+	if err := waitFor(func() bool {
+		_, m := e.get("/api/snapshot?host=a&visible=1")
+		return m["data"].(map[string]any)["src"] == "live"
+	}); err != nil {
 		t.Fatal("no live line answered the poll")
 	}
 	r.mu.Lock()

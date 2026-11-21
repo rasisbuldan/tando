@@ -34,9 +34,22 @@ func countRestarts(t *tick, a *appTick) {
 		// once a minute for every static app)
 	}
 	xc, xs := a.unit["ExecMainCode"], a.unit["ExecMainStatus"]
-	if a.newRestarts > 0 || a.unit["ActiveState"] != "active" {
-		// systemd's own line about the last exit (the unit's ExecMain* already describe the new
-		// process after an automatic restart); only read when the app restarted or is not running
+	// systemd's own line about the last exit (the unit's ExecMain* already describe the new
+	// process after an automatic restart): read when the app restarted or is not running, but
+	// once per change of the unit's state and restart count, never for a stopped app. Each
+	// journalctl opens every file of the system journal; a failed app asked it every minute and
+	// re-read the journal inside tandod's memory cap. vs xi.<app>: "<state>/<NRestarts> <code>
+	// <status>", what that read found (volatile: after a reboot it is read once more).
+	ck, sig := "xi."+a.name, a.unit["ActiveState"]+"/"+nr
+	switch {
+	case a.stopped:
+	case a.newRestarts == 0 && a.unit["ActiveState"] == "active":
+		t.vs.del(ck) // running: the next stop or crash reads afresh
+	default:
+		if c := strings.Fields(t.vs.get(ck)); len(c) == 3 && c[0] == sig {
+			xc, xs = c[1], c[2]
+			break
+		}
 		out, _ := t.w.Env.Run.Output(t.ctx, run.Cmd{
 			Argv: []string{"journalctl", "-q", "--no-pager", "-o", "cat", "-u", "tando-" + a.name + ".service",
 				"--since=@" + decimal.Itoa(t.now-900), "-g", "process exited, code="},
@@ -47,6 +60,9 @@ func countRestarts(t *tick, a *appTick) {
 			if m := exitRe.FindStringSubmatch(ls[len(ls)-1]); m != nil {
 				xc, xs = map[string]string{"exited": "1", "killed": "2", "dumped": "3"}[m[1]], m[2]
 			}
+		}
+		if decimal.IsDigits(xc) && decimal.IsDigits(xs) {
+			t.vs.set(ck, sig+" "+xc+" "+xs)
 		}
 	}
 	var xi string

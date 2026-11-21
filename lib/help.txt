@@ -142,7 +142,7 @@ Example: tando ls --all
 @@ snapshot
 flags: -a= -H= --all --app= --range= --json --follow
 args: 0
-usage: tando snapshot --json [-H host | --all] [--app A [--range 1h|24h|7d]]
+usage: tando snapshot --json [-H host | --all] [--app A] [--range 1h|24h|7d]
        tando snapshot --json --follow [-H host]
 Everything a dashboard shows of a server, in one ssh call per server: apps
 with their state and its reason, load, memory, disk, clock, versions, alerts.

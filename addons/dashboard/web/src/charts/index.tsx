@@ -13,7 +13,8 @@ export interface PlotProps {
   color: string;                 // a CSS variable, e.g. var(--chart-1)
   fmt: (n: number) => string;    // axis + tooltip value
   fmtTick?: (n: number) => string;
-  limit?: number | null;         // dashed memory cap
+  limit?: number | null;         // dashed memory cap (or cores, total)
+  limitLabel?: string;           // its label; default "limit <value>"
   markers?: Marker[];
   yTicks?: number[];             // round ticks; the domain stays [0, yMax]
   second?: { name: string; color: string }; // `w` of each point as a second series
@@ -63,7 +64,7 @@ function Plot(p: PlotProps) {
       <XAxis type="number" dataKey="t" domain={[p.domain.from, p.domain.to]} ticks={ticks(p.domain)} tickFormatter={tick} allowDataOverflow {...axis} />
       <YAxis domain={[0, p.yMax]} {...(p.yTicks ? { ticks: p.yTicks } : { tickCount: 4 })} tickFormatter={p.fmtTick ?? p.fmt} width={56} {...axis} />
       <Tooltip content={<Tip fmt={p.fmt} markers={p.markers} near={Math.max(60, p.span / 120)} second={p.second} name={p.name} />} isAnimationActive={false} cursor={{ stroke: "var(--faint)" }} />
-      {p.limit != null && <ReferenceLine y={p.limit} stroke="var(--warn)" strokeDasharray="4 4" ifOverflow="extendDomain" label={{ value: `limit ${p.fmt(p.limit)}`, fill: "var(--warn)", fontSize: 11, position: "insideTopRight" }} />}
+      {p.limit != null && <ReferenceLine y={p.limit} stroke="var(--warn)" strokeDasharray="4 4" ifOverflow="extendDomain" label={{ value: p.limitLabel ?? `limit ${p.fmt(p.limit)}`, fill: "var(--warn)", fontSize: 11, position: "insideTopRight" }} />}
       {p.incidents?.map((i) => <ReferenceArea key={i.start} x1={Math.max(i.start, p.domain.from)} x2={Math.min(i.end, p.domain.to)} fill="var(--fail-bg)" fillOpacity={1} />)}
       {p.markers?.map((m) => <ReferenceLine key={`${m.t}-${m.release}`} x={m.t} stroke="var(--faint)" strokeDasharray="3 3" strokeWidth={1} label={<MarkerHit text={markerText(m)} />} />)}
     </>

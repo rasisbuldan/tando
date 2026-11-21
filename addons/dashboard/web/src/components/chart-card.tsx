@@ -17,7 +17,7 @@ export function prefetchCharts() {
 }
 
 interface Props extends Omit<PlotProps, "span"> {
-  title: string; range: RangeKey; span: number; metrics: Metrics | null; name: string; deploys: number;
+  title: string; range: RangeKey; span: number; metrics: Pick<Metrics, "data_since" | "bucket_s"> | null; name: string; deploys: number;
   zeroText?: string;   // shown in the plot box when every value is 0 ("No restarts in 24 h")
 }
 

@@ -157,7 +157,7 @@ Per app; the host's defaults are set with `tando host setup` (docs/LOGGING.md).
 
 | Key | Type | Default | Unit | Meaning | Example |
 |---|---|---|---|---|---|
-| `log_max` | size | host default, else the smaller of 2G and 5% of the disk | `K`, `M`, `G` | Size cap of the app's journal, at least 4M; the oldest entries go first. | `log_max = 500M` |
+| `log_max` | size | host default, else the smaller of 256M and 5% of the disk | `K`, `M`, `G` | Size cap of the app's journal, at least 4M; the oldest entries go first. | `log_max = 500M` |
 | `log_keep` | time | host default, else `30d` | `h`, `d`, `w` | How long the journal keeps entries. | `log_keep = 14d` |
 | `log_rate` | text | host default, else `5000/30s` | lines / seconds | Lines per interval per service, as `<lines>/<seconds>s`, or `off`. | `log_rate = 2000/10s` |
 | `access_log` | bool-like | `on` | | `on` or `off`: write the request log. | `access_log = off` |

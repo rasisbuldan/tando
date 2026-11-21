@@ -40,7 +40,7 @@ type shape struct {
 	verb  []string
 	pos   []valueKind
 	flags map[string]flagRule
-	needs map[string]string // flag -> flag it needs (--range needs --app)
+	needs map[string]string // flag -> flag it needs
 	write bool
 }
 
@@ -49,8 +49,8 @@ var shapes = []shape{
 	{name: "version", verb: []string{"--version"}},
 	{name: "help-snapshot", verb: []string{"help", "snapshot"}},
 	{name: "snapshot", verb: []string{"snapshot"}, flags: map[string]flagRule{
-		"--json": {vNone, true}, "-H": {vHost, true}, "--app": {vApp, false}, "--range": {vRange, false}},
-		needs: map[string]string{"--range": "--app"}},
+		"--json": {vNone, true}, "-H": {vHost, true}, "--app": {vApp, false}, "--range": {vRange, false}}},
+	// (--range without --app: the host's series, for the Server page)
 	// the live view (live.go): one host, no app, a line every 5 s until it is stopped
 	{name: "snapshot-follow", verb: []string{"snapshot"}, flags: map[string]flagRule{
 		"--json": {vNone, true}, "-H": {vHost, true}, "--follow": {vNone, true}}},
@@ -279,9 +279,9 @@ func argvSnapshot(host, app, rng string) []string {
 	a := []string{"snapshot", "--json", "-H", host}
 	if app != "" {
 		a = append(a, "--app", app)
-		if rng != "" {
-			a = append(a, "--range", rng)
-		}
+	}
+	if rng != "" { // with an app: its series; without: the host's (the Server page)
+		a = append(a, "--range", rng)
 	}
 	return a
 }

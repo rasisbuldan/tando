@@ -18,8 +18,14 @@ export interface HistoryRow {
   build_s: Num; upload_s: Num; copy_s: Num; release_s: Num; preflight_s: Num; switch_s: Num; verify_s: Num;
   note: string | null; deployer: string | null;
 }
-export interface MetricPoint { t: number; memory_bytes: Num; cpu_percent: Num; restarts: Num; state: string | null }
-export interface Metrics { range: string; bucket_s: number; points: number; from: Num; to: Num; data_since: Num; series: MetricPoint[] }
+export interface MetricPoint { t: number; memory_bytes: Num; cpu_percent: Num; restarts: Num; state: string | null; disk_bytes?: Num }
+export interface Series<P> { range: string; bucket_s: number; points: number; from: Num; to: Num; data_since: Num; series: P[] }
+export type Metrics = Series<MetricPoint>;
+/** snapshot --range without --app: load (1 min average), cpu % of all cores, memory, disk of /var/lib/tando */
+export interface HostMetricPoint {
+  t: number; load: Num; cpu_percent: Num; memory_used_bytes: Num; memory_total_bytes: Num; disk_used_bytes: Num; disk_total_bytes: Num;
+}
+export type HostMetrics = Series<HostMetricPoint>;
 export interface Incident { start: number; end: Num; check: string; cause: string | null }
 export interface Health {
   uptime_24h_pct: Num; uptime_7d_pct: Num; incidents_7d: Num; p50_ms: Num; p95_ms: Num; last: string | null; last_ms: Num;
@@ -34,6 +40,7 @@ export interface AppDetail {
 export interface Snapshot {
   host: string; reachable: boolean; error?: string; checked_at: number; server_version?: string | null; client_version?: string | null;
   clock_skew_s?: Num; server_now?: Num; system?: System; apps?: AppRow[]; alerts?: Alert[]; app?: AppDetail;
+  host_metrics?: HostMetrics | null;
 }
 export interface ApiErrorBody { code: string; message: string }
 

@@ -14,7 +14,7 @@ the review itself is not in the repository). The design guideline is docs/DESIGN
 
 ## Architecture
 - **Main package (lean, bash):** new client verbs, all `--json`:
-  - `tando snapshot --json [-H host] [--app A --range 1h|24h|7d]`: ONE ssh exec per host per
+  - `tando snapshot --json [-H host] [--app A] [--range 1h|24h|7d]` (`--range` without `--app`: the host series, for the Server page): ONE ssh exec per host per
     refresh (built like `top_fetch`, lib/cmd-top.sh): status, host row (load, memory, disk,
     clock, versions), alerts, and for the selected app: releases, history (with deployer),
     metrics (gap-filled buckets), health series. (B1, B2)

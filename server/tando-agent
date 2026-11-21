@@ -4919,7 +4919,7 @@ destroy_finish() {
   [[ -x $LOGS ]] && "$LOGS" app-remove "$A" > /dev/null
   [[ -x $R/bin/tando-gate ]] && { $R/bin/tando-gate admin remove "$A" > /dev/null ||
     echo "warning=could not remove the deploy user" >&2; }
-  rm -f "/var/lib/tando/metrics/$A.tsv" "/var/lib/tando/metrics/$A.tsv.1"
+  rm -f "/var/lib/tando/metrics/$A.tsv" "/var/lib/tando/metrics/$A.tsv.1" "/var/lib/tando/metrics/$A.disk" "/var/lib/tando/metrics/$A.disk.1"
   [[ -x $R/bin/tando-watch ]] && "$R/bin/tando-watch" forget "$A" > /dev/null   # its alert state
   # leftovers of the uid outside the app's directory, then the user; its uid is never handed out
   # again. The app's directory goes last: a destroy interrupted before it finds the app again and

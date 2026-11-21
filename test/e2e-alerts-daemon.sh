@@ -34,6 +34,15 @@ check "29a tandod runs after host setup; its socket is root 600 in a root 700 di
   srv 'systemctl -q is-active tandod && [ "$(sudo stat -c "%a %U" /run/tandod /run/tandod/tandod.sock | tr "\n" " ")" = "700 root 600 root " ]'
 check "29b a user that is not root cannot reach the socket; tando-watch brief works without it" \
   srv '! ls /run/tandod > /dev/null 2>&1 && /opt/tando/bin/tando-watch brief > /dev/null'
+# an older tando's unit (MemoryMax=64M, where tandod's page cache was evicted every minute):
+# host setup rewrites it, reloads systemd and restarts tandod
+srv 'sudo sed -i "s/^MemoryMax=.*/MemoryMax=64M/" /etc/systemd/system/tandod.service && sudo systemctl daemon-reload &&
+  sudo systemctl restart tandod'
+p64=$(srv 'systemctl show -P MainPID tandod')
+"$R" host setup t > "$E/memmax.out" 2>&1 || cat "$E/memmax.out" >&2
+check "29p host setup raises an older tandod unit's MemoryMax=64M to 160M (unit file, systemd, a new process)" \
+  srv 'grep -qx MemoryMax=160M /etc/systemd/system/tandod.service && [ "$(systemctl show -P MemoryMax tandod)" = 167772160 ] &&
+    systemctl -q is-active tandod && [ "$(systemctl show -P MainPID tandod)" != '"$p64"' ]'
 srv 'sudo systemctl stop tando-watch.timer'; until_ 60 idle
 # kill -9 in the middle of a run: hog/health fires in one run; "hook" answers at once, "slowd" never
 # (the run waits for it, 15 s), and tandod is killed while it waits

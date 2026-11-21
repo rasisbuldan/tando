@@ -42,6 +42,9 @@ func newHost(t *testing.T) *host {
 		}),
 	}
 	h.m = New(e, "")
+	h.m.Journal = filepath.Join(root, "journal")
+	statDisk = func(string) (int64, int64, error) { return 4000, 10000, nil }
+	t.Cleanup(func() { statDisk = diskOf })
 	h.write("proc/loadavg", "0.52 0.40 0.31 1/123 4567\n")
 	h.write("proc/meminfo", "MemTotal:        2000000 kB\nMemFree:          100000 kB\nMemAvailable:     500000 kB\n")
 	return h
@@ -94,8 +97,8 @@ func TestSample(t *testing.T) {
 	}
 	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\n")
 	check("web.tsv", "1800000000\t1000\t0\t3\tf\n")
-	check("host.tsv", "1800000000\t52\t1536000000\t2048000000\n")
-	check(".state", "api-2 9000000 1800000000 1\nweb 5000000 1800000000 1\n.host 0 1800000000 1\n")
+	check("host.tsv", "1800000000\t52\t1536000000\t2048000000\t-\t4000\t10000\n")
+	check(".state", "api-2 9000000 1800000000 1 1800000000\nweb 5000000 1800000000 1 1800000000\n.host 0 1800000000 1 0\n")
 	// root's alone: an app must not read another app's samples (tando top reads through sudo);
 	// the directory is made 700 although it existed with 755 (an older version's)
 	for f, want := range map[string]os.FileMode{"": 0o700, "web.tsv": 0o600, "host.tsv": 0o600, ".state": 0o600} {
@@ -115,8 +118,8 @@ func TestSample(t *testing.T) {
 	}
 	check("web.tsv", "1800000000\t1000\t0\t3\tf\n1800000060\t1100\t1200000\t0\ts\n")
 	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\n1800000060\t2000\t400000\t2\ta\n")
-	check("host.tsv", "1800000000\t52\t1536000000\t2048000000\n1800000060\t1234\t1536000000\t2048000000\n")
-	check(".state", "api-2 400000 1800000000 2\nweb 6200000 1800000000 2\n.host 0 1800000000 2\n")
+	check("host.tsv", "1800000000\t52\t1536000000\t2048000000\t-\t4000\t10000\n1800000060\t1234\t1536000000\t2048000000\t-\t4000\t10000\n")
+	check(".state", "api-2 400000 1800000000 2 1800000000\nweb 6200000 1800000000 2 1800000000\n.host 0 1800000000 2 0\n")
 
 	// web is destroyed: its line leaves .state; a unit without a cgroup samples zeros
 	os.RemoveAll(filepath.Join(h.m.Env.Root, "apps", "web"))
@@ -126,7 +129,7 @@ func TestSample(t *testing.T) {
 	if err := h.m.Sample(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	check(".state", "api-2 0 1800000000 3\n.host 0 1800000000 3\n")
+	check(".state", "api-2 0 1800000000 3 1800000000\n.host 0 1800000000 3 0\n")
 	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\n1800000060\t2000\t400000\t2\ta\n1800000120\t0\t0\t0\ts\n")
 }
 
@@ -157,7 +160,8 @@ func TestSampleRotates(t *testing.T) {
 	if got := h.read("fresh.tsv.1"); got != "previous\n" {
 		t.Errorf("fresh rotated too early")
 	}
-	want := "fresh 100 " + decimal.Itoa(now-302399) + " 5100\nfull 100 " + decimal.Itoa(now) + " 1\nold 100 " + decimal.Itoa(now) + " 1\n.host 0 " + decimal.Itoa(now) + " 2\n"
+	n := decimal.Itoa(now)
+	want := "fresh 100 " + decimal.Itoa(now-302399) + " 5100 " + n + "\nfull 100 " + n + " 1 " + n + "\nold 100 " + n + " 1 " + n + "\n.host 0 " + n + " 2 0\n"
 	if got := h.read(".state"); got != want {
 		t.Errorf(".state:\n got %q\nwant %q", got, want)
 	}
@@ -176,7 +180,7 @@ func TestSampleSystemdDown(t *testing.T) {
 		t.Error("an app line was written without systemd's answer")
 	}
 	// the host was sampled, and web's file keeps its count and start
-	if got := h.read(".state"); got != "web 50 1799990000 7\n.host 0 1799990000 8\n" {
+	if got := h.read(".state"); got != "web 50 1799990000 7 1800000000\n.host 0 1799990000 8 0\n" {
 		t.Errorf(".state = %q", got)
 	}
 }
