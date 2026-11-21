@@ -103,7 +103,15 @@ the page shows "Session ended"). Errors are `{"error":{"code","message"}}`, the 
 | GET | `/api/action/stream?key=` | none (the write's output file) | none | cookie |
 
 Snapshot answers: `{host, app, range, fetched_at, age_s, cached, next_poll_s, data}` where `data` is
-the CLI's JSON as it is; `next_poll_s` is 15 with `visible=1` (default) and 60 with `visible=0`.
+the CLI's JSON as it is; `next_poll_s` is 5 with `visible=1` (default) and 60 with `visible=0`.
+Live (5 s): while a visible page asks for a server, tando-dash keeps one `tando snapshot --json
+--follow -H <host>` running for it (the server pushes a line every 5 s over one ssh session) and
+answers that server's polls from the last line, without running anything; an app's page gets its
+own snapshot (at most every 10 s, cached) with the live app row and server numbers laid over it.
+The follow ends 30 s after the last visible poll. A server without a live view (older tando,
+no tandod, no cgroup v2: the follow exits at once) is polled through the 10 s cache and asked
+again after 10 minutes. Why not a 5 s poll: on the server a poll is an ssh exec, a shell, sudo,
+the agent and tando-status each time; a follow is one process reading tandod's socket.
 Overview: `{hosts: [{host, ok, fetched_at, cached, data} | {host, ok: false, error}], next_poll_s}`.
 Doctor and host status: `{host, ran_at, cached, next_run_s, data | error}`.
 Action: 202 `{key, action, host, app, status: "running", started_at, replay}`; the same key again

@@ -83,6 +83,43 @@ tando alerts backup-ping                     # a URL called after each whole run
   warning when it is not running: the timer runs the checks meanwhile); `tando alerts` says when
   the checks last ran either way.
 
+## Live views (5 s)
+
+`tando status --follow`, `tando ls --follow` (and the menu bar's "Open status in Terminal") show
+numbers 5 s old at most. They are for looking only: every alert rule stays once a minute, on the
+minute samples above, unchanged.
+
+- **The fast loop** (srv/live, in tandod, its own goroutine beside the minute schedule): every 5 s
+  one point of every app (memory as anon + shmem of `memory.stat`, CPU from `cpu.stat`'s
+  `usage_usec` since the last point, tasks from `pids.current`, and the unit's `ActiveState`,
+  `SubState`, `NRestarts` and `MainPID` over the bus connection tandod already keeps, asked of
+  loaded app units only) and of the host (`/proc/loadavg`, `/proc/meminfo`, `/proc/stat`, statfs of
+  `/`). It starts no program, writes no file, takes no lock and never touches the alert state; the
+  last hour (720 points) stays in memory and is lost on a restart. The minute files of
+  `tando-metrics` are written exactly as before.
+- **cgroup v2 only.** On a host with cgroup v1 or the hybrid layout there is no fast loop: the live
+  verbs answer "no live view on this server", and `--follow` polls `status` every 5 s instead.
+- **On the socket**: `live [app]` gives the latest point (`lhost`, `lapp` rows), `ring [app]` the
+  hour (`rhost`, `rapp`). An older tandod answers "bad request" to both.
+- **`tando-agent status-follow [app]`** (`tando-status follow`, root): one long-running process per
+  viewer that writes a frame every 5 s: the rows of `status [app]` with the live fields patched in
+  (state, memory, restarts, uptime, the CPU field now over 5 s; load, memory and disk of the host),
+  then the live rows, between `@frame <epoch>` and `@end`. The whole status (from tandod: no program
+  started either) is collected once a minute and at once when an app's `ActiveState` changes, so a
+  crash, a stop or a start shows within 5 s with its release and alerts. It ends when the reader
+  goes (its next write fails, within 5 s of the ssh session closing).
+- **The laptop** keeps one ssh session for the whole view and reads the frames from a fifo; a
+  silent server shows as stale after 15 s, an ended session is opened again. A server that sends no
+  first frame (no `status-follow`, no tandod, no cgroup v2) is polled every 5 s as `--watch 5` does.
+
+Cost, measured by `test/e2e-live.sh` on the arm64 Docker test server with 25 app units (one
+deployed, 24 that only sleep), apps idle: tandod with the fast loop and its minute ticks about
+0.1-0.2% of a core averaged over the window (about 110 ms of CPU a minute), the fast loop alone about
+4 ms per point; systemd's own CPU (init.scope, the Gets) under 0.1%; tandod's anonymous memory
+about 5 MB with the hour's ring; no program started by the fast loop (tandod's reaped-children
+counters unchanged over 30 s with the minute ticks paused). A follower costs one process per
+viewer reading tandod's socket every 5 s; the whole status once a minute.
+
 ## What is checked
 
 | Check | Fires when | Production default |

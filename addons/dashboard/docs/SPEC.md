@@ -62,6 +62,8 @@ the review itself is not in the repository). The design guideline is docs/DESIGN
   skeletons).
 - Tab hidden: 0 polls; laptop CPU idle < 0.5 %; tando-dash RSS <= 30 MB.
 - Server: <= 1 snapshot exec per host per 15 s while visible, 1 per 60 s for hosts off screen.
+  Since the live views: while visible, one `snapshot --json --follow` per host instead (a line every
+  5 s from one ssh session; README.md, "Live"), an app's own snapshot at most every 10 s.
 
 ## Data rules (S3)
 - Metrics keep 3.5-7 days: a "7d" chart has a fixed domain with a "data since" label.
