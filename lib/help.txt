@@ -129,12 +129,15 @@ server is asked every 5 s instead).
 Example: tando status --watch 2
 
 @@ ls
-flags: -H= --all --watch= --follow --json --check
+flags: -H= --all --all-rows --watch= --follow --json --check
 args: 0
-usage: tando ls [-H host] [--all] [--watch N | --follow] [--json] [--check]
+usage: tando ls [-H host] [--all] [--all-rows] [--watch N | --follow] [--json] [--check]
 The apps of a server: state, when deployed, memory, cpu, uptime and link.
+Above 50 apps it shows a summary: the apps that are down or alerting, then
+a count per state; --all-rows lists every app. --json always has every app.
 --follow: live, every 5 s (as tando status --follow).
---all: every registered server in one box, what needs attention first.
+--all: every registered server in one box, what needs attention first (a
+server above 50 apps shows its problems and counts, like ls; --all-rows: all).
 --check: exit status 2 when an app is
 down, an alert fires or (with --all) a server does not answer; 0 when not.
 Example: tando ls --all

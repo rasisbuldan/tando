@@ -28,7 +28,7 @@ ui_init
 . "$TANDO_HOME/lib/args.sh"
 
 # the flags every command shares (lib/args.sh has already refused the ones a command does not take)
-WATCH="" LIVE="" FOLLOW="" NLINES=100 ARGS=() ALL="" PURGE="" SHOW="" NOTE="" HELP="" JSON="" YES="" FORCE="" DRY_RUN="" VERBOSE="" CHECK=""
+WATCH="" LIVE="" FOLLOW="" NLINES=100 ARGS=() ALL="" PURGE="" SHOW="" NOTE="" HELP="" JSON="" YES="" FORCE="" DRY_RUN="" VERBOSE="" CHECK="" ALLROWS=""
 parse() {
   while [ $# -gt 0 ]; do
     case $1 in
@@ -39,6 +39,7 @@ parse() {
       --follow) LIVE=1 WATCH=${WATCH:-5}; shift;;   # status, ls: frames pushed every 5 s (views.sh follow_loop)
       -f) FOLLOW=follow; shift;;
       --all) ALL=1; shift;;
+      --all-rows) ALLROWS=1; shift;;   # ls: every app row, also above 50 apps (views.sh)
       --purge) PURGE=1; shift;;
       --show) SHOW=1; shift;;
       --note) NOTE=$2; shift 2;;   # env set|unset|import: the line for the env changelog

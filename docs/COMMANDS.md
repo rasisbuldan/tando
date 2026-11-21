@@ -422,7 +422,7 @@ Example: `tando restore --from-host 3f9a01c2b7de --all -H newvps`
 ## Observe
 
 ### ls
-`tando ls [-H host] [--all] [--watch N | --follow] [--json] [--check]`. Arguments: none. `-a` is refused.
+`tando ls [-H host] [--all] [--all-rows] [--watch N | --follow] [--json] [--check]`. Arguments: none. `-a` is refused.
 The apps of a server: state, deploy age, memory, cpu over the last minute (`CPU 1M`), uptime, link (never cut: other columns are
 dropped first at 80 columns). While an alert fires for an app, an ALERT column names the checks
 (`http`, `slow`, ...) and the footer counts them; `--json` has `alerts_firing` and `firing` per
@@ -434,7 +434,11 @@ server's `address` and ssh `user` as registered (`tando host add`; a name stays 
 what needs attention (a server not answering, an app down, an alert firing, host care to do,
 clock or version skew), one line each with the command to look closer, then every app of every
 server (HOST APP STATE ALERT MEMORY CPU 1M UP) with those needing attention on top; with
-`--watch` and `--json` (one object per server, as `ls --json`). A
+`--watch` and `--json` (one object per server, as `ls --json`). Above 50 apps on a server (`ls` or
+`ls --all`) the table is a summary: a line with the count per state, then only the apps that are
+down or have an alert firing (a server in `ls --all` gets one count line under the table);
+`--all-rows` lists every app; `--json` always has every app. The rows are made in one awk pass, so
+200 apps render in well under a second. A
 worker that does not run while its app does gets a line under the table. `--json` has `apps` and
 `alerts` (each alert's app, check, state `firing` or `pending`, since, detail; a host check has app
 `host`); with `--all`, a server that did not answer is `{"host", "address", "user", "error",
