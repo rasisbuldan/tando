@@ -11,10 +11,11 @@
 // durable state of the checks is read from disk every tick, so a kill -9 at any point is as safe
 // as the one-shot's (srv/watch commit.go).
 //
-// It serves read-only queries and `tick` on /run/tandod/tandod.sock (package proto); the
+// Every 5 s, in a goroutine of its own, the live views' point (srv/live: no program, no file, no
+// alert state). It serves read-only queries and `tick` on /run/tandod/tandod.sock (package proto); the
 // tando-watch CLI asks there first and does the work itself when nothing answers.
 //
-// Layer: composition. It imports the domain packages (watch, logs, metrics, status), daemon/proto
+// Layer: composition. It imports the domain packages (watch, logs, metrics, status, live), daemon/proto
 // and internal/*, and holds no check logic and no parsing; only cmd/tandod imports it. It reads no
 // environment: main passes what systemd said (Systemd).
 package daemon
@@ -38,6 +39,7 @@ import (
 	"tando/srv/internal/out"
 	"tando/srv/internal/run"
 	"tando/srv/internal/sdbus"
+	"tando/srv/live"
 	"tando/srv/logs"
 	"tando/srv/metrics"
 	"tando/srv/status"
@@ -56,6 +58,8 @@ type Daemon struct {
 	Logs    *logs.Logs
 	// Status answers `status [app]` (tando-agent's status verb, srv/status); nil: not served.
 	Status *status.Collector
+	// Live is the 5 s loop of the live views (srv/live); nil: none (a host without cgroup v2).
+	Live   *live.Live
 	Socket string
 	Clock  Clock
 	// TimerActive says whether tando-watch.timer is active: stopped, the daemon runs no ticks of
@@ -99,6 +103,9 @@ func New(e env.Env, sd Systemd) *Daemon {
 	d.Status = status.New(e)
 	d.Status.Stderr = io.Discard
 	statusRows(d) // (status's rows of logs, watch and metrics in-process: statusrows.go)
+	if live.V2(e.Cgroup) {
+		d.Live = live.New(e, func(units []string) ([]map[string]string, error) { return bus.get(units, liveProps) })
+	}
 	d.TimerActive = func(ctx context.Context) bool {
 		b, err := e.Run.Output(ctx, runShow("tando-watch.timer"))
 		return timerOn(string(b), err)
@@ -164,6 +171,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.notify.send("READY=1")
 	if d.wdEvery > 0 {
 		go d.watchdog(ctx, d.wdEvery)
+	}
+	if d.Live != nil {
+		go d.Live.Run(ticks) // (its own loop: it never waits for a tick, nor a tick for it)
 	}
 	schedule(ctx, d.Clock, d.scheduledSafe, func() { d.progress.Store(int64(d.Clock.Boot())) })
 	d.notify.send("STOPPING=1")
@@ -319,6 +329,16 @@ func (d *Daemon) handle(ctx context.Context, r proto.Request, w io.Writer) error
 	case "brief":
 		d.Watch.Brief(o, args)
 		return nil
+	case "live", "ring":
+		if d.Live == nil {
+			return errNoLive
+		}
+		if r.Verb == "live" {
+			d.Live.Rows(o, r.Arg)
+		} else {
+			d.Live.RingRows(o, r.Arg)
+		}
+		return nil
 	case "status":
 		if d.Status == nil {
 			return errors.New("status is not served here")
@@ -328,6 +348,15 @@ func (d *Daemon) handle(ctx context.Context, r proto.Request, w io.Writer) error
 	}
 	return proto.ErrBad
 }
+
+// errNoLive: the live verbs on a host without the fast loop (cgroup v1 or hybrid).
+var errNoLive = errors.New("no live view on this server: it needs cgroup v2 (the per-minute samples still run)")
+
+// liveProps: what the fast loop asks systemd of the loaded app units (the others are not asked).
+var liveProps = []sdbus.Prop{{Iface: "org.freedesktop.systemd1.Unit", Name: "ActiveState"},
+	{Iface: "org.freedesktop.systemd1.Unit", Name: "SubState"},
+	{Iface: "org.freedesktop.systemd1.Service", Name: "NRestarts"},
+	{Iface: "org.freedesktop.systemd1.Service", Name: "MainPID"}}
 
 // runShow is `systemctl show -P ActiveState <unit>` (answered over the bus).
 func runShow(unit string) run.Cmd {

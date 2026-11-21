@@ -40,6 +40,7 @@ type Config struct {
 	IdemTTL          time.Duration // idempotency records: 24 h
 	PollVisible      int           // next_poll_s while visible: 15
 	PollHidden       int           // next_poll_s off-screen: 60
+	LivePoll         int           // next_poll_s while visible with live views (live.go): 5; -1: off (PollVisible)
 	MaxBody          int64         // request body: 64 KB
 	MaxCache         int           // cache entries: 256
 	MaxIdem          int           // idempotency records: 500
@@ -77,6 +78,7 @@ func (c *Config) defaults() {
 	}
 	i(&c.PollVisible, 15)
 	i(&c.PollHidden, 60)
+	i(&c.LivePoll, livePoll)
 	i(&c.MaxCache, 256)
 	i(&c.MaxIdem, 500)
 	i(&c.MaxInflight, 64)
@@ -112,6 +114,7 @@ type Server struct {
 	wg         sync.WaitGroup // running writes
 	actStreams atomic.Int64   // open progress streams
 	studios    *studios       // studio.go
+	live       liveFeed       // live.go
 }
 
 // New: a server; it loads the sessions and the idempotency records from ConfigDir
@@ -155,7 +158,7 @@ func (s *Server) Close() { s.stop(); s.studios.closeAll() }
 // WaitStreams: after Close, wait (up to d) for the log streams' children to be killed and reaped
 func (s *Server) WaitStreams(d time.Duration) {
 	done := make(chan struct{})
-	go func() { s.hub.wg.Wait(); s.studios.wg.Wait(); close(done) }()
+	go func() { s.hub.wg.Wait(); s.studios.wg.Wait(); s.live.wg.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(d):

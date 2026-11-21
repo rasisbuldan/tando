@@ -4,6 +4,8 @@
 // tando/srv/status. The output and the error messages are the agent's ("tando-agent: ...").
 //
 //	tando-status status [app]           host row, app rows; with an app its releases, history, domains, metrics
+//	tando-status follow [app]           status as frames every 5 s with tandod's live rows (root; status.Follow)
+//	tando-status live|ring [app]        tandod's fast loop: the latest point, the last hour (root; tests, debugging)
 //	tando-status deploy-status <app> <id>
 //	tando-status releases <app>
 //	tando-status history [app] [n]
@@ -21,6 +23,7 @@ import (
 	"os"
 	"runtime/debug"
 	"syscall"
+	"time"
 
 	"tando/srv/daemon/proto"
 	"tando/srv/internal/buildinfo"
@@ -29,7 +32,7 @@ import (
 	"tando/srv/status"
 )
 
-var errUsage = errors.New("usage: tando-status status [app] | deploy-status <app> <id> | releases <app> | history [app] [n] | busy <app> | info | version")
+var errUsage = errors.New("usage: tando-status status [app] | follow [app] | deploy-status <app> <id> | releases <app> | history [app] [n] | busy <app> | info | version")
 
 func main() {
 	syscall.Umask(0o022) // (a recreated releases/ is 755 whatever umask sudo passed on)
@@ -69,6 +72,29 @@ func run(args []string) error {
 	switch verb {
 	case "status":
 		return c.StatusVia(ctx, w, arg(args, 0), proto.AskStatus)
+	case "follow":
+		// (status every minute, the fast loop's point every 5 s: package status, follow.go); it
+		// runs for as long as someone watches, so the collector is on again
+		debug.SetGCPercent(100)
+		return c.Follow(ctx, w, arg(args, 0), proto.AskStatus, proto.AskLive, 5*time.Second, time.Minute)
+	case "live", "ring":
+		var a []string
+		if arg(args, 0) != "" {
+			a = []string{arg(args, 0)}
+		}
+		r, err := proto.FromArgs(verb, a)
+		if err != nil {
+			return errUsage
+		}
+		ans, err := proto.Call(ctx, proto.Socket, r, 100*time.Millisecond, 10*time.Second)
+		if err != nil {
+			return err
+		}
+		if !ans.OK {
+			return errors.New(ans.Err)
+		}
+		_, err = w.Write(ans.Body)
+		return err
 	case "deploy-status":
 		return c.DeployStatus(ctx, w, arg(args, 0), arg(args, 1))
 	case "releases":

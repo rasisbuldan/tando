@@ -2,6 +2,7 @@
 # exec per host (built like top_fetch in lib/cmd-top.sh). bash 3.2.
 #
 #   tando snapshot --json [-H host | --all] [--app A] [--range 1h|24h|7d]
+#   tando snapshot --json --follow -H host     one line every 5 s (snap_follow)
 #
 # One JSON document per host, one per line (hosts in parallel, each with a timeout; an unreachable
 # host is {"host", "reachable": false, "error", "checked_at"}). Without --app it is the cheap one
@@ -50,9 +51,26 @@ cmd_snapshot() {
     hosts=$HOST
   fi
   for h in $hosts; do valid_host "$h" || die "bad host name: $h"; done
+  if [ -n "$LIVE" ]; then   # --follow: one line every 5 s from the server's live view
+    [ -z "$ALL" ] && [ -z "$app" ] && [ -z "$range" ] || usage_err "--follow goes with one host (-H), no app and no range" snapshot
+    snap_follow; return
+  fi
   # shellcheck disable=SC2086  # a list of host names
   snap_fetch "$app" $hosts
   for h in $hosts; do snap_render "$h" "$app"; done
+}
+
+# snap_follow: `snapshot --json --follow -H host`: the snapshot without an app as one line of JSON
+# every 5 s, built from the frames `tando-agent status-follow` pushes over one ssh session
+# (views.sh follow_loop; a frame has the status rows, the loadavg row and the server row's clock).
+# Exit 3 at once when the server has no live view (an older one, no tandod, no cgroup v2): the
+# caller polls `snapshot --json` instead. Runs until killed (or the reader goes away).
+snap_follow() {
+  FOLLOW_RAW=1
+  follow_loop snap_live
+}
+snap_live() {
+  cp "$TMPD/st" "$TMPD/s.$HOST.out" && echo 0 > "$TMPD/s.$HOST.rc" && snap_render "$HOST" ""
 }
 
 # snap_cmd app: the one remote command (only words tando built: the app name is checked)
