@@ -5,6 +5,8 @@
 //
 //   tando-menubar                          the menu bar app (the LaunchAgent starts it this way)
 //   tando-menubar --once [--checks N]      run N checks (default 1) and print the menu as text
+//   tando-menubar --dash-url               what "Open dashboard" does, without the window: starts
+//                                          tando-dash if needed and prints the one-time link
 //   --tando PATH  --interval SECONDS  --timeout SECONDS   override menubar.conf
 //
 // Settings: $TANDO_CONFIG_DIR/menubar.conf (default ~/.config/tando/menubar.conf), key=value lines:
@@ -23,6 +25,7 @@ struct Settings {
     var timeout: Double = 45
     var notify = "auto"
     var once = false
+    var dashURL = false
     var checks = 1
 
     static func load() -> Settings {
@@ -41,6 +44,7 @@ struct Settings {
             let a = args.removeFirst()
             switch a {
             case "--once": s.once = true
+            case "--dash-url": s.dashURL = true
             case "--tando", "--interval", "--timeout", "--checks", "--notify":
                 guard !args.isEmpty else { fail("\(a) needs a value") }
                 s.set(String(a.dropFirst(2)), args.removeFirst())
@@ -154,8 +158,26 @@ func probe(_ urls: [URL], timeout: Double = 8) -> [String: Bool] {
     return res
 }
 
-/// One whole check: tando, then the links. Returns the new snapshot and the notifications.
+/// Where the last check got its list: "cache" (tando-dash's ls-all.json, fresh) or "tando".
+var lastSource = "tando"
+
+/// tando-dash writes cache/ls-all.json at each overview refresh; when it is fresher than this
+/// app's own interval, use it instead of running `tando ls --all --json` (one ssh per server).
+func freshCache(interval: Double) -> LsAll? {
+    let path = dashConfigDir() + "/cache/ls-all.json"
+    let mod = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+    guard cacheFresh(modified: mod, now: Date(), interval: interval),
+          let d = FileManager.default.contents(atPath: path) else { return nil }
+    return parseLsAll(d)
+}
+
+/// One whole check: the list (the shared cache or tando), then the links. Returns the new snapshot and the notifications.
 func check(_ s: Settings, _ m: Monitor) -> (Snapshot, [Note]) {
+    if let ls = freshCache(interval: s.interval) {
+        lastSource = "cache"
+        return m.apply(ls, probes: probe(m.linksToProbe(ls)))
+    }
+    lastSource = "tando"
     switch runTando(s.tando, ["ls", "--all", "--json"], timeout: s.timeout) {
     case .failure(let e):
         return (m.failed(e.why), [])
@@ -170,6 +192,13 @@ func check(_ s: Settings, _ m: Monitor) -> (Snapshot, [Note]) {
 // ---- --once: no UI, the menu as text -------------------------------------------------------------
 
 let settings = Settings.load()
+if settings.dashURL {
+    switch resolveDash(tando: settings.tando) {
+    case .ready(let url, _): print("dash: open \(url.absoluteString)"); exit(0)
+    case .notInstalled: print("dash: not installed (\(dashInstallCommand))"); exit(1)
+    case .failed(let why): print("dash: failed: \(why)"); exit(1)
+    }
+}
 if settings.once {
     let m = Monitor()
     var last = Snapshot()
@@ -179,6 +208,7 @@ if settings.once {
         last = snap
         if i < settings.checks { Thread.sleep(forTimeInterval: 0.2) }
     }
+    print("source: \(lastSource)")
     print(describe(last))
     exit(last.grey == nil ? 0 : 1)
 }
@@ -235,7 +265,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
 
 // ---- the menu bar item ---------------------------------------------------------------------------
 
-final class Controller: NSObject {
+final class Controller: NSObject, NSMenuDelegate {
     let s: Settings
     let monitor = Monitor()
     let notifier: Notifier
@@ -244,6 +274,7 @@ final class Controller: NSObject {
     var running = false
     var offline = false
     var timer: Timer?
+    lazy var dash = DashWindowController(tando: s.tando)
     let path = NWPathMonitor()
     let tf: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f }()
 
@@ -310,6 +341,14 @@ final class Controller: NSObject {
             }
         }
         item.menu = buildMenu()
+        item.menu?.delegate = self
+    }
+
+    /// The add-on may be installed (or removed) while the menu bar app runs: the first row follows.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if let d = menu.items.first(where: { $0.action == #selector(openDashboard) }) {
+            d.title = dashBinary() == nil ? "Install dashboard…" : "Open dashboard"
+        }
     }
 
     func badgeImage(_ n: Int) -> NSImage {
@@ -384,6 +423,9 @@ final class Controller: NSObject {
             for f in snap.firing { let i = label(f); i.attributedTitle = dot(.systemRed, f); menu.addItem(i) }
         }
         menu.addItem(.separator())
+        let d = NSMenuItem(title: dashBinary() == nil ? "Install dashboard…" : "Open dashboard", action: #selector(openDashboard), keyEquivalent: "d")
+        d.target = self
+        menu.addItem(d)
         let r = NSMenuItem(title: "Refresh now", action: #selector(refresh), keyEquivalent: "r")
         r.target = self; r.isEnabled = !running
         menu.addItem(r)
@@ -395,6 +437,8 @@ final class Controller: NSObject {
         menu.addItem(q)
         return menu
     }
+
+    @objc func openDashboard() { dash.open() }
 
     @objc func openLink(_ sender: NSMenuItem) {
         if let u = sender.representedObject as? URL { NSWorkspace.shared.open(u) }

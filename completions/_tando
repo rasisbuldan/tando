@@ -55,7 +55,9 @@ _tando() {
     'audit:Who changed what on the server - one row per deploy, env change, restart,'
     'adopt:Take over an app that was deployed by hand (a systemd unit behind Caddy) - plan'
     'help:The list of commands, or the help of one command (tando help alerts notifier'
+    'addon:the dashboard add-on (tando-dash)'
     'cheat:the commands that matter, on one screen'
+    'dashboard:open the dashboard in the browser (the add-on - tando addon install dashboard)'
     'go:the setup wizard (docs/EASE.md)'
     'link:print the apps address (its own domain, else its link), for scripts'
     'menubar:menu bar icon with a problem badge (macOS)'
@@ -114,7 +116,9 @@ _tando() {
         audit) subs="" flags="-n -H -a" args="apps" ;;
         adopt) subs="plan apply undo status site" flags="--health --no-jobs --yes --accept-502 -H --apply" args="apps" ;;
         help) subs="" flags="" args="" ;;
+        addon) subs="install uninstall status" flags="--version --from --sha256" args="" ;;
         cheat) subs="" flags="" args="" ;;
+        dashboard) subs="" flags="--no-open --idle --port" args="" ;;
         go) subs="" flags="--port --key --domain --dns --yes --forget" args="" ;;
         link) subs="" flags="" args="apps" ;;
         menubar) subs="install uninstall status build" flags="--dry-run --out" args="" ;;

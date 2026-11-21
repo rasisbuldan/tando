@@ -6,6 +6,21 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: `tando addon install dashboard | uninstall dashboard | status` and `tando dashboard`. The
+  dashboard add-on is installed from its own release asset (`tando-dash-<v>-<os>-<arch>.tar.gz`,
+  universal on macOS), checked against its SHA-256 (refused on a mismatch or without a checksum),
+  into `~/.local/lib/tando-dash/<v>/` with `~/.local/bin/tando-dash`; macOS quarantine is removed only
+  from the verified files. Uninstall removes the binary, its links, `dash.lock` and the cache files.
+- Added: `scripts/release-dashboard.sh` builds the web app and `tando-dash` (darwin universal with
+  lipo, linux amd64 and arm64; static, `-trimpath`, stripped) into reproducible archives with
+  `.sha256`; `--check` builds twice and compares the bytes. The main archive still has nothing of `addons/`.
+- Added (macOS): the menu bar app's "Open dashboard" (⌘D): a window of its own (WKWebView, one window,
+  size remembered, ⌘R reload, ⌘W closes the window) that starts `tando-dash` if none runs and asks it
+  for a fresh one-time link; "Install dashboard…" shows the command when the add-on is missing. The
+  window only shows `127.0.0.1:<port>`; other links open in the default browser. The menu bar also
+  reads `tando-dash`'s `ls-all.json` when it is fresher than its interval, instead of running
+  `tando ls --all --json`.
+
 - Added (dashboard add-on, not in the main archive): the web app, `addons/dashboard/web` (React, Vite,
   Tailwind, Recharts in a lazy chunk): sidebar, Overview, Server page, App page with the Overview
   and Deploys tabs; the other pages are placeholders. Bundle budgets and design rules are checked

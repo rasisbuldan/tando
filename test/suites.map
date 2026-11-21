@@ -62,6 +62,8 @@ lib/hostcare.sh          lint ui-test e2e-cli e2e-host
 lib/offsite.sh           lint ui-test e2e-cli e2e-offsite e2e-data
 lib/studio.sh            lint ui-test e2e-cli e2e-studio
 lib/cmd-menubar.sh       lint ui-test e2e-cli install-test
+lib/cmd-addon.sh         lint ui-test e2e-cli install-test addon-test
+lib/cmd-dashboard.sh     lint ui-test e2e-cli install-test addon-test
 macos/*                  ui-test install-test
 
 # ---- server side
@@ -96,6 +98,7 @@ bench/*                  lint
 # ---- add-ons (shipped on their own, never in the main archive)
 addons/dashboard/*       dashboard-test
 scripts/release.sh       dashboard-test
+scripts/release-dashboard.sh dashboard-test addon-test
 
 # ---- the tests themselves
 test/lint*               lint
@@ -113,6 +116,7 @@ test/pty-run.sh          ui-test e2e-top lint
 test/top-pty.py          e2e-top
 test/install-test.sh     install-test lint
 test/dashboard-test.sh   dashboard-test lint
+test/addon-test.sh       addon-test lint
 test/secret-scan-test.sh lint
 test/check.sh            lint
 test/durations.tsv       lint
