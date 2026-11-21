@@ -6,7 +6,7 @@ import { share } from "./share";
 import type { DoctorResult, HostStatus, HostView, OnDemand, Snapshot } from "./types";
 
 const registry = new Map<string, Poller<never>>();
-function poller<T>(key: string, make: () => Poller<T>): Poller<T> {
+export function registerPoller<T>(key: string, make: () => Poller<T>): Poller<T> {
   let p = registry.get(key) as Poller<T> | undefined;
   if (!p) { p = make(); registry.set(key, p as unknown as Poller<never>); }
   return p;
@@ -17,7 +17,7 @@ if (typeof document !== "undefined") {
 const vis = (visible: boolean) => (visible ? "1" : "0");
 
 export function overviewPoller(): Poller<HostView[]> {
-  return poller("overview", () => new Poller<HostView[]>(async (visible) => {
+  return registerPoller("overview", () => new Poller<HostView[]>(async (visible) => {
     const r = await apiGet<{ hosts: RawHost[]; next_poll_s?: number }>(`/api/overview?${qs({ visible: vis(visible) })}`);
     return { data: toViews(r.hosts), nextPollS: r.next_poll_s };
   }, mergeViews));
@@ -25,7 +25,7 @@ export function overviewPoller(): Poller<HostView[]> {
 
 export interface SnapView { view: HostView }
 export function snapshotPoller(host: string, app?: string, range?: string): Poller<HostView> {
-  return poller(`snap:${host}:${app ?? ""}:${range ?? ""}`, () => new Poller<HostView>(async (visible) => {
+  return registerPoller(`snap:${host}:${app ?? ""}:${range ?? ""}`, () => new Poller<HostView>(async (visible) => {
     const r = await apiGet<{ fetched_at?: string; next_poll_s?: number; data: Snapshot }>(
       `/api/snapshot?${qs({ host, app, range, visible: vis(visible) })}`);
     const [v] = toViews([{ host, ok: true, fetched_at: r.fetched_at, data: r.data }]);

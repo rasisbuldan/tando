@@ -4,6 +4,7 @@
 # web-1 answers from the fixtures; web-2 is unreachable. Uses the repo's test/fixtures/json.
 F=$(cd "$(dirname "$0")/../../../.." && pwd -P)/test/fixtures/json
 host=""; app=""; i=0; args=("$@")
+sub=${2:-}
 while [ $i -lt $# ]; do case ${args[$i]} in -H) host=${args[$((i+1))]};; --app) app=${args[$((i+1))]};; esac; i=$((i+1)); done
 case $1 in
   --version) echo "tando 0.2.2";;
@@ -14,5 +15,19 @@ case $1 in
     else cat "$F/snapshot.sample.json"; fi;;
   doctor) cat "$F/doctor.sample.json";;
   host) cat "$F/host-status.sample.json";;
+  # reads the M5 pages need (tando-dash does not allow these argv shapes yet: see the M5 notes)
+  jobs) cat "$F/jobs.sample.json";;
+  requests) cat "$F/requests.sample.json";;
+  errors) cat "$F/errors.sample.json";;
+  alerts) cat "$F/alerts.sample.json";;
+  env) case $sub in ls) cat "$F/env-ls.sample.json";; log) cat "$F/env-log.sample.json";; *) exit 2;; esac;;
+  logs)
+    follow=0; for a in "$@"; do [ "$a" = -f ] && follow=1; done
+    line() { printf '{"time":"t","usec":%s,"src":"app","unit":"tando-%s%s.service","priority":%s,"level":"x","msg":"%s"}\n' "$(( $(date +%s) * 1000000 + $1 ))" "$2" "$3" "$4" "$5"; }
+    i=0; while [ $i -lt 60 ]; do
+      case $((i % 7)) in 0) line $i "$2" "" 3 "error: connection refused to db (attempt $i)";; 3) line $i "$2" "_worker-mail" 4 "slow job: sent 41 mails in 12 s";; *) line $i "$2" "" 6 "GET /api/items/$i 200 12ms request $i handled by the app with a fairly long message to test truncation and wrapping behaviour of the log viewer";; esac
+      i=$((i+1)); done
+    [ $follow = 1 ] && while :; do sleep 1; line $i "$2" "" 6 "live line $i"; i=$((i+1)); done; exit 0;;
+  backup) cat "$F/backup-ls.sample.json";;
   *) echo "fake tando: $*" >&2; exit 2;;
 esac

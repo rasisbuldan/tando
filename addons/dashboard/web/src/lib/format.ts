@@ -32,6 +32,15 @@ export function fmtDur(s: number | null | undefined): string {
   if (s < 86400) { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return m ? `${h} h ${m} min` : `${h} h`; }
   return `${Math.floor(s / 86400)} d`;
 }
+/** table form of a duration, no ellipsis in a narrow cell: "1m 13s", "48s", "3h 20m", "4d" */
+export function fmtDurShort(s: number | null | undefined): string {
+  if (s == null) return DASH;
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) { const m = Math.floor(s / 60), r = s % 60; return r ? `${m}m ${r}s` : `${m}m`; }
+  if (s < 86400) { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return m ? `${h}h ${m}m` : `${h}h`; }
+  return `${Math.floor(s / 86400)}d`;
+}
 /** build/upload phase times: sub-second values keep one decimal */
 export function fmtSecs(s: number | null | undefined): string {
   if (s == null) return DASH;

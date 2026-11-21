@@ -6,7 +6,7 @@ import { Loading, PanelBoundary } from "./components/panel";
 import { SessionEnded } from "./components/session-ended";
 import { overviewPoller, refreshAll, usePoller } from "./lib/resources";
 import { sessionStore } from "./lib/api";
-import { AppPage, Overview, ServerPage, Soon } from "./routes";
+import { AlertsPage, AppPage, DeploysPage, Overview, ServerPage, Soon } from "./routes";
 
 const VERSION = "tando dashboard";
 
@@ -54,8 +54,8 @@ function Shell() {
               <Suspense fallback={<div className="h-14 border-b border-border"><Loading h="h-14" /></div>}>
                 <Routes>
                   <Route path="/" element={<Overview />} />
-                  <Route path="/deploys" element={<Soon name="Deploys" />} />
-                  <Route path="/alerts" element={<Soon name="Alerts" />} />
+                  <Route path="/deploys" element={<DeploysPage />} />
+                  <Route path="/alerts" element={<AlertsPage />} />
                   <Route path="/s/:host" element={<ServerPage />} />
                   <Route path="/s/:host/:app/:tab?" element={<AppPage />} />
                   <Route path="*" element={<Soon name="Not found" notFound />} />
