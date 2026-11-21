@@ -3,7 +3,6 @@ import { apiGet, qs, ApiError } from "./api";
 import { Poller, isStale, type PollState } from "./poller";
 import { mergeViews, toViews, type RawHost } from "./shape";
 import { share } from "./share";
-import { studios } from "./studio";
 import type { DoctorResult, HostStatus, HostView, OnDemand, Snapshot } from "./types";
 
 const registry = new Map<string, Poller<never>>();
@@ -19,8 +18,7 @@ const vis = (visible: boolean) => (visible ? "1" : "0");
 
 export function overviewPoller(): Poller<HostView[]> {
   return registerPoller("overview", () => new Poller<HostView[]>(async (visible) => {
-    const r = await apiGet<{ hosts: RawHost[]; studios?: unknown; next_poll_s?: number }>(`/api/overview?${qs({ visible: vis(visible) })}`);
-    studios().fromOverview(r.studios);
+    const r = await apiGet<{ hosts: RawHost[]; next_poll_s?: number }>(`/api/overview?${qs({ visible: vis(visible) })}`);
     return { data: toViews(r.hosts), nextPollS: r.next_poll_s };
   }, mergeViews));
 }

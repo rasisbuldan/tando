@@ -359,8 +359,10 @@ statement, the error's position selected in the editor, notices, CSV download). 
   text is kept.
 - **For programs: `--json`.** No browser and no box: one line `{"url":"http://127.0.0.1:<port>/#c=<code>&app=<app>","port":<port>,"sid":"<word>"}`
   on stdout when the forward answers, and the forward ends when the command's stdin reaches EOF
-  (the program that started it closed the pipe or died), as Ctrl-C would. The dashboard add-on
-  runs it so (addons/dashboard/docs/SPEC.md "Database studio").
+  (the program that started it closed the pipe or died), as Ctrl-C would. Against the always-on
+  studio, a line `mint <app>` on stdin prints one more such line on the same port with a fresh
+  code for that app (`{"error":"..."}` when it cannot), so one forward serves many links. The
+  dashboard add-on runs it so (addons/dashboard/docs/SPEC.md "Database studio").
 - **Older servers.** Against a server set up by an older tando the command starts that server's
   per-session studio as before (`--idle M`, one app per studio). An older tando against a newer
   server is told to update.

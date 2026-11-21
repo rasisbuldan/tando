@@ -28,11 +28,12 @@ case $1 in
       i=$((i+1)); done
     [ $follow = 1 ] && while :; do sleep 1; line $i "$2" "" 6 "live line $i"; i=$((i+1)); done; exit 0;;
   backup) cat "$F/backup-ls.sample.json";;
-  db) # db studio <app> -H <host> --json: the ready line, then open until stdin closes (tando-dash
-      # stops it) or SIGTERM (Stop). The link leads nowhere: there is no studio here.
+  db) # db studio <app> -H <host> --json: the ready line, then a line per "mint <app>" line on stdin,
+      # until stdin closes (tando-dash stops it) or SIGTERM. The links lead nowhere: there is no studio here.
       [ "$sub" = studio ] || exit 2
       sleep 1
-      printf '{"url":"http://127.0.0.1:47999/#c=fake%s","port":47999,"sid":"0123456789ab"}\n' "$$"
-      cat > /dev/null; exit 0;;
+      n=0; printf '{"url":"http://127.0.0.1:47999/#c=fake%s&app=%s","port":47999,"sid":"0123456789ab"}\n' "$$" "$3"
+      while IFS= read -r l; do case "$l" in "mint "*) n=$((n+1)); printf '{"url":"http://127.0.0.1:47999/#c=fake%sm%s&app=%s","port":47999,"sid":"0123456789ab"}\n' "$$" "$n" "${l#mint }";; esac; done
+      exit 0;;
   *) echo "fake tando: $*" >&2; exit 2;;
 esac

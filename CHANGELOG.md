@@ -6,6 +6,18 @@ first, grouped by area.
 
 ## Unreleased
 
+- Changed (dashboard add-on): the database studio opens directly. A click on "Database" in the
+  sidebar, "Open database" or the Server page's "Database studio" opens the studio in a new tab
+  with no dialog; tando-dash keeps one lazy ssh forward per server (closed after 30 min without a
+  click) and mints a fresh one-time link for each click. The confirmation, Stop, the per-app slot
+  and the Idempotency-Key of the old per-session studio are gone. `tando db studio --json` accepts
+  a line `mint <app>` on stdin and answers with one more JSON line (a fresh code on the same port).
+- Added (dashboard add-on): the Server page is a cloud-VM monitoring tab: sections CPU, Memory,
+  Disk, Network, Pressure and Monitoring cost (20 charts: stacked CPU, swap, IOPS, throughput,
+  latency, TCP, pressure, tandod's own cost, ...) that fold and draw when scrolled to; the app
+  Overview shows throttled %, OOM kills, tasks against the limit and memory pressure; apps with a
+  database get a Database tab (connections, transactions, rows, cache hit, deadlocks, temp files,
+  long transactions, size and growth, top queries).
 - Fixed: a new app could get another app's pre-flight port (its port + 100) as its own port once
   the port range was widened past 100 ports (what the docs advise when it is used up): that app's
   every deploy and env change then failed with "pre-flight port in use", and the loopback rules let

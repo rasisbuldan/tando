@@ -38,6 +38,12 @@ let js = 0;
 for (const f of first) js += gz(read(f));
 check(js <= JS_MAX * KB, `first route JS ${(js / KB).toFixed(1)} KB gzipped <= ${JS_MAX} KB (${first.size} files)`);
 
+// the Server page (twenty charts' worth of specs) and the Database tab load on their own
+for (const [prefix, what] of [["server-", "the Server page"], ["tab-database-", "the Database tab"]]) {
+  const c = find(prefix);
+  check(c.length === 1 && !first.has(c[0]), `${what} is a lazy chunk the first route does not load`);
+}
+
 const charts = assets.filter((a) => a.endsWith(".js")).map((a) => "assets/" + a).filter((f) => /ResponsiveContainer|recharts/i.test(read(f).toString("utf8")) && read(f).length > 100 * KB);
 check(charts.length >= 1, `the Recharts chunk exists (${charts.map((c) => `${c} ${(gz(read(c)) / KB).toFixed(1)} KB gz`).join(", ")})`);
 check(charts.every((c) => !first.has(c)), "the first route does not load the Recharts chunk");

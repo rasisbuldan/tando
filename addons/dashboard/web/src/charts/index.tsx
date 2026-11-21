@@ -18,6 +18,8 @@ export interface PlotProps {
   markers?: Marker[];
   yTicks?: number[];             // round ticks; the domain stays [0, yMax]
   second?: { name: string; color: string }; // `w` of each point as a second series
+  lines?: { name: string; color: string }[]; // several series: the point's `s` array, one entry each
+  stack?: boolean;               // stack the lines (CPU user / system / iowait / steal)
   name?: string;
   incidents?: { start: number; end: number }[];
   syncId?: string;
@@ -29,11 +31,20 @@ function ticks(d: ChartDomain, n = 5): number[] {
   return Array.from({ length: n }, (_, i) => Math.round(d.from + i * step));
 }
 
-function Tip({ active, payload, fmt, markers, near, second, name }: { active?: boolean; payload?: { payload: ChartPoint }[]; fmt: (n: number) => string; markers?: Marker[]; near: number; second?: { name: string }; name?: string }) {
+function Tip({ active, payload, fmt, markers, near, second, name, lines }: { active?: boolean; payload?: { payload: ChartPoint }[]; fmt: (n: number) => string; markers?: Marker[]; near: number; second?: { name: string }; name?: string; lines?: { name: string; color: string }[] }) {
   const p = payload?.[0]?.payload;
   if (!active || !p) return null;
   const ms = markersNear(markers, p.t, near);
   if (p.v == null && ms.length === 0) return null;
+  if (lines) {
+    return (
+      <div className="rounded-lg border border-border bg-popover p-2 text-xs leading-4 text-foreground shadow-pop">
+        <div className="text-muted-foreground">{fmtDate(p.t)} {fmtTime(p.t)}</div>
+        {lines.map((l, i) => p.s?.[i] != null && <div key={l.name} className="font-medium">{l.name} {fmt(p.s[i] as number)}</div>)}
+        {ms.map((m) => <div key={m.t} className="mono text-muted-foreground">{markerText(m)}</div>)}
+      </div>
+    );
+  }
   return (
     <div className="rounded-lg border border-border bg-popover p-2 text-xs leading-4 text-foreground shadow-pop">
       <div className="text-muted-foreground">{fmtDate(p.t)} {fmtTime(p.t)}</div>
@@ -63,7 +74,7 @@ function Plot(p: PlotProps) {
       <CartesianGrid vertical={false} stroke="var(--border)" />
       <XAxis type="number" dataKey="t" domain={[p.domain.from, p.domain.to]} ticks={ticks(p.domain)} tickFormatter={tick} allowDataOverflow {...axis} />
       <YAxis domain={[0, p.yMax]} {...(p.yTicks ? { ticks: p.yTicks } : { tickCount: 4 })} tickFormatter={p.fmtTick ?? p.fmt} width={56} {...axis} />
-      <Tooltip content={<Tip fmt={p.fmt} markers={p.markers} near={Math.max(60, p.span / 120)} second={p.second} name={p.name} />} isAnimationActive={false} cursor={{ stroke: "var(--faint)" }} />
+      <Tooltip content={<Tip fmt={p.fmt} markers={p.markers} near={Math.max(60, p.span / 120)} second={p.second} name={p.name} lines={p.lines} />} isAnimationActive={false} cursor={{ stroke: "var(--faint)" }} />
       {p.limit != null && <ReferenceLine y={p.limit} stroke="var(--warn)" strokeDasharray="4 4" ifOverflow="extendDomain" label={{ value: p.limitLabel ?? `limit ${p.fmt(p.limit)}`, fill: "var(--warn)", fontSize: 11, position: "insideTopRight" }} />}
       {p.incidents?.map((i) => <ReferenceArea key={i.start} x1={Math.max(i.start, p.domain.from)} x2={Math.min(i.end, p.domain.to)} fill="var(--fail-bg)" fillOpacity={1} />)}
       {p.markers?.map((m) => <ReferenceLine key={`${m.t}-${m.release}`} x={m.t} stroke="var(--faint)" strokeDasharray="3 3" strokeWidth={1} label={<MarkerHit text={markerText(m)} />} />)}
@@ -75,7 +86,10 @@ function Plot(p: PlotProps) {
         <BarChart {...common}>{inner}<Bar dataKey="v" fill={p.color} isAnimationActive={false} maxBarSize={8} /></BarChart>
       ) : (
         <AreaChart {...common}>{inner}
-          <Area dataKey="v" type="monotone" connectNulls={false} dot={false} activeDot={{ r: 3 }} stroke={p.color} strokeWidth={1.5} fill={p.color} fillOpacity={0.12} isAnimationActive={false} />
+          {p.lines ? p.lines.map((l, i) => (
+            <Area key={l.name} dataKey={(pt: ChartPoint) => pt.s?.[i] ?? null} name={l.name} stackId={p.stack ? "s" : undefined} type="monotone" connectNulls={false} dot={false} activeDot={{ r: 3 }}
+              stroke={l.color} strokeWidth={1.5} fill={l.color} fillOpacity={p.stack ? 0.3 : 0.08} isAnimationActive={false} />
+          )) : <Area dataKey="v" type="monotone" connectNulls={false} dot={false} activeDot={{ r: 3 }} stroke={p.color} strokeWidth={1.5} fill={p.color} fillOpacity={0.12} isAnimationActive={false} />}
           {p.second && <Area dataKey="w" type="monotone" connectNulls={false} dot={false} activeDot={{ r: 3 }} stroke={p.second.color} strokeWidth={1.5} fill={p.second.color} fillOpacity={0.12} isAnimationActive={false} />}
         </AreaChart>
       )}

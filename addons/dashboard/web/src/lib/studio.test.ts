@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { entryState, Studios, type OpenStudio, type StudioEnv } from "./studio";
+import { Studios, studioTarget, type StudioEnv, type Tab } from "./studio";
 
 const H = "web-1", A = "shop";
-const URL1 = "http://127.0.0.1:47123/#c=abcDEF123_-";
+const URL1 = "http://127.0.0.1:47123/#c=abcDEF123_-&app=shop";
 
 interface Call { url: string; headers: Record<string, string>; body: Record<string, unknown> }
-function fake(handler: (c: Call) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }>) {
-  const calls: Call[] = [], opened: string[] = [];
-  let n = 0;
+function fake(handler: (c: Call) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }>, popups = true) {
+  const calls: Call[] = [], navigated: string[] = [], closed: number[] = [], direct: string[] = [];
+  let tabs = 0;
   const env: StudioEnv = {
     fetch: async (url, init) => {
       const c = { url, headers: init.headers, body: JSON.parse(init.body) };
@@ -15,88 +15,93 @@ function fake(handler: (c: Call) => { status: number; body: unknown } | Promise<
       const r = await handler(c);
       return { status: r.status, json: async () => r.body };
     },
-    open: (u) => { opened.push(u); },
-    uuid: () => `key-0000000${++n}`,
+    // the tab is opened on the click itself, before the request, so a pop-up blocker lets it through
+    openTab: (): Tab | null => {
+      if (!popups) return null;
+      const id = ++tabs;
+      return { go: (u) => { navigated.push(u); }, close: () => { closed.push(id); } };
+    },
+    openUrl: (u) => { direct.push(u); return true; },
   };
-  return { s: new Studios(env), calls, opened, posts: (p: string) => calls.filter((c) => c.url === p) };
+  return { s: new Studios(env), calls, navigated, closed, direct };
 }
-const okServer = (c: Call) => c.url === "/api/confirm" ? { status: 200, body: { token: "tok-1", expires_in_s: 60 } }
-  : c.url === "/api/studio/open" ? { status: 200, body: { url: URL1, host: H, app: A, since: "2026-11-21T14:02:00Z" } }
-  : { status: 200, body: { stopped: true } };
+const ok = () => ({ status: 200, body: { url: URL1, host: H, app: A } });
 
-describe("entry state", () => {
-  const open: OpenStudio[] = [{ host: H, app: A, since: "2026-11-21T14:02:00Z", state: "open" }];
-  it("closed, open, taken by another app of the server, starting", () => {
-    expect(entryState(H, A, [], null)).toEqual({ kind: "closed" });
-    expect(entryState(H, A, open, null)).toEqual({ kind: "open", since: "2026-11-21T14:02:00Z" });
-    expect(entryState(H, "blog", open, null)).toEqual({ kind: "taken", by: A });
-    expect(entryState("web-2", A, open, null)).toEqual({ kind: "closed" });
-    expect(entryState(H, A, [{ ...open[0], state: "starting" }], null)).toEqual({ kind: "opening" });
-  });
-  it("opening while this tab's request is out", () => {
-    const d = { host: H, app: A, token: "t", preparing: false, key: "k", sending: true, error: null, url: null };
-    expect(entryState(H, A, [], d)).toEqual({ kind: "opening" });
-  });
-  it("the overview's list: odd entries dropped", () => {
-    const { s } = fake(okServer);
-    s.fromOverview([{ host: H, app: A, since: "x", state: "open" }, null, { host: 1 }]);
-    expect(s.get().list).toHaveLength(1);
-    s.fromOverview(undefined);
-    expect(s.get().list).toEqual([]);
+describe("studioTarget", () => {
+  it("the server's studio opens on its first app with a database", () => {
+    expect(studioTarget([{ app: "api", database: null }, { app: "shop", database: "postgres" }, { app: "blog", database: "postgres" }])).toBe("shop");
+    expect(studioTarget([{ app: "api", database: null }])).toBeNull();
+    expect(studioTarget(undefined)).toBeNull();
   });
 });
 
-describe("open", () => {
-  it("asks for a confirm token of kind studio, opens with it and an Idempotency-Key, then the window", async () => {
-    const f = fake(okServer);
-    await f.s.ask(H, A);
-    expect(f.posts("/api/confirm")[0].body).toEqual({ action: "studio", host: H, app: A });
-    expect(f.s.get().dialog?.token).toBe("tok-1");
-    expect(f.opened).toEqual([]); // nothing before the confirmation
-    await f.s.confirm();
-    const o = f.posts("/api/studio/open")[0];
-    expect(o.body).toEqual({ host: H, app: A, confirm: "tok-1" });
-    expect(o.headers["Idempotency-Key"]).toBe("key-00000001");
-    expect(f.opened).toEqual([URL1]);
-    expect(f.s.get().dialog?.url).toBe(URL1);
-    expect(entryState(H, A, f.s.get().list, null).kind).toBe("open");
-    await f.s.confirm(); // a second click: nothing more
-    expect(f.posts("/api/studio/open")).toHaveLength(1);
+describe("open: no dialog, no confirm token", () => {
+  it("one POST, no token and no Idempotency-Key, then the tab goes to the link", async () => {
+    const f = fake(ok);
+    await f.s.open(H, A);
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0].url).toBe("/api/studio/open");
+    expect(f.calls[0].body).toEqual({ host: H, app: A });
+    expect(f.calls[0].headers["Idempotency-Key"]).toBeUndefined();
+    expect(f.navigated).toEqual([URL1]);
+    expect(f.s.get().error).toBeNull();
+    expect(f.s.get().opening).toEqual([]);
   });
-  it("a lost request: Open again sends the same key (no second studio)", async () => {
-    let fail = true;
-    const f = fake((c) => {
-      if (c.url === "/api/studio/open" && fail) { fail = false; throw new Error("network"); }
-      return okServer(c);
-    });
-    await f.s.ask(H, A);
-    await f.s.confirm();
-    expect(f.s.get().dialog?.error).toMatch(/did not answer/);
-    await f.s.confirm();
-    const keys = f.posts("/api/studio/open").map((c) => c.headers["Idempotency-Key"]);
-    expect(keys).toEqual(["key-00000001", "key-00000001"]);
-    expect(f.opened).toEqual([URL1]);
+  it("every click mints again: a link is never reused", async () => {
+    const f = fake(ok);
+    await f.s.open(H, A);
+    await f.s.open(H, A);
+    expect(f.calls).toHaveLength(2);
   });
-  it("409: the server's words, no window", async () => {
-    const f = fake((c) => c.url === "/api/studio/open"
-      ? { status: 409, body: { error: { code: "studio_open", message: "the dashboard's studio on web-1 is open for blog: it is in the window it opened; Stop it to start a new one" } } }
-      : okServer(c));
-    await f.s.ask(H, A);
-    await f.s.confirm();
-    expect(f.opened).toEqual([]);
-    expect(f.s.get().dialog?.error).toBe("the dashboard's studio on web-1 is open for blog: it is in the window it opened; Stop it to start a new one.");
+  it("while a click is out, the same entry is opening and a second click does nothing", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const f = fake(async () => { await gate; return ok(); });
+    const p = f.s.open(H, A);
+    expect(f.s.get().opening).toEqual([`${H}/${A}`]);
+    await f.s.open(H, A);
+    release();
+    await p;
+    expect(f.calls).toHaveLength(1);
+    expect(f.s.get().opening).toEqual([]);
+  });
+});
+
+describe("failures", () => {
+  it("the server's words on a refusal; the tab is closed, nothing navigates", async () => {
+    const f = fake(() => ({ status: 502, body: { error: { code: "cli", message: "the studio on web-1 gave no code (tando doctor web-1)" } } }));
+    await f.s.open(H, A);
+    expect(f.navigated).toEqual([]);
+    expect(f.closed).toEqual([1]);
+    expect(f.s.get().error).toBe("the studio on web-1 gave no code (tando doctor web-1).");
+  });
+  it("a request that did not answer: one line, tab closed", async () => {
+    const f = fake(() => { throw new Error("network"); });
+    await f.s.open(H, A);
+    expect(f.s.get().error).toMatch(/did not answer/);
+    expect(f.closed).toEqual([1]);
   });
   it("a link that is not the studio's is never opened", async () => {
-    const f = fake((c) => c.url === "/api/studio/open" ? { status: 200, body: { url: "javascript:alert(1)" } } : okServer(c));
-    await f.s.ask(H, A);
-    await f.s.confirm();
-    expect(f.opened).toEqual([]);
+    const f = fake(() => ({ status: 200, body: { url: "javascript:alert(1)" } }));
+    await f.s.open(H, A);
+    expect(f.navigated).toEqual([]);
+    expect(f.direct).toEqual([]);
+    expect(f.s.get().error).toMatch(/not the studio/i);
   });
-  it("Stop: the entry closes", async () => {
-    const f = fake(okServer);
-    f.s.fromOverview([{ host: H, app: A, since: "x", state: "open" }]);
-    expect(await f.s.stop(H, A)).toBeNull();
-    expect(f.posts("/api/studio/stop")[0].body).toEqual({ host: H, app: A });
-    expect(entryState(H, A, f.s.get().list, null).kind).toBe("closed");
+  it("a pop-up blocker: the link opens directly after the answer, else a line says what to do", async () => {
+    const f = fake(ok, false);
+    await f.s.open(H, A);
+    expect(f.direct).toEqual([URL1]);
+    const g = fake(ok, false);
+    g.s["env"].openUrl = () => false;
+    await g.s.open(H, A);
+    expect(g.s.get().error).toMatch(/pop-up/i);
+  });
+  it("dismiss clears the line", async () => {
+    const f = fake(() => ({ status: 500, body: {} }));
+    await f.s.open(H, A);
+    expect(f.s.get().error).not.toBeNull();
+    f.s.dismiss();
+    expect(f.s.get().error).toBeNull();
   });
 });

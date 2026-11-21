@@ -6,7 +6,7 @@ import { Loading, PanelBoundary } from "./components/panel";
 import { SessionEnded } from "./components/session-ended";
 import { overviewPoller, refreshAll, usePoller } from "./lib/resources";
 import { sessionStore } from "./lib/api";
-import { StudioDialogHost } from "./components/studio";
+import { StudioNotice } from "./components/studio";
 import { AlertsPage, AppPage, DeploysPage, Overview, ServerPage, Soon } from "./routes";
 
 const VERSION = "tando dashboard";
@@ -68,7 +68,7 @@ function Shell() {
           </div>
         </main>
       </div>
-      <StudioDialogHost />
+      <StudioNotice />
     </TooltipProvider>
   );
 }

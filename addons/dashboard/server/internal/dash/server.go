@@ -326,8 +326,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.confirm(w, r)
 	case "/api/studio/open":
 		s.studioOpen(w, r)
-	case "/api/studio/stop":
-		s.studioStop(w, r)
 	case "/api/action/stream":
 		s.actionStream(w, r)
 	case "/api/action":

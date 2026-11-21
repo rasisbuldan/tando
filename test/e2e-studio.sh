@@ -574,6 +574,14 @@ s7k=0
 grep -qE "^\{\"url\":\"http://127\.0\.0\.1:([0-9]+)/#c=[A-Za-z0-9_-]+&app=shop\",\"port\":[0-9]+,\"sid\":\"[A-Za-z0-9_-]+\"\}$" "$E/s7i.out" &&
   [ "$(wc -l < "$E/s7i.out" | tr -d " ")" = 1 ] && s7k=1
 check "S7k --json prints one line {url, port, sid} and no box ($(head -c 60 "$E/s7i.out"))" eval '[ $s7k = 1 ]'
+# a line "mint <app>" on stdin: one more JSON line, same port, a fresh code (one forward, many codes)
+printf 'mint shop\nmint no_such!\n' >&5
+T_UNTIL_STEP=0.2 t_until 30 eval '[ "$(wc -l < "$E/s7i.out" | tr -d " ")" -ge 3 ]'
+s7m=0
+p1=$(sed -n '1s/.*"port":\([0-9]*\).*/\1/p' "$E/s7i.out"); c1=$(sed -n '1s/.*#c=\([A-Za-z0-9_-]*\)&.*/\1/p' "$E/s7i.out")
+p2=$(sed -n '2s/.*"port":\([0-9]*\).*/\1/p' "$E/s7i.out"); c2=$(sed -n '2s/.*#c=\([A-Za-z0-9_-]*\)&.*/\1/p' "$E/s7i.out")
+[ -n "$p1" ] && [ "$p1" = "$p2" ] && [ -n "$c2" ] && [ "$c1" != "$c2" ] && sed -n 3p "$E/s7i.out" | grep -q '^{"error":"bad app name"}$' && s7m=1
+check "S7m --json: 'mint <app>' on stdin prints a fresh code on the same port; a bad name is an error line ($(sed -n 2,3p "$E/s7i.out" | head -c 90))" eval '[ $s7m = 1 ]'
 exec 5>&-
 s7l=0; T_UNTIL_STEP=0.2 t_until 20 eval '! kill -0 $ST_PID 2> /dev/null' && s7l=1
 kill -TERM "$ST_PID" 2> /dev/null; wait "$ST_PID" 2> /dev/null   # (when it did not end: not left running; a background job ignores SIGINT)

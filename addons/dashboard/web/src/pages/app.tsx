@@ -12,22 +12,24 @@ import { cn } from "@/lib/cn";
 import { refreshAll, snapshotPoller, useNowMs, usePoller } from "@/lib/resources";
 import { appKind, chartDomain, cpuMax, deployMarkers, describe, memoryTicks, niceMax, RANGE_S, roundTicks, restartsTotal, stateWithReason, toPoints, uptimeCells, type RangeKey } from "@/lib/shape";
 import { StudioButton } from "@/components/studio";
+import { appSliceStats } from "@/lib/observe";
 import { AppActions, ProgressPanel, useRollbackTo, type AppCtx } from "@/components/actions";
 import { DASH, fmtAgo, fmtBytes, fmtDateTime, fmtDur, fmtMs, fmtPct, fmtTime, pctOf } from "@/lib/format";
 
 const LogsTab = lazy(() => import("./tab-logs"));
+const DatabaseTab = lazy(() => import("./tab-database"));
 const tabs = () => import("./tabs");
 const TrafficTab = lazy(() => tabs().then((m) => ({ default: m.TrafficTab })));
 const JobsTab = lazy(() => tabs().then((m) => ({ default: m.JobsTab })));
 const EnvTab = lazy(() => tabs().then((m) => ({ default: m.EnvTab })));
 const ChangesTab = lazy(() => tabs().then((m) => ({ default: m.ChangesTab })));
-const TABS = [["overview", "Overview"], ["deploys", "Deploys"], ["logs", "Logs"], ["traffic", "Traffic"], ["jobs", "Jobs"], ["env", "Env"], ["changes", "What changed"]] as const;
-const KNOWN = TABS.map((t) => t[0]) as string[];
+const TABS = [["overview", "Overview"], ["database", "Database"], ["deploys", "Deploys"], ["logs", "Logs"], ["traffic", "Traffic"], ["jobs", "Jobs"], ["env", "Env"], ["changes", "What changed"]] as const;
+
 
 export default function AppPage() {
   const { host = "", app = "", tab = "overview" } = useParams();
   const [range, setRange] = useState<RangeKey>("24h");
-  const r = tab === "overview" ? range : "24h";
+  const r = tab === "overview" || tab === "database" ? range : "24h";
   const st = usePoller(snapshotPoller(host, app, r));
   const nowS = Math.floor(useNowMs(30000) / 1000);
   const v = st.data;
@@ -42,6 +44,8 @@ export default function AppPage() {
     host, app, state: status.state_reason ?? null, reachable: !!v?.reachable, origin: d?.origin, releases: d?.releases ?? [], live: status.release ?? null,
   } : null), [host, app, status, v?.reachable, d?.origin, d?.releases]);
   const rb = useRollbackTo(ctx);
+  const tabList = TABS.filter(([k]) => k !== "database" || !!status?.database);
+  const known = tabList.map((t) => t[0]) as string[];
 
   return (
     <>
@@ -60,7 +64,7 @@ export default function AppPage() {
       <Freshness st={st} />
       <ProgressPanel host={host} app={app} />
       <div role="tablist" aria-label="App" className="mb-4 flex h-10 items-end gap-4 overflow-x-auto border-b border-border">
-        {TABS.map(([k, label]) => (
+        {tabList.map(([k, label]) => (
           <NavLink key={k} to={`/s/${encodeURIComponent(host)}/${app}/${k}`} role="tab" aria-selected={tab === k}
             className={cn("hov inset-focus flex h-10 items-center border-b-2 text-[13px] leading-5 font-medium whitespace-nowrap", tab === k ? "border-foreground text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>{label}</NavLink>
         ))}
@@ -69,10 +73,12 @@ export default function AppPage() {
       {!v && !st.error && <Loading h="h-96" />}
       {v && !v.data && <SectionError message={`${v.error ?? "Not answering"}. Check ssh access, then retry.`} onRetry={refreshAll} />}
       {v?.data && !d && !status && <Empty>No app named <Mono>{app}</Mono> on <Mono>{host}</Mono>.</Empty>}
-      {v?.data && !KNOWN.includes(tab) && <Empty>Nothing here. Pick a tab above.</Empty>}
-      {v?.data && status && KNOWN.includes(tab) && (
+      {v?.data && !known.includes(tab) && <Empty>Nothing here. Pick a tab above.</Empty>}
+      {v?.data && status && known.includes(tab) && (
         tab === "overview" ? <OverviewTab d={d} v={v.data} app={app} range={range} setRange={setRange} nowS={nowS} />
-          : tab === "deploys" ? (
+          : tab === "database" ? (
+            <Suspense fallback={<Loading h="h-96" />}><DatabaseTab host={host} app={app} d={d} v={v.data} range={range} setRange={setRange} /></Suspense>
+          ) : tab === "deploys" ? (
             <>
               <Section title="Releases">{d ? <ReleasesTable rows={d.releases} rollback={rb} /> : <Loading h="h-24" />}</Section>
               <Section title="History">{d ? <HistoryTable rows={d.history} /> : <Loading h="h-24" />}</Section>
@@ -123,6 +129,8 @@ function OverviewTab({ d, v, app, range, setRange, nowS }: {
   const firing = (v.alerts ?? []).filter((a) => a.app === app);
   const cells = useMemo(() => uptimeCells(d?.metrics && range === "24h" ? d.metrics : null, d?.health?.incidents ?? [], domain.to), [d, range, domain.to]);
   const rstTotal = restartsTotal(rst);
+  const slice = appSliceStats(m?.series);
+  const sliceVals = Object.values(slice);
   const memNow = status.memory_bytes && status.memory_bytes > 0 ? status.memory_bytes : null;
 
   return (
@@ -135,6 +143,14 @@ function OverviewTab({ d, v, app, range, setRange, nowS }: {
         <MetricCard label="Avg probe time" value={probeAvg != null ? fmtMs(probeAvg) : DASH} sub={d?.health ? `24 h · last ${fmtMs(d.health.last_ms)}` : "no health checks"}
           right={<Sparkline values={probeVals} className="mt-1 shrink-0" />} />
       </div>
+      {m && sliceVals.some((x) => x != null) && (
+        <div className="mb-4 grid grid-cols-1 gap-3 min-[641px]:grid-cols-2 min-[1024px]:grid-cols-4">
+          <MetricCard label="CPU throttled" value={slice.throttled != null ? fmtPct(slice.throttled) : DASH} sub={slice.throttled != null ? "of the time held at the CPU limit" : "no CPU limit"} />
+          <MetricCard label="OOM kills" value={slice.oomKills ?? DASH} sub={slice.oomKills != null ? `in ${rangeWord}` : "not recorded yet"} />
+          <MetricCard label="Tasks" value={slice.tasks ?? DASH} sub={slice.tasksMax ? `of ${slice.tasksMax} allowed` : "no task limit"} />
+          <MetricCard label="Memory pressure" value={slice.pressure != null ? fmtPct(slice.pressure) : DASH} sub="time tasks waited for memory" />
+        </div>
+      )}
       {!d || !m ? (
         <Section title="Charts"><Empty>No metrics yet. They appear a few minutes after the first deploy.</Empty></Section>
       ) : (

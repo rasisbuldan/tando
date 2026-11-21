@@ -126,19 +126,13 @@ func (q *writeReq) check(params bool) *apiError {
 	return nil
 }
 
-// POST /api/confirm {action, host, app} -> {token, expires_in_s}; action is a write's or "studio"
+// POST /api/confirm {action, host, app} -> {token, expires_in_s}; action is a write's
 func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 	var q writeReq
 	if _, ok := decode(w, r, &q); !ok {
 		return
 	}
-	if q.Action == "studio" { // (studio.go: opening a studio is confirmed like a write)
-		sq := studioReq{Host: q.Host, App: q.App}
-		if e := sq.check(); e != nil {
-			writeErr(w, e)
-			return
-		}
-	} else if e := q.check(false); e != nil {
+	if e := q.check(false); e != nil {
 		writeErr(w, e)
 		return
 	}
