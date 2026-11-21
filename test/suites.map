@@ -18,6 +18,7 @@ lib/common.sh            ALL
 lib/deploy.sh            ALL
 lib/build.sh             ALL
 lib/native.js            ALL
+lib/workspace.js         ALL
 lib/args.sh              ALL
 server/tando-agent       ALL
 server/tando-install-recover  ALL

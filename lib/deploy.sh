@@ -352,8 +352,12 @@ node_install() {
   tr -d '\n' < package.json | grepq -E '"(dependencies|devDependencies)"[[:space:]]*:[[:space:]]*\{[[:space:]]*"' || return 0
   yarn_pnp
   ws_member_check
-  [ -d node_modules ] && return 0
-  if [ -f pnpm-lock.yaml ]; then NODE_INSTALL="pnpm install --frozen-lockfile"
+  NODE_INSTALL_DIR=""
+  if ws_member; then   # a package of a workspace: the workspace is installed at its root
+    [ -d "$WS_ROOT/node_modules" ] && return 0
+    NODE_INSTALL=$(ws_install) NODE_INSTALL_DIR=$WS_UP
+  elif [ -d node_modules ]; then return 0
+  elif [ -f pnpm-lock.yaml ]; then NODE_INSTALL="pnpm install --frozen-lockfile"
   elif [ -f yarn.lock ] && [ -f .yarnrc.yml ]; then NODE_INSTALL="yarn install --immutable"   # (Yarn 2+)
   elif [ -f yarn.lock ]; then NODE_INSTALL="yarn install --frozen-lockfile"
   elif [ -f bun.lock ] || [ -f bun.lockb ]; then NODE_INSTALL="bun install --frozen-lockfile"
@@ -361,7 +365,7 @@ node_install() {
   else NODE_INSTALL="npm install"; fi
   if [ -z "${UP:-}${TANDO_ORIGIN:-}" ] || [ -n "${DRY_RUN:-}" ]; then
     local again="tando deploy"; [ -z "${DRY_RUN:-}" ] || again="tando deploy --dry-run"
-    die "node_modules is missing (a fresh clone?): run $NODE_INSTALL first, then $again" \
+    die "node_modules is missing (a fresh clone?): run $NODE_INSTALL${NODE_INSTALL_DIR:+ in $NODE_INSTALL_DIR} first, then $again" \
       "(tando up runs it for you)"
   fi
   # pnpm and Yarn 2+ come with Node as corepack shims: used when the command itself is not installed
@@ -561,7 +565,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   if [ -n "$NODE_INSTALL" ]; then
     local ti lock=""; ti=$(clock)
     [ -f package-lock.json ] || [ "$NODE_INSTALL" != "npm install" ] || lock=", created package-lock.json"
-    if ! $NODE_INSTALL > "$TMPD/build.log" 2>&1; then
+    if ! (cd "${NODE_INSTALL_DIR:-.}" && $NODE_INSTALL) > "$TMPD/build.log" 2>&1; then
       phase_line 1 build fail "$(since "$ti")"
       box_say "$UI_RED" "node_modules was missing and $NODE_INSTALL failed here:" \
         "run it yourself to see why, then deploy again"
@@ -569,7 +573,8 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
       ui_box_close "dependencies could not be installed; nothing was uploaded"
       exit 1
     fi
-    box_say "" "        installed dependencies: $NODE_INSTALL, here" \
+    local where=here; [ -z "$NODE_INSTALL_DIR" ] || where="in $NODE_INSTALL_DIR"
+    box_say "" "        installed dependencies: $NODE_INSTALL, $where" \
       "(node_modules was missing$lock; $(ui_dur "$(since "$ti")"))"
   fi
   needs_build && step_start "build: running ${C_build:-$ENGINE build} here"

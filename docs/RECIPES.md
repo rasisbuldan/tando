@@ -38,8 +38,47 @@ command is not installed. Yarn Plug'n'Play has no node_modules: add `nodeLinker:
 Node version: `node =` in tando.conf, else `.nvmrc`, `.node-version` or `engines.node` in
 package.json (the major); a server that runs another Node gets a note on every deploy.
 
-Not supported yet: deploying one package of a monorepo, from the workspace root or from inside the
-package (refused at once: its dependencies are linked into the root's `node_modules`; make a
-standalone copy with `pnpm deploy --filter <package> <dir>` and deploy that directory); Next.js without standalone
-output (refused before anything is installed: the standalone release of a small app is 56 MB and
-1,900 files, `next start` with all of node_modules 360 MB and 9,000 files).
+## One package of a monorepo
+
+Run `tando init` and `tando up` in the package's own directory (`apps/api`), not at the workspace
+root (there tando lists the packages and stops). A package with no lockfile of its own, under a
+directory that has `pnpm-workspace.yaml` or `"workspaces"` in package.json and the lockfile, is a
+workspace member:
+
+    tando: detected: Express
+      why: express in package.json, start script, pnpm-lock.yaml at ../..
+      ...
+      workspace: package apps/api of ../.., shipped with the packages it uses
+
+- Install: on a fresh clone `tando up` runs `pnpm install --frozen-lockfile` or `npm ci` at the
+  workspace root (`tando deploy` asks you to). The build runs in the package's directory, with the
+  workspace installed at the root, as `pnpm run build` there would.
+- The release: the package's own files, and in its `node_modules` every package it needs at run
+  time (its `dependencies`, `optionalDependencies` and installed `peerDependencies`, then theirs),
+  workspace packages (`workspace:*`) included, as real files. tando reads them from the
+  workspace's `node_modules` the way Node resolves them (lib/workspace.js): no `pnpm deploy`, no
+  second install, no network. devDependencies are not shipped (as with `pnpm deploy --prod`): a
+  start command that needs one (tsx) must be a dependency. Platform packages are swapped and
+  checked against the root's lockfile, as for any other app.
+- Supported: pnpm and npm workspaces (tested end to end: an Express package that uses a
+  `workspace:*` package). A static package (Vite) installs and builds the same way and ships its
+  `dist`; a framework with its own output directory (Nuxt's `.output`) ships that directory as
+  before; neither is covered by a test yet. Refused, with what to do: Yarn and Bun workspaces, and a Next.js package
+  (make a standalone copy with `pnpm deploy --filter <package> <dir>` and deploy that directory).
+
+Why not the package managers' own tools: `pnpm deploy` needs `--legacy` or
+`inject-workspace-packages` from pnpm 10 on and installs again (slower, can need the network), npm
+has no deploy at all, and `yarn workspaces focus` rewrites the install in place. One reader of the
+installed tree works for both layouts (npm's hoisted one, pnpm's links into node_modules/.pnpm),
+places another version of a package beside the one that needs it, and uses no tool the project
+does not use.
+
+Next.js in a monorepo (next step): `output: "standalone"` traces from the workspace root
+(`outputFileTracingRoot`, set to the workspace root), so `.next/standalone` holds
+`node_modules` at its top and the server at `.next/standalone/apps/web/server.js`. tando stages
+only the directory of server.js today; it needs to ship all of `.next/standalone`, put
+`.next/static` and `public` under `apps/web/`, and start `node apps/web/server.js`.
+
+Not supported yet: Next.js without standalone output (refused before anything is installed: the
+standalone release of a small app is 56 MB and 1,900 files, `next start` with all of node_modules
+360 MB and 9,000 files).
