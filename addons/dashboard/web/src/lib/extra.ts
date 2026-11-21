@@ -1,21 +1,21 @@
-// Reads beyond the snapshot: jobs, requests, errors, env names and log, alerts with history.
-// tando-dash answers these (see the NOTE in the M5 report for the endpoints it needs); until it
-// does, a 404 shows one line per section and the rest of the page keeps working.
+// Reads beyond the snapshot: jobs, requests, errors, env names and log, alerts, every app's
+// deploy history of a server. tando-dash runs the CLI's --json read for each (README, API) and
+// caches it 60 s; a failed read shows one line in its section and the rest of the page works.
 import { apiGet, qs, ApiError } from "./api";
 import { Poller } from "./poller";
 import { share } from "./share";
 import type { AlertsData, EnvLog, EnvNames, ErrorsData, JobsData, Requests } from "./pages";
-import type { HostView, Snapshot } from "./types";
+import type { HistoryRow, HostView } from "./types";
 import { registerPoller } from "./resources";
 
-export type ExtraKind = "jobs" | "requests" | "errors" | "envnames" | "envlog" | "alerts";
-export interface ExtraTypes { jobs: JobsData; requests: Requests; errors: ErrorsData; envnames: EnvNames; envlog: EnvLog; alerts: AlertsData }
+export type ExtraKind = "jobs" | "requests" | "errors" | "envnames" | "envlog" | "alerts" | "history";
+export interface HostHistory { host: string; history: HistoryRow[] }
+export interface ExtraTypes { jobs: JobsData; requests: Requests; errors: ErrorsData; envnames: EnvNames; envlog: EnvLog; alerts: AlertsData; history: HostHistory }
 interface Envelope<T> { data?: T; ran_at?: string; next_poll_s?: number; error?: { code: string; message: string } }
 
 /** the answer's one-line error: a missing endpoint says what to do */
 export function extraError(e: ApiError | null, what: string): string | null {
   if (!e) return null;
-  if (e.code === "http_404" || e.code === "not_found" || e.code === "bad_request") return `Could not read ${what}: this tando-dash cannot read it yet. Update with \`tando addon install dashboard\`.`;
   return `Could not read ${what}: ${e.message}`;
 }
 
@@ -49,20 +49,28 @@ export function allAlertsPoller(hosts: string[]): Poller<AllAlerts> {
   }, (prev, next) => share(prev, next)));
 }
 
-/** every app's snapshot history (the deploy timeline); one read per (host, app), from the cache the Overview fills */
+/** the deploy timeline: one history read per reachable server (every app of it), not one snapshot per app */
 export interface AllHistory { rows: import("./pages").TimelineRow[]; failed: string[] }
-export function allHistoryPoller(pairs: { host: string; app: string }[]): Poller<AllHistory> {
-  return registerPoller(`x:history-all:${pairs.map((p) => `${p.host}/${p.app}`).join(",")}`, () => new Poller<AllHistory>(async () => {
-    const rs = await Promise.allSettled(pairs.map((p) => apiGet<{ data: Snapshot }>(`/api/snapshot?${qs({ host: p.host, app: p.app, range: "1h", visible: "1" })}`)));
+export function allHistoryPoller(hosts: string[]): Poller<AllHistory> {
+  return registerPoller(`x:history-all:${hosts.join(",")}`, () => new Poller<AllHistory>(async () => {
+    const rs = await Promise.allSettled(hosts.map((h) => get<HostHistory>("history", { host: h })()));
     const rows: AllHistory["rows"] = [], failed: string[] = [];
     rs.forEach((r, i) => {
-      if (r.status === "fulfilled") (r.value.data?.app?.history ?? []).forEach((h) => rows.push({ ...h, host: pairs[i].host }));
-      else failed.push(`${pairs[i].host}/${pairs[i].app}`);
+      if (r.status === "fulfilled") (r.value.data.history ?? []).forEach((h) => rows.push({ ...h, deployer: h.deployer ?? null, host: hosts[i] }));
+      else failed.push(hosts[i]);
     });
-    return { data: { rows, failed }, nextPollS: 30 };
+    if (hosts.length > 0 && failed.length === hosts.length) {
+      const r0 = rs[0];
+      throw r0.status === "rejected" && r0.reason instanceof ApiError ? new ApiError(r0.reason.code, extraError(r0.reason, "the deploy history") ?? r0.reason.message) : new ApiError("error", "Could not read the deploy history.");
+    }
+    return { data: { rows, failed }, nextPollS: POLL_S };
   }, (prev, next) => share(prev, next)));
 }
 
 export function reachableApps(hosts: HostView[] | null): { host: string; app: string }[] {
   return (hosts ?? []).filter((h) => h.reachable).flatMap((h) => (h.data?.apps ?? []).map((a) => ({ host: h.host, app: a.app })));
+}
+/** servers that answered and have apps: the ones whose history is read */
+export function historyHosts(hosts: HostView[] | null): string[] {
+  return (hosts ?? []).filter((h) => h.reachable && (h.data?.apps ?? []).length > 0).map((h) => h.host);
 }

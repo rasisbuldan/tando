@@ -188,8 +188,10 @@ func TestSession(t *testing.T) {
 		t.Fatal("bad code")
 	}
 	e.cookie = ck
-	if st, _ := e.get("/api/ping"); st != 200 {
+	if st, m := e.get("/api/ping"); st != 200 {
 		t.Fatalf("with cookie: %d", st)
+	} else if m["client"] != clientName() || clientName() == "" {
+		t.Fatalf("ping: client %v, want %q (the deploy button's check)", m["client"], clientName())
 	}
 	// a forged cookie
 	e.cookie = &http.Cookie{Name: cookieName, Value: strings.Repeat("ab", 32)}

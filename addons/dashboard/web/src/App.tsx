@@ -26,6 +26,8 @@ function Shell() {
   const nav = useNavigate();
   const st = usePoller(overviewPoller());
   const g = useRef(0);
+  // a write this tab started before a reload: find it by its key and show it again
+  useEffect(() => { void import("./lib/actions").then((m) => m.actions().reattach()); }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
