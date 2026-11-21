@@ -112,12 +112,21 @@ for a in $NODE; do eval "PID0_$a=\$(mpid $a)"; done
 for a in ua udb ujob usite ufail; do t_loop_start "$a" "$(t_url "$a")" 0.2; done
 # (setup installs the programs first, then updates every app under its lock: it waits for ukill's
 # activation; that is killed there, so its unit's ExecStopPost runs the new agent's recover)
+# 0.1.1's job unit in a failed state before the upgrade, whose host setup replaces it (a failed run, as on a real
+# server: its runtime drop-in only makes the run fail, then goes): nothing of it may stay in
+# systemctl --failed after the replacement ("not-found failed", seen on a real upgraded server)
+srv 'sudo mkdir -p /run/systemd/system/tando-ujob-job-tick.service.d &&
+     printf "[Service]\nExecStart=\nExecStart=/bin/false\n" | sudo tee /run/systemd/system/tando-ujob-job-tick.service.d/fail.conf > /dev/null &&
+     sudo systemctl daemon-reload; sudo systemctl start tando-ujob-job-tick.service; sudo rm -rf /run/systemd/system/tando-ujob-job-tick.service.d && sudo systemctl daemon-reload' > /dev/null 2>&1
+oldfailed=$(srv 'systemctl list-units --failed --plain --no-legend "tando-ujob-job-*"' 2>/dev/null | wc -l | tr -d ' ')
 "$R" host setup test public_port="$HP" > "$E/setup-new.out" 2>&1 & SPID=$!
 waitlock() { srv "sudo sh -c 'ls $AP/ukill/lock.wait.* > /dev/null 2>&1'"; }
 check "U5b host setup installs the new agent, then waits for ukill's 0.1.1 activation" t_until 240 waitlock
 dxs "systemctl kill -s KILL 'tando-ukill-act-*'"
 wait "$SPID"; rc=$?; cat "$E/setup-new.out" >&2
 check "U3a host setup with this tree over 0.1.1 (rc=$rc)" t_eq "$rc" 0
+check "U3a2 0.1.1's failed job unit ($oldfailed failed before) leaves nothing in systemctl --failed once replaced" \
+  eval '[ "$oldfailed" = 1 ] && [ -z "$(srv "systemctl list-units --failed --plain --no-legend \"tando-ujob-job-*\"")" ]'
 bad=""
 for a in ua udb ujob usite ufail; do
   t_loop_stop "$a"; [ "$T_LOOP_BAD" = 0 ] && [ "$T_LOOP_N" -gt 5 ] || bad="$bad $a:$T_LOOP_BAD/$T_LOOP_N"

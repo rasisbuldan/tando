@@ -5630,6 +5630,9 @@ sync_jobs() {
       cp -p "$st" "/var/lib/systemd/timers/stamp-$(job_unit "$n").timer"
     fi
     systemctl disable -q --now "$b.timer" 2> /dev/null
+    # (its service's failed state would stay in systemctl --failed as "not-found failed" once the
+    # file is gone: seen on a real server upgraded from 0.1.1, until it rebooted)
+    systemctl reset-failed "$b.service" "$b.timer" 2> /dev/null
     rm -f "/etc/systemd/system/$b.timer" "$f" "$st"; changed=1
   done
   for f in /etc/systemd/system/tando-"$A"_job-*.timer; do

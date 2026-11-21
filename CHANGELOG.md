@@ -6,6 +6,10 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: the upgrade from 0.1.1 left each replaced job unit of the old name in `systemctl --failed`
+  ("not-found failed") when its last run had failed, until the server rebooted. Seen on a real
+  server during the 0.2.0 game day; the replaced units' failed state is now cleared (e2e-upgrade U3a2).
+
 ## 0.2.0 - 2026-11-21
 
 - Fixed: with `spa = true`, an older release's fingerprinted file (and a missing one) was
