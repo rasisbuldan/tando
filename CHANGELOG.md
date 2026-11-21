@@ -46,6 +46,17 @@ first, grouped by area.
   Overview shows throttled %, OOM kills, tasks against the limit and memory pressure; apps with a
   database get a Database tab (connections, transactions, rows, cache hit, deadlocks, temp files,
   long transactions, size and growth, top queries).
+- PostgreSQL for 100 apps on one server: `tando host setup` sizes it from the server's RAM
+  (max_connections 100 and shared_buffers 15% on 8 GB, instead of 20 and 32 MB) and runs one
+  pgbouncer for all apps (127.0.0.1:6432, transaction pooling, `db_pool` server connections per
+  app, default 5). An app's `DATABASE_URL` points at pgbouncer from its next deploy;
+  `db_direct = true` keeps PostgreSQL itself (LISTEN/NOTIFY, session advisory locks, session SET,
+  prepared statements on old drivers). New `DATABASE_URL_DIRECT` (always PostgreSQL itself) is the
+  release command's `DATABASE_URL`. A deploy is refused when the apps' `db_pool` together would
+  pass max_connections. On a server whose apps already have databases, new memory settings wait
+  for `tando host setup <host> --pg-restart` (asked first; a restart drops every app's
+  connections for seconds); setup and `tando doctor` say so. `tando db` shows how the app
+  connects (docs/COMMANDS.md, "Database connections and pgbouncer").
 - Fixed: a new app could get another app's pre-flight port (its port + 100) as its own port once
   the port range was widened past 100 ports (what the docs advise when it is used up): that app's
   every deploy and env change then failed with "pre-flight port in use", and the loopback rules let

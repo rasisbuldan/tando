@@ -297,5 +297,41 @@ check "U11f the queue's order: a hash of the name, the same each night (not the 
 bw() { "$BASH" -c 'eval "$1"; BACKUP_WINDOW=01:00-05:00; H_w=$2; backup_window' _ "$(agent_fn backup_window | sed 's/\${H\[backup_window\]:-/${H_w:-/')" "$1"; }
 check "U11g backup_window: 01:00-05:00 by default, a bad one is the default" eq "$(bw '') / $(bw 22:30-03:00) / $(bw 25:00-1)" "01:00 05:00 / 22:30 03:00 / 01:00 05:00"
 
+# ---- U12 PostgreSQL for 100 apps (docs/ARCHITECTURE.md, "PostgreSQL"): its memory settings from
+# the server's RAM (pg_sizing: max_connections about 100 on 8 GB, shared_buffers 15%), and the
+# apps' db_pool together checked against max_connections (db_pool_check)
+pgsz() { # MemTotal-kB [cgroup memory.max] -> "max_connections shared_buffers work_mem maintenance effective"
+  printf 'MemTotal:       %s kB\n' "$1" > "$T/meminfo"
+  printf '%s\n' "${2:-max}" > "$T/memory.max"
+  # shellcheck disable=SC2016
+  "$BASH" -c 'eval "$1"; pg_sizing; echo "$PGS_MC $PGS_SB $PGS_WM $PGS_MWM $PGS_ECS"' _ \
+    "$(agent_fn pg_sizing | sed -e "s#/proc/meminfo#$T/meminfo#" -e "s#/sys/fs/cgroup/memory.max#$T/memory.max#")"
+}
+check "U12a 8 GB: max_connections 100, shared_buffers 15%, work_mem 4 MB" eq "$(pgsz 8048000)" "100 1178 4 245 3929"
+check "U12b 4 GB: max_connections 50" eq "$(pgsz 4020000 | cut -d' ' -f1-2)" "50 588"
+check "U12c 1 GB: at least 50 connections, work_mem at least 2 MB" eq "$(pgsz 1000000 | cut -d' ' -f1-3)" "50 146 2"
+check "U12d 64 GB: at most 400 connections" eq "$(pgsz 65000000 | cut -d' ' -f1)" 400
+check "U12e a cgroup limit under MemTotal (a container) is the RAM" eq "$(pgsz 8048000 2147483648 | cut -d' ' -f1-2)" "50 307"
+pgpool() { # mine max this-app-conf other-app-confs... (a conf: lines joined with ,) -> ok or the refusal
+  local c i=0 mine=$1
+  rm -rf "${T:?}/pa"; mkdir -p "$T/pa/apps/me"
+  printf 'max_connections = %s\n' "$2" > "$T/pa/tando.conf"
+  [ -z "$3" ] || printf '%s\n' "$3" | tr , '\n' > "$T/pa/apps/me/app.conf"
+  shift 3
+  for c; do i=$((i + 1)); mkdir -p "$T/pa/apps/a$i"; printf '%s\n' "$c" | tr , '\n' > "$T/pa/apps/a$i/app.conf"; done
+  # shellcheck disable=SC2016
+  R=$T/pa D=$T/pa/apps/me A=me "$BASH" -c 'eval "$1"; die() { echo "$*"; exit 1; }; DB_POOL=5 DB_TOOL_SLOTS=5
+    db_pool_check "$2" "$R/tando.conf" && echo ok' _ "$(agent_fn db_pool_check)" "$mine" 2>&1
+}
+# max_connections 50: 42 for the apps (3 for the superuser, 5 for tando's own)
+check "U12f a new app's pool that fits is taken" eq "$(pgpool 5 50 "" database=postgres database=postgres,db_pool=20 recipe=static)" ok
+check "U12g one that brings the sum over max_connections is refused, and says what to do" \
+  eval 'pgpool 20 50 "" database=postgres database=postgres,db_pool=20 | grep -q "connections to 45, over the 42 PostgreSQL has.*smaller db_pool"'
+# a server already over (an older tando's apps): an app whose pool does not grow still deploys
+check "U12h an app whose pool does not grow deploys on a server already over" \
+  eq "$(pgpool 20 30 database=postgres,db_pool=20 database=postgres database=postgres)" ok
+check "U12i ... and one that grows it is refused" \
+  eval 'pgpool 21 30 database=postgres,db_pool=20 database=postgres database=postgres | grep -q "over the 22"'
+
 echo "core-unit: $n checks, $nf failed"
 [ "$nf" = 0 ]

@@ -358,7 +358,12 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
 - Commands from tando.conf (start, jobs) are stored in app.conf and executed by fixed agent verbs;
   no command text is written into unit files.
 - PostgreSQL: one role per app with CONNECT only on its own database; the password exists only in
-  the server's env file and is shown only by `tando db url --show`.
+  the server's env file and is shown only by `tando db url --show`. One pgbouncer in front of it
+  for every app (127.0.0.1:6432, transaction pooling, `db_pool` server connections per app; it
+  holds the roles' SCRAM secrets, not passwords, in a root:postgres 0640 file); the loopback
+  rules keep apps without a database away from 5432 and 6432. Sizing from RAM, the env's
+  `DATABASE_URL`/`DATABASE_URL_DIRECT`, the upgrade path: docs/COMMANDS.md, "Database connections
+  and pgbouncer".
 - db studio (`tando db studio`, srv/studio): one always-on service per server since the studio-vm
   change (docs/STUDIO.md: a front as root with CAP_SETUID/CAP_SETGID only, holding the codes and
   tokens; a helper per app and page as the app's user, which is the per-app studio described here).

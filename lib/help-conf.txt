@@ -45,6 +45,8 @@ Data
   db_statement_timeout  postgres, like 30s, or off (default 30s)
   db_idle_tx_timeout    postgres, like 5m, or off (default 5m)
   db_temp_limit         postgres temp files, like 1G, or off (default 1G)
+  db_pool         postgres connections through pgbouncer (default 5)
+  db_direct       true: DATABASE_URL skips pgbouncer (LISTEN/NOTIFY, session locks)
 Release command (not static, not container)
   release         command run on the server before every switch
   release_shell   true: run it with sh -c (default false)

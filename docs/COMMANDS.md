@@ -579,9 +579,9 @@ Example: `tando audit -n 20`
 
 ### host
 `tando host add <name> <user@address> [--port N] [--key FILE] [--yes] [--force] [--no-check]`
-`tando host setup <name> [apps_domain=D] [tls=auto|internal|off] [setting=value ...] [--pg-stat-statements] [--yes]`
+`tando host setup <name> [apps_domain=D] [tls=auto|internal|off] [setting=value ...] [--pg-stat-statements] [--pg-restart] [--yes]`
 `tando host ls` · `tando host rm <name>` · `tando host rename <old> <new>` · `tando host rename --drop-alias <old>`
-Flags: `--port --key --insecure-test --no-check --deploy --force --yes --drop-alias --pg-stat-statements`. Subcommands: add (2),
+Flags: `--port --key --insecure-test --no-check --deploy --force --yes --drop-alias --pg-stat-statements --pg-restart`. Subcommands: add (2),
 ls (default, 0), setup (1+), rm (1), rename (1-2).
 `ls` shows each server's `user@address` (TARGET) as registered; a name is shown as is, never
 looked up. `rename` changes a server's name on this laptop only (no server stores it; its audit
@@ -617,6 +617,14 @@ turns on `pg_stat_statements` for the top statements of each app's database (`ta
 once (every app's database is away for a few seconds); setup asks first, `--yes` does not ask.
 A later run restarts nothing. The extension goes in the `postgres` database only, with
 `track_utility` off (docs/MONITORING.md, PostgreSQL). Never turned on by anything else.
+With PostgreSQL on the server, setup also sizes it from the server's RAM and runs pgbouncer
+("Database connections and pgbouncer" below). `--pg-restart`: when the sized
+`max_connections` or `shared_buffers` differ from what PostgreSQL runs with (a server set up by an
+older tando, more RAM, `pg_max_connections=N`), they need a restart, which drops every app's
+database connections for a few seconds; setup then leaves PostgreSQL running, says so in its
+database step and in `tando doctor` (row `postgresql settings`), and restarts it only with
+`--pg-restart` (asked first, `--yes` does not ask). A server with no app database yet restarts by
+itself. `pg_max_connections=N` (20 to 9999; `auto`: from RAM again) sets max_connections.
 Example: `tando host setup vps apps_domain=apps.example.com tls=auto`
 
 `tando host status [name] [--json] [--watch N]` · `tando host care [name]` ·
@@ -789,11 +797,62 @@ the next deploy; per host with `tando host setup <host> key=value`.
 | host `conn_rate=` | 100 | new connections a second per client address, burst 3x | further SYNs are dropped: the client retries a second later |
 | host `rate_limit=` | auto | on, off, or auto: on only where tando owns Caddy (it installed it, or the Caddyfile has no other site) | `tando doctor` row "client limits" shows how often they tripped |
 
+### Database connections and pgbouncer
+
+Apps with `database = postgres` share one PostgreSQL. `tando host setup` sizes it from the
+server's RAM (MemTotal, or a container's memory limit when lower):
+
+| Setting | Value | On 8 GB |
+|---|---|---|
+| `max_connections` | one per 80 MB, in tens, 50 to 400 (`pg_max_connections=N` in host setup) | 100 |
+| `shared_buffers` | 15% of RAM | about 1.2 GB |
+| `work_mem` | RAM / max_connections / 16, 2 to 32 MB | 4 MB |
+| `maintenance_work_mem`, `effective_cache_size` | 1/32 of RAM (16 MB to 1 GB), half of RAM | 245 MB, 3.9 GB |
+
+They are in `/etc/postgresql/<version>/main/conf.d/tando.conf`. A change of `max_connections` or
+`shared_buffers` waits for `tando host setup <host> --pg-restart` (see host setup above).
+
+**pgbouncer.** Setup also runs one pgbouncer for all apps, on 127.0.0.1:6432 only (no unix
+socket; apps without a database cannot reach it, as with 5432), in transaction pooling: a server
+connection belongs to an app only for the length of one transaction, and is closed after a minute
+idle. Each app gets at most `db_pool` server connections (default 5) however many its own pool
+opens, so 100 apps fit in about 100 PostgreSQL connections. pgbouncer checks the app's password
+against the role's SCRAM secret (`/etc/pgbouncer/userlist.txt`, root:postgres 0640, kept in step
+when an app is created, destroyed or gets a new password); `/etc/pgbouncer/pgbouncer.ini` is
+rewritten by tando, edits there do not last.
+
+| Variable | Points at | Used by |
+|---|---|---|
+| `DATABASE_URL` | pgbouncer (6432), or PostgreSQL (5432) with `db_direct = true` | the app, its workers and jobs |
+| `DATABASE_URL_DIRECT` | PostgreSQL (5432), always | the release command, which gets it as `DATABASE_URL` |
+
+tando's backups and restores, `tando db psql`, the studio and tando-watch connect to PostgreSQL
+directly. **What transaction pooling does not keep** between two transactions of the app:
+`LISTEN`/`NOTIFY`, session advisory locks (`pg_advisory_lock`; `pg_advisory_xact_lock` works),
+session `SET` (use `SET LOCAL` inside the transaction), temporary tables kept across transactions,
+`WITH HOLD` cursors, and prepared statements with drivers that prepare them by SQL (`PREPARE`).
+Protocol-level prepared statements work with pgbouncer 1.21 and newer (Ubuntu 24.04 has 1.22);
+an older pgbouncer needs them off in the driver (for example `prepareThreshold=0` in JDBC, or
+`statement_cache_size=0` in asyncpg). An app that needs any of these sets `db_direct = true`.
+
+**Per app in tando.conf:** `db_pool = N` (1 to 999, default 5): pgbouncer's server connections for
+the app; with `db_direct = true`, what the app's own pool should stay within. The role may hold
+`db_pool + 5` connections (the 5 for migrations, backups, the studio and `db psql`). A deploy is
+refused when the apps' `db_pool` together would pass max_connections less 8 (3 for the superuser,
+5 for tando), unless it does not raise the app's own. `db_direct = true` gives the app PostgreSQL
+itself (and its own pool is then capped by the role's limit only).
+
+**Upgrading.** `tando host setup` installs pgbouncer but leaves running apps alone: an app moves
+to pgbouncer on its next deploy, unless it sets `db_direct = true`. Setup says how many apps are
+still direct. A deploy whose role pgbouncer does not let in (pgbouncer down, for example) keeps
+the direct URL and warns. A rollback keeps the current `DATABASE_URL`; to go back to a direct
+connection set `db_direct = true` and deploy. An older tando agent on the server keeps working
+with a pooled `DATABASE_URL`. `tando db` shows how the app connects.
+
 ### Database limits
 
-Apps with `database = postgres` share one PostgreSQL (20 connections, 10 per app). Each app's role
-gets limits, so one query or one forgotten transaction cannot take the database from the others.
-Per app in tando.conf; `off` turns one off.
+Each app's role gets limits, so one query or one forgotten transaction cannot take the database
+from the others. Per app in tando.conf; `off` turns one off.
 
 | Setting | Default | Limits | When it trips, the app sees |
 |---|---|---|---|

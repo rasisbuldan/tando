@@ -2124,7 +2124,8 @@ fw_sync() {
     for u in "${!own[@]}"; do
       echo "    oifname \"lo\" meta skuid $u tcp dport { ${own[$u]} } accept"
       echo "    oifname \"lo\" meta skuid $u tcp dport { $lo-$hi, $PF_LO-$PF_HI, 2019$others } reject with tcp reset"
-      [[ -n ${pgu[$u]:-} ]] || echo "    oifname \"lo\" meta skuid $u tcp dport 5432 reject with tcp reset"
+      # (5432: PostgreSQL itself, 6432: pgbouncer in front of it)
+      [[ -n ${pgu[$u]:-} ]] || echo "    oifname \"lo\" meta skuid $u tcp dport { 5432, 6432 } reject with tcp reset"
       # the cloud provider's metadata service (instance keys and tokens on many clouds): an app
       # tricked into fetching a URL (SSRF) must not reach it
       echo "    meta skuid $u ip daddr 169.254.169.254 reject"
@@ -2246,6 +2247,10 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
       postgres=yes|podman=yes|python=yes|node=yes) feats+=("${kv%=yes}");;
       postgres_version=*) pg_repin "${kv#*=}"; feats+=(postgres);;   # after a manual upgrade (pg_repin)
       pg_stat_statements=yes) pgss=1;;   # tando host setup --pg-stat-statements (asked first: a restart)
+      pg_restart=yes) PG_RESTART_OK=1;;   # tando host setup --pg-restart (asked first): pg_tune may restart
+      pg_max_connections=auto) unset 'H[pg_max_connections]';;
+      pg_max_connections=*) [[ ${kv#*=} =~ ^[1-9][0-9]{1,3}$ ]] && ((${kv#*=} >= 20)) || die "bad pg_max_connections (20 to 9999, or auto)"
+        H[pg_max_connections]=${kv#*=};;
       node=[0-9]*) [[ ${kv#*=} =~ ^[0-9]{2}$ ]] || die "bad node version (a major, like 24)"; feats+=("$kv");;
       swap=yes|swap=no) swap=${kv#*=};;
       ufw=no|ufw=yes) ufw=${kv#*=};;
@@ -2391,7 +2396,13 @@ EOF
     step "$f" ok "$RT_DETAIL"
   done
 
-  [[ ${H[postgres]:-} == yes ]] && pg_host_sync   # the service drop-in, every app's role limits
+  # the service drop-in, the sizing, pgbouncer, every app's role limits (a step of its own: the
+  # client counts it when the server has PostgreSQL or this setup installs it)
+  if [[ ${H[postgres]:-} == yes ]]; then
+    step database run
+    pg_host_sync
+    step database ok "$PG_DETAIL"
+  fi
   if ((pgss)); then
     [[ ${H[postgres]:-} == yes ]] || die "pg_stat_statements needs PostgreSQL on this server: tando host setup <host> postgres=yes --pg-stat-statements"
     step pg_stat_statements run
@@ -2829,7 +2840,7 @@ cmd_configure() {
     "C[container_port]" "C[build_memory]" "C[log_max]" "C[log_keep]" "C[log_rate]" "C[access_log]" \
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" "C[priority]" \
-    "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" \
+    "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" "C[db_pool]" "C[db_direct]" \
     "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]"
   local line
   while IFS= read -r line; do
@@ -2864,6 +2875,8 @@ cmd_configure() {
       backup) [[ $v =~ ^(daily|off)$ ]] || die "backup must be daily or off";;
       database) [[ $v =~ ^(postgres|sqlite)$ ]] || die "database must be postgres or sqlite";;
       db_statement_timeout|db_idle_tx_timeout|db_temp_limit) db_guc "$k" "$v" > /dev/null || die "bad $k: $v ($DB_GUC_HINT)";;
+      db_pool) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || die "bad db_pool: $v (connections, 1 to 999)";;
+      db_direct) [[ $v =~ ^(true|false)$ ]] || die "db_direct must be true or false";;
       memory) [[ $v =~ ^[0-9]+[KMG]$ ]] || die "bad memory: $v";;
       health_timeout) [[ $v =~ ^[0-9]{1,3}$ ]] || die "bad health_timeout: $v";;
       soak) [[ $v =~ ^[0-9]{1,3}$ ]] || die "bad soak: $v (seconds)";;
@@ -2932,6 +2945,9 @@ cmd_configure() {
     C[$k]=$v
   done <<< "$input"
   release_ok
+  # the apps' database pools must fit in PostgreSQL's connections (before anything is written)
+  [[ ${C[database]:-} == postgres && ${H[postgres]:-} == yes ]] &&
+    db_pool_check "${C[db_pool]:-$DB_POOL}" "/etc/postgresql/${H[postgres_version]:-}/main/conf.d/tando.conf"
   [[ -n ${C[assets]:-} && ${C[assets]} != off && ${C[recipe]:-} == container ]] &&
     die "assets is not supported for a container app (its files are inside the image)"
   for k in "${jobs[@]}"; do   # a job setting is for a job of this tando.conf
@@ -3063,7 +3079,7 @@ cmd_configure() {
   # what the new release needs before its pre-flight (its database, its shared directories) is
   # made from its own settings; the live app's unit, site and jobs from the live ones
   conf_copy C LC; conf_copy NC C; app_vars
-  local ndb=${C[database]:-}
+  local ndb=${C[database]:-} ndirect=${C[db_direct]:-}
   [[ -x $LOGS ]] && { "$LOGS" app-setup "$A" > /dev/null || die "log setup failed"; }
   app_perms
   # the shared/ directories the app uses, created once now by its own user (see ensure_shared)
@@ -3073,8 +3089,9 @@ cmd_configure() {
   [[ ${C[recipe]:-} == python ]] && ensure_shared .cache
   conf_copy LC C; app_vars
   # the role and its database now (the pre-flight and the release command use them), with the live
-  # release's limits: this release's are set when it goes live (db_follow, from conf_put)
-  [[ $ndb == postgres ]] && db_ensure
+  # release's limits: this release's are set when it goes live (db_follow, from conf_put). Its
+  # DATABASE_URL follows this release's db_direct (pgbouncer's or PostgreSQL's port)
+  [[ $ndb == postgres ]] && DB_DIRECT=$ndirect db_ensure deploy
   write_unit || die "could not write the unit of $A (disk full?)"
   write_caddy || die "$WC_WHY"
   jobs_follow || die "could not write the job units of $A (disk full?)"
@@ -3513,6 +3530,9 @@ cmd_exec_release() {
   rel_conf "${dir##*/}"     # (its own settings: app.conf is the live release's until the switch)
   [[ -n ${C[release]:-} ]] || die "no release command"
   [[ ${C[recipe]:-} == python && -d $dir/.venv ]] && export VIRTUAL_ENV=$dir/.venv PATH="$dir/.venv/bin:$PATH"
+  # a migration needs a session of its own (advisory locks, SET, prepared statements): PostgreSQL's
+  # port, not pgbouncer's (the app's DATABASE_URL may be either)
+  [[ -n ${DATABASE_URL_DIRECT:-} ]] && export DATABASE_URL=$DATABASE_URL_DIRECT
   if [[ ${C[release_shell]:-} == true ]]; then exec /bin/sh -c "${C[release]}"; fi
   read -ra argv <<< "${C[release]}"
   exec "${argv[@]}"
@@ -4639,45 +4659,222 @@ pg_protect() {
 }
 
 pg_setup() {
-  local ver conf changed=0
-  if ! command -v pg_ctlcluster > /dev/null; then
-    apt_install postgresql
+  # (one apt run for both: pgb_setup then finds pgbouncer there)
+  if ! command -v pg_ctlcluster > /dev/null || ! command -v pgbouncer > /dev/null; then
+    apt_install postgresql pgbouncer
   fi
   pg_pin || die "$PG_PIN_ERR"
-  ver=${H[postgres_version]}
-  conf=/etc/postgresql/$ver/main/conf.d/tando.conf
-  [[ -d ${conf%/*} ]] || die "PostgreSQL $ver/main, where tando's databases are, has no ${conf%/*}: pg_lsclusters on the server shows what is there (docs/COMMANDS.md, Upgrading PostgreSQL)"
-  # sized for a 1-2 GB machine shared with the apps
-  cat > "$conf.tmp" <<EOF
-listen_addresses = 'localhost'
-max_connections = 20
-shared_buffers = 32MB
-work_mem = 2MB
-maintenance_work_mem = 16MB
-effective_cache_size = 256MB
-wal_buffers = 1MB
-max_wal_size = 256MB
-# a client that never answers the password request holds a slot only this long (default 60 s)
-authentication_timeout = 5s
-superuser_reserved_connections = 3
-EOF
-  if ! cmp -s "$conf.tmp" "$conf"; then mv "$conf.tmp" "$conf"; changed=1; else rm -f "$conf.tmp"; fi
   pg_protect || die "could not write $PG_DROPIN"
-  # restarted only for changed settings or when it does not answer (a re-run of host setup leaves
-  # the apps' connections alone). The install can restart dbus or systemd libraries: retry until
-  # systemctl answers and the server accepts connections
-  local i
-  if ((changed)) || ! pg_isready -q -h 127.0.0.1; then
-    for i in $(seq 30); do
-      systemctl restart postgresql 2> /dev/null && break
-      sleep 1
-    done
-  fi
-  for i in $(seq 30); do pg_isready -q -h 127.0.0.1 && break; sleep 1; done
+  pg_tune || die "$PG_TUNE_ERR"
   systemctl enable -q postgresql
   # apps reach only their own database: no default CONNECT on the shared databases
   pgsql -c "REVOKE CONNECT ON DATABASE postgres FROM PUBLIC" -c "REVOKE CONNECT ON DATABASE template1 FROM PUBLIC" ||
     die "could not configure postgresql"
+  # (in a subshell: a pgbouncer that cannot be installed is a warning; the apps then connect directly)
+  ( pgb_setup ) || echo "tando-agent: pgbouncer could not be set up; apps connect to PostgreSQL directly until host setup sets it up (tando doctor)" >&2
+}
+
+# pg_sizing: PostgreSQL's memory settings from the server's RAM (MemTotal, or the cgroup's limit
+# when lower), tuned for the typical VM of 4 vCPU and 8 GB: max_connections 100 (one per 80 MB,
+# in tens, 50 to 400; host setup pg_max_connections=N sets it), shared_buffers 15% of RAM,
+# work_mem so that every connection sorting at once stays near 6% of RAM (2 to 32 MB),
+# maintenance_work_mem 1/32 of RAM (16 MB to 1 GB), effective_cache_size half of it.
+pg_sizing() {
+  local mem lim
+  mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+  lim=$(cat /sys/fs/cgroup/memory.max 2> /dev/null)
+  [[ $lim =~ ^[0-9]+$ ]] && ((lim / 1048576 < mem)) && mem=$((lim / 1048576))
+  [[ $mem =~ ^[0-9]+$ ]] && ((mem >= 256)) || mem=1024
+  PGS_MEM=$mem
+  PGS_MC=$(((mem / 80 + 5) / 10 * 10)); ((PGS_MC < 50)) && PGS_MC=50; ((PGS_MC > 400)) && PGS_MC=400
+  [[ ${H[pg_max_connections]:-} =~ ^[1-9][0-9]+$ ]] && PGS_MC=${H[pg_max_connections]}
+  PGS_SB=$((mem * 15 / 100)); ((PGS_SB < 32)) && PGS_SB=32
+  PGS_WM=$((mem / PGS_MC / 16)); ((PGS_WM < 2)) && PGS_WM=2; ((PGS_WM > 32)) && PGS_WM=32
+  PGS_MWM=$((mem / 32)); ((PGS_MWM < 16)) && PGS_MWM=16; ((PGS_MWM > 1024)) && PGS_MWM=1024
+  PGS_ECS=$((mem / 2)); ((PGS_ECS < 128)) && PGS_ECS=128
+}
+pg_restart() {
+  local i
+  for i in $(seq 30); do
+    systemctl restart postgresql 2> /dev/null && break
+    sleep 1
+  done
+  for i in $(seq 30); do pg_isready -q -h 127.0.0.1 && break; sleep 1; done
+}
+# pg_tune: tando's settings of the cluster (conf.d/tando.conf), sized by pg_sizing. A reload
+# applies most of them at once; max_connections, shared_buffers and wal_buffers need a restart,
+# which drops every app's connections. So PostgreSQL restarts by itself only when no app has a
+# database yet (a new server) or it is not running; otherwise only with the owner's yes
+# (PG_RESTART_OK: host setup --pg-restart, which the client asks for first). Until then it keeps
+# the old values, and PG_PENDING names the settings that wait (PostgreSQL's pending_restart).
+# PG_RESTARTED=1 when it restarted. Returns 1 with PG_TUNE_ERR when the cluster has no conf.d.
+pg_tune() {
+  local conf t0 i changed=0 fresh=0
+  PG_PENDING="" PG_RESTARTED=""
+  conf=/etc/postgresql/${H[postgres_version]}/main/conf.d/tando.conf
+  if [[ ! -d ${conf%/*} ]]; then
+    PG_TUNE_ERR="PostgreSQL ${H[postgres_version]}/main, where tando's databases are, has no ${conf%/*}: pg_lsclusters on the server shows what is there (docs/COMMANDS.md, Upgrading PostgreSQL)"
+    return 1
+  fi
+  pg_sizing
+  cat > "$conf.tmp" <<CONF
+# written by tando (host setup), sized from this server's RAM (docs/ARCHITECTURE.md, PostgreSQL)
+listen_addresses = 'localhost'
+max_connections = $PGS_MC
+shared_buffers = ${PGS_SB}MB
+work_mem = ${PGS_WM}MB
+maintenance_work_mem = ${PGS_MWM}MB
+effective_cache_size = ${PGS_ECS}MB
+wal_buffers = -1
+max_wal_size = 1GB
+# a client that never answers the password request holds a slot only this long (default 60 s)
+authentication_timeout = 5s
+superuser_reserved_connections = 3
+CONF
+  if ! cmp -s "$conf.tmp" "$conf"; then mv "$conf.tmp" "$conf"; changed=1; else rm -f "$conf.tmp"; fi
+  # the install can restart dbus or systemd libraries: pg_restart retries until systemctl answers
+  if ! pg_isready -q -h 127.0.0.1; then pg_restart; PG_RESTARTED=1; return 0; fi
+  [[ $(pgsql -c "SELECT count(*) FROM pg_database WHERE datname LIKE 'tando\_%'" 2> /dev/null) == 0 ]] && fresh=1
+  if ((changed)); then
+    t0=$(pgsql -c "SELECT pg_conf_load_time()" 2> /dev/null)
+    systemctl reload postgresql 2> /dev/null
+    # (a reload is a signal: the new values are read a moment later)
+    for i in $(seq 20); do [[ $(pgsql -c "SELECT pg_conf_load_time()" 2> /dev/null) != "$t0" ]] && break; sleep 0.25; done
+  fi
+  PG_PENDING=$(pgsql -c "SELECT string_agg(name, ', ' ORDER BY name) FROM pg_settings WHERE pending_restart" 2> /dev/null)
+  if [[ -n $PG_PENDING ]] && ((fresh || ${PG_RESTART_OK:-0})); then
+    pg_restart; PG_RESTARTED=1 PG_PENDING=""
+  fi
+  return 0
+}
+
+# ---- pgbouncer: one pooler in front of PostgreSQL for every app's database ----------------
+# Set up with PostgreSQL (host setup). It listens on 127.0.0.1:6432 only (no unix socket: the
+# loopback rules keep apps without a database away from it, as from 5432) and pools by
+# transaction: a server connection belongs to an app only for one transaction, so many apps with
+# a small pool each (db_pool, default 5) share PostgreSQL's max_connections, and an idle app holds
+# none after a minute (server_idle_timeout). Per app (pgb_sync): its database with at most db_pool
+# server connections, and its role's SCRAM secret from pg_authid, with which pgbouncer checks the
+# app's password and logs in for it (no password in plain text in its files). An app's
+# DATABASE_URL points here from its first deploy with this agent on, unless db_direct = true;
+# DATABASE_URL_DIRECT (5432) is what needs a session: the release command (migrations). tando's
+# backups, the studio, tando db psql and tando-watch connect to PostgreSQL directly.
+PGB_DIR=/etc/pgbouncer PGB_PORT=6432
+PGB_DROPIN=/etc/systemd/system/pgbouncer.service.d/tando.conf
+DB_POOL=5        # db_pool's default: server connections per app through pgbouncer
+DB_TOOL_SLOTS=5  # the role may hold db_pool + these: migrations, backups, the studio, db psql
+pgb_setup() {
+  local first=0 before
+  command -v pgbouncer > /dev/null || apt_install pgbouncer
+  grep -q '^; written by tando' "$PGB_DIR/pgbouncer.ini" 2> /dev/null || first=1
+  # out of memory, an app goes first, never the pooler every database app uses (as the postmaster)
+  mkdir -p "${PGB_DROPIN%/*}"
+  before=$(cksum < "$PGB_DROPIN" 2> /dev/null)
+  printf '# written by tando (host setup): pgbouncer, the way to their database of every pooled app\n[Service]\nOOMScoreAdjust=-900\nLimitNOFILE=65536\nRestart=on-failure\nRestartSec=1\n' |
+    write_if_changed "$PGB_DROPIN" || return 1
+  [[ $before == "$(cksum < "$PGB_DROPIN")" ]] || systemctl daemon-reload
+  pgb_sync || return 1
+  systemctl enable -q pgbouncer 2> /dev/null
+  # restarted only the first time (the package's own configuration before) or when it is down: a
+  # restart drops the pooled apps' connections; pgb_sync's changes need only a reload
+  if ((first)) || ! systemctl is-active -q pgbouncer; then systemctl restart pgbouncer || return 1; fi
+}
+# pgb_put file: stdin into a file pgbouncer (user postgres) reads and the apps cannot, only when
+# it differs; PGB_CHANGED=1 when it did
+pgb_put() {
+  local t; t=$(mktemp "$PGB_DIR/.tando.XXXXXX") || return 1
+  cat > "$t" || { rm -f "$t"; return 1; }
+  if cmp -s "$t" "$1"; then rm -f "$t"; return 0; fi
+  chown root:postgres "$t" && chmod 640 "$t" && mv -f "$t" "$1" || { rm -f "$t"; return 1; }
+  PGB_CHANGED=1
+}
+# pgb_sync: pgbouncer's databases and users from PostgreSQL (the roles tando_*, their SCRAM
+# secrets) and the apps' db_pool (app.conf; for the app in hand, C: the release going live).
+# Both files are written whole, one sync at a time; pgbouncer reloads only when they changed (a
+# reload keeps its clients). Called on an app's deploy and destroy, a pool change, host setup.
+pgb_sync() {
+  [[ -d $PGB_DIR ]] && command -v pgbouncer > /dev/null || return 0
+  lockfile "$R/.pgb.lock"
+  (
+    flock -w 60 12 || exit 1
+    local rows r s f p ver extra="" me=""
+    local -A pool=()
+    rows=$(pgsql -F ' ' -c "SELECT rolname, rolpassword FROM pg_authid WHERE rolname LIKE 'tando\_%' AND rolpassword LIKE 'SCRAM-SHA-256\$%' ORDER BY 1") || exit 1
+    while IFS= read -r f; do
+      p=${f#*:db_pool=}; f=${f%%:*}; f=${f%/app.conf}; f=${f##*/}
+      [[ $p =~ ^[0-9]+$ ]] && pool[tando_${f//-/_}]=$p
+    done < <(grep -H '^db_pool=' "$R"/apps/*/app.conf 2> /dev/null)
+    if [[ -n ${A:-} ]]; then me=$(db_role); pool[$me]=${C[db_pool]:-$DB_POOL}; fi
+    # protocol-level prepared statements in transaction pooling: pgbouncer 1.21 and newer
+    ver=$(pgbouncer --version 2> /dev/null | sed -n 's/^PgBouncer \([0-9]*\)\.\([0-9]*\).*/\1 \2/p' | head -1)
+    [[ $ver =~ ^([0-9]+)\ ([0-9]+)$ ]] && ((BASH_REMATCH[1] > 1 || BASH_REMATCH[2] >= 21)) && extra=$'\nmax_prepared_statements = 200'
+    PGB_CHANGED=""
+    # (pgb_put in this shell, reading a process substitution: it sets PGB_CHANGED)
+    pgb_put "$PGB_DIR/userlist.txt" < <(while read -r r s; do [[ -n $r ]] && printf '"%s" "%s"\n' "$r" "$s"; done <<< "$rows") || exit 1
+    pgb_put "$PGB_DIR/pgbouncer.ini" < <(
+      echo "; written by tando (host setup, deploys): every app's database through one pooler."
+      echo "; Rewritten on each change (docs/ARCHITECTURE.md, PostgreSQL): edits here do not last."
+      echo "[databases]"
+      while read -r r s; do
+        [[ -n $r ]] || continue
+        p=${pool[$r]:-$DB_POOL}
+        echo "$r = host=127.0.0.1 port=5432 dbname=$r pool_size=$p max_db_connections=$p"
+      done <<< "$rows"
+      cat <<INI
+
+[pgbouncer]
+listen_addr = 127.0.0.1
+listen_port = $PGB_PORT
+unix_socket_dir =
+auth_type = scram-sha-256
+auth_file = $PGB_DIR/userlist.txt
+pool_mode = transaction
+default_pool_size = $DB_POOL
+min_pool_size = 0
+reserve_pool_size = 0
+max_client_conn = 5000
+server_idle_timeout = 60
+server_lifetime = 3600
+client_login_timeout = 5
+ignore_startup_parameters = extra_float_digits
+log_connections = 0
+log_disconnections = 0$extra
+INI
+    ) || exit 1
+    if [[ -n $PGB_CHANGED ]] && systemctl is-active -q pgbouncer; then systemctl reload pgbouncer || exit 1; fi
+    exit 0
+  ) 12> "$R/.pgb.lock"
+}
+# pgb_ok role password: pgbouncer lets the role in (asked over it, as the app will; a reload is a
+# signal, so up to 5 s for it to be read)
+pgb_ok() {
+  local i
+  systemctl is-active -q pgbouncer || return 1
+  for i in $(seq 20); do
+    (cd / && PGPASSWORD=$2 PGCONNECT_TIMEOUT=2 psql -X -q -At -h 127.0.0.1 -p "$PGB_PORT" -U "$1" -d "$1" -c 'SELECT 1' &> /dev/null) && return 0
+    sleep 0.25
+  done
+  return 1
+}
+# db_pool_check: the apps' db_pool together (the settings in hand, C, for this app; the live ones
+# for the others; db_direct apps too: their pool is what they open themselves) must fit in what
+# PostgreSQL has for them: max_connections less the superuser's 3 and DB_TOOL_SLOTS for tando's
+# own. Refused only when this deploy raises the app's share: a server already over (set up by an
+# older tando, or with a smaller VM) keeps deploying what it has.
+# db_pool_check pool conf: pool, this app's db_pool; conf, tando's file of PostgreSQL's settings
+db_pool_check() {
+  local mine=$1 max others had cap
+  max=$(sed -n 's/^max_connections = //p' "$2" 2> /dev/null)
+  [[ $max =~ ^[0-9]+$ ]] || { pg_sizing; max=$PGS_MC; }
+  read -r others had < <(awk -F= -v me="$D/app.conf" -v d="$DB_POOL" '
+    function add() { if (db) { if (f == me) had = p; else o += p } }
+    FNR == 1 { if (f != "") add(); f = FILENAME; db = 0; p = d }
+    $1 == "database" && $2 == "postgres" { db = 1 }
+    $1 == "db_pool" { p = $2 + 0 }
+    END { if (f != "") add(); print o + 0, had + 0 }' "$R"/apps/*/app.conf 2> /dev/null)
+  cap=$((max - 3 - DB_TOOL_SLOTS))
+  ((others + mine <= cap || mine <= ${had:-0})) && return 0
+  die "db_pool = $mine for $A brings the apps' database connections to $((others + mine)), over the $cap PostgreSQL has for them (max_connections $max, less $((3 + DB_TOOL_SLOTS)) kept for tando): set a smaller db_pool in tando.conf (default $DB_POOL), or tando host setup <host> pg_max_connections=N (each one costs memory)"
 }
 
 # pg_stat_statements_on: only from tando host setup --pg-stat-statements (the client asks first;
@@ -4709,19 +4906,37 @@ pg_stat_statements_on() {
 }
 
 # pg_host_sync (host setup, with PostgreSQL on the host): what an older tando did not set yet: the
-# recorded version, the drop-in, and every app's role limits (db_ensure). A problem here is a
-# warning, never a failed host setup: tando doctor shows the same.
+# recorded version, the drop-in, the sizing (pg_tune), pgbouncer, and every app's role limits
+# (db_ensure; its DATABASE_URL stays: an app moves to pgbouncer on its next deploy, never under
+# it while it runs). A problem here is a warning, never a failed host setup: tando doctor shows
+# the same. PG_DETAIL: the step's line for the client.
 pg_host_sync() {
+  PG_DETAIL=""
   command -v pg_lsclusters > /dev/null || return 0
   pg_pin || { echo "tando-agent: $PG_PIN_ERR" >&2; return 0; }
   pg_protect || echo "tando-agent: could not write $PG_DROPIN" >&2
-  local a
+  pg_tune || echo "tando-agent: $PG_TUNE_ERR" >&2
+  ( pgb_setup ) || echo "tando-agent: pgbouncer could not be set up (apps keep connecting to PostgreSQL directly): tando doctor" >&2
+  local a n=0
   for a in "$R"/apps/*/app.conf; do
     [[ -f $a ]] && grepq -x 'database=postgres' "$a" || continue
     a=${a%/app.conf}; a=${a##*/}
     ( app "$a"; lock 300; db_ensure > /dev/null ) ||
       echo "tando-agent: could not set the database limits of $a (is PostgreSQL running? tando doctor)" >&2
+    # (still on PostgreSQL's port, and not kept there by db_direct = true: moves on its next deploy)
+    grepq '^DATABASE_URL=.*:5432/' "$R/apps/$a/env" 2> /dev/null && ! grepq -x 'db_direct=true' "$R/apps/$a/app.conf" && n=$((n + 1))
   done
+  pgb_sync || echo "tando-agent: could not update pgbouncer's databases (tando doctor)" >&2
+  pg_sizing
+  # (short parts: the client shows the first on the step's line, cut to fit, the others below it)
+  PG_DETAIL="max_connections $PGS_MC, shared_buffers ${PGS_SB}MB; work_mem ${PGS_WM}MB, from $PGS_MEM MB of RAM"
+  [[ -n $PG_RESTARTED ]] && PG_DETAIL+=", PostgreSQL restarted"
+  if [[ -n $PG_PENDING ]]; then
+    PG_DETAIL+="; PostgreSQL keeps its old $PG_PENDING until a restart, which drops every app's connections for seconds: tando host setup <host> --pg-restart"
+  fi
+  if systemctl is-active -q pgbouncer 2> /dev/null; then PG_DETAIL+="; pgbouncer on 127.0.0.1:$PGB_PORT, transaction pooling"
+  else PG_DETAIL+="; pgbouncer is not running: apps connect directly (tando doctor)"; fi
+  ((n)) && PG_DETAIL+="; $n app$( ((n == 1)) || echo s) move$( ((n == 1)) && echo s) to pgbouncer on the next deploy (db_direct = true keeps an app direct)"
   return 0
 }
 
@@ -4741,6 +4956,14 @@ pg_doctor() {
   elif [[ -n $newer ]]; then
     row check warn "postgresql version" "PostgreSQL $newer is on this server too. tando keeps using $ver/main, where the apps' databases are, and does not switch by itself. To move them: docs/COMMANDS.md, Upgrading PostgreSQL"
   else row check ok "postgresql version" "$ver/main (recorded; a newer version is not picked up by itself)"; fi
+  x=$(pgsql -c "SELECT string_agg(name, ', ' ORDER BY name) FROM pg_settings WHERE pending_restart" 2> /dev/null)
+  if [[ -n $x ]]; then
+    row check warn "postgresql settings" "$x wait for a restart (it drops every app's connections for seconds): tando host setup <host> --pg-restart"
+  fi
+  if [[ -f $PGB_DIR/pgbouncer.ini ]]; then
+    if systemctl is-active -q pgbouncer; then row check ok pgbouncer "127.0.0.1:$PGB_PORT, transaction pooling"
+    else row check fail pgbouncer "not running: the apps that use it have no database. sudo systemctl start pgbouncer (sudo journalctl -u pgbouncer -n 20 says why)"; fi
+  fi
   # the live values: the postmaster and one of its children
   pm=$(head -1 "/run/postgresql/$ver-main.pid" 2> /dev/null)
   [[ $pm =~ ^[0-9]+$ ]] || return 0
@@ -4765,39 +4988,69 @@ db_creds() {
   [[ -n $DB_URL ]] || die "no DATABASE_URL in the env of $A"
 }
 
-# create the role and database if missing; (re)write DATABASE_URL with a new password if absent
+# db_ensure [deploy]: create the role and database if missing; (re)write DATABASE_URL with a new
+# password if absent. deploy (configure): also pgbouncer's databases (pgb_sync), and the URLs by
+# the release's db_direct (DB_DIRECT): DATABASE_URL is pgbouncer's (6432) unless db_direct = true
+# or pgbouncer does not let the role in (then PostgreSQL's, with a warning: the app works either
+# way); DATABASE_URL_DIRECT is always PostgreSQL's (5432). Without deploy (host setup) the URLs
+# stay as they are: an app moves to pgbouncer on its next deploy, never under it while it runs.
 db_ensure() {
   [[ ${H[postgres]:-} == yes ]] || die "no PostgreSQL on this host: tando host setup <host> postgres=yes"
   pg_pin lock || die "$PG_PIN_ERR"
-  local r pw
+  local r pw url0 dir0 direct add="" chg="" made=""
   r=$(db_role)
   declare -A E
   env_load E
-  if [[ -n ${E[DATABASE_URL]:-} ]] && [[ $(pgsql -c "SELECT 1 FROM pg_roles WHERE rolname = '$r'") == 1 ]]; then
-    db_limits "$r" || die "could not set the limits of role $r"; return 0
-  fi
-  pw=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
-  # statements on stdin, so the password never appears in a process list
-  if [[ $(pgsql -c "SELECT 1 FROM pg_roles WHERE rolname = '$r'") == 1 ]]; then
-    pgsql <<< "ALTER ROLE $r WITH LOGIN PASSWORD '$pw';" || die "could not set the database password"
+  url0=${E[DATABASE_URL]-} dir0=${E[DATABASE_URL_DIRECT]-}
+  if [[ -n $url0 ]] && [[ $(pgsql -c "SELECT 1 FROM pg_roles WHERE rolname = '$r'") == 1 ]]; then
+    pw=${url0#postgres://*:}; pw=${pw%%@*}
   else
-    pgsql <<< "CREATE ROLE $r WITH LOGIN PASSWORD '$pw';" || die "could not create role $r"
-    echo database_created=1
+    pw=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    # statements on stdin, so the password never appears in a process list
+    if [[ $(pgsql -c "SELECT 1 FROM pg_roles WHERE rolname = '$r'") == 1 ]]; then
+      pgsql <<< "ALTER ROLE $r WITH LOGIN PASSWORD '$pw';" || die "could not set the database password"
+    else
+      pgsql <<< "CREATE ROLE $r WITH LOGIN PASSWORD '$pw';" || die "could not create role $r"
+      echo database_created=1
+    fi
+    if [[ $(pgsql -c "SELECT 1 FROM pg_database WHERE datname = '$r'") != 1 ]]; then
+      pgsql -c "CREATE DATABASE $r OWNER $r" || die "could not create database $r"
+    fi
+    pgsql -c "REVOKE ALL ON DATABASE $r FROM PUBLIC" -c "GRANT CONNECT, TEMPORARY ON DATABASE $r TO $r" ||
+      die "could not restrict database $r"
+    E[DATABASE_URL]="postgres://$r:$pw@127.0.0.1:5432/$r" made=1
   fi
-  if [[ $(pgsql -c "SELECT 1 FROM pg_database WHERE datname = '$r'") != 1 ]]; then
-    pgsql -c "CREATE DATABASE $r OWNER $r" || die "could not create database $r"
+  if [[ ${1:-} == deploy ]]; then
+    # pgbouncer's users and databases: for a new role or password, or one it does not have yet (a
+    # pool change follows at the switch: db_follow)
+    if [[ -n $made ]] || ! grep -qs "^\"$r\" " "$PGB_DIR/userlist.txt"; then
+      pgb_sync || echo "tando-agent: could not update pgbouncer's databases (tando doctor)" >&2
+    fi
+    direct="postgres://$r:$pw@127.0.0.1:5432/$r"
+    E[DATABASE_URL_DIRECT]=$direct E[DATABASE_URL]=$direct
+    if [[ ${DB_DIRECT:-} != true && -f $PGB_DIR/pgbouncer.ini ]]; then
+      # (asked only when it is not pgbouncer's yet: a deploy of a pooled app asks nothing)
+      if [[ $url0 == "postgres://$r:$pw@127.0.0.1:$PGB_PORT/$r" ]] || pgb_ok "$r" "$pw"; then
+        E[DATABASE_URL]="postgres://$r:$pw@127.0.0.1:$PGB_PORT/$r"
+      else
+        echo "tando-agent: pgbouncer does not let $r in: $A connects to PostgreSQL directly for now (tando doctor)" >&2
+      fi
+    fi
   fi
-  pgsql -c "REVOKE ALL ON DATABASE $r FROM PUBLIC" -c "GRANT CONNECT, TEMPORARY ON DATABASE $r TO $r" ||
-    die "could not restrict database $r"
-  local had=${E[DATABASE_URL]+x}
-  E[DATABASE_URL]="postgres://$r:$pw@127.0.0.1:5432/$r"
-  env_save E || die "could not write the env file of $A (disk full?)"
-  if [[ -n $had ]]; then ENV_NOTE="" envlog_put database "" DATABASE_URL ""; else ENV_NOTE="" envlog_put database DATABASE_URL "" ""; fi
+  [[ -n $url0 ]] || add+=" DATABASE_URL"
+  [[ -n $url0 && ${E[DATABASE_URL]} != "$url0" ]] && chg+=" DATABASE_URL"
+  [[ -n ${E[DATABASE_URL_DIRECT]-} && -z $dir0 ]] && add+=" DATABASE_URL_DIRECT"
+  [[ -n $dir0 && ${E[DATABASE_URL_DIRECT]-} != "$dir0" ]] && chg+=" DATABASE_URL_DIRECT"
+  if [[ -n $add$chg ]]; then
+    env_save E || die "could not write the env file of $A (disk full?)"
+    ENV_NOTE="" envlog_put database "${add# }" "${chg# }" ""
+  fi
   db_limits "$r" || die "could not set the limits of role $r"
 }
-# db_limit role: one app holds at most DB_CONN_LIMIT of the server's connections (max_connections
-# 20, 3 kept for the superuser): a leaking pool cannot take every slot from the other apps
-DB_CONN_LIMIT=10
+# db_limits role: one app's role holds at most db_pool + DB_TOOL_SLOTS of the server's
+# connections (10 by default, as before pgbouncer): a leaking pool cannot take every slot from
+# the other apps. Through pgbouncer the app itself gets db_pool; the rest is for its migrations,
+# backups, the studio and db psql, which connect directly.
 # What one app may take from the cluster all apps share, as defaults of its role (ALTER ROLE ...
 # SET: every new connection of the role starts with them). Per app in tando.conf, "off" for none:
 #   db_statement_timeout  30s  a statement running longer is cancelled (the connection stays)
@@ -4827,30 +5080,32 @@ db_guc() {
   esac
 }
 # db_limits role: the connection limit and the three settings, from app.conf (C) or the defaults.
-# What was set is recorded in the state (db_limits=), for db_follow
+# What was set is recorded in the state (db_limits=, with db_pool), for db_follow
 db_limits() {
-  local stv it tf
+  local stv it tf pool=${C[db_pool]:-$DB_POOL}
   stv=$(db_guc db_statement_timeout "${C[db_statement_timeout]:-30s}") &&
     it=$(db_guc db_idle_tx_timeout "${C[db_idle_tx_timeout]:-5m}") &&
     tf=$(db_guc db_temp_limit "${C[db_temp_limit]:-1G}") || return 1
   # the app's database is its role's only: no CONNECT or TEMPORARY for PUBLIC (a database made by
   # an older tando, or by hand, may still have them; host setup and every deploy come here)
   pgsql -c "REVOKE ALL ON DATABASE $1 FROM PUBLIC" -c "GRANT CONNECT, TEMPORARY ON DATABASE $1 TO $1" || return 1
-  pgsql -c "ALTER ROLE $1 CONNECTION LIMIT $DB_CONN_LIMIT" -c "ALTER ROLE $1 SET statement_timeout = '$stv'" \
+  pgsql -c "ALTER ROLE $1 CONNECTION LIMIT $((pool + DB_TOOL_SLOTS))" -c "ALTER ROLE $1 SET statement_timeout = '$stv'" \
     -c "ALTER ROLE $1 SET idle_in_transaction_session_timeout = '$it'" -c "ALTER ROLE $1 SET temp_file_limit = '$tf'" || return 1
-  [[ ${S[db_limits]:-} == "$stv $it $tf" ]] || st db_limits "$stv $it $tf"
+  [[ ${S[db_limits]:-} == "$stv $it $tf $pool" ]] || st db_limits "$stv $it $tf $pool"
 }
 # db_follow: the role's limits are those of C (the release going live, or the live one again: a
 # revert, a rollback, a deploy that did not go live). Configure sets the live release's; this
-# changes them only when C's differ from what was set last. A failure is a warning: the next
-# deploy or host setup sets them again
+# changes them only when C's differ from what was set last (db_pool too: pgbouncer's pool follows).
+# A failure is a warning: the next deploy or host setup sets them again
 db_follow() {
   [[ ${C[database]:-} == postgres && ${H[postgres]:-} == yes ]] || return 0
-  local stv it tf
+  local stv it tf pool=${C[db_pool]:-$DB_POOL}
   stv=$(db_guc db_statement_timeout "${C[db_statement_timeout]:-30s}") &&
     it=$(db_guc db_idle_tx_timeout "${C[db_idle_tx_timeout]:-5m}") &&
     tf=$(db_guc db_temp_limit "${C[db_temp_limit]:-1G}") || return 0
-  [[ ${S[db_limits]:-} != "$stv $it $tf" ]] || return 0
+  [[ ${S[db_limits]:-} != "$stv $it $tf $pool" ]] || return 0
+  [[ ${S[db_limits]:-} == *" $pool" ]] || pgb_sync ||
+    echo "tando-agent: could not update pgbouncer's pool of $A (tando doctor)" >&2
   fp db.limits && db_limits "$(db_role)" ||
     echo "tando-agent: could not set the database limits of $A (is PostgreSQL running? tando doctor)" >&2
   return 0
@@ -4859,7 +5114,8 @@ db_follow() {
 db_drop() {
   local r
   r=$(db_role)
-  pgsql -c "DROP DATABASE IF EXISTS $r WITH (FORCE)" -c "DROP ROLE IF EXISTS $r"
+  pgsql -c "DROP DATABASE IF EXISTS $r WITH (FORCE)" -c "DROP ROLE IF EXISTS $r" || return 1
+  pgb_sync || echo "tando-agent: could not take $r out of pgbouncer (tando doctor)" >&2
 }
 
 cmd_db_url() { need_root; app "$1"; [[ ${C[database]:-} == postgres ]] || die "$A has no database"
@@ -4876,6 +5132,10 @@ cmd_db_info() {
     -c "SELECT replace(unnest(setconfig), '=', ' ') FROM pg_db_role_setting s JOIN pg_roles o ON o.oid = s.setrole
         WHERE o.rolname = '$r' AND s.setdatabase = 0") || die "PostgreSQL does not answer: tando doctor"
   echo "role=$r"; echo "cluster=${H[postgres_version]:-}${H[postgres_version]:+/main}"
+  # how the app connects (its env's DATABASE_URL) and its pool there
+  local -A E=(); env_load E
+  if [[ ${E[DATABASE_URL]:-} == *"@127.0.0.1:$PGB_PORT/"* ]]; then echo "via=pgbouncer"; else echo "via=direct"; fi
+  echo "pool=${C[db_pool]:-$DB_POOL}"; echo "db_direct=${C[db_direct]:-false}"
   while read -r k v; do
     case $k in server|size|conns|conn_limit|statement_timeout|idle_in_transaction_session_timeout|temp_file_limit)
       [[ $v =~ ^[A-Za-z0-9.-]+$ ]] && echo "$k=$v";; esac
@@ -5524,7 +5784,7 @@ env_save() { # array [file, default $D/env]
 protected_key() {
   case $1 in
     PORT|HOME|TANDO_DATA_DIR|DATABASE_PATH) return 0;;
-    DATABASE_URL) [[ ${C[database]:-} == postgres ]];;
+    DATABASE_URL|DATABASE_URL_DIRECT) [[ ${C[database]:-} == postgres ]];;
     *) return 1;;
   esac
 }
@@ -5786,7 +6046,7 @@ env_edit() {
   case $1 in
     ls)
       for k in "${!E[@]}"; do
-        if [[ $k == DATABASE_URL ]]; then row env "$k" "$(mask_url "${E[$k]}")"; else row env "$k" "${E[$k]}"; fi
+        if [[ $k == DATABASE_URL || $k == DATABASE_URL_DIRECT ]]; then row env "$k" "$(mask_url "${E[$k]}")"; else row env "$k" "${E[$k]}"; fi
       done | sort
       return 1;;
     set)
@@ -5997,10 +6257,10 @@ CONF_KEYS_A=(recipe image container_port build_memory start start_shell release 
   health path data writable backup database db_statement_timeout db_idle_tx_timeout db_temp_limit
   memory health_timeout soak cpu tasks max_conns max_requests stop_timeout hold log_max log_keep
   log_rate access_log request_log_max health_expect health_fails health_recover job_timeout job_spread
-  job_missed assets compress priority)
+  job_missed assets compress priority db_pool db_direct)
 CONF_KEYS=" ${CONF_KEYS_A[*]} "
 # what a record of the first agent that recorded every setting knew (conf=1 without keys=)
-CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority } job.* "
+CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority db_pool db_direct } job.* "
 conf_key() {
   case $1 in job.*|worker.*) return 0;; *[[:space:]]*|'') return 1;; esac
   [[ $CONF_KEYS == *" $1 "* ]]

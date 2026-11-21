@@ -119,12 +119,23 @@ srv 'sudo mkdir -p /run/systemd/system/tando-ujob-job-tick.service.d &&
      printf "[Service]\nExecStart=\nExecStart=/bin/false\n" | sudo tee /run/systemd/system/tando-ujob-job-tick.service.d/fail.conf > /dev/null &&
      sudo systemctl daemon-reload; sudo systemctl start tando-ujob-job-tick.service; sudo rm -rf /run/systemd/system/tando-ujob-job-tick.service.d && sudo systemctl daemon-reload' > /dev/null 2>&1
 oldfailed=$(srv 'systemctl list-units --failed --plain --no-legend "tando-ujob-job-*"' 2>/dev/null | wc -l | tr -d ' ')
+# pgpm: the postmaster's pid (0.1.1 sized PostgreSQL at 20 connections and 32 MB; this setup's
+# sizing from RAM must wait for --pg-restart: a restart drops every app's connections)
+pgpm() { srv "sudo sh -c 'head -1 /run/postgresql/*-main.pid'"; }
+# shellcheck disable=SC2034  # (read in the check's eval)
+pgpm0=$(pgpm)
 "$R" host setup test public_port="$HP" > "$E/setup-new.out" 2>&1 & SPID=$!
 waitlock() { srv "sudo sh -c 'ls $AP/ukill/lock.wait.* > /dev/null 2>&1'"; }
 check "U5b host setup installs the new agent, then waits for ukill's 0.1.1 activation" t_until 240 waitlock
 dxs "systemctl kill -s KILL 'tando-ukill-act-*'"
 wait "$SPID"; rc=$?; cat "$E/setup-new.out" >&2
 check "U3a host setup with this tree over 0.1.1 (rc=$rc)" t_eq "$rc" 0
+# (whitespace taken out: the step's lines wrap in the box)
+check "U3j PostgreSQL not restarted ($(pgpm)); its new sizing waits for --pg-restart; udb keeps its direct DATABASE_URL until its next deploy, as the step says" \
+  eval '[ -n "$pgpm0" ] && [ "$(pgpm)" = "$pgpm0" ] && srv "sudo grep -q \"^DATABASE_URL=.*@127.0.0.1:5432/\" $AP/udb/env" &&
+        tr -d "│\n " < "$E/setup-new.out" | grep -q "keepsitsoldmax_connections.*untilarestart.*--pg-restart" &&
+        tr -d "│\n " < "$E/setup-new.out" | grep -q "1appmovestopgbounceronthenextdeploy" &&
+        srv "systemctl is-active -q pgbouncer"'
 check "U3a2 0.1.1's failed job unit ($oldfailed failed before) leaves nothing in systemctl --failed once replaced" \
   eval '[ "$oldfailed" = 1 ] && [ -z "$(srv "systemctl list-units --failed --plain --no-legend \"tando-ujob-job-*\"")" ]'
 bad=""
@@ -198,6 +209,12 @@ app udb 2 'database = postgres' 'domain = udb.test' 'www = off' 'db_statement_ti
 lim0=$(dbset udb)
 check "U4j2 deploy of udb with this client (rc=$RC): v2, its role limit set ($lim0)" eval \
   '[ "$RC" = 0 ] && [ "$(served udb)" = "hello v2 greeting=" ] && case " $lim0 " in *" statement_timeout=30s "*) true;; *) false;; esac'
+upid=$(mpid udb)
+uurl=$(srv "sudo cat /proc/$upid/environ" | tr '\0' '\n' | sed -n 's/^DATABASE_URL=//p')
+ures=none; [ -n "$uurl" ] &&
+  ures=$(srv "sudo systemd-run --quiet --wait --pipe --collect -p User=tando-udb psql -X -At '$uurl' -c 'SELECT 1'" 2>&1 | tail -1)
+check "U4j6 that deploy moved udb to pgbouncer: its DATABASE_URL is 6432's and answers as its user ($ures)" \
+  eval 'case $uurl in *@127.0.0.1:6432/tando_udb) true;; *) false;; esac && [ "$ures" = 1 ]'
 new udb udb-rb.out rollback
 check "U4j3 rollback of udb to 0.1.1's v1 (rc=$RC): v1 serves" t_eq "$(served udb)" "hello v1 greeting="
 check "U4j4 and udb keeps its domain: app.conf ($(conf_of udb domains)), Caddy answers for udb.test ($(dserved udb.test))" eval \
