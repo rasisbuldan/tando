@@ -396,7 +396,7 @@ C_image="" C_container_port="" C_build_memory="" C_dockerfile="" C_node="" C_dom
 C_compress=""   # on (default) or off: Caddy compresses text answers (checked by the server too)
 C_assets=""   # fingerprinted files served from Caddy: off, or <dir>[, <url prefix>] (checked by the server too)
 C_job_timeout=""   # seconds a scheduled job may run (the server's default: 3600)
-C_job_spread="" C_job_missed=""   # the spread of a job's start (default 15 s), run or skip a run missed while the server was off
+C_job_spread="" C_job_missed=""   # the spread of a job's start (default: a sixth of its period, at most 600 s), run or skip a run missed while the server was off
 C_workers=""       # worker.<name> = <command> and their .memory, .stop_timeout as key=value lines
 C_release="" C_release_shell="" C_release_timeout=""   # the release command (lib/deploy.sh; checked by the server too)
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)

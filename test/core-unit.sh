@@ -290,7 +290,7 @@ check "U11d backup off: the unit goes" eq "$(sb off)" ""
 check "U11e host setup moves every app to the queue and installs it" eval \
   'sed -n "/^cmd_setup() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "journal_dir; sync_backup_timer" &&
    sed -n "/^cmd_setup() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "backup_sched_install"'
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016,SC2034  # (bo is read in the eval below)
 bo=$("$BASH" -c 'eval "$1"; backup_order zeta alpha mid' _ "$(agent_fn backup_order)" | tr '\n' ' ')
 check "U11f the queue's order: a hash of the name, the same each night (not the alphabet)" eval \
   '[ "$bo" != "alpha mid zeta " ] && [ "$(echo $bo | tr " " "\n" | sort | tr "\n" " ")" = "alpha mid zeta " ]'

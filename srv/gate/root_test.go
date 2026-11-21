@@ -35,13 +35,13 @@ type host struct {
 	f    *fakeRun
 	dir  string
 	uid  int
-	rxUp bool             // systemd-run was called: the receiver unit is "active"
-	tk   string           // the receiver's ticket when systemd-run was called
-	rxu  string           // the unit systemd-run was asked to create
-	fail map[string]bool  // commands that fail ("visudo", "visudo1" = the first try only, "agent begin", "sshd")
-	unit string           // list-units' answer before systemd-run ("" = not loaded)
-	ran  map[string]int   // calls per command word
-	pids map[int]struct{} // fake processes of the deploy user; Kill removes them
+	rxUp bool              // systemd-run was called: the receiver unit is "active"
+	tk   string            // the receiver's ticket when systemd-run was called
+	rxu  string            // the unit systemd-run was asked to create
+	fail map[string]bool   // commands that fail ("visudo", "visudo1" = the first try only, "agent begin", "sshd")
+	unit string            // list-units' answer before systemd-run ("" = not loaded)
+	ran  map[string]int    // calls per command word
+	pids map[int]struct{}  // fake processes of the deploy user; Kill removes them
 	ents map[string]string // getent passwd / getent group (enumerated): its output
 	nss  map[string]bool   // ids getent finds by number only (a directory service that does not enumerate)
 }
