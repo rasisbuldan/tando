@@ -94,6 +94,7 @@ RuntimeMaxUse=8M
 MaxRetentionSec=1h
 MaxFileSec=15min
 Compress=yes
+SplitMode=none
 RateLimitIntervalSec=0
 `
 	if got := h.read("etc/systemd/journald@tando-hello.conf"); got != want {

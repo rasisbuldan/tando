@@ -121,6 +121,10 @@ func (a *app) setup(ctx context.Context) error {
 	b.WriteString("# circular: when the files reach SystemMaxUse, journald deletes the oldest to make room\n")
 	fmt.Fprintf(&b, "[Journal]\nStorage=persistent\nSystemMaxUse=%s\nRuntimeMaxUse=8M\nMaxRetentionSec=%dh\nMaxFileSec=%dmin\nCompress=yes\n",
 		maxUse, kh, fmin)
+	// one file for all: an app user's id is 30000 and up (the uid band), and journald would put
+	// the lines of a user of 1000 and up into a user-<uid>.journal of their own, which the app
+	// user may read, and which the error scan (system.journal's signature) never sees
+	b.WriteString("SplitMode=none\n")
 	// per service in this namespace: the app, its pre-flight and its jobs. (A unit's own
 	// LogRateLimitIntervalSec=0 would mean "journald's default", not "off".)
 	if rate == "off" {
