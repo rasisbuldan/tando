@@ -255,15 +255,21 @@ check "J7b2 before its first run has ended: LAST never, RESULT running (not ok)"
   eval 'grep "^│ long " "$E/jobs7.out" | grep -q " never  *● running" && ! grep "^│ long " "$E/jobs7.out" | grep -q "● ok"'
 sleep 22   # (a wait that proves something did not happen: no second copy over the next five timer times)
 starts4=$(srv "sudo cat $AD/shared/data/starts4 | wc -l")
-# the shortest time from the end of a run to the start of the next: a time of the timer that passed
-# during a run is skipped, so the next run waits for the next time (about 3 s here), never 0 s
+# what must hold: the next run starts at or after the first timer time (a multiple of 4 s) that
+# follows the end of a run (job-due skips the times that passed during a run; without it systemd
+# would start the job at once when the run ends). The time from an end to the next start is NOT
+# bounded below by a fixed number: the start is written after job-begin (which waits for a job
+# slot, in steps of a second), so it is the timer time plus that wait, and a run whose begin took
+# 2 s followed by one whose begin took 0 s legitimately starts less than 1 s after the end.
+# margin = the smallest (next start - that timer time); a catch-up would be negative, about -3 s.
 gap=$(srv "sudo cat $AD/shared/data/starts4; echo; sudo cat $AD/shared/data/ends4" |
   awk 'NF == 0 { e = 1; next } !e { s[n++] = $1; next } { f[m++] = $1 }
-       END { g = 99; for (i = 0; i + 1 < n && i < m; i++) if (s[i + 1] - f[i] < g) g = s[i + 1] - f[i]; printf "%.1f", g }')
+       END { g = 99; for (i = 0; i + 1 < n && i < m; i++) { nx = (int(f[i] / 4) + 1) * 4; if (s[i + 1] - nx < g) g = s[i + 1] - nx }
+             printf "%.1f", g }')
 # (t0 is taken once the first start was seen, up to a few seconds after it: those count too)
 span=$((SECONDS - t0)); most=$(((span + 4) / 8 + 1))
-check "J7c in $span s the timer fired every 4 s, the job takes 5 s: it started $starts4 times (at most $most, at its times, 2 at least), never two at once, never at once after a run (at least ${gap} s between)" \
-  eval '[ "$starts4" -ge 2 ] && [ "$starts4" -le "$most" ] && ! srv "sudo test -e $AD/shared/data/bad4" && awk -v g="$gap" "BEGIN { exit !(g >= 1) }"'
+check "J7c in $span s the timer fired every 4 s, the job takes 5 s: it started $starts4 times (at most $most, at its times, 2 at least), never two at once, never at once after a run (each start at or after the timer time that follows the previous end: margin ${gap} s)" \
+  eval '[ "$starts4" -ge 2 ] && [ "$starts4" -le "$most" ] && ! srv "sudo test -e $AD/shared/data/bad4" && awk -v g="$gap" "BEGIN { exit !(g >= -0.1) }"'
 check "J7d the runs are in the history with their duration (5 s)" \
   eval 'J jobs 2>&1 | grep "^│ long " | grep -Eq "● ok +[0-9]+ ?s|5\.[0-9]s"'
 
