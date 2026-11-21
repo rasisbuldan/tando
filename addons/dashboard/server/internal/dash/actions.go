@@ -37,9 +37,10 @@ import (
 
 // actParams: the params of a write request (only those of its action may be given)
 type actParams struct {
-	Release string  `json:"release,omitempty"` // rollback
-	Key     string  `json:"key,omitempty"`     // env-set
-	Value   *string `json:"value,omitempty"`   // env-set; never stored, never hashed into a record
+	Release string  `json:"release,omitempty"`  // rollback
+	Key     string  `json:"key,omitempty"`      // env-set
+	Value   *string `json:"value,omitempty"`    // env-set; never stored, never hashed into a record
+	NewHost string  `json:"new_host,omitempty"` // host-rename
 }
 
 // MaxEnvValue: the longest value env set takes from the dashboard
@@ -56,7 +57,20 @@ func (q *writeReq) params() (actParams, *apiError) {
 		}
 	}
 	bad := func(m string) (actParams, *apiError) { return p, &apiError{Status: 400, Code: "bad_request", Msg: m} }
+	if p.NewHost != "" && q.Action != "host-rename" {
+		return bad(q.Action + " takes no new_host")
+	}
 	switch q.Action {
+	case "host-rename":
+		if p.Release != "" || p.Key != "" || p.Value != nil {
+			return bad("host-rename takes only new_host")
+		}
+		if !ValidHost(p.NewHost) {
+			return bad("new_host: letters, digits, . _ - (at most 64, not starting with - or .)")
+		}
+		if p.NewHost == q.Host {
+			return bad(q.Host + " is already called " + p.NewHost)
+		}
 	case "rollback":
 		if p.Key != "" || p.Value != nil {
 			return bad("rollback takes only a release")
@@ -96,7 +110,7 @@ func (q *writeReq) params() (actParams, *apiError) {
 // nothing derived from it is written to disk (a key reused with another value is caught in
 // memory only, by the record's vmac).
 func canonParams(action string, p actParams) json.RawMessage {
-	c := actParams{Release: p.Release, Key: p.Key}
+	c := actParams{Release: p.Release, Key: p.Key, NewHost: p.NewHost}
 	if c == (actParams{}) {
 		return nil
 	}
@@ -125,6 +139,13 @@ func (s *Server) prepare(ctx context.Context, q *writeReq, p actParams) (*plan, 
 		return &plan{argv: []string{q.Action, a, "-H", h}}, nil
 	case "env-set":
 		return &plan{argv: []string{"env", "set", p.Key, "-a", a, "-H", h}, stdin: []byte(*p.Value + "\n")}, nil
+	case "host-rename":
+		if s.knownHost(p.NewHost) {
+			return nil, &apiError{Status: 409, Code: "host_exists", Msg: "a host named " + p.NewHost + " exists already; pick another name"}
+		}
+		// (run in the config dir: the CLI also rewrites a tando.conf in its working folder, and
+		// tando-dash's own folder is no project of the user's)
+		return &plan{argv: []string{"host", "rename", h, p.NewHost}, dir: s.cfg.ConfigDir}, nil
 	case "rollback":
 		snap, e := s.readApp(ctx, h, a, true)
 		if e != nil {
@@ -140,7 +161,7 @@ func (s *Server) prepare(ctx context.Context, q *writeReq, p actParams) (*plan, 
 		if e != nil {
 			return nil, e
 		}
-		dir, e := deployDir(snap.Origin, h, a)
+		dir, e := deployDir(s.cfg.ConfigDir, snap.Origin, h, a)
 		if e != nil {
 			return nil, e
 		}
@@ -173,8 +194,10 @@ func clientName() string {
 func folderErr(msg string) *apiError { return &apiError{Status: 422, Code: "deploy_folder", Msg: msg} }
 
 // deployDir: the folder to deploy app to host from, from the server's record of where it was
-// last deployed from; every reason to refuse in one line with the way on
-func deployDir(origin *string, host, app string) (string, *apiError) {
+// last deployed from; every reason to refuse in one line with the way on. A tando.conf that names
+// host's old name is fine while the alias tando host rename left (configDir/renamed/<old>:
+// alias=<host>) stands: the CLI follows it (lib/common.sh host_use).
+func deployDir(configDir string, origin *string, host, app string) (string, *apiError) {
 	if origin == nil || *origin == "" {
 		return "", folderErr("tando has no record of where " + app + " was deployed from (a server set up by an older tando: tando host setup " + host + "); deploy it once from its folder with tando deploy")
 	}
@@ -208,11 +231,35 @@ func deployDir(origin *string, host, app string) (string, *apiError) {
 	if confApp != app {
 		return "", folderErr("tando.conf in " + dir + " is for " + orDash(confApp) + ", not " + app + ": deploy from a terminal there")
 	}
-	if confHost != "" && confHost != host {
+	if confHost != "" && confHost != host && aliasOf(configDir, confHost) != host {
 		return "", folderErr("tando.conf in " + dir + " deploys to " + confHost + ", not " + host + ": deploy from a terminal there")
 	}
 	// (a tando.conf that names no server: the CLI is given -H)
 	return dir, nil
+}
+
+// aliasOf: the host old was renamed to (configDir/renamed/<old>: alias=<new>), as lib/common.sh
+// host_alias reads it: only while old is no host itself and new is one; "" otherwise
+func aliasOf(configDir, old string) string {
+	if !ValidHost(old) {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(configDir, "hosts", old)); err == nil {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(configDir, "renamed", old))
+	if err != nil {
+		return ""
+	}
+	l, _, _ := strings.Cut(string(b), "\n")
+	n, ok := strings.CutPrefix(l, "alias=")
+	if !ok || !ValidHost(n) {
+		return ""
+	}
+	if fi, err := os.Stat(filepath.Join(configDir, "hosts", n)); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	return n
 }
 
 func orDash(s string) string {
@@ -453,7 +500,15 @@ func (s *Server) reattach(rec *idemRec, lockKey string) {
 	if rec.ChildEnded {
 		exit = rec.Exit
 	}
-	if rec.Action == "noop" {
+	if hostWide(rec.Action) && exit >= 0 { // (the CLI's status is the outcome)
+		st := "done"
+		if exit > 0 {
+			st = "failed"
+		}
+		s.idem.finish(rec, st, exit, "", lastError(s.idem.tail(rec.Key)), nil)
+		return
+	}
+	if rec.Action == "noop" || hostWide(rec.Action) {
 		s.idem.finish(rec, "unknown", exit, "", "tando-dash restarted while this ran; read the outcome from tando (status, history)", nil)
 		return
 	}

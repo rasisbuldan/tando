@@ -165,10 +165,11 @@ func TestOverviewPartialAndMenubarCache(t *testing.T) {
 	}
 	var ls struct {
 		Hosts []struct {
-			Host   string
-			Apps   []struct{ App, State, Link string }
-			Alerts []map[string]any
-			Error  *string
+			Host          string
+			Address, User *string
+			Apps          []struct{ App, State, Link string }
+			Alerts        []map[string]any
+			Error         *string
 		}
 	}
 	if err := json.Unmarshal(b, &ls); err != nil {
@@ -181,6 +182,9 @@ func TestOverviewPartialAndMenubarCache(t *testing.T) {
 			seen++
 			if len(h.Apps) != 2 || h.Apps[0].App != "web" || h.Apps[0].Link == "" || h.Apps[1].App != "api" || len(h.Alerts) != 1 || h.Error != nil {
 				t.Errorf("a: %+v", h)
+			}
+			if h.Address == nil || *h.Address != "192.0.2.10" || h.User == nil || *h.User != "admin" {
+				t.Errorf("a: address %v user %v", h.Address, h.User)
 			}
 		case "fail1":
 			seen++

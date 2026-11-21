@@ -393,11 +393,12 @@ final class Controller: NSObject, NSMenuDelegate {
             menu.addItem(.separator())
             if let e = h.error {
                 let i = label(h.name)
-                i.attributedTitle = dot(.systemRed, "\(h.name): cannot reach (\(e))")
+                i.attributedTitle = dot(.systemRed, "\(h.name)\(h.target.map { " (\($0))" } ?? ""): cannot reach (\(e))")
                 menu.addItem(i)
                 continue
             }
             menu.addItem(label(h.name, bold: true))
+            if let t = h.target { menu.addItem(label("  \(t)")) }
             if h.apps.isEmpty { menu.addItem(label("  no apps")) }
             for a in h.apps {
                 let color: NSColor = a.problem != nil ? .systemRed : (probedStates.contains(a.state) ? .systemGreen : .systemGray)

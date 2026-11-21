@@ -32,7 +32,14 @@ import (
 // actions: the writes the page can ask for (actions.go builds their argv). noop is harmless
 // (tando --version) and exercises the whole mechanism in tests.
 var actions = map[string]bool{"noop": true, "deploy": true, "rollback": true, "stop": true, "start": true,
-	"restart": true, "env-set": true}
+	"restart": true, "env-set": true, "host-rename": true}
+
+// hostWide: the writes of a host as a whole (no app): they lock the host, not an app
+func hostWide(action string) bool { return action == "host-rename" }
+
+// writeLockKey: one write per (host, app); a host-wide write takes "<host>/" and waits for, and holds
+// off, every write on the host (writeLocks.tryLock)
+func writeLockKey(host, app string) string { return host + "/" + app }
 
 const maxConfirms = 128
 
@@ -104,7 +111,11 @@ func (q *writeReq) check(params bool) *apiError {
 	if !ValidHost(q.Host) {
 		return &apiError{Status: 400, Code: "bad_request", Msg: "host: letters, digits, . _ -"}
 	}
-	if !ValidApp(q.App) {
+	if hostWide(q.Action) {
+		if q.App != "" {
+			return &apiError{Status: 400, Code: "bad_request", Msg: q.Action + " takes no app"}
+		}
+	} else if !ValidApp(q.App) {
 		return &apiError{Status: 400, Code: "bad_request", Msg: "app: a-z, 0-9, -; 2-24 characters"}
 	}
 	if params {
@@ -187,9 +198,13 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// admission: the app free, then the confirm token; a refusal is not remembered
-	lockKey := q.Host + "/" + q.App
+	lockKey := writeLockKey(q.Host, q.App)
 	if cur, ok := s.writes.tryLock(lockKey, q.Action, key, s.cfg.Now()); !ok {
-		e := &apiError{Status: 409, Code: "running", Msg: "a " + cur.Action + " of " + q.App + " is running, started " +
+		what := cur.App
+		if what == "" {
+			what = q.Host
+		}
+		e := &apiError{Status: 409, Code: "running", Msg: "a " + cur.Action + " of " + what + " is running, started " +
 			cur.Since.UTC().Format("15:04:05") + " GMT", Extra: cur}
 		s.idem.abort(key, e)
 		writeErr(w, e)
@@ -256,11 +271,14 @@ func (s *Server) runWrite(rec *idemRec, lockKey string, pl *plan, host string) {
 		exit = -1 // (killed, or never started)
 	}
 	s.idem.childEnded(rec, exit)
-	if rec.Action == "noop" {
+	if rec.Action == "noop" || hostWide(rec.Action) {
+		// (no app state tells how it ended: the CLI's status does)
 		status, msg := "done", ""
 		if err != nil {
 			status, msg = "failed", cliErr(err).Msg
-			if s.idem.tail(rec.Key) == "" && res.Stderr != "" {
+			if m := lastError(s.idem.tail(rec.Key)); m != "" {
+				msg = m
+			} else if s.idem.tail(rec.Key) == "" && res.Stderr != "" {
 				msg = firstLine(res.Stderr)
 			}
 		}
@@ -301,6 +319,7 @@ func (s *Server) actionStatus(w http.ResponseWriter, r *http.Request) {
 
 type running struct {
 	Action string    `json:"action"`
+	App    string    `json:"app,omitempty"` // "" : a host-wide write
 	Since  time.Time `json:"since"`
 	Key    string    `json:"key"`
 }
@@ -318,7 +337,18 @@ func (l *writeLocks) tryLock(k, action, key string, now time.Time) (running, boo
 	if cur, ok := l.m[k]; ok {
 		return cur, false
 	}
-	l.m[k] = running{Action: action, Since: now, Key: key}
+	host, app, _ := strings.Cut(k, "/")
+	if cur, ok := l.m[host+"/"]; ok { // a host-wide write runs
+		return cur, false
+	}
+	if app == "" { // host-wide: no write of the host may run
+		for o, cur := range l.m {
+			if strings.HasPrefix(o, host+"/") {
+				return cur, false
+			}
+		}
+	}
+	l.m[k] = running{Action: action, App: app, Since: now, Key: key}
 	return running{}, true
 }
 

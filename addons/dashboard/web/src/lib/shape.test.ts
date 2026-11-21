@@ -3,7 +3,7 @@ import { fixture } from "./fixtures";
 import type { Snapshot } from "./types";
 import {
   appKind, appRows, chartDomain, dataSince, defaultOrder, describe as describeSeries, headroom, keepOrder, mergeViews, needsAttention,
-  nextSort, niceMax, phases, restartsTotal, rowKey, skewNote, sortRows, stateWithReason, toPoints, toViews, uptimeCells, type RawHost,
+  nextSort, niceMax, phases, restartsTotal, rowKey, skewNote, sshTarget, sortRows, stateWithReason, toPoints, toViews, uptimeCells, type RawHost,
 } from "./shape";
 
 const snap = fixture<Snapshot>("snapshot");
@@ -187,4 +187,16 @@ describe("deploy phases", () => {
     expect(phases(h[2]).map((p) => p.label)).toEqual(["build", "upload", "preflight"]);
   });
   it("history carries the deployer", () => { expect(h.map((x) => x.deployer)).toEqual(["ci-bot", "alice", null]); });
+});
+
+describe("ssh target", () => {
+  it("user@address from the snapshot; nothing for an older tando", () => {
+    expect(sshTarget(snap)).toBe("nobody@192.0.2.10");
+    expect(sshTarget(fixture<Snapshot>("snapshot-unreachable"))).toBe("nobody@192.0.2.99");
+    expect(sshTarget({ ...snap, user: null })).toBe("192.0.2.10");
+    expect(sshTarget({ ...snap, address: null })).toBeNull();
+    const { address: _a, user: _u, ...old } = snap; // eslint-disable-line @typescript-eslint/no-unused-vars
+    expect(sshTarget(old as Snapshot)).toBeNull();
+    expect(sshTarget(null)).toBeNull();
+  });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  Actions, commandFor, conflictLine, deployBlocked, dialogCopy, endView, envKeyError, envValueError, readSse, refusedLine, runningLine, STORE_KEY,
+  Actions, commandFor, conflictLine, deployBlocked, dialogCopy, endView, envKeyError, envValueError, hostNameError, readSse, refusedLine, runningLine, STORE_KEY,
   type ActionEnv, type ActionRecord, type Resp,
 } from "./actions";
 
@@ -312,5 +312,32 @@ describe("panel header", () => {
     expect(runningLine(o, Date.parse("2026-11-21T14:02:32Z"))).toBe("Rolling back shop · started 14:02 GMT · 32 s");
     expect(runningLine(o, Date.parse("2026-11-21T14:02:32Z"), true)).toBe("Rollback of shop · started 14:02 GMT · 32 s");
     expect(runningLine({ ...o, action: "deploy" }, Date.parse("2026-11-21T14:02:48Z"), true)).toBe("Deploy of shop · started 14:02 GMT · 48 s");
+  });
+});
+
+describe("host rename", () => {
+  it("validates the new name with tando-dash's rule", () => {
+    expect(hostNameError("", H)).toBe("Enter a name.");
+    for (const bad of ["-x", ".x", "a..b", "a b", "a/b", "ä", "x".repeat(65)]) expect(hostNameError(bad, H)).not.toBeNull();
+    expect(hostNameError(H, H)).toBe(`${H} is already called that.`);
+    for (const ok of ["vps", "web.2", "a_b-C", "x".repeat(64)]) expect(hostNameError(ok, H)).toBeNull();
+  });
+
+  it("confirms and sends host-rename with no app and the new name in params", async () => {
+    const f = fake(server(() => json(202, rec({ action: "host-rename", app: "" }))));
+    const a = new Actions(f.env);
+    a.open(H, "", "host-rename");
+    await flush();
+    expect(JSON.parse(f.posts("/api/confirm")[0].body!)).toEqual({ action: "host-rename", host: H, app: "" });
+    await a.send(H, "", undefined, { newHost: "vps-2" }); await flush();
+    expect(JSON.parse(f.posts("/api/action")[0].body!)).toEqual({ action: "host-rename", host: H, app: "", confirm: "tok1", params: { new_host: "vps-2" } });
+  });
+
+  it("copy: the command, the dialog, the running line and the end", () => {
+    expect(commandFor("host-rename", H, "", { newHost: "vps-2" })).toBe(`tando host rename ${H} vps-2`);
+    expect(dialogCopy("host-rename", H, "").title).toBe(`Rename ${H}?`);
+    expect(runningLine({ action: "host-rename", app: "", host: H, startedAt: "2026-11-21T14:02:00Z" }, Date.parse("2026-11-21T14:02:30Z"))).toBe(`Renaming ${H} · started 14:02 GMT · 30 s`);
+    expect(endView(endRec({ action: "host-rename", app: "", outcome: undefined })).line).toBe(`Renamed ${H} in 4 s.`);
+    expect(endView(rec({ action: "host-rename", app: "", status: "failed", message: "tando: a host named b exists already" })).line).toBe("Rename failed: tando: a host named b exists already.");
   });
 });

@@ -22,17 +22,35 @@ export function Cell({ children, sub }: { children: ReactNode; sub?: ReactNode }
   return <>{children}{sub != null && <span className="text-muted-foreground"> · {sub}</span>}</>;
 }
 
+/** a copy-to-clipboard icon button ("Copied" for 1.5 s) */
+export function CopyButton({ text, label }: { text: string; label: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <Tip text={done ? "Copied" : label}>
+      <Button variant="ghost" size="icon" aria-label={label} onClick={() => { void navigator.clipboard?.writeText(text); setDone(true); setTimeout(() => setDone(false), 1500); }}>
+        {done ? <Check size={16} strokeWidth={1.75} aria-hidden="true" /> : <Copy size={16} strokeWidth={1.75} aria-hidden="true" />}
+      </Button>
+    </Tip>
+  );
+}
+
 /** the CLI equivalent, with a copy button */
 export function Command({ cmd }: { cmd: string }) {
-  const [done, setDone] = useState(false);
   return (
     <span className="inline-flex items-center gap-2">
       <code className="rounded-sm bg-muted px-2 py-0.5">{cmd}</code>
-      <Tip text={done ? "Copied" : "Copy command"}>
-        <Button variant="ghost" size="icon" aria-label="Copy command" onClick={() => { void navigator.clipboard?.writeText(cmd); setDone(true); setTimeout(() => setDone(false), 1500); }}>
-          {done ? <Check size={16} strokeWidth={1.75} aria-hidden="true" /> : <Copy size={16} strokeWidth={1.75} aria-hidden="true" />}
-        </Button>
-      </Tip>
+      <CopyButton text={cmd} label="Copy command" />
+    </span>
+  );
+}
+
+/** user@address tando connects to, with a copy button; nothing when the CLI does not say (older tando) */
+export function SshTarget({ target, className }: { target: string | null; className?: string }) {
+  if (!target) return null;
+  return (
+    <span className={cn("inline-flex min-w-0 items-center gap-1 text-[13px] text-muted-foreground", className)}>
+      <Mono className="min-w-0 truncate">{target}</Mono>
+      <CopyButton text={target} label="Copy address" />
     </span>
   );
 }

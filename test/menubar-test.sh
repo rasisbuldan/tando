@@ -126,7 +126,7 @@ check "O1 --once runs the installed tando and exits 0 (rc=$rc)" test "$rc" = 0
 check "O2 badge counts the down app (api, with its firing alert) and the app whose link fails (dead): 2" \
   grep -qx 'badge: 2' "$T/once"
 check "O3 the menu lists the host and each app with its state" \
-  eval 'grep -q "^host vps$" "$T/once" && grep -q "^  api  down  PROBLEM: down" "$T/once" && grep -q "^  dead  running  PROBLEM: link fails" "$T/once"'
+  eval 'grep -Eq "^host vps(  [a-z]+@[0-9.]+)?$" "$T/once" && grep -q "^  api  down  PROBLEM: down" "$T/once" && grep -q "^  dead  running  PROBLEM: link fails" "$T/once"'
 if [ "$PORT" != 1 ]; then
   check "O4 the app whose link answers has no problem" grep -q "^  web  running  http://127.0.0.1:$PORT/" "$T/once"
 else echo "SKIP menubar O4 no python3 for a local web server"; fi
@@ -149,14 +149,14 @@ mkdir -p "$TANDO_CONFIG_DIR/cache"
 printf '{"hosts":[{"host":"cachehost","apps":[{"app":"cachedapp","state":"running","link":null}],"alerts":[]}],"source":"tando-dash"}\n' > "$TANDO_CONFIG_DIR/cache/ls-all.json"
 c1=$(PATH=$T/bin:/usr/bin:/bin "$BIN" --once --interval 60 --tando "$R/bin/tando" 2>&1)
 check "C1 a fresh ls-all.json is used instead of tando ls: source cache, its host and app listed" \
-  eval 'printf "%s" "$c1" | grep -qx "source: cache" && printf "%s" "$c1" | grep -q "^host cachehost$" && printf "%s" "$c1" | grep -q "^  cachedapp  running" && ! printf "%s" "$c1" | grep -q "^host vps$"'
+  eval 'printf "%s" "$c1" | grep -qx "source: cache" && printf "%s" "$c1" | grep -q "^host cachehost$" && printf "%s" "$c1" | grep -q "^  cachedapp  running" && ! printf "%s" "$c1" | grep -Eq "^host vps( |$)"'
 touch -t 202001010000 "$TANDO_CONFIG_DIR/cache/ls-all.json"
 c2=$(PATH=$T/bin:/usr/bin:/bin "$BIN" --once --interval 60 --tando "$R/bin/tando" 2>&1)
 check "C2 an old ls-all.json is not used: tando ls runs (source tando, host vps)" \
-  eval 'printf "%s" "$c2" | grep -qx "source: tando" && printf "%s" "$c2" | grep -q "^host vps$"'
+  eval 'printf "%s" "$c2" | grep -qx "source: tando" && printf "%s" "$c2" | grep -Eq "^host vps( |$)"'
 printf 'not json' > "$TANDO_CONFIG_DIR/cache/ls-all.json"
 c3=$(PATH=$T/bin:/usr/bin:/bin "$BIN" --once --interval 60 --tando "$R/bin/tando" 2>&1)
-check "C3 a fresh but broken ls-all.json falls back to tando ls" eval 'printf "%s" "$c3" | grep -q "^host vps$"'
+check "C3 a fresh but broken ls-all.json falls back to tando ls" eval 'printf "%s" "$c3" | grep -Eq "^host vps( |$)"'
 rm -f "$TANDO_CONFIG_DIR/cache/ls-all.json"
 
 # ---- Open dashboard without the window (--dash-url) ------------------------------------------------

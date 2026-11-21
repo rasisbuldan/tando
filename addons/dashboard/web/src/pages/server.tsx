@@ -8,10 +8,11 @@ import { Card } from "@/components/ui/card";
 import { RangeTabs } from "@/components/ui/tabs";
 import { ChartCard, prefetchCharts } from "@/components/chart-card";
 import { Tip } from "@/components/ui/tooltip";
-import { Command, Mono, MetricCard } from "@/components/bits";
+import { Command, Mono, MetricCard, SshTarget } from "@/components/bits";
+import { HostActions, ProgressPanel } from "@/components/actions";
 import { Empty, Freshness, Loading, PageHeader, Section, SectionError } from "@/components/panel";
 import { refreshAll, snapshotPoller, useDemand, useNowMs, usePoller } from "@/lib/resources";
-import { appRows, chartDomain, cpuMax, describe, headroom, hostPoints, lastValue, loadMax, memoryTicks, niceMax, RANGE_S, roundTicks, skewNote, type RangeKey } from "@/lib/shape";
+import { appRows, chartDomain, cpuMax, describe, headroom, hostPoints, lastValue, loadMax, memoryTicks, niceMax, RANGE_S, roundTicks, skewNote, sshTarget, type RangeKey } from "@/lib/shape";
 import { DASH, fmtBytes, fmtDur, fmtLoad, fmtPct, fmtTime, pctOf } from "@/lib/format";
 import type { DoctorResult, HostMetrics, HostStatus, Snapshot } from "@/lib/types";
 
@@ -91,9 +92,10 @@ export default function ServerPage() {
       <PageHeader
         title={<Mono className="text-xl font-semibold">{host}</Mono>}
         badge={v ? (v.reachable ? <Badge kind="ok">reachable</Badge> : <Badge kind="fail">not answering</Badge>) : undefined}
-        meta={d ? <>tando {d.server_version ?? DASH} · {skew ?? "clock ok"}{s?.uptime_s ? ` · up ${fmtDur(s.uptime_s)}` : ""}</> : undefined}
-        actions={runDoctor}
+        meta={d ? <><SshTarget target={sshTarget(d)} className="mr-2 align-middle" />tando {d.server_version ?? DASH} · {skew ?? "clock ok"}{s?.uptime_s ? ` · up ${fmtDur(s.uptime_s)}` : ""}</> : undefined}
+        actions={<><HostActions host={host} />{runDoctor}</>}
       />
+      <ProgressPanel host={host} app="" />
       <Freshness st={st} />
       {!v && st.error && <SectionError message={st.error.message} onRetry={refreshAll} />}
       {!v && !st.error && <Loading h="h-96" />}

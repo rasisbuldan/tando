@@ -281,10 +281,12 @@ func (s *Server) writeLsAll(hosts []hostOut) {
 		Link  *string `json:"link"`
 	}
 	type row struct {
-		Host   string            `json:"host"`
-		Apps   []app             `json:"apps"`
-		Alerts []json.RawMessage `json:"alerts"`
-		Error  *string           `json:"error,omitempty"`
+		Host    string            `json:"host"`
+		Address *string           `json:"address"` // the registered ssh target (newer tando); null when not known
+		User    *string           `json:"user"`
+		Apps    []app             `json:"apps"`
+		Alerts  []json.RawMessage `json:"alerts"`
+		Error   *string           `json:"error,omitempty"`
 	}
 	rows := make([]row, 0, len(hosts))
 	for _, h := range hosts {
@@ -296,14 +298,17 @@ func (s *Server) writeLsAll(hosts []hostOut) {
 			continue
 		}
 		var snap struct {
-			Apps   []map[string]any  `json:"apps"`
-			Alerts []json.RawMessage `json:"alerts"`
-			Status *struct {
+			Address *string           `json:"address"`
+			User    *string           `json:"user"`
+			Apps    []map[string]any  `json:"apps"`
+			Alerts  []json.RawMessage `json:"alerts"`
+			Status  *struct {
 				Apps   []map[string]any  `json:"apps"`
 				Alerts []json.RawMessage `json:"alerts"`
 			} `json:"status"`
 		}
 		_ = json.Unmarshal(h.Data, &snap)
+		rw.Address, rw.User = snap.Address, snap.User
 		apps, alerts := snap.Apps, snap.Alerts
 		if snap.Status != nil {
 			if apps == nil {

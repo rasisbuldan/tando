@@ -138,7 +138,7 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 	s.lastUse.Store(cfg.Now().UnixNano())
 	// writes that ran when tando-dash stopped: their app stays taken until tando says how they ended
 	for _, r := range s.idem.reattach {
-		k := r.Host + "/" + r.App
+		k := writeLockKey(r.Host, r.App)
 		if _, ok := s.writes.tryLock(k, r.Action, r.Key, r.Started); ok {
 			s.wg.Add(1)
 			go s.reattach(r, k)

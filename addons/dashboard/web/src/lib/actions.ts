@@ -9,8 +9,8 @@
 import { sessionStore } from "./api";
 import { backoffMs } from "./poller";
 
-export type ActionName = "deploy" | "rollback" | "stop" | "start" | "restart" | "env-set";
-export interface ActionParams { release?: string; key?: string }
+export type ActionName = "deploy" | "rollback" | "stop" | "start" | "restart" | "env-set" | "host-rename";
+export interface ActionParams { release?: string; key?: string; newHost?: string }
 export interface Running { action: string; since: string; key: string }
 export interface HistEntry { at: number; release: string; kind: string; result: string; total_s?: number; note?: string }
 export interface Outcome { checked_at: string; state?: string; release?: string; history?: HistEntry; verdict: "ok" | "failed" | "unknown"; summary: string }
@@ -166,6 +166,7 @@ export class Actions {
     const body: Record<string, unknown> = { action: d0.action, host, app, confirm: conf ?? "" };
     if (d0.action === "rollback" && params.release) body.params = { release: params.release };
     if (d0.action === "env-set") body.params = { key: params.key ?? "", value: value ?? "" };
+    if (d0.action === "host-rename") body.params = { new_host: params.newHost ?? "" };
     let r: { status: number; body: Record<string, unknown> | null };
     try {
       r = await this.post("/api/action", body, { "Idempotency-Key": key });
@@ -330,9 +331,9 @@ export async function readSse(body: ReadableStream<Uint8Array>, on: (e: SseEvent
 }
 
 // ---- copy (DESIGN sections 7 and 9) ----
-const VERB: Record<string, string> = { deploy: "Deploy", rollback: "Roll back", restart: "Restart", stop: "Stop", start: "Start", "env-set": "Set variable" };
-const NOUN: Record<string, string> = { deploy: "deploy", rollback: "rollback", restart: "restart", stop: "stop", start: "start", "env-set": "variable change" };
-const ING: Record<string, string> = { deploy: "Deploying", rollback: "Rolling back", restart: "Restarting", stop: "Stopping", start: "Starting", "env-set": "Setting a variable of" };
+const VERB: Record<string, string> = { deploy: "Deploy", rollback: "Roll back", restart: "Restart", stop: "Stop", start: "Start", "env-set": "Set variable", "host-rename": "Rename" };
+const NOUN: Record<string, string> = { deploy: "deploy", rollback: "rollback", restart: "restart", stop: "stop", start: "start", "env-set": "variable change", "host-rename": "rename" };
+const ING: Record<string, string> = { deploy: "Deploying", rollback: "Rolling back", restart: "Restarting", stop: "Stopping", start: "Starting", "env-set": "Setting a variable of", "host-rename": "Renaming" };
 export const actionVerb = (a: string) => VERB[a] ?? a;
 export const actionNoun = (a: string) => NOUN[a] ?? a;
 
@@ -361,9 +362,10 @@ export function conflictLine(app: string, r: Running, nowMs: number): string {
 }
 
 /** the panel's header while running: "Deploying shop · started 14:02 GMT · 32 s" */
-export function runningLine(o: Pick<OpState, "action" | "app" | "startedAt">, nowMs: number, ended = false): string {
+export function runningLine(o: Pick<OpState, "action" | "app" | "startedAt"> & { host?: string }, nowMs: number, ended = false): string {
   const s = toS(o.startedAt);
-  const what = ended ? `${actionVerb(o.action).replace(/^Set variable$/, "Variable change")} of ${o.app}`.replace(/^Roll back of/, "Rollback of") : `${ING[o.action] ?? o.action} ${o.app}`;
+  const subj = o.app || o.host || ""; // (a host-wide write has no app)
+  const what = ended ? `${actionVerb(o.action).replace(/^Set variable$/, "Variable change")} of ${subj}`.replace(/^Roll back of/, "Rollback of") : `${ING[o.action] ?? o.action} ${subj}`;
   return `${what} · started ${gmt(o.startedAt)}${s != null ? ` · ${dur(Math.max(0, Math.round(nowMs / 1000 - s)))}` : ""}`;
 }
 
@@ -383,6 +385,7 @@ export function endView(rec: ActionRecord, varName: string | null = null): EndVi
       : a === "stop" ? `Stopped ${app}${inT}.`
       : a === "start" ? `Started ${app}${inT}.`
       : a === "env-set" ? `Set ${varName ?? "the variable"} on ${app}${inT}.`
+      : a === "host-rename" ? `Renamed ${rec.host}${inT}.`
       : `Done${inT}.`;
     return { kind: "ok", badge: "done", line, next: null, showLog: false };
   }
@@ -394,12 +397,13 @@ export function endView(rec: ActionRecord, varName: string | null = null): EndVi
     const next = a === "deploy" || a === "rollback"
       ? (o?.release ? `The live release is ${o.release}. See the log, fix, then try again.` : "See the log, fix, then try again.")
       : a === "env-set" ? `Nothing was changed if ${app} did not restart healthy. tando env log ${app} shows it.`
+      : a === "host-rename" ? "Nothing was renamed. tando host ls shows the names."
       : "See the log, then try again.";
     return { kind: "fail", badge: "failed", line: `${actionVerb(a)} failed: ${msg}.`, next, showLog: true };
   }
   if (rec.status === "unknown") {
     return { kind: "stale", badge: "unknown", line: `Not known how the ${actionNoun(a)} ended: ${oneLine(rec.message || o?.summary || "the server did not say")}.`,
-      next: `Check with tando status ${app} -H ${rec.host}.`, showLog: false };
+      next: a === "host-rename" ? "Check with tando host ls." : `Check with tando status ${app} -H ${rec.host}.`, showLog: false };
   }
   return { kind: "stale", badge: "running", line: "", next: null, showLog: false };
 }
@@ -423,6 +427,14 @@ export function envKeyError(k: string): string | null {
   if (k === "") return "Enter a name.";
   return ENV_KEY_RE.test(k) ? null : "Letters, digits and _, not starting with a digit; 128 at most.";
 }
+/** a host name by tando-dash's rule (allow.go ValidHost): letters, digits, . _ -; 1-64; no leading - or .; no ".." */
+export const HOST_RE = /^(?![-.])(?!.*\.\.)[A-Za-z0-9._-]{1,64}$/;
+export function hostNameError(n: string, current: string): string | null {
+  if (n === "") return "Enter a name.";
+  if (!HOST_RE.test(n)) return "Letters, digits, . _ and -, not starting with - or .; 64 at most.";
+  if (n === current) return `${current} is already called that.`;
+  return null;
+}
 /** one line of text, 32 KB at most (tando-dash refuses the rest before anything runs) */
 export function envValueError(v: string): string | null {
   // eslint-disable-next-line no-control-regex
@@ -437,6 +449,7 @@ export function commandFor(action: ActionName, host: string, app: string, p: Act
     case "deploy": return `tando deploy -a ${app} -H ${host}`;
     case "rollback": return `tando rollback ${app}${p.release ? ` ${p.release}` : ""} -H ${host}`;
     case "env-set": return `tando env set ${p.key || "KEY"} -a ${app} -H ${host}`;
+    case "host-rename": return `tando host rename ${host} ${p.newHost || "NEW-NAME"}`;
     default: return `tando ${action} ${app} -H ${host}`;
   }
 }
@@ -457,6 +470,7 @@ export function dialogCopy(action: ActionName, host: string, app: string, p: Act
     case "stop": return { title: `Stop ${app} on ${host}?`, body: "Visitors get 503 until you start it. Jobs and workers stop too. Nothing is removed.", button: "Stop", destructive: true };
     case "start": return { title: `Start ${app} on ${host}?`, body: `${app} starts on its live release${p.live ? ` ${p.live}` : ""}, with its jobs and workers.`, button: "Start", destructive: false };
     case "env-set": return { title: `Set a variable of ${app} on ${host}?`, body: `${app} restarts once with the new value. If it does not come up healthy, nothing changes.`, button: "Set variable", destructive: false };
+    case "host-rename": return { title: `Rename ${host}?`, body: `Only the name tando uses on this machine changes; nothing on the server does. A tando.conf or script that says ${host} keeps working through an alias.`, button: "Rename", destructive: false };
   }
 }
 

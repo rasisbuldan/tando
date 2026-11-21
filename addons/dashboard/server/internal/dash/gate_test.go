@@ -28,6 +28,7 @@ func TestAllowlist(t *testing.T) {
 		{"rollback", "shop", "-H", "web-1"},
 		{"rollback", "shop", "20261113-171442", "-H", "web-1"},
 		{"env", "set", "STRIPE_KEY", "-a", "shop", "-H", "web-1"},
+		{"host", "rename", "web-1", "web.2"},
 		argvSnapshot("a", "web", "24h"), argvDoctor("a"), argvHostStatus("a"),
 	}
 	for _, a := range ok {
@@ -63,6 +64,12 @@ func TestAllowlist(t *testing.T) {
 		{"doctor", "a", "b", "--json"},
 		{"doctor", "-x", "--json"},
 		{"host", "rm", "a"},
+		{"host", "rename", "a"},
+		{"host", "rename", "a", "../x"},
+		{"host", "rename", "a", "-b"},
+		{"host", "rename", "a", "b", "--force"},
+		{"host", "rename", "--drop-alias", "a"},
+		{"host", "rename", "a", "b", "c"},
 		{"restart", "shop"},
 		{"restart", "shop", "-H", "a", "--all"},
 		{"deploy"},

@@ -4,9 +4,9 @@ import { RefreshCw } from "lucide-react";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
-import { Mono } from "./bits";
+import { Mono, SshTarget } from "./bits";
 import { fmtBytes, fmtLoad, fmtPct, fmtTime, pctOf } from "@/lib/format";
-import { headroom, skewNote } from "@/lib/shape";
+import { headroom, skewNote, sshTarget } from "@/lib/shape";
 import type { HostView } from "@/lib/types";
 import { refreshAll } from "@/lib/resources";
 
@@ -19,7 +19,10 @@ export const HostCard = memo(function HostCard({ h }: { h: HostView }) {
   return (
     <Card className="min-h-[148px]">
       <div className="mb-2 flex items-center justify-between gap-2">
-        <Link to={`/s/${encodeURIComponent(h.host)}`} className="inset-focus"><Mono className="text-[15px] font-semibold">{h.host}</Mono></Link>
+        <span className="flex min-w-0 items-center gap-2">
+          <Link to={`/s/${encodeURIComponent(h.host)}`} className="inset-focus shrink-0"><Mono className="text-[15px] font-semibold">{h.host}</Mono></Link>
+          <SshTarget target={sshTarget(d)} />
+        </span>
         {h.reachable ? <Badge kind="ok">reachable</Badge> : <Badge kind="fail">not answering</Badge>}
       </div>
       {!h.reachable && (

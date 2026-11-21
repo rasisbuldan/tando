@@ -13,6 +13,14 @@ struct HostRow: Decodable {
     let apps: [AppRow]?
     let alerts: [AlertRow]?   // since tando 0.2.2; an older client leaves it out
     let error: String?
+    var address: String? = nil   // the registered ssh address and user (newer tando); left out by older ones
+    var user: String? = nil
+    /// user@address as registered, nil when the client does not say
+    var target: String? {
+        guard let a = address, !a.isEmpty else { return nil }
+        if let u = user, !u.isEmpty { return "\(u)@\(a)" }
+        return a
+    }
 }
 struct AppRow: Decodable {
     let app: String
@@ -46,6 +54,7 @@ struct HostView: Equatable {
     let name: String
     let error: String?    // set: the laptop could not reach it over ssh
     let apps: [AppView]
+    var target: String? = nil   // user@address, as registered
 }
 struct Note: Equatable { let title: String; let body: String }
 
@@ -114,7 +123,7 @@ final class Monitor {
                     carried.insert(k)
                 }
                 for k in linkFails.keys where k.hasPrefix("\(h.host)/") { seenLinks.insert(k) }  // keep counts
-                snap.hosts.append(HostView(name: h.host, error: err, apps: []))
+                snap.hosts.append(HostView(name: h.host, error: err, apps: [], target: h.target))
                 continue
             }
             hostFails[h.host] = nil
@@ -154,7 +163,7 @@ final class Monitor {
                 snap.firing.append(line)
                 issues.append(Issue(key: "alert:\(h.host)/\(app)/\(check)", subject: subject, text: line))
             }
-            snap.hosts.append(HostView(name: h.host, error: nil, apps: apps))
+            snap.hosts.append(HostView(name: h.host, error: nil, apps: apps, target: h.target))
         }
         // forget the counts of apps that are gone or no longer probed
         for k in linkFails.keys where !seenLinks.contains(k) { linkFails[k] = nil }
@@ -205,8 +214,9 @@ func describe(_ s: Snapshot) -> String {
     case .grey: out.append("badge: grey (\(s.grey ?? ""))")
     }
     for h in s.hosts {
-        if let e = h.error { out.append("host \(h.name): unreachable (\(e))"); continue }
-        out.append("host \(h.name)")
+        let t = h.target.map { "  \($0)" } ?? ""
+        if let e = h.error { out.append("host \(h.name)\(t): unreachable (\(e))"); continue }
+        out.append("host \(h.name)\(t)")
         for a in h.apps {
             out.append("  \(a.name)  \(a.state)\(a.problem.map { "  PROBLEM: \($0)" } ?? "")  \(a.link ?? "-")")
         }

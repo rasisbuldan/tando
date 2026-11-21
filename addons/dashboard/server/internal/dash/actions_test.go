@@ -80,6 +80,10 @@ func fakeWrite(dir, host, mode string, args []string) (int, bool) {
 		app = fakeFlag(args, "-a")
 	case "rollback", "stop", "start", "restart":
 		app = args[1]
+	case "host": // host rename <old> <new>, run in the config dir: moves hosts/<old> as the CLI does
+		if len(args) != 4 || args[1] != "rename" {
+			return 0, false
+		}
 	default:
 		return 0, false
 	}
@@ -103,6 +107,14 @@ func fakeWrite(dir, host, mode string, args []string) (int, bool) {
 		return 1, true
 	}
 	switch verb {
+	case "host":
+		if err := os.Rename(filepath.Join("hosts", args[2]), filepath.Join("hosts", args[3])); err != nil {
+			fmt.Fprintln(os.Stderr, "tando: no host named "+args[2]+" (tando host ls)")
+			return 1, true
+		}
+		os.MkdirAll("renamed", 0o700)
+		os.WriteFile(filepath.Join("renamed", args[2]), []byte("alias="+args[3]+"\n"), 0o600)
+		fmt.Println("renamed host " + args[2] + " to " + args[3])
 	case "deploy":
 		if _, err := os.Stat("tando.conf"); err != nil {
 			fmt.Fprintln(os.Stderr, "tando: no tando.conf here")
@@ -752,5 +764,102 @@ func TestReattach(t *testing.T) {
 	sleeper.Wait()
 	if m = e.waitEnd("reat-key-rstrt1"); m["status"] != "done" || outcomeOf(m)["state"] != "running" {
 		t.Fatalf("restart: %v", m)
+	}
+}
+
+// host-rename: `host rename <old> <new>` in the config dir, no app; refused for a name that is
+// taken or bad, and while another write runs on the host (and the other way round)
+func TestHostRename(t *testing.T) {
+	e := actEnv(t)
+	rename := func(key, host, newHost string) (int, map[string]any) {
+		e.t.Helper()
+		return e.write(key, "host-rename", host, "", map[string]string{"new_host": newHost})
+	}
+	if st, m := rename("ren-key-0001", "a", "vps-2"); st != 202 {
+		t.Fatal(st, m)
+	}
+	if m := e.waitEnd("ren-key-0001"); m["status"] != "done" {
+		t.Fatal(m)
+	}
+	w := e.writes()
+	if len(w) != 1 || w[0] != "host rename a vps-2 |from=dashboard |cwd="+e.dir {
+		t.Fatalf("writes %v", w)
+	}
+	if !e.srv.knownHost("vps-2") || e.srv.knownHost("a") {
+		t.Fatal("hosts not re-read", e.srv.Hosts())
+	}
+	// refused before anything runs: a taken name, a bad one, the same one, an app, params elsewhere
+	if st, m := rename("ren-key-0002", "b", "c"); st != 409 || errCode(m) != "host_exists" {
+		t.Fatal(st, m)
+	}
+	for i, n := range []string{"../x", "-b", "a b", "", "b"} {
+		st, m := e.post("/api/action", map[string]any{"action": "host-rename", "host": "b", "app": "", "confirm": "x",
+			"params": map[string]string{"new_host": n}}, hdr("Idempotency-Key", fmt.Sprintf("ren-key-bad%d", i)))
+		if st != 400 {
+			t.Fatalf("%q: %d %v", n, st, m)
+		}
+	}
+	if st, _ := e.post("/api/confirm", map[string]string{"action": "host-rename", "host": "b", "app": "web"}); st != 400 {
+		t.Fatal("host-rename with an app got a token")
+	}
+	if st, _ := e.post("/api/confirm", map[string]string{"action": "restart", "host": "b", "app": ""}); st != 400 {
+		t.Fatal("restart without an app got a token")
+	}
+	e.fakeApp("b", "web", "running")
+	if st, m := e.write("ren-key-0003", "restart", "b", "web", map[string]string{"new_host": "z"}); st != 400 {
+		t.Fatal(st, m)
+	}
+	// the host lock: a rename waits for the host's writes, a write waits for the rename
+	e.fakeApp("slow1", "web", "running")
+	if st, _ := e.write("ren-key-0004", "restart", "slow1", "web", nil); st != 202 {
+		t.Fatal(st)
+	}
+	if st, m := rename("ren-key-0005", "slow1", "slow2"); st != 409 || errCode(m) != "running" {
+		t.Fatal(st, m)
+	}
+	e.waitEnd("ren-key-0004")
+	if st, m := rename("ren-key-0006", "slow1", "slow2"); st != 202 {
+		t.Fatal(st, m)
+	}
+	if st, m := e.write("ren-key-0007", "restart", "slow1", "web", nil); st != 409 || errCode(m) != "running" {
+		t.Fatal(st, m)
+	}
+	if m := e.waitEnd("ren-key-0006"); m["status"] != "done" || !e.srv.knownHost("slow2") {
+		t.Fatal(m)
+	}
+	// the CLI refusing: failed, with its line
+	if st, _ := rename("ren-key-0008", "flop1", "flop2"); st != 202 {
+		t.Fatal(st)
+	}
+	if m := e.waitEnd("ren-key-0008"); m["status"] != "failed" || !strings.Contains(fmt.Sprint(m["message"]), "failed") {
+		t.Fatal(m)
+	}
+}
+
+// a tando.conf that names a host's old name: deploy follows the alias tando host rename left
+func TestDeployFolderAlias(t *testing.T) {
+	e := actEnv(t)
+	e.fakeApp("a", "web", "running")
+	e.project("a", "web", "app = web\nhost = old-a\n")
+	st, m := e.write("alias-key-001", "deploy", "a", "web", nil)
+	if st != 422 || errCode(m) != "deploy_folder" {
+		t.Fatal("no alias:", st, m)
+	}
+	os.MkdirAll(filepath.Join(e.dir, "renamed"), 0o700)
+	os.WriteFile(filepath.Join(e.dir, "renamed", "old-a"), []byte("alias=b\n"), 0o600)
+	if st, m := e.write("alias-key-002", "deploy", "a", "web", nil); st != 422 {
+		t.Fatal("alias of another host:", st, m)
+	}
+	os.WriteFile(filepath.Join(e.dir, "renamed", "old-a"), []byte("alias=a\n"), 0o600)
+	if st, m := e.write("alias-key-003", "deploy", "a", "web", nil); st != 202 {
+		t.Fatal(st, m)
+	}
+	if m := e.waitEnd("alias-key-003"); m["status"] != "done" {
+		t.Fatal(m)
+	}
+	// a host file of the old name wins over the alias (the CLI deploys there)
+	os.WriteFile(filepath.Join(e.dir, "hosts", "old-a"), []byte("x"), 0o600)
+	if st, m := e.write("alias-key-004", "deploy", "a", "web", nil); st != 422 {
+		t.Fatal("old name is a host again:", st, m)
 	}
 }
