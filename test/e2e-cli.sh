@@ -164,8 +164,7 @@ out=$(cd "$E/w/twohosts" && "$R" up -H vps2 < /dev/null 2>&1)
 check "9h up -H vps2 writes host = vps2 into tando.conf" grep -q '^host = vps2$' "$E/w/twohosts/tando.conf"
 out=$("$R" ls --all --json 2>/dev/null)
 check "9i ls --all --json: one JSON object, an unreachable server as an error" \
-  eval 'printf "%s" "$out" | grep -q "^{\"hosts\":\[{\"host\":\"vps\",\"error\":\"" &&
-        printf "%s" "$out" | python3 -c "import json,sys; json.load(sys.stdin)"'
+  eval 'printf "%s" "$out" | python3 -c "import json,sys; h=json.load(sys.stdin)[\"hosts\"][0]; sys.exit(0 if h[\"host\"] == \"vps\" and isinstance(h.get(\"error\"), str) and h[\"error\"] else 1)"'
 rm -f "$TANDO_CONFIG_DIR/hosts/vps2"
 # domain add --wait polls DNS (it was dropped by the global flag parser, so the wizard's
 # `tando go --dns wait` stopped at once); a server that answers `info` only, a domain elsewhere
