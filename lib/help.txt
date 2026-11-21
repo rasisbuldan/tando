@@ -191,9 +191,9 @@ and history; start, stop, restart and rollback from the keyboard (not with
 --read-only). --watch N refreshes every N seconds (default 2). q quits.
 
 @@ env
-flags: -a= -H= --show --note= --json
+flags: -a= -H= --show --names --note= --json
 subs: ls=0-1 set=1+ unset=1+ import=0-1 log=0-1 default=ls
-usage: tando env ls [app] [--show]
+usage: tando env ls [app] [--show | --names] [--json]
 usage: tando env set KEY=VALUE ... [--note "text"]
 usage: tando env set KEY [--note "text"]
 usage: tando env unset KEY ... [--note "text"]
@@ -203,7 +203,8 @@ The app's environment variables, stored on the server (root, 640), never in
 the release or in git. set and unset restart the app once; set KEY alone reads
 the value from the terminal without echo (or from stdin). import sets every
 KEY=VALUE line of a file (.env by default); ls lists the keys (values hidden;
---show prints them).
+--show prints them); ls --names (and ls --json, always) reads the names only:
+no value leaves the server.
 log is the changelog of the env: every set, unset and import adds one entry
 (when, who, the note, and the key names added, changed and removed; never a
 value, a length or a hash). --note "text" (one line, 200 characters) says why;

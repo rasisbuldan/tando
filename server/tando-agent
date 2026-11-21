@@ -110,7 +110,7 @@ now() { printf '%(%s)T' -1; }
 # refused when that fails, except the recovery verbs, which must run to bring the apps back.
 if [[ -e $R/bin/.install.pending ]]; then
   case ${1:-} in
-    status|deploy-status|releases|history|busy|info|jobs|domain-ls|domain-check|env-ls|env-log|logs|log-stats|\
+    status|deploy-status|releases|history|busy|info|jobs|domain-ls|domain-check|env-ls|env-names|env-log|logs|log-stats|\
     log-doctor|req-summary|req-tail|req-errors|audit-read|errors|doctor|"")
       [[ ${1:-} == doctor ]] ||
         echo "tando-agent: warning: an install on <host> was cut off between files, so some programs may be old and some new: tando host setup <host> finishes or undoes it" >&2;;
@@ -5395,6 +5395,22 @@ env_staged() {
   echo changed=1; echo staged=1; echo restarted=0; echo why=not-created; echo healthy=1
 }
 
+# env-names <app>: the NAMES of the app's environment variables, one `env <KEY>` row each, sorted;
+# never a value, so it is not audited as a reveal (env-ls is) and a dashboard can list them without
+# ever holding a secret. Only the key part of each line is read; values are not even parsed.
+cmd_env_names() {
+  need_root
+  valid_app "${1:-}" || die "invalid app name"
+  local f line k
+  if [[ ! -e $R/apps/$1 && -f $R/staged/$1/env ]]; then f=$R/staged/$1/env
+  else app "$1"; f=$D/env; fi
+  [[ -f $f ]] || return 0
+  while IFS= read -r line; do
+    k=${line%%=*}
+    [[ $k =~ ^[A-Za-z_][A-Za-z0-9_]*$ && $line == *=* ]] && echo "env	$k"
+  done < "$f" | sort -u
+}
+
 # env_edit op: apply stdin to E (set/unset), or list E (ls); returns 1 when there is nothing to save
 env_edit() {
   local line k
@@ -6351,6 +6367,7 @@ case $verb in
   env-set) cmd_env set "$@";;
   env-unset) cmd_env unset "$@";;
   env-ls) cmd_env ls "$@";;
+  env-names) cmd_env_names "$@";;
   env-log) cmd_env_log "$@";;
   start|stop|restart) cmd_svc "$verb" "$@";;
   logs|log-stats|log-doctor|req-summary|req-tail|req-errors|audit-read|errors)

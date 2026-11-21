@@ -785,7 +785,25 @@ cmd_jobs() {
 
 cmd_env_ls() {
   resolve 1
-  local r k v
+  local r k v a names=""
+  for a in ${ARGS[@]+"${ARGS[@]}"}; do [ "$a" = --names ] && names=1; done
+  # --names, and always with --json: the names only, read by the agent's env-names (no value ever
+  # leaves the server, and it is not audited as a reveal, as env-ls is)
+  if [ -n "$names$JSON" ]; then
+    [ -z "$SHOW" ] || usage_err "--show prints values; --names and --json list names only" env
+    agent_raw sudo env-names "$APP" > "$TMPD/st" || exit 1
+    if [ -n "$JSON" ]; then
+      printf '{"host":%s,"app":%s,"names":' "$(json_str "$HOST")" "$(json_str "$APP")"
+      awk -F '\t' '$1 == "env" && $2 ~ /^[A-Za-z_][A-Za-z0-9_]*$/ { printf "%s\"%s\"", (n++ ? "," : "["), $2 } END { printf (n ? "]" : "[]") }' "$TMPD/st"
+      printf '}\n'; return 0
+    fi
+    ui_box_open "env $APP" "$HOST"
+    if grep -q "^env$TAB" "$TMPD/st"; then
+      { printf 'KEY\n'; awk -F '\t' '$1 == "env" { print $2 }' "$TMPD/st"; } | ui_table "l"
+    else ui_box_line "No variables yet: tando env set KEY=VALUE (or tando env import .env)"; fi
+    ui_box_close "names only: tando env ls shows them with their values hidden"
+    return 0
+  fi
   agent_raw sudo env-ls "$APP" > "$TMPD/st" || exit 1
   {
     printf 'KEY\tVALUE\n'
