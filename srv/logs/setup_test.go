@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -266,5 +267,36 @@ func TestSetupTrimsAJournalOverItsCap(t *testing.T) {
 	setup()
 	if got := h.stderr.String(); got != "warning=could not trim the journal of big to 4M: Failed to vacuum: Permission denied\n" {
 		t.Fatalf("stderr %q", got)
+	}
+}
+
+// TestLogBudget: the default journal cap is the app's share of log_budget (four fifths of
+// budget / apps) when that is below 256M and 5% of the disk; its request log default a quarter
+// of it. The doctor compares the caps with the budget.
+func TestLogBudget(t *testing.T) {
+	h := newHost(t)
+	tot, _, err := diskKB(h.l.P.VarLog)
+	if err != nil || tot*fairPct/100/1024 < 64 {
+		t.Skip("the test's file system is too small for a 5% share above 64M")
+	}
+	for i := range 10 {
+		h.app("a"+strconv.Itoa(i), "recipe=node")
+		h.write("etc/systemd/journald@tando-a"+strconv.Itoa(i)+".conf", "x")
+	}
+	h.write("opt/logs.conf", "log_budget=500M\n")
+	a, _ := h.l.app("a0")
+	if v := a.setting("log_max"); v != "40M" { // 500 * 4/5 / 10
+		t.Errorf("log_max %s, want 40M", v)
+	}
+	if v := a.setting("request_log_max"); sizeBytes(v) > 10<<20 {
+		t.Errorf("request_log_max %s, want at most 10M", v)
+	}
+	if !Valid("log_budget", "8G") || !Valid("log_budget", "auto") || Valid("log_budget", "1M") {
+		t.Error("Valid log_budget")
+	}
+	h.app("a0", "recipe=node", "log_max=1G")
+	o, _ := h.rows(func(w *out.Writer) error { h.l.LogDoctor(context.Background(), w); return nil })
+	if !strings.Contains(o, "over log_budget 500 MB") {
+		t.Errorf("doctor: %s", o)
 	}
 }

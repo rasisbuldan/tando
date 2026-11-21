@@ -101,7 +101,9 @@ func TestLogDoctor(t *testing.T) {
 		return "Archived and active journals take up 24.0M in the file system.\n", nil
 	}
 	o, _ := h.rows(func(w *out.Writer) error { h.l.LogDoctor(ctx(), w); return nil })
-	if !strings.HasPrefix(o, "check\twarn\tmain journal\tno tando cap: run tando host setup\ncheck\twarn\tapp logs\tno log cap yet for: bb (tando up applies it)\ncheck\tok\tlog caps\t24 MB of app log caps (0 MB used), ") {
+	// (the log budget row between them: its size is the test file system's)
+	if !strings.HasPrefix(o, "check\twarn\tmain journal\tno tando cap: run tando host setup\ncheck\twarn\tapp logs\tno log cap yet for: bb (tando up applies it)\ncheck\tok\tlog budget\t24 MB of ") ||
+		!strings.Contains(o, " MB (log_budget) for 2 apps\ncheck\tok\tlog caps\t24 MB of app log caps (0 MB used), ") {
 		t.Fatalf("%q", o)
 	}
 	h.write("etc/systemd/journald.conf.d/tando.conf", "x")

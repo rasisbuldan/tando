@@ -163,7 +163,7 @@ cmd_host() {
           postgres_version=[1-9]|postgres_version=[1-9][0-9]) feats="$feats postgres";;
           swap=yes|swap=no|ufw=yes|ufw=no) ;;
           domain_tls=auto|domain_tls=internal|domain_tls=off) ;;
-          journal_max=*|log_max=*|log_keep=*|log_rate=*|access_log=*|access_size=*|access_keep=*) ;;
+          journal_max=*|log_budget=*|log_max=*|log_keep=*|log_rate=*|access_log=*|access_size=*|access_keep=*) ;;
           access_keep_for=*|ci_max_mb=*|ci_max_files=*|ci_max_file_mb=*|app_max_mb=*) ;;
           rate_limit=on|rate_limit=off|rate_limit=auto|conn_limit=*|conn_rate=*) ;;
           request_log_max=*) ;;
