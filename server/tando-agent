@@ -2100,7 +2100,7 @@ host_lock() {
 }
 cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=yes|no] [ufw=no] ...
   need_root
-  local kv a logkv=() swap=auto ufw=yes feats=() got="" before
+  local kv a logkv=() swap=auto ufw=yes feats=() got="" before pgss=0
   mkdir -p "$R/apps"
   host_lock
   load "$R/host.conf" H
@@ -2114,6 +2114,7 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
       unit_drop=*) [[ ${kv#*=} =~ ^[A-Za-z,]*$ ]] || die "bad unit_drop"; H[unit_drop]=${kv#*=};;
       postgres=yes|podman=yes|python=yes|node=yes) feats+=("${kv%=yes}");;
       postgres_version=*) pg_repin "${kv#*=}"; feats+=(postgres);;   # after a manual upgrade (pg_repin)
+      pg_stat_statements=yes) pgss=1;;   # tando host setup --pg-stat-statements (asked first: a restart)
       node=[0-9]*) [[ ${kv#*=} =~ ^[0-9]{2}$ ]] || die "bad node version (a major, like 24)"; feats+=("$kv");;
       swap=yes|swap=no) swap=${kv#*=};;
       ufw=no|ufw=yes) ufw=${kv#*=};;
@@ -2257,6 +2258,12 @@ EOF
   done
 
   [[ ${H[postgres]:-} == yes ]] && pg_host_sync   # the service drop-in, every app's role limits
+  if ((pgss)); then
+    [[ ${H[postgres]:-} == yes ]] || die "pg_stat_statements needs PostgreSQL on this server: tando host setup <host> postgres=yes --pg-stat-statements"
+    step pg_stat_statements run
+    pg_stat_statements_on
+    step pg_stat_statements ok "$RT_DETAIL"
+  fi
   step apps run
   # settings such as tls change every site: re-render them (each reloads Caddy only if it changed)
   local n=0
@@ -4414,6 +4421,34 @@ EOF
     die "could not configure postgresql"
 }
 
+# pg_stat_statements_on: only from tando host setup --pg-stat-statements (the client asks first;
+# never by itself). Preloads the module, which restarts PostgreSQL once (every app's database is
+# away for a few seconds; a later run finds it loaded and restarts nothing), and creates the
+# extension in the postgres database only: tando-watch reads the top statements of every app's
+# database from there (the view covers the whole server), while the apps, which cannot connect to
+# it, do not see each other's statements. track_utility off: statements such as ALTER ROLE ...
+# PASSWORD keep their literals, so they are never recorded. RT_DETAIL says what happened.
+pg_stat_statements_on() {
+  local conf libs want i restart=""
+  conf=/etc/postgresql/${H[postgres_version]}/main/conf.d/tando-pg_stat_statements.conf
+  libs=$(pgsql -c "SHOW shared_preload_libraries") || die "PostgreSQL does not answer: tando doctor <host> says why"
+  libs=${libs// /}
+  [[ $libs =~ ^[A-Za-z0-9_.,\$-]*$ ]] || die "shared_preload_libraries is '$libs': add pg_stat_statements to it by hand"
+  want=$libs
+  [[ ,$libs, == *,pg_stat_statements,* ]] || { want=${libs:+$libs,}pg_stat_statements; restart=1; }
+  printf "# written by tando (host setup --pg-stat-statements)\nshared_preload_libraries = '%s'\npg_stat_statements.track_utility = off\npg_stat_statements.max = 1000\n" "$want" |
+    write_if_changed "$conf" || die "could not write $conf"
+  if [[ -n $restart ]]; then
+    systemctl restart postgresql || die "PostgreSQL did not start again: sudo journalctl -u 'postgresql@*' -n 20 says why"
+    for i in $(seq 30); do pg_isready -q -h 127.0.0.1 && break; sleep 1; done
+  else
+    systemctl reload postgresql 2> /dev/null   # (track_utility and max only need a reload)
+  fi
+  pgsql -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" || die "could not create the extension pg_stat_statements"
+  H[pg_stat_statements]=yes; save "$R/host.conf" H; chmod 644 "$R/host.conf"
+  RT_DETAIL="on${restart:+ (PostgreSQL restarted once)}; top statements in tando snapshot within 2 minutes"
+}
+
 # pg_host_sync (host setup, with PostgreSQL on the host): what an older tando did not set yet: the
 # recorded version, the drop-in, and every app's role limits (db_ensure). A problem here is a
 # warning, never a failed host setup: tando doctor shows the same.
@@ -4983,7 +5018,8 @@ destroy_finish() {
   [[ -x $LOGS ]] && "$LOGS" app-remove "$A" > /dev/null
   [[ -x $R/bin/tando-gate ]] && { $R/bin/tando-gate admin remove "$A" > /dev/null ||
     echo "warning=could not remove the deploy user" >&2; }
-  rm -f "/var/lib/tando/metrics/$A.tsv" "/var/lib/tando/metrics/$A.tsv.1" "/var/lib/tando/metrics/$A.disk" "/var/lib/tando/metrics/$A.disk.1"
+  rm -f "/var/lib/tando/metrics/$A.tsv" "/var/lib/tando/metrics/$A.tsv.1" "/var/lib/tando/metrics/$A.disk" "/var/lib/tando/metrics/$A.disk.1" \
+    "/var/lib/tando/metrics/$A.db" "/var/lib/tando/metrics/$A.db.1" "/var/lib/tando/metrics/$A.dbtop"
   [[ -x $R/bin/tando-watch ]] && "$R/bin/tando-watch" forget "$A" > /dev/null   # its alert state
   # leftovers of the uid outside the app's directory, then the user; its uid is never handed out
   # again. The app's directory goes last: a destroy interrupted before it finds the app again and

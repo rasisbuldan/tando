@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -45,7 +44,8 @@ type fakeHost struct {
 	pg      string   // psql's answer about the connections (the m and r rows); pgErr: it fails with this
 	pgSizes string   // its answer about the sizes (the d rows), given only when asked
 	pgErr   string
-	pgCmds  []run.Cmd // every psql started
+	pgStat  map[string]string // its answer to each other statement (the database's numbers), by SQL
+	pgCmds  []run.Cmd         // every psql started
 }
 
 func (f *fakeHost) setUptime() {
@@ -176,10 +176,20 @@ func (f *fakeHost) cmd(ctx context.Context, c run.Cmd) ([]byte, error) {
 		if f.pgErr != "" {
 			return nil, errors.New(f.pgErr)
 		}
-		if slices.Contains(argv, "--command="+pgSizesSQL) {
-			return []byte(f.pgSizes + f.pg), nil
+		// each statement's rows, in the order given (one that "fails" has none: its error goes to
+		// stderr, and the exit status is the last statement's)
+		var b strings.Builder
+		for _, a := range argv {
+			switch sql, _ := strings.CutPrefix(a, "--command="); sql {
+			case pgSizesSQL:
+				b.WriteString(f.pgSizes)
+			case pgConnsSQL:
+				b.WriteString(f.pg)
+			default:
+				b.WriteString(f.pgStat[sql])
+			}
 		}
-		return []byte(f.pg), nil
+		return []byte(b.String()), nil
 	case "du":
 		return []byte(f.du + "\t" + argv[len(argv)-1] + "\n" + f.du + "\ttotal\n"), nil
 	}

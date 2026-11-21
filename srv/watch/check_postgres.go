@@ -24,8 +24,9 @@ import (
 //	                the server: pg_roles.rolconnlimit) for db_conn_for samples
 //	disk            per app: the size of its database counts as the app's disk use (check_app.go)
 //
-// The sizes (pg_database_size stats every file of a database) are asked every disk_every minutes,
-// the connections every run. The last answer is kept in the volatile state for tando status and
+// The sizes (pg_database_size stats every file of a database) are asked every 5 minutes (or
+// disk_every, when shorter), the connections every run; the database's own numbers too
+// (check_dbstats.go: same psql, before the connections). The last answer is kept in the volatile state for tando status and
 // tando health: pgsz.<app> bytes, pgc.<app> connections, pgl.<app> the role's limit.
 
 const (
@@ -35,7 +36,7 @@ const (
 		`UNION ALL SELECT 'r', r.rolname, r.rolconnlimit::text, '0', ` +
 		`(SELECT count(*) FROM pg_stat_activity a WHERE a.usename = r.rolname) FROM pg_roles r WHERE r.rolname LIKE 'tando\_%'`
 	pgSizesSQL = `SELECT 'd', datname, pg_database_size(oid) FROM pg_database WHERE datname LIKE 'tando\_%'`
-	pgTimeout  = 8 * time.Second
+	pgTimeout  = 10 * time.Second // (8 s before the database's numbers: at most 4 x 500 ms more)
 )
 
 // pgEnv: psql gives up connecting after 3 s and the server ends a statement after 4 s.
@@ -46,6 +47,7 @@ type pgFacts struct {
 	max, reserved, clients int64 // max_connections; kept back for superusers and reserved roles; client sessions now
 	roles                  map[string]pgRole
 	sizes                  map[string]int64 // database -> bytes (only when asked)
+	stats                  pgStats          // the database's numbers (check_dbstats.go)
 }
 
 type pgRole struct{ limit, conns int64 }
@@ -55,7 +57,7 @@ func pgRoleOf(app string) string { return "tando_" + strings.ReplaceAll(app, "-"
 
 // parsePg reads psql's unaligned rows; nil without the server's own row (no answer).
 func parsePg(out []byte) *pgFacts {
-	f := &pgFacts{roles: map[string]pgRole{}, sizes: map[string]int64{}}
+	f := &pgFacts{roles: map[string]pgRole{}, sizes: map[string]int64{}, stats: newPgStats()}
 	up := false
 	for _, l := range bashread.Lines(out) {
 		p := strings.Split(l, "|")
@@ -67,6 +69,8 @@ func parsePg(out []byte) *pgFacts {
 			f.roles[p[1]] = pgRole{limit: num(p[2], -1), conns: num(p[4], 0)}
 		case len(p) == 3 && p[0] == "d" && decimal.IsDigits(p[2]):
 			f.sizes[p[1]] = num(p[2], 0)
+		default:
+			f.stats.row(p)
 		}
 	}
 	if !up {
@@ -92,11 +96,32 @@ func checkPostgres(t *tick) {
 		}
 		return
 	}
-	sizes := t.now-t.vs.n("pgszt", 0) >= t.cfg.num("disk_every", "")*60 || t.now < t.vs.n("pgszt", 0)
-	c := run.Cmd{Argv: []string{"psql", "-X", "-q", "-At", "--command=" + pgConnsSQL}, Env: pgEnv, Timeout: pgTimeout, User: "postgres"}
-	if sizes { // (the connections last: psql's exit status is its last command's)
-		c = run.Cmd{Argv: []string{"psql", "-X", "-q", "-At", "--command=" + pgSizesSQL, "--command=" + pgConnsSQL}, Env: pgEnv, Timeout: pgTimeout, User: "postgres"}
+	// the sizes every 5 minutes (or disk_every, when shorter): the database's size is charted
+	every := min(t.cfg.num("disk_every", ""), 5)
+	sizes := t.now-t.vs.n("pgszt", 0) >= every*60 || t.now < t.vs.n("pgszt", 0)
+	// (the connections last: psql's exit status is its last command's; check_dbstats.go)
+	// ver: the server's version as last seen (0: not known), pgss: pg_stat_statements readable then
+	ver, pgss := t.vs.n("pgver", 0), t.vs.get("pgss") == "1"
+	argv := []string{"psql", "-X", "-q", "-At"}
+	if sizes {
+		argv = append(argv, "--command="+pgSizesSQL)
 	}
+	argv = append(argv, "--command="+pgFastSQL, "--command="+pgVerSQL, "--command="+pgDBSQL)
+	switch {
+	case ver >= 170000:
+		argv = append(argv, "--command="+pgCkpt17SQL)
+	case ver >= 140000:
+		argv = append(argv, "--command="+pgCkpt14SQL)
+	case ver > 0:
+		argv = append(argv, "--command="+pgCkpt10SQL)
+	}
+	if pgss && ver >= 130000 {
+		argv = append(argv, "--command="+pgTop13SQL)
+	} else if pgss && ver > 0 {
+		argv = append(argv, "--command="+pgTop10SQL)
+	}
+	argv = append(argv, "--command="+pgSlowSQL, "--command="+pgConnsSQL)
+	c := run.Cmd{Argv: argv, Env: pgEnv, Timeout: pgTimeout, User: "postgres"}
 	out, err := t.w.Env.Run.Output(t.ctx, c)
 	f := parsePg(out)
 	on := t.cfg.on("postgres", "") && !t.holdAll // (not while the host boots: it starts with the apps)
@@ -114,6 +139,7 @@ func checkPostgres(t *tick) {
 	if sizes {
 		t.vs.set("pgszt", decimal.Itoa(t.now))
 	}
+	writeDBStats(t, f, users, sizes)
 	for _, a := range users {
 		role := pgRoleOf(a)
 		if r, ok := f.roles[role]; ok {

@@ -472,7 +472,19 @@ measured every 15 minutes: docs/TOP.md); null where there was no sample, never
 interpolated; 1h = 60 x 60 s, 24h = 144 x 600 s (the default), 7d = 168 x 3600 s; metrics keep 3.5
 to 7 days), `health` (as `health --json` for the app, plus `last_ms`, `series` (the average probe
 time of each of the last 24 hours, `t` from the server's clock) and `incidents`; null without
-alerts) and `database` (when the app has one). `--range` without `--app` (one host) adds
+alerts) and `database` (when the app has one: `bytes`, `connections`, `connection_limit`; with the
+database's samples (docs/MONITORING.md, PostgreSQL) also `series`, the same buckets as `metrics`:
+`t`, `max_connections`, the sessions `active`, `idle`, `idle_in_transaction`, `waiting` (the
+bucket's highest), `commits_per_s`, `rollbacks_per_s`, `rows_returned_per_s`, `rows_fetched_per_s`,
+`rows_inserted_per_s`, `rows_updated_per_s`, `rows_deleted_per_s`, `cache_hit_pct`, `deadlocks`,
+`temp_files`, `temp_bytes`, `conflicts` (counts in the bucket), `longest_transaction_s`,
+`longest_idle_in_transaction_s`, `xid_age`, `size_bytes`, `checkpoints_timed`,
+`checkpoints_requested`, `wal_bytes_per_s` (the server's); null where there was no sample or, for
+rates and counts, after a statistics reset; `latest` (the newest sample: `t`,
+`server_version_num`, `max_connections`, the sessions, the two ages, `xid_age`, `wraparound_pct`,
+`size_bytes`, `stats_reset`) and `top_queries` (null unless `host setup --pg-stat-statements`:
+`t` and `queries`, each `calls`, `total_ms`, `mean_ms`, `rows`, `query`: normalized, no values,
+at most 500 characters)). `--range` without `--app` (one host) adds
 `host_metrics` instead: the same `range` .. `data_since` and a `series` of `t`, `load` (the
 1-minute load average), `cpu_percent` (of all cores), `memory_used_bytes`, `memory_total_bytes`,
 `disk_used_bytes`, `disk_total_bytes` (the file system holding /var/lib/tando); null where there was
@@ -503,7 +515,10 @@ the apps (down, health, memory, disk, failed jobs as `job.<name>`, a worker that
 every setting; `--json` (show): every firing or pending alert (app, check, state, since, detail,
 silenced), every notifier (last delivery, failures in a row, queued, error) and `history`, the
 last 8 events (`at`, `event`: fire, resolve, flap, restart, ...; `app`, `check`, `detail`), newest first. `job=off`, `db_conns=off`, `postgres=off` turn the newest checks off, `db_conn_pct`
-(80) and `db_conn_for` (5) are the connection threshold and its samples.
+(80) and `db_conn_for` (5) are the connection threshold and its samples. `db_deadlock` (a new
+deadlock in the app's database; resolves after `deadlock_quiet`, 30 min), `db_wrap` and
+`db_wrap_warn` (low: transaction IDs towards wraparound at `db_wrap_pct` 50% and
+`db_wrap_warn_pct` 25%) judge the database's own numbers.
 `heartbeat [off]` · `backup-ping [off]`. Flags: `-a -H --watch -n --json`. Default subcommand: show.
 What is firing on the server and where alerts go; checks run every minute (docs/MONITORING.md).
 Secrets are read without echo. `notifiers` = `notifier` (docs/DEV-NOTES.md, mismatch 9).
@@ -554,9 +569,9 @@ Example: `tando audit -n 20`
 
 ### host
 `tando host add <name> <user@address> [--port N] [--key FILE] [--yes] [--force] [--no-check]`
-`tando host setup <name> [apps_domain=D] [tls=auto|internal|off] [setting=value ...]`
+`tando host setup <name> [apps_domain=D] [tls=auto|internal|off] [setting=value ...] [--pg-stat-statements] [--yes]`
 `tando host ls` · `tando host rm <name>` · `tando host rename <old> <new>` · `tando host rename --drop-alias <old>`
-Flags: `--port --key --insecure-test --no-check --deploy --force --yes --drop-alias`. Subcommands: add (2),
+Flags: `--port --key --insecure-test --no-check --deploy --force --yes --drop-alias --pg-stat-statements`. Subcommands: add (2),
 ls (default, 0), setup (1+), rm (1), rename (1-2).
 `ls` shows each server's `user@address` (TARGET) as registered; a name is shown as is, never
 looked up. `rename` changes a server's name on this laptop only (no server stores it; its audit
@@ -580,7 +595,12 @@ once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections 
 3x; default 100). Without `apps_domain`, links use
 `<ip-with-dashes>.sslip.io` (an outside service). `--deploy` and `--insecure-test` are not in the
 usage (docs/DEV-NOTES.md, mismatch 7). `care=on|off`: host care's security updates (on by default where tando
-installed Caddy itself; docs/HOSTCARE.md).
+installed Caddy itself; docs/HOSTCARE.md). `--pg-stat-statements` (with PostgreSQL on the server):
+turns on `pg_stat_statements` for the top statements of each app's database (`tando snapshot`'s
+`database.top_queries`). It adds the module to `shared_preload_libraries`, so PostgreSQL restarts
+once (every app's database is away for a few seconds); setup asks first, `--yes` does not ask.
+A later run restarts nothing. The extension goes in the `postgres` database only, with
+`track_utility` off (docs/MONITORING.md, PostgreSQL). Never turned on by anything else.
 Example: `tando host setup vps apps_domain=apps.example.com tls=auto`
 
 `tando host status [name] [--json] [--watch N]` · `tando host care [name]` ·

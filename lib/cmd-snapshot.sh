@@ -9,9 +9,11 @@
 # (status, the load averages, the server clock): what `tando ls --json` prints, plus state_reason,
 # the system object, server_now and the alerts. With --app the same exec also reads the app's
 # releases, history (with the deployer, from the audit log's who), metrics over the range (gap
-# filled: every bucket present, null where no sample) and health. With --range and no --app, the
-# host's series over the range (load, cpu, memory, disk), its extended series (CPU split, swap,
-# pressure, disk IO, network, TCP, OOM kills, inodes) and what the monitoring costs, instead. Fields: docs/COMMANDS.md.
+# filled: every bucket present, null where no sample), health, and for an app with a database its
+# numbers over the range, the latest and its top statements (tando-metrics read-db). With --range
+# and no --app, the host's series over the range (load, cpu, memory, disk), its extended series
+# (CPU split, swap, pressure, disk IO, network, TCP, OOM kills, inodes) and what the monitoring
+# costs, instead. Fields: docs/COMMANDS.md.
 # Every server field is data: numbers are checked before they are printed as numbers.
 
 SNAP_TIMEOUT=${TANDO_SNAPSHOT_TIMEOUT:-15}
@@ -84,6 +86,9 @@ snap_cmd() {
     c="$c sudo -n /opt/tando/bin/tando-metrics read $a $SNAP_PTS $SNAP_BK; else echo 'mx	none'; fi"
     c="$c; echo '@health'; if [ -x $WATCH_BIN ]; then sudo -n $WATCH_BIN health $a; fi"
     c="$c; echo '@audit'; sudo -n $AGENT_BIN audit-read $a 300"
+    # (an older tando-metrics has no read-db: its usage error is dropped, the section stays empty)
+    c="$c; echo '@db'; if [ -x /opt/tando/bin/tando-metrics ]; then"
+    c="$c sudo -n /opt/tando/bin/tando-metrics read-db $a $SNAP_PTS $SNAP_BK 2> /dev/null; fi"
   elif [ -n "$SNAP_HOSTM" ]; then
     c="$c; echo '@hostm'; if [ -x /opt/tando/bin/tando-metrics ]; then"
     c="$c sudo -n /opt/tando/bin/tando-metrics read host $SNAP_PTS $SNAP_BK; else echo 'mx	none'; fi"
@@ -148,9 +153,9 @@ snap_render() {
   NOW=$(now)
   rc=$(cat "$TMPD/s.$h.rc")
   # the sections: status rows (and loadavg, clock) -> st; each @section -> its own file
-  : > "$TMPD/st"; : > "$TMPD/s.releases"; : > "$TMPD/s.history"; : > "$TMPD/s.metrics"; : > "$TMPD/s.health"; : > "$TMPD/s.audit"; : > "$TMPD/s.hostm"; : > "$TMPD/s.hostx"; : > "$TMPD/s.mon"
+  : > "$TMPD/st"; : > "$TMPD/s.releases"; : > "$TMPD/s.history"; : > "$TMPD/s.metrics"; : > "$TMPD/s.health"; : > "$TMPD/s.audit"; : > "$TMPD/s.hostm"; : > "$TMPD/s.hostx"; : > "$TMPD/s.mon"; : > "$TMPD/s.db"
   [ "$rc" = 0 ] && awk -v d="$TMPD" '
-    /^@(releases|history|metrics|health|audit|hostm|hostx|mon)$/ { f = d "/s." substr($0, 2); next }
+    /^@(releases|history|metrics|health|audit|hostm|hostx|mon|db)$/ { f = d "/s." substr($0, 2); next }
     /^clock\t/ { print > (d "/st"); next }
     { print > (f == "" ? d "/st" : f) }' "$TMPD/s.$h.out"
   if [ "$rc" != 0 ] || ! grep -q "^host$TAB" "$TMPD/st"; then
@@ -199,8 +204,46 @@ snap_app() {
   cp "$TMPD/st.keep" "$TMPD/st"
   printf ',"metrics":'; snap_metrics "$sn"
   printf ',"health":'; snap_health "$a" "$sn"
-  pg_json "$TMPD/s.health" "$a"
+  snap_db "$(pg_json "$TMPD/s.health" "$a")" "$sn"
   printf '}'
+}
+
+# snap_db pg-json server-now: the app's "database" object: pg_json's (size, connections, limit)
+# with, when tando-metrics read-db answered, "series" (every bucket of the range, null where no
+# sample: sessions, rates per second, counts, ages; docs/COMMANDS.md), "latest" (the newest sample)
+# and "top_queries" (pg_stat_statements' top 10 by total time, null when it is not on)
+snap_db() {
+  local o=$1
+  grep -q "^d[xl]*${TAB}[0-9]" "$TMPD/s.db" 2> /dev/null || { printf '%s' "$o"; return 0; }
+  [ -n "$o" ] || o=',"database":{"bytes":null,"connections":null,"connection_limit":null}'
+  printf '%s,' "${o%\}}"
+  awk -F '\t' -v P="$SNAP_PTS" -v B="$SNAP_BK" -v SN="$2" '
+    function n(v) { return (v ~ /^(0|[1-9][0-9]*)(\.[0-9]+)?$/) ? v : "null" }
+    function s(v) { gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); gsub(/[\001-\037]/, " ", v); return "\"" v "\"" }
+    BEGIN { split("max_connections active idle idle_in_transaction waiting commits_per_s rollbacks_per_s rows_returned_per_s " \
+      "rows_fetched_per_s rows_inserted_per_s rows_updated_per_s rows_deleted_per_s cache_hit_pct deadlocks temp_files " \
+      "temp_bytes conflicts longest_transaction_s longest_idle_in_transaction_s xid_age size_bytes checkpoints_timed " \
+      "checkpoints_requested wal_bytes_per_s", K, " ")
+      split("t server_version_num max_connections active idle idle_in_transaction waiting longest_transaction_s " \
+      "longest_idle_in_transaction_s xid_age wraparound_pct size_bytes stats_reset", L, " ") }
+    $1 == "dx" { if (n($3) != "null") now = n($3); next }
+    $1 == "d" && n($2) != "null" { t = $2 + 0; D[t] = 1; for (i = 1; i <= 24; i++) V[t, i] = n($(i + 2)); next }
+    $1 == "dl" && n($2) != "null" { lat = "{"; for (i = 1; i <= 13; i++) lat = lat (i > 1 ? "," : "") "\"" L[i] "\":" n($(i + 1)); lat = lat "}"; next }
+    $1 == "qt" { qt = n($2); next }
+    $1 == "q" { q = q (q == "" ? "" : ",") sprintf("{\"calls\":%s,\"total_ms\":%s,\"mean_ms\":%s,\"rows\":%s,\"query\":%s}", n($2), n($3), n($4), n($5), s($6)); next }
+    END {
+      if (now == "") now = SN + 0
+      from = (int(now / B) - P + 1) * B
+      printf "\"series\":["
+      for (j = 0; j < P; j++) {
+        t = from + j * B
+        printf "%s{\"t\":%d", (j ? "," : ""), t
+        for (i = 1; i <= 24; i++) printf ",\"%s\":%s", K[i], ((t in D) ? V[t, i] : "null")
+        printf "}"
+      }
+      printf "],\"latest\":%s,\"top_queries\":", (lat == "" ? "null" : lat)
+      if (q == "") printf "null"; else printf "{\"t\":%s,\"queries\":[%s]}", (qt == "" ? "null" : qt), q
+      printf "}" }' "$TMPD/s.db"
 }
 
 # snap_history app: history --json's objects plus "deployer", the audit line's who of that deploy

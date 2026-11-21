@@ -74,6 +74,16 @@ case $cmd in
       # audit time who from verb app result note
       tab audit $((T - 7300)) ci-bot 198.51.100.7 deploy shop ok "release 20261117-101010"
       tab audit $((T - 90100)) alice 203.0.113.5 rollback shop ok "from 20261117-000000 to 20261116-101010"
+      echo '@db'
+      # read-db <app> <points> <bucket>: dx, d rows (a bucket after a reset: rates "-"), dl, the top
+      tab dx $b $now
+      tab d $((s - 3 * b)) 20 1 3 0 0 10.50 0.02 120.00 80.00 1.00 0.50 0.10 99.20 0 0 0 0 2 0 1200000 12582912 1 0 840.25
+      tab d $((s - 1 * b)) 20 2 2 1 0 - - - - - - - - - - - - 5 30 1200100 12582912 0 0 -
+      tab d $s 20 1 4 0 0 9.00 0.00 100.00 70.00 0.00 0.00 0.00 100.00 1 1 8192 0 1 0 1200200 12648448 0 1 512.00
+      tab dl $now 170002 20 1 4 0 0 1 0 1200200 0.05 12648448 $((T - 86400))
+      tab qt $((T - 60))
+      tab q 1200 5300 4.41 3600 'SELECT * FROM "orders" WHERE id = $1 AND note LIKE $2'
+      tab q 3 900 300.00 3 'UPDATE stock SET n = n - $1 WHERE path = $2 -- a\b'
       ;;
     esac
     case $cmd in *"@hostm"*)

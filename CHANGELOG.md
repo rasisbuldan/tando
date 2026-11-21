@@ -50,6 +50,21 @@ first, grouped by area.
   alert `monitor_cost`: silent for the first 7 days of data, then over 2x the monitoring's normal
   CPU a minute (minutes without readers), never above 1% of a core. Steal and swap-in are shown
   only; the existing inode, memory pressure, swap, OOM and connection alerts are unchanged.
+- Added: database monitoring like Cloud SQL and RDS, for apps with `database = postgres`, in the
+  one `psql` a minute tando-watch already ran (no new connection): sessions by state against
+  `max_connections`, commits and rollbacks, rows, cache hit, deadlocks, temporary files,
+  conflicts, the oldest transaction and longest idle-in-transaction, `age(datfrozenxid)`, the size
+  every 5 minutes (was 10), and the server's checkpoints and WAL bytes (statements chosen by
+  `server_version_num`: PostgreSQL 16 and older, 17 and newer). One line a minute in
+  `/var/lib/tando/metrics/<app>.db`; `tando-metrics read-db`; `tando snapshot --json --app A`
+  gains `database.series`, `database.latest` and `database.top_queries`. New alerts:
+  `db_deadlock` (a new deadlock), `db_wrap` (50% of the transaction IDs towards wraparound) and
+  `db_wrap_warn` (low, 25%). The new statements run before the connections statement with a
+  500 ms statement timeout, so they cannot make "PostgreSQL does not answer" fire; the `psql`
+  call may now take 10 s (was 8 s).
+- Added: `tando host setup <host> --pg-stat-statements` turns on PostgreSQL's
+  `pg_stat_statements` (asks first: PostgreSQL restarts once). Then the top 10 normalized
+  statements of each app's database are in `tando snapshot`, latest only (`<app>.dbtop`, 0600).
 - Added: live views every 5 s. tandod keeps a second loop beside the minute's checks (srv/live):
   every 5 s each app's memory, CPU, tasks and unit state and the host's load, memory, CPU and disk,
   from the cgroup v2 files, /proc and the bus connection it already has; no program started, no file

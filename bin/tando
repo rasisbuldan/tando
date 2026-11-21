@@ -145,7 +145,7 @@ public_ip() {
 }
 
 cmd_host() {
-  local kv feats=""
+  local kv feats="" pgss=""
   case ${1:-ls} in
     add) shift; host_add "$@";;
     ls) host_ls;;
@@ -168,15 +168,19 @@ cmd_host() {
           rate_limit=on|rate_limit=off|rate_limit=auto|conn_limit=*|conn_rate=*) ;;
           request_log_max=*) ;;
           care=on|care=off) ;;   # host care's security updates (tando-host install; not the agent's)
+          --pg-stat-statements) pgss=1;;   # PostgreSQL's top statements (a restart: asked below)
           *) usage_err "bad setting: $kv" host;;
         esac
         case $kv in tls=*) case ${kv#tls=} in off|internal|auto) ;; *) usage_err "tls must be off, internal or auto" host;; esac;; esac
       done
       host_check > /dev/null 2>&1 || { host_check; exit 1; }   # connection and sudo, explained
+      # pg_stat_statements is loaded at PostgreSQL's start: never without the owner's yes
+      [ -z "$pgss" ] || confirm "host setup --pg-stat-statements restarts PostgreSQL on $HOST once (the first time only): every app's database is unavailable for a few seconds." "$HOST"
       ui_box_open "host setup $HOST" "$TARGET"
       local t0 total n sargs=() care=""
-      for kv in "$@"; do case $kv in care=*) care=$kv;; *) sargs+=("$kv");; esac; done
+      for kv in "$@"; do case $kv in care=*) care=$kv;; --pg-stat-statements) sargs+=(pg_stat_statements=yes);; *) sargs+=("$kv");; esac; done
       total=$((9 + $(printf '%s' "$feats" | wc -w)))
+      [ -z "$pgss" ] || total=$((total + 1))
       t0=$(clock)
       install_agent
       ui_step 1 $total agent ok "$(client_version) in /opt/tando/bin"

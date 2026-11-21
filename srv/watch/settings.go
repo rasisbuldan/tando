@@ -33,6 +33,9 @@ var defaults = []struct{ key, def, desc string }{
 	{"stuck_min", "20", "minutes an activation may run before it counts as stuck"},
 	{"db_conn_pct", "80", "connections of an app's database role as % of the role's connection limit (PostgreSQL's whole server: % of its usable slots)"},
 	{"db_conn_for", "5", "samples at or above db_conn_pct before db_conns (or host postgres) fires"},
+	{"deadlock_quiet", "30", "minutes without a new deadlock in an app's database before db_deadlock resolves"},
+	{"db_wrap_pct", "50", "% of the 2^31 transaction IDs of an app's database used (age of datfrozenxid) at which db_wrap fires"},
+	{"db_wrap_warn_pct", "25", "the same % at which db_wrap_warn (low) fires, below db_wrap_pct"},
 	{"http_min", "5", "answers with HTTP 5xx within 5 minutes (real requests, from the request log) before http fires, if also http_pct"},
 	{"http_pct", "10", "% of the requests within 5 minutes answered 5xx before http fires"},
 	{"slow_ms", "3000", "p95 latency in ms of real requests within a minute above which the minute counts as slow"},
@@ -61,11 +64,13 @@ var defaults = []struct{ key, def, desc string }{
 // The checks that can be turned off ("<check>=off", "<app>.<check>=off"). "logs" is of low
 // severity: no high priority in ntfy, "(low)" in the text.
 var (
-	appChecks  = []string{"down", "health", "memory", "oom", "restarts", "tls", "backup", "stuck", "disk", "http", "slow", "errors", "logs", "job", "worker", "db_conns"}
+	appChecks  = []string{"down", "health", "memory", "oom", "restarts", "tls", "backup", "stuck", "disk", "http", "slow", "errors", "logs", "job", "worker", "db_conns", "db_deadlock", "db_wrap", "db_wrap_warn"}
 	hostChecks = []string{"disk", "inodes", "host_memory", "swap", "load", "host_oom", "caddy", "caddy_config", "firewall", "monitor", "monitor_cost", "postgres"}
 )
 
-func lowSeverity(check string) bool { return check == "logs" || check == "ssh" }
+func lowSeverity(check string) bool {
+	return check == "logs" || check == "ssh" || check == "db_wrap_warn"
+}
 
 // textSettings are the settings that are not numbers.
 func textSetting(k string) bool {

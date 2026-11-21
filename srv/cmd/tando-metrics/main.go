@@ -6,6 +6,7 @@
 //	tando-metrics read <app|host> <points> <bucket seconds>   the last <points> buckets, averaged
 //	tando-metrics read host.x|tandod.x <points> <bucket>     the host's extended series, what the
 //	                                                    monitoring costs (named columns)
+//	tando-metrics read-db <app> <points> <bucket seconds>     its database's (metrics/db.go)
 //	tando-metrics version                               the tando version it was built from
 //
 // TANDO_METRICS_DIR replaces /var/lib/tando/metrics (tests).
@@ -24,7 +25,7 @@ import (
 	"tando/srv/metrics"
 )
 
-const usage = "usage: tando-metrics sample | read <app|host|host.x|tandod.x> <points> <bucket seconds> | version"
+const usage = "usage: tando-metrics sample | read <app|host|host.x|tandod.x> <points> <bucket seconds> | read-db <app> <points> <bucket seconds> | version"
 
 func main() {
 	syscall.Umask(0o022) // files are 644 and the directory 755 whatever umask sudo passed on
@@ -50,6 +51,15 @@ func run(args []string) error {
 			return err
 		}
 		m.Read(w, a)
+	case "read-db":
+		a, err := metrics.ParseReadArgs(args)
+		if err != nil {
+			return err
+		}
+		if a.Who == "host" || metrics.IsX(a.Who) {
+			return errors.New("read-db takes an app")
+		}
+		m.ReadDB(w, a)
 	case "version":
 		w.Row(buildinfo.Version)
 	default:

@@ -58,6 +58,7 @@ func appCheckList() []appCheck {
 		appFunc{"jobs", checkJobs},        // its scheduled jobs: how each last ended (not held with the app)
 		appFunc{"workers", checkWorkers},  // its workers: one that keeps exiting
 		appFunc{"db conns", checkDBConns}, // its database role's connections against the role's limit
+		appFunc{"db stats", checkDBStats}, // its database's deadlocks and transaction-ID wraparound
 		appFunc{"disk", checkAppDisk},     // and the disk guard
 		appFunc{"uptime class", classify},
 		appFunc{"health queue", queueProbe}, // probed together below

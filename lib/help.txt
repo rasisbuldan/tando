@@ -313,11 +313,12 @@ tando backup offsite hosts lists the servers.
 Example: tando restore --from-host 3f9a01c2b7de --all -H newvps
 
 @@ host
-flags: --port= --key= --insecure-test --no-check --deploy --force --yes --json --watch= --all --now --updates --reboot --window= --tz= --lead= --even-with-other-sites --drop-alias
+flags: --port= --key= --insecure-test --no-check --deploy --force --yes --json --watch= --all --now --updates --reboot --window= --tz= --lead= --even-with-other-sites --drop-alias --pg-stat-statements
 subs: add=2 ls=0 setup=1+ rm=1 rename=1-2 status=0-1 care=0-3 update=0-1 reboot=0-1 default=ls
 usage: tando host add <name> <user@address> [--port N] [--key FILE] [--yes] [--force]
 usage:                [--no-check] [--deploy] [--insecure-test]
 usage: tando host setup <name> [apps_domain=D] [tls=auto|internal|off] [setting=value ...]
+usage:                  [--pg-stat-statements] [--yes]
 usage: tando host ls
 usage: tando host rm <name>
 usage: tando host rename <old> <new> | rename --drop-alias <old>
@@ -345,6 +346,10 @@ domains of tando domain add get certificates from Caddy's own local CA instead
 of Let's Encrypt: for a test server that the internet cannot reach; browsers
 do not trust them). public_port=N: the port links use when the server's port
 80 is mapped to another one (a container, a test VM).
+--pg-stat-statements turns on PostgreSQL's pg_stat_statements: the top 10
+statements of each app's database (normalized, no values) in the dashboard.
+PostgreSQL restarts once for it (every app's database away for seconds), so
+setup asks first (--yes does not ask).
 add saves the server only once tando logs in with it; run the same command again
 after fixing what it says (--yes trusts the host key without asking, --no-check
 saves it without connecting, --force replaces a different entry of that name).

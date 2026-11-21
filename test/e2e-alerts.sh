@@ -662,6 +662,33 @@ wruns 2
 check "31h no repeat while they stay open" eq "$(nev firing ops db_conns)/$(nev resolved ops db_conns)" 1/0
 pgfree; wruns 2
 check "31i released: resolved, one notification" eq "$(pgconns)/$(st ops.db_conns.st)/$(nev resolved ops db_conns)" 0/ok/1
+# the database's own numbers, from the same psql (check_dbstats.go): <app>.db, read-db, snapshot
+dbline() { srv 'sudo tail -1 /var/lib/tando/metrics/ops.db' 2> /dev/null; }
+check "31n ops.db: a line a minute with the server's version, max_connections 20 and its commit counter (0600, no statement text)" \
+  eval 'dbline | awk -F "\t" "{ exit !(\$2 >= 140000 && \$3 == 20 && \$8 ~ /^[0-9]+\$/) }" &&
+        [ "$(srv "sudo stat -c %a /var/lib/tando/metrics/ops.db")" = 600 ] && srv "! sudo test -e /var/lib/tando/metrics/ops.dbtop"'
+"$R" snapshot --json -H t --app ops --range 1h > "$E/snap-db.json" 2>&1
+check "31o snapshot --app: database.series over the range, database.latest from the newest sample, no top_queries (pg_stat_statements off)" \
+  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["app"]["database"]; sys.exit(0 if len(d["series"]) == 60 and d["latest"]["server_version_num"] >= 140000 and d["latest"]["max_connections"] == 20 and d["top_queries"] is None else 1)' "$E/snap-db.json"
+pgstart() { srv 'sudo -u postgres psql -At -c "SELECT pg_postmaster_start_time()"' 2> /dev/null; }
+pgstart > "$E/pg-start0"
+"$R" host setup t tls=off --pg-stat-statements --yes > "$E/setup-pgss.out" 2>&1; nodaemon
+srv 'sudo systemctl stop tando-watch.timer'
+check "31p host setup --pg-stat-statements: the step says PostgreSQL restarted once, the module is preloaded with track_utility off" \
+  eval 'grep -q "pg_stat_statements.*PostgreSQL restarted once" "$E/setup-pgss.out" &&
+        [ "$(srv "sudo -u postgres psql -At -c \"SHOW pg_stat_statements.track_utility\"")" = off ]'
+wruns 3
+check "31q its top statements: ops.dbtop (0600), in snapshot's top_queries; the history file has no statement text" \
+  eval '"$R" snapshot --json -H t --app ops --range 1h > "$E/snap-db2.json" 2>&1 &&
+        python3 -I -c "import json,sys; d=json.load(open(sys.argv[1]))[\"app\"][\"database\"]; sys.exit(0 if d[\"top_queries\"] and d[\"top_queries\"][\"queries\"] else 1)" "$E/snap-db2.json" &&
+        [ "$(srv "sudo stat -c %a /var/lib/tando/metrics/ops.dbtop")" = 600 ] && ! srv "sudo grep -qi select /var/lib/tando/metrics/ops.db"'
+pgstart > "$E/pg-start1"
+"$R" host setup t tls=off --pg-stat-statements --yes > "$E/setup-pgss2.out" 2>&1; nodaemon
+srv 'sudo systemctl stop tando-watch.timer'
+check "31r a second host setup --pg-stat-statements restarts nothing" \
+  eval '! grep -q "restarted once" "$E/setup-pgss2.out" && grep -q "pg_stat_statements" "$E/setup-pgss2.out" &&
+        [ "$(pgstart)" = "$(cat "$E/pg-start1")" ] &&
+        [ "$(cat "$E/pg-start0")" != "$(cat "$E/pg-start1")" ]'
 # PostgreSQL stopped while an app has a database: one host alert (down_after=2 samples)
 pgdown() { ! srv 'pg_isready -q -h 127.0.0.1'; }
 srv 'sudo systemctl stop postgresql'; until_ 30 pgdown
