@@ -4,6 +4,8 @@
 //
 //	tando-metrics sample                                append one line per app and one for the host
 //	tando-metrics read <app|host> <points> <bucket seconds>   the last <points> buckets, averaged
+//	tando-metrics read host.x|tandod.x <points> <bucket>     the host's extended series, what the
+//	                                                    monitoring costs (named columns)
 //	tando-metrics version                               the tando version it was built from
 //
 // TANDO_METRICS_DIR replaces /var/lib/tando/metrics (tests).
@@ -22,7 +24,7 @@ import (
 	"tando/srv/metrics"
 )
 
-const usage = "usage: tando-metrics sample | read <app|host> <points> <bucket seconds> | version"
+const usage = "usage: tando-metrics sample | read <app|host|host.x|tandod.x> <points> <bucket seconds> | version"
 
 func main() {
 	syscall.Umask(0o022) // files are 644 and the directory 755 whatever umask sudo passed on

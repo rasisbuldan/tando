@@ -9,7 +9,8 @@
 # the system object, server_now and the alerts. With --app the same exec also reads the app's
 # releases, history (with the deployer, from the audit log's who), metrics over the range (gap
 # filled: every bucket present, null where no sample) and health. With --range and no --app, the
-# host's series over the range (load, cpu, memory, disk) instead. Fields: docs/COMMANDS.md.
+# host's series over the range (load, cpu, memory, disk), its extended series (CPU split, swap,
+# pressure, disk IO, network, TCP, OOM kills, inodes) and what the monitoring costs, instead. Fields: docs/COMMANDS.md.
 # Every server field is data: numbers are checked before they are printed as numbers.
 
 SNAP_TIMEOUT=${TANDO_SNAPSHOT_TIMEOUT:-15}
@@ -68,6 +69,10 @@ snap_cmd() {
   elif [ -n "$SNAP_HOSTM" ]; then
     c="$c; echo '@hostm'; if [ -x /opt/tando/bin/tando-metrics ]; then"
     c="$c sudo -n /opt/tando/bin/tando-metrics read host $SNAP_PTS $SNAP_BK; else echo 'mx	none'; fi"
+    # the extended host series and what the monitoring costs (host.x, tandod.x; an older
+    # tando-metrics refuses the name: no rows, null)
+    c="$c; echo '@hostx'; [ -x /opt/tando/bin/tando-metrics ] && sudo -n /opt/tando/bin/tando-metrics read host.x $SNAP_PTS $SNAP_BK 2> /dev/null"
+    c="$c; echo '@mon'; [ -x /opt/tando/bin/tando-metrics ] && sudo -n /opt/tando/bin/tando-metrics read tandod.x $SNAP_PTS $SNAP_BK 2> /dev/null"
   fi
   printf '%s' "$c; printf 'clock\\t%s\\n' \"\$EPOCHREALTIME\""
 }
@@ -125,9 +130,9 @@ snap_render() {
   NOW=$(now)
   rc=$(cat "$TMPD/s.$h.rc")
   # the sections: status rows (and loadavg, clock) -> st; each @section -> its own file
-  : > "$TMPD/st"; : > "$TMPD/s.releases"; : > "$TMPD/s.history"; : > "$TMPD/s.metrics"; : > "$TMPD/s.health"; : > "$TMPD/s.audit"; : > "$TMPD/s.hostm"
+  : > "$TMPD/st"; : > "$TMPD/s.releases"; : > "$TMPD/s.history"; : > "$TMPD/s.metrics"; : > "$TMPD/s.health"; : > "$TMPD/s.audit"; : > "$TMPD/s.hostm"; : > "$TMPD/s.hostx"; : > "$TMPD/s.mon"
   [ "$rc" = 0 ] && awk -v d="$TMPD" '
-    /^@(releases|history|metrics|health|audit|hostm)$/ { f = d "/s." substr($0, 2); next }
+    /^@(releases|history|metrics|health|audit|hostm|hostx|mon)$/ { f = d "/s." substr($0, 2); next }
     /^clock\t/ { print > (d "/st"); next }
     { print > (f == "" ? d "/st" : f) }' "$TMPD/s.$h.out"
   if [ "$rc" != 0 ] || ! grep -q "^host$TAB" "$TMPD/st"; then
@@ -150,7 +155,12 @@ snap_render() {
   if [ -n "$a" ]; then
     printf ',"app":'; snap_app "$a" "${clk:-$NOW}"
   elif [ -n "$SNAP_HOSTM" ]; then
-    printf ',"host_metrics":'; snap_host_metrics "${clk:-$NOW}"
+    local hm; hm=$(snap_host_metrics "${clk:-$NOW}")
+    printf ',"host_metrics":%s' "${hm%\}}"
+    if [ "$hm" != null ]; then   # (null: no tando-metrics)
+      printf ',"extended":'; snap_xseries "${clk:-$NOW}" < "$TMPD/s.hostx"
+      printf ',"monitoring":'; snap_xseries "${clk:-$NOW}" < "$TMPD/s.mon"; printf '}'
+    fi
   fi
   printf '}\n'
 }
@@ -204,8 +214,11 @@ snap_metrics() {
   awk -F '\t' -v P="$SNAP_PTS" -v B="$SNAP_BK" -v R="$SNAP_RANGE" -v SN="$1" '
     function n(v) { return (v ~ /^[0-9]+$/) ? v + 0 : "" }
     $1 == "mx" { if ($2 == "none") none = 1; else { if (n($3) != "") now = n($3) }; next }
+    function j(v) { return (v == "") ? "null" : v }
+    function dec(v, d) { return (v == "") ? "null" : (d == 100 ? sprintf("%d.%02d", int(v / 100), v % 100) : sprintf("%d.%d", int(v / 10), v % 10)) }
     $1 == "m" { t = n($2); if (t == "") next; M[t] = n($3); C[t] = n($4); S[t] = n($5)
-      st = $6; ST[t] = (st ~ /^[a-z]$/) ? st : ""; D[t] = n($7); if (first == "" || t < first) first = t; next }
+      st = $6; ST[t] = (st ~ /^[a-z]$/) ? st : ""; D[t] = n($7); TH[t] = n($8); OK[t] = n($9); TK[t] = n($10); TM[t] = n($11); MP[t] = n($12)
+      if (first == "" || t < first) first = t; next }
     END {
       if (none) { printf "null"; exit }
       if (now == "") now = SN + 0
@@ -218,9 +231,10 @@ snap_metrics() {
           r = (prev == "" || S[t] == "") ? 0 : S[t] - prev; if (r < 0) r = 0
           if (S[t] != "") prev = S[t]
           c = C[t]; cs = (c == "") ? "null" : sprintf("%d.%d", int(c / 10), c % 10)
-          printf "%s{\"t\":%d,\"memory_bytes\":%s,\"cpu_percent\":%s,\"restarts\":%d,\"state\":%s,\"disk_bytes\":%s}", (i ? "," : ""), t,
+          printf "%s{\"t\":%d,\"memory_bytes\":%s,\"cpu_percent\":%s,\"restarts\":%d,\"state\":%s,\"disk_bytes\":%s", (i ? "," : ""), t,
             (M[t] == "" ? "null" : M[t]), cs, r, (ST[t] == "" ? "null" : "\"" ST[t] "\""), (D[t] == "" ? "null" : D[t])
-        } else printf "%s{\"t\":%d,\"memory_bytes\":null,\"cpu_percent\":null,\"restarts\":null,\"state\":null,\"disk_bytes\":null}", (i ? "," : ""), t
+          printf ",\"throttled_pct\":%s,\"oom_kills\":%s,\"tasks\":%s,\"tasks_max\":%s,\"memory_pressure_pct\":%s}", dec(TH[t], 10), j(OK[t]), j(TK[t]), j(TM[t]), dec(MP[t], 100)
+        } else printf "%s{\"t\":%d,\"memory_bytes\":null,\"cpu_percent\":null,\"restarts\":null,\"state\":null,\"disk_bytes\":null,\"throttled_pct\":null,\"oom_kills\":null,\"tasks\":null,\"tasks_max\":null,\"memory_pressure_pct\":null}", (i ? "," : ""), t
       }
       printf "]}" }' "$TMPD/s.metrics"
 }
@@ -249,6 +263,32 @@ snap_host_metrics() {
         else printf "%s{\"t\":%d,\"load\":null,\"cpu_percent\":null,\"memory_used_bytes\":null,\"memory_total_bytes\":null,\"disk_used_bytes\":null,\"disk_total_bytes\":null}", (i ? "," : ""), t
       }
       printf "]}" }' "$TMPD/s.hostm"
+}
+
+# snap_xseries server-now < rows of `tando-metrics read host.x|tandod.x`: one array per column,
+# a value per bucket of the range (oldest first, as host_metrics.series' t), null where none.
+# The xc row names the columns (name:aggregation:scale; scale 10 or 100: shown divided by it,
+# with one or two decimals): a column added on the server shows up here without a change. null
+# when there is no xc row (an older tando-metrics).
+snap_xseries() {
+  awk -F '\t' -v P="$SNAP_PTS" -v B="$SNAP_BK" -v SN="$1" '
+    function n(v) { return (v ~ /^[0-9]+$/) ? v + 0 : "" }
+    function show(v, d) { if (v == "") return "null"; if (d == 100) return sprintf("%d.%02d", int(v / 100), v % 100)
+      if (d == 10) return sprintf("%d.%d", int(v / 10), v % 10); return v }
+    $1 == "mx" { if (n($3) != "") now = n($3); next }
+    $1 == "xc" { for (i = 2; i <= NF; i++) { split($i, w, ":"); if (w[1] !~ /^[a-z0-9_]+$/) continue; k++; NAME[k] = w[1]; SC[k] = w[3] + 0; COL[k] = i + 1 } next }
+    $1 == "x" { t = n($2); if (t == "") next; R[t] = 1; for (i = 3; i <= NF; i++) V[t, i] = n($i); next }
+    END {
+      if (!k) { printf "null"; exit }
+      if (now == "") now = SN + 0
+      from = (int(now / B) - P + 1) * B
+      printf "{"
+      for (c = 1; c <= k; c++) {
+        printf "%s\"%s\":[", (c > 1 ? "," : ""), NAME[c]
+        for (i = 0; i < P; i++) { t = from + i * B; printf "%s%s", (i ? "," : ""), ((t in R) ? show(V[t, COL[c]], SC[c]) : "null") }
+        printf "]"
+      }
+      printf "}" }'
 }
 
 # snap_health app server-now: tando health --json's numbers for the app, its incidents, and the

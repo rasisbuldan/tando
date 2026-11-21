@@ -61,9 +61,9 @@ case $cmd in
       tab mx $b $now
       tab m $((s - 5 * b)) 100000000 120 1 a 52428800
       tab m $((s - 4 * b)) 101000000 130 2 a -
-      tab m $((s - 2 * b)) 102000000 140 0 a 52428800
-      tab m $((s - 1 * b)) 103000000 150 1 a 53477376
-      tab m $s 104857600 34 1 a 53477376
+      tab m $((s - 2 * b)) 102000000 140 0 a 52428800 - - - - -
+      tab m $((s - 1 * b)) 103000000 150 1 a 53477376 125 2 17 512 250
+      tab m $s 104857600 34 1 a 53477376 0 0 18 512 5
       echo '@health'
       tab up shop 9993 9987 1430 9980 2 12 85 40,42,-,38,39,41,40,40,39,38,37,36,40,41,42,43,44,40,39,38,37,36,35,34 ok 33 -
       tab inc shop $((T - 50000)) $((T - 49700)) down "exited with status 1"
@@ -84,6 +84,19 @@ case $cmd in
       tab h $((s - 3 * b)) 42 1000000000 2048000000
       tab h $((s - 1 * b)) 105 1010000000 2048000000 125 11900000000 40000000000
       tab h $s 50 1024000000 2048000000 30 12000000000 40000000000
+      ;;
+    esac
+    case $cmd in *"@hostx"*)
+      # read host.x / tandod.x: the column names, then a bucket with values and one with gaps
+      echo '@hostx'
+      tab mx $b $now
+      tab xc cpu_user_pct:a:10 cpu_system_pct:a:10 cpu_iowait_pct:a:10 cpu_steal_pct:a:10 mem_available_bytes:a:1 mem_cached_bytes:a:1 swap_used_bytes:a:1 swap_total_bytes:a:1 swap_in_pages:s:1 swap_out_pages:s:1 psi_cpu_pct:a:100 psi_memory_pct:a:100 psi_io_pct:a:100 disk_reads:s:1 disk_writes:s:1 disk_read_bytes:s:1 disk_write_bytes:s:1 disk_latency_us:a:1 disk_util_pct:a:10 net_in_bytes:s:1 net_out_bytes:s:1 net_errors:s:1 net_drops:s:1 tcp_established:a:1 tcp_retransmits:s:1 oom_kills:s:1 inodes_pct:m:10 uptime_s:m:1
+      tab x $((s - 1 * b)) 125 40 12 3 1000000000 500000000 1048576 1073741824 0 4 150 1234 7 120 60 2097152 1048576 850 31 600000 120000 0 2 14 5 0 125 864000
+      tab x $s - - - - 1000000000 - 1048576 1073741824 - - - - - - - - - - - - - - - 14 - 1 125 864000
+      echo '@mon'
+      tab mx $b $now
+      tab xc cpu_ms:a:1 anon_bytes:a:1 file_bytes:a:1 major_faults:s:1 refaults:s:1 children:s:1 requests:s:1
+      tab x $s 450 9000000 4000000 2 1000 3 12
       ;;
     esac
     printf 'clock\t%s.123456\n' $((T + 3))

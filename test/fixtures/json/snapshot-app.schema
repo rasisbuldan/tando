@@ -136,3 +136,8 @@ system.load_5:null-or-number
 system.memory_total_bytes:null-or-number
 system.memory_used_bytes:null-or-number
 system.uptime_s:null-or-number
+app.metrics.series[].throttled_pct:null-or-number
+app.metrics.series[].oom_kills:null-or-number
+app.metrics.series[].tasks:null-or-number
+app.metrics.series[].tasks_max:null-or-number
+app.metrics.series[].memory_pressure_pct:null-or-number

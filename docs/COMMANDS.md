@@ -454,7 +454,19 @@ alerts) and `database` (when the app has one). `--range` without `--app` (one ho
 `host_metrics` instead: the same `range` .. `data_since` and a `series` of `t`, `load` (the
 1-minute load average), `cpu_percent` (of all cores), `memory_used_bytes`, `memory_total_bytes`,
 `disk_used_bytes`, `disk_total_bytes` (the file system holding /var/lib/tando); null where there was
-no sample, and cpu and disk null for samples taken before 2026-11.
+no sample, and cpu and disk null for samples taken before 2026-11. `host_metrics.extended` holds
+one array per series, a value per bucket in the order of `series` (null where not known):
+`cpu_user_pct`, `cpu_system_pct`, `cpu_iowait_pct`, `cpu_steal_pct`, `mem_available_bytes`,
+`mem_cached_bytes`, `swap_used_bytes`, `swap_total_bytes`, `swap_in_pages`, `swap_out_pages`,
+`psi_cpu_pct`, `psi_memory_pct`, `psi_io_pct`, `disk_reads`, `disk_writes`, `disk_read_bytes`,
+`disk_write_bytes` (per bucket), `disk_latency_us`, `disk_util_pct` (the block device holding
+/var/lib/tando), `net_in_bytes`, `net_out_bytes`, `net_errors`, `net_drops` (the default route's
+interfaces, per bucket), `tcp_established`, `tcp_retransmits`, `oom_kills`, `inodes_pct`,
+`uptime_s`; `host_metrics.monitoring` what the monitoring costs: `cpu_ms` (a minute, average),
+`anon_bytes`, `file_bytes`, `major_faults`, `refaults`, `children` (programs started),
+`requests` (readers' requests to tandod), per bucket. Both are null from a server before
+2026-11 (docs/TOP.md). An app's `metrics.series` also has `throttled_pct` (null without a CPU
+limit), `oom_kills`, `tasks`, `tasks_max` and `memory_pressure_pct`, from the app's slice.
 Example: `tando snapshot --json -H vps --app shop --range 24h`, `tando snapshot --json -H vps --range 7d`
 
 ### alerts

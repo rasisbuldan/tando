@@ -6,6 +6,19 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: cloud-style host and app series, and what the monitoring costs. Each minute's sample
+  also writes `host.x` (CPU user/system/iowait/steal, memory available and cached, swap used and
+  in/out, PSI cpu/memory/io, IOPS, throughput, latency and busy share of the disk holding
+  /var/lib/tando, network bytes/errors/drops of the default route, TCP established and
+  retransmits, OOM kills, inodes, uptime) and `tandod.x` (tandod's CPU, memory, faults,
+  refaults, programs started, readers' requests), and an app's line gains its slice's CPU
+  throttling, OOM kills, tasks and task limit, memory pressure. `tando-metrics read host.x` and
+  `read tandod.x` return them; `tando snapshot --json --range R` returns
+  `host_metrics.extended` and `host_metrics.monitoring` (one array per series) and an app's
+  series gains `throttled_pct`, `oom_kills`, `tasks`, `tasks_max`, `memory_pressure_pct`. New
+  alert `monitor_cost`: silent for the first 7 days of data, then over 2x the monitoring's normal
+  CPU a minute (minutes without readers), never above 1% of a core. Steal and swap-in are shown
+  only; the existing inode, memory pressure, swap, OOM and connection alerts are unchanged.
 - Monitoring, lighter (slice 1): tandod's `MemoryMax` is 160M instead of 64M. At 64M its cgroup
   evicted the page cache of the journals and programs it reads every minute and read them again
   (on a real server: about 300 MB a minute of re-reads); its own memory still stays under 20 MB.
