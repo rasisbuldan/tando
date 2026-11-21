@@ -71,7 +71,7 @@ w=0; for x in "$D"/lock.wait.*; do [ -e "$x" ] && [ -d "/proc/${x##*.}" ] && w=$
 kv units "$(systemctl list-units --all --plain --no-legend "tando-$A-*" 2> /dev/null | awk '{ print $1 }' |
   grep -E "^tando-$A-(act|pre|rel|venv|envcheck|backup)-" | tr '\n' ' ')"
 kv tmp "$( { find "$D" -maxdepth 2 \( -name '*.tmp' -o -name '*.tmp.*' -o -name current.tmp -o -name .env.check \
-  -o -name '.env.??????' -o -name copy.err -o -name '.restore-*' -o -name '.replaced-*' \) 2> /dev/null
+  -o -name '.env.??????' -o -name copy.err -o -name '.restore-*' -o -name '.replaced-*' -o -path "$D/sums/*.work" \) 2> /dev/null
   ls "$f.tmp" "$f.old" 2> /dev/null; } | sed "s|^$D/||" | tr '\n' ' ')"
 # the shared assets directory: a half-made link, list or key left by an operation that was cut off
 kv asset_left "$( { find "$D/assets" -name '*.new' 2> /dev/null; ls "$D"/assetlog/*.tmp "$D"/assetlog/.keep.* 2> /dev/null; } | sed "s|^$D/||" | tr '\n' ' ')"

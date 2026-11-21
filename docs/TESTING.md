@@ -241,7 +241,7 @@ none when the app is stopped (`--selftest` breaks it twice: a worker stopped beh
 a stray worker unit).
 
 `test/e2e-matrix-quick.sh` (full and quick tiers, about 8 minutes) runs `--cells`: one cell for
-each defect fixed in milestone 1, 2a and 2b (the list `CELLS` in the driver: two clients' settings, nothing of a deploy that does not go live reaching the live app, job units that could not be written, a queue that gave up, a site file that was not replaced, a rollback cut before its first state write, an upload lease left by a killed begin or activate, a destroy killed after its units went and before its Caddy site, a deploy queued behind one that is refused before its switch),
+each defect fixed in milestone 1, 2a and 2b (the list `CELLS` in the driver: two clients' settings, nothing of a deploy that does not go live reaching the live app, job units that could not be written, a queue that gave up, a site file that was not replaced, a rollback cut before its first state write, an upload lease left by a killed begin or activate, a destroy killed after its units went and before its Caddy site, a deploy queued behind one that is refused before its switch, a deploy killed just before its release's manifest is written and between its flushed temp file and the mv: recovery drops the release with its manifest, temp file and work directory),
 node; two cells of
 the container recipe (the switch failure, a kill at its spawn) and two of a static site (a kill at
 Caddy's file site, after the link moved), and for the kind `worker` a kill in the middle of the

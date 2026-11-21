@@ -80,6 +80,17 @@ first, grouped by area.
   and a Next.js package are still refused, with what to do (docs/RECIPES.md, "One package of a
   monorepo"). A Next.js package used to get a tando.conf from init and be refused only at
   deploy; init refuses it now.
+- Faster on a slow disk: the copy of a deploy no longer reads the live release. Each release now
+  has a manifest (`sums/<id>` beside the releases, root's: per file its sha256, size and identity),
+  written last in its import. The next import hashes only the files the upload changed, and links
+  a file to the live release when the manifest says the bytes are the same and the live file is
+  still the recorded inode, unchanged, root's with mode 640 or 750; the rest is copied, with no
+  `rsync -c` over both trees. A live release without a valid manifest (an older agent's, a damaged
+  one) is compared byte for byte as before. On the slow-disk bench (10 MB/s, page cache dropped
+  before each deploy, a 61 MB / 1,847-file app) a warm deploy's copy took 1.0 and 0.9 s against
+  6.1 and 6.3 s, and the deploy read 69-73 MB from disk against 129 MB (the rest is the upload's
+  own `rsync -c`); the first warm deploy after the cold one still took 7.4 s against 7.3 s
+  (bench/RESULTS.md, "Slow disk: the manifest").
 - Faster on a slow disk: the copy of a deploy no longer runs `chown -R` and `chmod -R` over the
   whole new release. It sets owner and mode only on the files that are not root's with the app's
   group and mode 640 or 750 already, so a file the release shares with the live one (most files

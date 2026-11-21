@@ -8,8 +8,10 @@
 # and agent of <tree>: one cold `tando up`, then RUNS warm deploys (one small file changed each),
 # each under a request loop against the app being deployed (reqloop.py, ~10 req/s, 5 s timeout).
 # Records per warm deploy: copy_s and total_s (tando history --json), the worst request time and
-# failed requests during the deploy. Then times each step of the copy by hand, on the server, on the
-# same disk (STEPS=0 skips it).
+# failed requests during the deploy, and rd_mb: what the deploy read from the throttled disk (the
+# loop device's sectors read, before and after). DROP=1: the page cache is dropped before each warm
+# deploy (as on a small server where the live release was evicted since the last deploy). Then
+# times each step of the copy by hand, on the server, on the same disk (STEPS=0 skips it).
 # Usage: bench/run-slowdisk.sh <tree> <label> <app-dist-dir> [runs (3)]   (ASSETS=1: the app's
 # .next/static shared with Caddy, assets = .next/static, /_next/static; 0.1.1 has no assets)
 # Server: TANDO_TEST_NAME (tando-je1), TANDO_TEST_SSH_PORT (3801), TANDO_TEST_HTTP_PORT (9801);
@@ -59,14 +61,17 @@ sys.exit(0 if c and c[0].get("status")=="verified" else 1)' && return 0; sleep 1
 echo v0 > dist/bench-version.txt
 tando up --yes > "$O/cold.out" 2>&1 || { tail -20 "$O/cold.out" >&2; exit 1; }
 verified_wait || log "[$L] cold: not verified"
-res "label	run	rc	copy_s	total_s	deploy_wall_s	req	failed	max_req_ms	p95_req_ms"
+res "label	run	rc	copy_s	total_s	deploy_wall_s	req	failed	max_req_ms	p95_req_ms	rd_mb"
+# sectors read from the loop disk so far (/sys/block/loopN/stat, field 3)
+rdsec() { docker exec "$C" sh -c 'awk "{ print \$3 }" /sys/block/$(basename $(cat /run/bench-loop))/stat'; }
 URL=http://127.0.0.1:$HP/api/version H=bench.localhost
 for r in $(seq 1 "$RUNS"); do
   echo "v$r" > dist/bench-version.txt
   "$ROOT/bench/reqloop.py" "$URL" "$O/req.$r" "$H" & rl=$!
-  sleep 2; t0=$(ms)
+  [ "${DROP:-0}" = 1 ] && docker exec "$C" sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
+  sleep 2; rd0=$(rdsec); t0=$(ms)
   tando deploy > "$O/deploy.$r.out" 2>&1; rc=$?
-  t1=$(ms); sleep 2; kill $rl; wait $rl 2> /dev/null
+  t1=$(ms); rd1=$(rdsec); sleep 2; kill $rl; wait $rl 2> /dev/null
   h=$(tando history --json 2> /dev/null | python3 -c 'import sys,json
 d=json.load(sys.stdin); e=d if isinstance(d,list) else d.get("history",d.get("entries",[]))
 e=[x for x in e if x.get("kind")=="deploy"]; x=max(e,key=lambda x:x.get("at",0))
@@ -76,7 +81,8 @@ rows=[l.split() for l in open(sys.argv[1]) if l.strip()]
 lat=sorted(float(c) for a,b,c in rows); bad=sum(1 for a,b,c in rows if b!="200")
 print(len(rows), bad, "%.0f" % lat[-1], "%.0f" % lat[int(.95*len(lat))])' "$O/req.$r")
   # shellcheck disable=SC2086 # words
-  res "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$L" "$r" "$rc" $h "$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.1f", (b - a) / 1000 }')" $q)"
+  res "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$L" "$r" "$rc" $h "$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.1f", (b - a) / 1000 }')" $q \
+    "$(awk -v a="$rd0" -v b="$rd1" 'BEGIN { printf "%.1f", (b - a) * 512 / 1048576 }')")"
   verified_wait || log "[$L] run $r: not verified"
 done
 tando history --json > "$O/history.json" 2>&1
