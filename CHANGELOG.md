@@ -19,6 +19,7 @@ first, grouped by area.
   were linked before are not compressed again. The bench Next.js app itself was not built here.
   Tests: CG0 and CZ in e2e.sh, N13 in e2e-next.sh. Not done: `.zst` copies (a visitor that
   accepts both gets the .gz).
+
 ## 0.2.1 - 2026-11-21
 
 - Fixed: the 0.2.0 release archive lacked `lib/native.js`, so every Node.js or Next.js deploy from
