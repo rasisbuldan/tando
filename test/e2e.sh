@@ -505,7 +505,9 @@ srv "printf 'ELOG_X=1\n' | sudo $AGENT env-set hello note64=$(printf 'a\tb' | ba
 check "12h12 a note with a control character or over 200 characters is refused by the client and by the agent, and nothing is changed ($rc1 $rc2 $rc3 $rc4)" \
   eval '[ $rc1 != 0 ] && [ $rc2 != 0 ] && [ $rc3 != 0 ] && [ $rc4 != 0 ] && [ "$(elog_n)" = "$n1" ] && ! "$R" env ls --show | grep -q ELOG_X &&
         grep -q "control" "$E/ctl.out" && grep -q "at most 200" "$E/long.out" && grep -q "over 200" "$E/slong.out" && grep -q "control" "$E/sctl.out"'
-"$R" env set "UNHEALTHY_VERSION=$(ver)@$((port + 100))" > "$E/pf.out" 2>&1; rc=$?
+# (its pre-flight port: preflight_port= from 14100-14999, port + 100 for an app made before)
+pfp=$(srv "sudo sed -n 's/^preflight_port=//p' /opt/tando/apps/hello/app.conf"); pfp=${pfp:-$((port + 100))}
+"$R" env set "UNHEALTHY_VERSION=$(ver)@$pfp" > "$E/pf.out" 2>&1; rc=$?
 check "12h13 a change refused by the pre-flight is not logged (rc=$rc, $n1 -> $(elog_n))" \
   eval '[ $rc != 0 ] && grep -q "nothing was changed" "$E/pf.out" && [ "$(elog_n)" = "$n1" ]'
 # the bound: an app that does not exist yet (its env is staged), 205 changes; the 200 newest stay

@@ -6,8 +6,12 @@
 # 2, 12: the loopback rules name every app port, and app replies to connections from outside drop
 FW=$(srv 'sudo nft list table inet tando')
 AU=$(srv 'id -u tando-alpha')
-check "S3-2 alpha's uid: own ports accepted, the range and 2019 rejected (adopted ports join the list)" \
-  eval 'echo "$FW" | grep -q "skuid $AU tcp dport { $AP, $((AP + 100)) } accept" && echo "$FW" | grep -q "skuid $AU tcp dport { 2019, 4100-4299.*} reject"'
+# (its pre-flight port: preflight_port= from the pre-flight range, 14100-14999; port + 100 before it)
+PP=$(srv "sudo sed -n 's/^preflight_port=//p' /opt/tando/apps/alpha/app.conf"); PP=${PP:-$((AP + 100))}
+REJ=$(echo "$FW" | grep "skuid $AU tcp dport {.*} reject with tcp reset" | grep -v "5432")
+check "S3-2 alpha's uid: own ports accepted, both ranges and 2019 rejected (adopted ports join the list)" \
+  eval 'echo "$FW" | grep -Eq "skuid $AU tcp dport \{ ($AP, $PP|$PP, $AP) \} accept" &&
+        echo "$REJ" | grep -q "[{ ]2019[,}]" && echo "$REJ" | grep -q " 4100-4999[,}]" && echo "$REJ" | grep -q " 14100-14999[ ,}]"'
 check "S3-12a outside connections to an app's sockets get no answer (rule present)" \
   eval 'echo "$FW" | grep -q "oifname != \"lo\" meta skuid $AU ct direction reply drop"'
 IP=$(rootsh "hostname -I | cut -d' ' -f1")

@@ -209,6 +209,11 @@ wait_server() {
 stray_start() { srv "sudo systemd-run --quiet --unit=fault-stray-$1 node -e \"require('http').createServer((q,s)=>s.end('stray\\\\n')).listen($1,'127.0.0.1')\""; sleep 1; }
 stray_stop() { srv "sudo systemctl stop fault-stray-$1" 2> /dev/null; true; }
 app_port() { srv "sudo sed -n 's/^port=//p' /opt/tando/apps/$1/app.conf"; }
+# app_preflight_port: its preflight_port= (from 14100-14999), or port + 100 for an app made before
+app_preflight_port() {
+  local p; p=$(srv "sudo sed -n 's/^preflight_port=//p' /opt/tando/apps/$1/app.conf")
+  [ -n "$p" ] && echo "$p" || echo $(($(app_port "$1") + 100))
+}
 # run the client in the background: CL pid, output $W/client.out (rc=N appended)
 client_bg() { # app args...
   local a=$1; shift

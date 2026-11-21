@@ -50,7 +50,8 @@ neutral() { # h1 h2
     grep -q '\^\[\[2J' "$1" && grep -q 'café' "$2"
 }
 deploy_ok() { # file id
-  grep -q "^# deploy $2: ok" "$1" && grep -q '\[pre\] logflood on 4[0-9]*' "$1" &&
+  # (the pre-flight port: 14100-14999 for an app made now, port + 100 for an older one)
+  grep -q "^# deploy $2: ok" "$1" && grep -q '\[pre\] logflood on 1\{0,1\}4[0-9][0-9][0-9]' "$1" &&
     grep -q "\[systemd\] .*tando activation filt $2" "$1"
 }
 no_journal_read() { # user app (constants of this file)
