@@ -123,34 +123,29 @@ host_line() { # from the host row
   done < "$TMPD/st"
 }
 
-# cpu_pct app cpu_ns uptime -> CPUP: percent since the previous sample while watching,
-# otherwise the average since the app started
-cpu_pct() {
-  local v pc pt p=""
-  ui_int "$2" || set -- "$1" 0 "${3:-}"   # server fields never reach $(( )) unchecked (N4)
-  ui_int "${3:-}" || set -- "$1" "$2" 0
-  v=$(var "$1"); pc="PC_$v" pt="PT_$v"
-  if [ -n "${!pc:-}" ] && [ "$NOW" -gt "${!pt}" ]; then
-    p=$(( ($2 - ${!pc}) / 10000000 / (NOW - ${!pt}) ))
-  elif ui_int "$3" && [ "$3" -gt 0 ]; then
-    p=$(( $2 / 10000000 / $3 ))
-  fi
-  printf -v "$pc" %s "$2"
-  printf -v "$pt" %s "$NOW"
-  CPUP=${p:-0}
+# cpu_min permille -> CPUP: the app's CPU over the last minute (tando-metrics' last sample, the app
+# row's 26th field, per mille of one core) as "12%" or "0.4%"; "-" without one (no sample yet, or
+# an older agent). The same window in ls and status, with and without --watch. CPUN: the number
+# (percent, for JSON), "" without one.
+cpu_min() {
+  if ui_int "${1:-}" && [ ${#1} -le 9 ]; then   # server fields never reach $(( )) unchecked (N4)
+    local v=$((10#$1))
+    if [ $v -ge 100 ]; then CPUP="$((v / 10))%"; else CPUP="$((v / 10)).$((v % 10))%"; fi
+    CPUN="$((v / 10)).$((v % 10))"
+  else CPUP=- CPUN=""; fi
 }
 
 # the app rows of $TMPD/st with the columns ls --json and status --json share
 app_json_rows() {
   firing_load
-  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx
-  while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx; do
+  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx
+  while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx; do
     [ "$r" = app ] || continue
-    cpu_pct "$a" "$cpu" "$up"
+    cpu_min "${cpum:-}"
     lim_clean
     firing_of "$a"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(state_word "$state" "$rel" "$recipe")" \
-      "$recipe" "$port" "$rel" "$(id_epoch "$rel")" "$rst" "$mem" "$max" "$CPUP" "$rs" "$up" "$link" "$db" "${lb:-}" "${doms:-}" \
+      "$recipe" "$port" "$rel" "$(id_epoch "$rel")" "$rst" "$mem" "$max" "$CPUN" "$rs" "$up" "$link" "$db" "${lb:-}" "${doms:-}" \
       "$lcpu" "$ltasks" "$lconns" "$lreq" "$FIREN" "$FIRED"
   done < "$TMPD/st"
 }
@@ -217,7 +212,7 @@ firing_of() {
   done
 }
 render_ls() {
-  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx n=0 upt dep
+  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx n=0 upt dep
   if [ -n "$JSON" ]; then
     printf '{"host":%s,"apps":' "$(json_str "$HOST")"; app_json_rows | to_json "$APP_JSON"; printf '}\n'
     return
@@ -227,18 +222,18 @@ render_ls() {
   local acol="" ahd=""
   for a in $FIRING; do grep -q "^app${TAB}${a%%:*}${TAB}" "$TMPD/st" && { acol=1; ahd="${TAB}ALERT"; break; }; done
   {
-    printf 'APP\tSTATE%s\tDEPLOYED\tMEMORY\tCPU\tUP\tLOGS\tLINK\n' "$ahd"
-    while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx; do
+    printf 'APP\tSTATE%s\tDEPLOYED\tMEMORY\tCPU 1M\tUP\tLOGS\tLINK\n' "$ahd"
+    while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx; do
       [ "$r" = app ] || continue
       n=$((n + 1))
       case ${doms:--} in -) ;; *,*) link="${doms%%,*} +$(printf '%s' "$doms" | tr -cd , | wc -c | tr -d ' ')";; *) link=$doms;; esac
       state=$(down_word "$a" "$(state_word "$state" "$rel" "$recipe")")
-      cpu_pct "$a" "$cpu" "$up"
+      cpu_min "${cpum:-}"
       upt=- dep=-
       [ "$state" = running ] && upt=$(ui_dur "$up")
       [ "$state" = "not deployed" ] || dep=$(ago "$(id_epoch "$rel")")
       if [ -n "$acol" ]; then firing_of "$a"; [ -n "$FIRED" ] && FIRED="${UI_RED}${FIRED}${UI_NC}"; FIRED="${TAB}${FIRED:--}"; fi
-      printf '%s\t%s%s\t%s\t%s\t%s%%\t%s\t%s\t%s\n' "$a" "$(state_badge "$state")" "${acol:+$FIRED}" "$dep" "$(mb "$mem")" \
+      printf '%s\t%s%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(state_badge "$state")" "${acol:+$FIRED}" "$dep" "$(mb "$mem")" \
         "$CPUP" "$upt" "$(mb "${lb:-}")" "$(short_link "$link")"
     done < "$TMPD/st"
   } > "$TMPD/rows"
@@ -337,15 +332,15 @@ hist_notes_box() {
 }
 
 render_status() {
-  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly c g upt doms lcpu ltasks lconns lreq lx
-  while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx; do
+  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly c g upt doms lcpu ltasks lconns lreq cpum lx
+  while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx; do
     [ "$r" = app ] && break
   done < "$TMPD/st"
   [ "$r" = app ] || die "no status for $APP"
   if [ -n "$JSON" ]; then status_json; return; fi
   state=$(down_word "$a" "$(state_word "$state" "$rel" "$recipe")")
-  cpu_pct "$a" "$cpu" "$up"
-  SPC="$SPC $CPUP" SPM="$SPM $mem"
+  cpu_min "${cpum:-}"
+  SPC="$SPC ${CPUN%.*}" SPM="$SPM $mem"
   # without --watch, the trend comes from the server's per-minute samples (tando-metrics)
   local mrows hm="" hc=""
   if [ -z "$WATCH" ] && mrows=$(awk -F '\t' '$1 == "m" {print $3, $4}' "$TMPD/st") && [ -n "$mrows" ]; then
@@ -371,7 +366,7 @@ render_status() {
   else
     ui_kv memory "$(mb "$mem") (no cap)  ${UI_DIM}in use, not cache${UI_NC}"
   fi
-  ui_kv cpu "$CPUP%"
+  ui_kv cpu "$CPUP  ${UI_DIM}last minute${UI_NC}"
   worker_lines
   local rcid rcsf rcwh
   while IFS=$TAB read -r r _x rcid rcsf rcwh _y; do

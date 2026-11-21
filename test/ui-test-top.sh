@@ -157,17 +157,17 @@ v1=12 v2=0.5 v3=abc; ui_nums v1 v3; ui_nums -d v2; eq "ui_nums keeps numbers" "$
 if [[ -e $M ]]; then fail "a hostile server field ran a command in tando top"; fi
 [[ -e $HX/done.top ]] || fail "the hostile tando top run did not finish"
 
-# views.sh cpu_pct (tando ls / status): the cpu field of an app row
+# views.sh cpu_min (tando ls / status): the last-minute cpu field of an app row
 if [[ -f $RT/lib/views.sh && -f $RT/lib/common.sh ]]; then
     (
         set +u
         . "$RT/lib/common.sh"; . "$RT/lib/views.sh"
         NOW=1000
-        for h in "${HOSTILE[@]}"; do cpu_pct hello "$h" 10; cpu_pct hello "$h" "$h"; cpu_pct site 5 "$h"; done
+        for h in "${HOSTILE[@]}"; do cpu_min "$h"; done
         : > "$HX/done.views"
     ) > /dev/null 2>&1
-    if [[ -e $M ]]; then fail "a hostile cpu field ran a command in views.sh cpu_pct"; fi
-    [[ -e $HX/done.views ]] || fail "the hostile cpu_pct run did not finish"
+    if [[ -e $M ]]; then fail "a hostile cpu field ran a command in views.sh cpu_min"; fi
+    [[ -e $HX/done.views ]] || fail "the hostile cpu_min run did not finish"
 fi
 rm -rf "$HX"
 exit 0

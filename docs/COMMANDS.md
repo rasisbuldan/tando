@@ -101,7 +101,7 @@ Example: `tando history -n 10`
 
 ### status
 `tando status [app] [--watch N] [-H host] [--json]`. Flags also `-a`. Arguments: 0-1.
-One app in detail: state, release, memory, cpu, last 16 minutes, logs, alerts, its database
+One app in detail: state, release, memory, cpu (the last minute: `12%  last minute`), last 16 minutes, logs, alerts, its database
 (`database  postgres  412 MB, 3 of 10 connections`: the size and the connections of its role
 against the role's limit, as the alert checks last read them), backups, releases,
 recent deploys. The backup line turns red (`over 50 h, the backup alert fires`) past the backup
@@ -390,7 +390,7 @@ Example: `tando restore --from-host 3f9a01c2b7de --all -H newvps`
 
 ### ls
 `tando ls [-H host] [--all] [--watch N] [--json]`. Arguments: none. `-a` is refused.
-The apps of a server: state, deploy age, memory, cpu, uptime, link (never cut: other columns are
+The apps of a server: state, deploy age, memory, cpu over the last minute (`CPU 1M`), uptime, link (never cut: other columns are
 dropped first at 80 columns). While an alert fires for an app, an ALERT column names the checks
 (`http`, `slow`, ...) and the footer counts them; `--json` has `alerts_firing` and `firing` per
 app. `--all`: every registered server, with `--watch` and `--json`. A

@@ -4882,8 +4882,23 @@ app_row() { # name of the array with this unit's systemctl fields
   row app "$A" "$state" "${C[port]}" "${S[current]:-}" "${S[status_${S[current]:-x}]:-}" \
     "$mem" "$max" "$cpu" "${_u[NRestarts]:-0}" "$up" "$(link)" "${C[recipe]:-}" \
     "${C[backup]:-off}" "${S[last_backup]:-}" "${C[database]:-}" ${LG[$A]:-- - - -} "$(app_domains)" \
-    "${C[cpu]:--}" "${C[tasks]:-1024}" "${C[max_conns]:-256}" "${C[max_requests]:--}"
-  # (LG: 4 words, split on purpose; the last four: the app's limits, cpu "-" = none)
+    "${C[cpu]:--}" "${C[tasks]:-1024}" "${C[max_conns]:-256}" "${C[max_requests]:--}" "$(cpu_minute)"
+  # (LG: 4 words, split on purpose; then the app's limits, cpu "-" = none; then cpu_minute)
+}
+# cpu_minute: the app's CPU over tando-metrics' last sample (about the last minute), per mille of
+# one core: the usec of the last line over the seconds since the line before; "-" without two
+# lines, a gap over 10 minutes, or a last sample older than 3 minutes. srv/status: cpuMinute.
+cpu_minute() {
+  local f=/var/lib/tando/metrics/$A.tsv ml t1 t2 u2 dt
+  [[ -r $f ]] || { echo -; return; }
+  mapfile -t ml < <(tail -n 2 "$f" 2> /dev/null)
+  ((${#ml[@]} == 2)) || { echo -; return; }
+  IFS=$'\t' read -r t1 _ <<< "${ml[0]}"
+  IFS=$'\t' read -r t2 _ u2 _ <<< "${ml[1]}"
+  [[ $t1 =~ ^[0-9]{1,12}$ && $t2 =~ ^[0-9]{1,12}$ && $u2 =~ ^[0-9]{1,15}$ ]] || { echo -; return; }
+  dt=$((t2 - t1))
+  if ((dt < 1 || dt > 600 || EPOCHSECONDS - t2 > 180)); then echo -; return; fi
+  echo $((u2 / (dt * 1000)))
 }
 # restore_cut_row: a restore cut off while it replaced the data (restore_cut in the state, until a
 # restore ends): one row for tando status and ls: the backup to restore again, the safety backup,

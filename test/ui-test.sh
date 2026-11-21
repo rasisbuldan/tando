@@ -615,8 +615,8 @@ if [[ $r == "2028-02-29 23:59 GMT|12-11 14:40 GMT|2025-11-24 16:00 GMT|27m ago" 
 mon_rows() { # the default stub: one host, apps web (running) and api (running, an alert firing)
     local n; n=$(date +%s)
     printf 'host\tvps\t2\t0.40\t2000000000\t500000000\t40000000000\t10000000000\t86400\n'
-    printf 'app\tweb\tactive\t3001\t20261101-101010\tok\t52428800\t134217728\t9000000000\t0\t3600\thttp://web.example.test\tnode\toff\t-\t-\t1000\t2000\t10\t0\t-\t-\t1024\t256\t-\n'
-    printf 'app\tapi\tactive\t3002\t20261101-101010\tok\t52428800\t134217728\t9000000000\t0\t3600\thttp://api.example.test\tnode\tdaily\t%s\t-\t1000\t2000\t10\t0\t-\t-\t1024\t256\t-\n' $((n - 30 * 3600))
+    printf 'app\tweb\tactive\t3001\t20261101-101010\tok\t52428800\t134217728\t9000000000\t0\t3600\thttp://web.example.test\tnode\toff\t-\t-\t1000\t2000\t10\t0\t-\t-\t1024\t256\t-\t123\n'
+    printf 'app\tapi\tactive\t3002\t20261101-101010\tok\t52428800\t134217728\t9000000000\t0\t3600\thttp://api.example.test\tnode\tdaily\t%s\t-\t1000\t2000\t10\t0\t-\t-\t1024\t256\t-\t-\n' $((n - 30 * 3600))
     printf 'alert\tapi\thttp\tfiring\t%s\t5xx 12%% of 300 requests\n' $((n - 120))
 }
 mon_run() { # code: run with the views loaded, the stub agent answering from $tmp/mon.st
@@ -674,6 +674,16 @@ out=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/views.sh
   printf "up\tweb\t9990\t9990\t1440\t10080\t0\t12\t30\t5,6,7\tok\t11\t\n" > "$TMPD/hl"; hl_all; rm -rf "$TMPD"' _ "$here" 2>&1)
 if [[ $out == *"PROBE P95"*"P95: tando-watch's probe, 24 h; real traffic: tando requests"* ]]; then ok
 else bad "health: the p95 does not say it is the probe's ($out)"; fi
+# CPU is the last minute's (the app row's 26th field, per mille) in ls, status and --json alike;
+# "-" without a sample (it was the average since the app started, or a delta while watching)
+out=$(mon_run 'render_ls' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if grep -Eq '^│ APP .* MEMORY +CPU 1M ' <<< "$out" && grep -Eq '^│ web .* 50 MB +12% ' <<< "$out" &&
+   grep -Eq '^│ api .* 50 MB +- ' <<< "$out"; then ok; else bad "ls: cpu is not the last minute's ($out)"; fi
+out=$(mon_run 'APP=web; render_status' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if grep -Eq '^│ cpu +12%  last minute' <<< "$out"; then ok; else bad "status: cpu is not the last minute's ($out)"; fi
+out=$(mon_run 'JSON=1; render_ls')
+if [[ $out == *'"app":"web",'*'"cpu_percent":12.3,'*'"app":"api",'*'"cpu_percent":null,'* ]]; then ok
+else bad "ls --json: cpu_percent is not the last minute's ($out)"; fi
 # tando top: the firing check after the app's state, the count in the host strip
 out=$("$BASH_BIN" -c '
     . "$1/lib/ui.sh"; . "$1/lib/common.sh"; set +u; TAB=$(printf "\t"); AGENT_BIN=/opt/tando/bin/tando-agent; . "$1/lib/cmd-top.sh"

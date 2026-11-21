@@ -6,6 +6,12 @@ first, grouped by area.
 
 ## Unreleased
 
+- Changed: CPU in `tando ls` and `tando status` is the last minute's, with and without `--watch`
+  (`CPU 1M`; status: `12%  last minute`); it was the average since the app started, or under
+  `--watch` a delta timed by the laptop's whole seconds, so a pegged app could read 0%. It comes
+  from tando-metrics' last sample: the app row of `status` has a 26th field (per mille of one
+  core, `-` without a sample in the last 3 minutes), printed the same by the shell agent and
+  tando-status. `--json`'s `cpu_percent` is that number (null without a sample).
 - Changed: labels say what they measure. `tando health`'s p95 column is `PROBE P95` (tando-watch's
   probe, 24 h; the footer points to `tando requests` for real traffic), `tando health <app>` shows
   `probe 24h`, and `tando requests`' latency row ends with `real requests, <window>`. The backup
