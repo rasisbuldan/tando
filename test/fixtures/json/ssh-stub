@@ -1,0 +1,77 @@
+#!/bin/bash
+# test/fixtures/json/ssh-stub: a stand-in for ssh in test/json-contract.sh. It never connects
+# anywhere: it answers the remote command tando sends with canned agent rows (invented data), by
+# what the command asks for. Every call is appended to $STUB_LOG (one line: the remote command),
+# so a test can count the execs. Times are around T=1795000000 (2026-11-18 GMT).
+set -u
+T=1795000000
+cmd=""
+# the remote command is the last argument; options before it (-p, -o, -i, -n, -t) are skipped
+for a; do cmd=$a; done
+case "$*" in *" -O "*|*" -O"*) exit 0;; esac
+[ -n "${STUB_LOG:-}" ] && printf '%s\n' "$cmd" >> "$STUB_LOG"
+# a host entry whose target is 192.0.2.99 is down; 192.0.2.98 hangs (a timeout)
+case "$*" in *@192.0.2.99*) echo "ssh: connect to host 192.0.2.99 port 22: Connection refused" >&2; exit 255;;
+  *@192.0.2.98*) exec sleep 60;; esac
+tab() { local IFS='	'; printf '%s\n' "$*"; }
+
+status_rows() {
+  tab host web-1 2 0.42 2048000000 1024000000 40000000000 12000000000 864000
+  tab server $((T + 3)) 0.2.2
+  tab hostcare 2 0 1 $((T - 600))
+  # app: a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx
+  tab app shop active 3000 20261117-101010 verified 104857600 268435456 123456789 1 7200 https://shop.example.com/ node daily $((T - 3600)) shop 5242880 50M 1200 0,1,2 shop.example.com 50% 64 100 200 34 -
+  tab app api inactive 3001 20261117-090909 verified 0 0 0 4 0 https://api.example.com/ node off - - - - - - - - - - - - -
+  tab app docs active - 20261116-080808 verified 0 0 0 0 0 https://docs.example.com/ static off - - - - - - - - - - - - -
+  tab app jobs stopped 3002 20261115-070707 verified 0 0 0 0 0 - python off - - - - - - - - - - - - -
+  tab app fresh deploying 3003 - - 0 0 0 0 0 - node off - - - - - - - - - - - - -
+  tab worker shop mailer active 0 20971520 67108864
+  tab alert api down firing $((T - 900)) exited
+  tab alert host disk pending $((T - 120)) "85% used"
+}
+
+case $cmd in
+  *"tando-agent status"*)
+    status_rows
+    case $cmd in *loadavg*) tab loadavg 0.42 0.37 0.30;; esac
+    case $cmd in *"@releases"*)
+      echo '@releases'
+      tab rel 20261117-101010 verified 1 1
+      tab rel 20261116-101010 verified 0 0
+      tab rel 20261115-101010 failed 0 0
+      echo '@history'
+      # hist app at release kind result total build upload copy preflight switch verify note release_s
+      tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1
+      tab hist shop $((T - 90000)) 20261116-101010 rollback verified 6.0 - - - - 0.5 5.5 - -
+      tab hist shop $((T - 180000)) 20261115-101010 deploy failed 20.0 12.0 3.0 1.0 2.0 - - "start test failed" -
+      echo '@metrics'
+      # read <app> <points> <bucket>: mx then m rows (a gap in the middle, a counter reset)
+      case $cmd in
+        *"read shop 60 60"*) b=60;; *"read shop 144 600"*) b=600;; *) b=3600;;
+      esac
+      now=$((T + 3)); s=$((now / b * b))
+      tab mx $b $now
+      tab m $((s - 5 * b)) 100000000 120 1 a
+      tab m $((s - 4 * b)) 101000000 130 2 a
+      tab m $((s - 2 * b)) 102000000 140 0 a
+      tab m $((s - 1 * b)) 103000000 150 1 a
+      tab m $s 104857600 34 1 a
+      echo '@health'
+      tab up shop 9993 9987 1430 9980 2 12 85 40,42,-,38,39,41,40,40,39,38,37,36,40,41,42,43,44,40,39,38,37,36,35,34 ok 33 -
+      tab inc shop $((T - 50000)) $((T - 49700)) down "exited with status 1"
+      tab pg shop 12582912 3 20
+      echo '@audit'
+      # audit time who from verb app result note
+      tab audit $((T - 7300)) ci-bot 198.51.100.7 deploy shop ok "release 20261117-101010"
+      tab audit $((T - 90100)) alice 203.0.113.5 rollback shop ok "from 20261117-000000 to 20261116-101010"
+      ;;
+    esac
+    printf 'clock\t%s.123456\n' $((T + 3))
+    exit 0;;
+  *"tando-agent env-names"*)
+    tab env DATABASE_URL; tab env SESSION_SECRET; tab env PUBLIC_BASE_URL; exit 0;;
+  *"tando-agent env-ls"*)
+    echo "stub: env-ls must not be called for names" >&2; exit 9;;
+esac
+echo "ssh-stub: no canned answer for: $cmd" >&2
+exit 1

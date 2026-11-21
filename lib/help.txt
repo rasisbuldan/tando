@@ -136,6 +136,16 @@ The apps of a server: state, when deployed, memory, cpu, uptime and link.
 down, an alert fires or (with --all) a server does not answer; 0 when not.
 Example: tando ls --all
 
+@@ snapshot
+flags: -a= -H= --all --app= --range= --json
+args: 0
+usage: tando snapshot --json [-H host | --all] [--app A [--range 1h|24h|7d]]
+Everything a dashboard shows of a server, in one ssh call per server: apps
+with their state and its reason, load, memory, disk, clock, versions, alerts.
+--app adds that app's releases, deploys (with who deployed), metrics over the
+range (every bucket present, null where there was no sample) and health.
+--all: every registered server in parallel, one JSON line each.
+
 @@ logs
 flags: -a= -H= -f -n= --since= --until= --grep= --regex -E -i --level= --release= --deploy= --worker= --json
 args: 0-2

@@ -144,12 +144,30 @@ app_json_rows() {
     cpu_min "${cpum:-}"
     lim_clean
     firing_of "$a"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(state_word "$state" "$rel" "$recipe")" \
+    state_reason_v "$a" "$state" "$rel" "$recipe"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(state_word "$state" "$rel" "$recipe")" \
       "$recipe" "$port" "$rel" "$(id_epoch "$rel")" "$rst" "$mem" "$max" "$CPUN" "$rs" "$up" "$link" "$db" "${lb:-}" "${doms:-}" \
-      "$lcpu" "$ltasks" "$lconns" "$lreq" "$FIREN" "$FIRED"
+      "$lcpu" "$ltasks" "$lconns" "$lreq" "$FIREN" "$FIRED" "$SR"
   done < "$TMPD/st"
 }
-APP_JSON="app:s,state:s,recipe:s,port:n,release:s,deployed_at:n,release_status:s,memory_bytes:n,memory_max_bytes:n,cpu_percent:n,restarts:n,uptime_s:n,link:s,database:s,log_bytes:n,domains:s,cpu_limit:s,tasks_max:n,max_conns:n,max_requests:n,alerts_firing:n,firing:s"
+APP_JSON="app:s,state:s,recipe:s,port:n,release:s,deployed_at:n,release_status:s,memory_bytes:n,memory_max_bytes:n,cpu_percent:n,restarts:n,uptime_s:n,link:s,database:s,log_bytes:n,domains:s,cpu_limit:s,tasks_max:n,max_conns:n,max_requests:n,alerts_firing:n,firing:s,state_reason:s"
+# state_reason_v app agent-state release recipe -> SR, the one word a UI shows (no fork): running,
+# static, deploying, stopped (tando stop), down (it died: not running, or stopped with a down
+# alert, as down_word), failed (tando gave up on it: the agent's failed), not_deployed (no
+# release yet). Needs firing_load (DOWN_APPS) first. Any other agent state passes through.
+state_reason_v() {
+  case $2 in
+    deploying) SR=deploying; return 0;;
+  esac
+  case ${3:--} in -) SR=not_deployed; return 0;; esac
+  case $2 in
+    active) if [ "$4" = static ]; then SR=static; else SR=running; fi;;
+    failed) SR=failed;;
+    inactive) SR=down;;
+    stopped) case " $DOWN_APPS " in *" $1 "*) SR=down;; *) SR=stopped;; esac;;
+    *) SR=$2;;
+  esac
+}
 # lim_clean: the app's limits from the server (cpu "50%" or "1.5" cores, "-" = no cap), else "-"
 lim_clean() {
   case ${lcpu:-} in [0-9]%|[0-9][0-9]%|[0-9][0-9][0-9]%|[0-9]|[0-9].[0-9]|[0-9].[0-9][0-9]|[0-9][0-9]|[0-9][0-9].[0-9]) ;; *) lcpu=-;; esac
@@ -228,12 +246,36 @@ json_meta() {
     "$NOW" "$( [ -n "$SRV_VER" ] && json_str "$SRV_VER" || printf null)" \
     "$( [ -n "$CLI_VER" ] && json_str "$CLI_VER" || printf null)" "${SKEW:-null}"
 }
+# system_json: ,"system":{...}, the machine's numbers from the host row of $TMPD/st (and the loadavg
+# row `tando snapshot` adds): hostname, cpus, load_1/5/15, memory and disk (the file system of /,
+# which holds /opt/tando) used and total in bytes, uptime_s. Unknown is null. No fork.
+system_json() {
+  local r f1 f2 f3 f4 f5 f6 f7 f8 x n=null c=null mt=null mu=null dt=null du=null up=null l1=null l5=null l15=null found=""
+  while IFS=$TAB read -r r f1 f2 f3 f4 f5 f6 f7 f8 x; do
+    case $r in
+      host) found=1 n=$f1
+        ui_int "$f2" && c=$f2; ui_int "$f4" && mt=$f4; ui_int "$f5" && mu=$f5
+        ui_int "$f6" && dt=$f6; ui_int "$f7" && du=$f7; ui_int "$f8" && up=$f8
+        [ "$l5" != null ] || { sys_load_v "$f3"; l1=$UI_RET; };;
+      loadavg) sys_load_v "$f1"; l1=$UI_RET; sys_load_v "$f2"; l5=$UI_RET; sys_load_v "$f3"; l15=$UI_RET;;
+    esac
+  done < "$TMPD/st"
+  [ -n "$found" ] || { printf ',"system":null'; return 0; }
+  case $n in ""|-|*[!A-Za-z0-9._-]*) n=null;; *) n="\"$n\"";; esac   # a host name: plain words only
+  printf ',"system":{"hostname":%s,"cpus":%s,"load_1":%s,"load_5":%s,"load_15":%s,"memory_used_bytes":%s,"memory_total_bytes":%s,"disk_used_bytes":%s,"disk_total_bytes":%s,"uptime_s":%s}' \
+    "$n" "$c" "$l1" "$l5" "$l15" "$mu" "$mt" "$du" "$dt" "$up"
+}
+sys_load_v() { # "0.42" -> UI_RET, the number as JSON ("0.42"), else null
+  case $1 in [0-9]*.[0-9]*|[0-9]*) case $1 in *[!0-9.]*|*.*.*) UI_RET=null;; *) UI_RET=$1;; esac;; *) UI_RET=null;; esac
+}
 # firing_load: FIRING = " app:check ..." for every firing alert in $TMPD/st (no fork)
 firing_load() {
   local r fa fc fs _x
-  FIRING=""
+  FIRING="" DOWN_APPS=""
   while IFS=$TAB read -r r fa fc fs _x; do
-    [ "$r" = alert ] && [ "$fs" = firing ] || continue
+    [ "$r" = alert ] || continue
+    [ "$fc" = down ] && DOWN_APPS="$DOWN_APPS $fa"   # (down_word's rule: a down alert in any state)
+    [ "$fs" = firing ] || continue
     case $fa$fc in *[!a-z0-9_.-]*) continue;; esac   # plain words only: the list is word-split
     FIRING="$FIRING $fa:$fc"
   done < "$TMPD/st"
@@ -253,7 +295,7 @@ render_ls() {
   if [ -n "$JSON" ]; then
     printf '{"host":%s' "$(json_str "$HOST")"; json_meta
     printf ',"apps":'; app_json_rows | to_json "$APP_JSON"
-    printf ',"alerts":'; alerts_json; printf '}\n'
+    printf ',"alerts":'; alerts_json; system_json; printf '}\n'
     return
   fi
   firing_load
@@ -524,6 +566,7 @@ status_json() {
   printf ',"history":'; hist_json
   printf ',"alerts":'; alerts_json
   pg_json "$TMPD/st" "$APP"
+  system_json
   printf '}\n'
 }
 cmd_status() {
