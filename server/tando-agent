@@ -308,13 +308,14 @@ journal_dir() {
   g=$(id -gn "$AU" 2> /dev/null) || return 0
   printf 'd %s 0750 root %s -\nz %s 0750 root %s -\n' "$d" "$g" "$d" "$g" | write_if_changed "$f"
   # it is the RuntimeDirectory of the namespace's journald, set to 0755 whenever that starts:
-  # set it right after
+  # set it right after (a daemon-reload only when that drop-in changed)
   mkdir -p "/etc/systemd/system/systemd-journald@tando-$A.service.d"
+  WIC_CHANGED=0
   write_if_changed "/etc/systemd/system/systemd-journald@tando-$A.service.d/tando.conf" <<EOF
 [Service]
 ExecStartPost=-/bin/sh -c 'chgrp $g $d && chmod 0750 $d'
 EOF
-  systemctl daemon-reload
+  ((WIC_CHANGED)) && dreload
   systemd-tmpfiles --create "$f" 2> /dev/null || true
 }
 
@@ -636,7 +637,12 @@ write_slice() {
   { printf '[Unit]\nDescription=tando app %s: all its units together\n\n[Slice]\n' "$A"
     printf 'MemoryMax=%sM\nTasksMax=%s\nCPUWeight=100\n' $((mb * 3 + wmb)) "${C[tasks]:-1024}"
     [[ -n $cpu ]] && printf 'CPUQuota=%s\n' "$cpu"
-  } | write_if_changed "/etc/systemd/system/$(app_slice)"
+  } > "/etc/systemd/system/.$(app_slice).new" || return 1
+  WIC_CHANGED=0
+  write_if_changed "/etc/systemd/system/$(app_slice)" < "/etc/systemd/system/.$(app_slice).new"
+  rm -f "/etc/systemd/system/.$(app_slice).new"
+  ((WIC_CHANGED)) && WU_CHANGED=1
+  return 0
 }
 props() { # port [kind]
   local p=$1 kind=${2:-service} x rw="$D/shared" envs ef=() sock
@@ -917,10 +923,19 @@ write_caddy() {
     { rm -f "$f.tmp"; WC_WHY="could not write the site file of $A (disk full?)"; echo "tando-agent: $WC_WHY" >&2; return 1; }
   # root:caddy 640: the probe header's secret is in it, and apps can read /etc
   chgrp caddy "$f.tmp" 2> /dev/null; chmod 640 "$f.tmp"
-  if cmp -s "$f.tmp" "$f" && [[ $(stat -c %a "$f") == 640 ]]; then rm -f "$f.tmp"; return 0; fi
+  # host setup (WC_STAGE): the file waits as <app>.caddy.new; caddy_install_staged puts every
+  # app's in place with one validation and one reload
+  if [[ -n ${WC_STAGE:-} ]]; then
+    if cmp -s "$f.tmp" "$f" && [[ $(stat -c %a "$f") == 640 ]]; then rm -f "$f.tmp" "$f.new"; else mv -f "$f.tmp" "$f.new"; fi
+    return 0
+  fi
+  # (a file host setup staged is older than this one: it goes, under the lock)
+  if [[ ! -f $f.new ]] && cmp -s "$f.tmp" "$f" && [[ $(stat -c %a "$f") == 640 ]]; then rm -f "$f.tmp"; return 0; fi
   # one site change at a time on the host (fd 11): Caddy validates and reloads the whole config,
   # so another app's file in between would be judged (and rolled back) with this one
   caddy_try_lock || { rm -f "$f.tmp"; echo "tando-agent: $WC_WHY" >&2; return 1; }
+  rm -f "$f.new"
+  if cmp -s "$f.tmp" "$f" && [[ $(stat -c %a "$f") == 640 ]]; then rm -f "$f.tmp"; exec 11>&-; return 0; fi
   if [[ -f $f ]] && ! cp -p "$f" "$f.old"; then
     rm -f "$f.tmp" "$f.old"; exec 11>&-
     WC_WHY="could not keep a copy of the site file of $A (disk full?)"; echo "tando-agent: $WC_WHY" >&2; return 1
@@ -950,6 +965,36 @@ write_caddy() {
     wc_fail "caddy rejected the site config for $A${verr:+: $verr}; $busy"; return 1
   fi
   rm -f "$f.old"
+  exec 11>&-
+}
+# caddy_install_staged: the site files host setup staged (<app>.caddy.new) in place, then one
+# validation and one reload for all of them (with 100 apps: one pass over Caddy's whole config, not
+# 100). When Caddy refuses, every file goes back as it was and WC_WHY says why. WC_N: how many.
+caddy_install_staged() {
+  local f l=() verr busy; WC_WHY="" WC_N=0
+  compgen -G "/etc/caddy/tando/*.caddy.new" > /dev/null || return 0
+  caddy_try_lock || return 1
+  for f in /etc/caddy/tando/*.caddy.new; do
+    [[ -f $f ]] || continue       # (a deploy wrote its own since: it removed this one)
+    f=${f%.new}
+    if [[ -f $f ]] && ! cp -p "$f" "$f.old"; then rm -f "$f.old"; continue; fi
+    sync "$f.new" 2> /dev/null
+    if mv -f "$f.new" "$f"; then l+=("$f"); else rm -f "$f.old"; fi
+  done
+  WC_N=${#l[@]}
+  ((WC_N)) || { exec 11>&-; return 0; }
+  cis_back() { for f in "${l[@]}"; do if [[ -f $f.old ]]; then mv -f "$f.old" "$f"; else rm -f "$f"; fi; done; }
+  if ! verr=$(caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1); then
+    cis_back; exec 11>&-
+    WC_WHY="caddy rejected the new site files: $(printf '%s\n' "$verr" | grep -i 'error\|fail' | tail -1 | cut -c1-300)"; return 1
+  fi
+  busy=$(caddy_binds /etc/caddy/Caddyfile)
+  [[ -z $busy ]] || { cis_back; exec 11>&-; WC_WHY="the Caddyfile listens on $busy, which another program holds (nothing was reloaded)"; return 1; }
+  if ! caddy_reload; then
+    cis_back; verr=$CADDY_ERR; busy=$(caddy_unload); exec 11>&-
+    WC_WHY="caddy rejected the new site files${verr:+: $verr}; $busy"; return 1
+  fi
+  for f in "${l[@]}"; do rm -f "$f.old"; done
   exec 11>&-
 }
 caddy_lock() { caddy_try_lock || die "$WC_WHY"; }
@@ -1019,9 +1064,11 @@ caddy_unload() {
 # Caddy holds at that moment with a 502 (it cancels the old configuration, and its retry loop with
 # it), so no tando change of Caddy's sites (caddy_lock) runs while the app is down: the window lasts
 # until the app listens again, the unit stops trying, or <secs> pass. fd 11, like caddy_lock.
+# A shared lock: restarts of other apps run beside it (their windows only keep reloads out),
+# a site change (exclusive) waits for every window that is open.
 hold_window_start() {
   exec 11>"$R/.caddy.lock"; chmod 600 "$R/.caddy.lock"
-  flock -w 60 11 || true      # (a site change that hangs must not stop a restart or a rollback)
+  flock -s -w 60 11 || true      # (a site change that hangs must not stop a restart or a rollback)
 }
 hold_window_end() { # port unit secs
   local end n0=""; mono; end=$((MONO + ${3:-15}))
@@ -1978,14 +2025,18 @@ fw_sync() {
   lockfile "$R/.fw.lock"; exec 4>"$R/.fw.lock"
   flock -w 60 4 || { echo "tando-agent: another update of the loopback rules takes over 60 s" >&2; return 1; }
   tmp=$(mktemp "$R/.firewall.nft.XXXXXX") || { exec 4>&-; return 1; }
-  lo=${H[port_min]:-4100} hi=$(( ${H[port_max]:-4199} + 100 ))
+  local PR_LO PR_HI PF_LO PF_HI; port_ranges
+  # closed to every app but its owner: both ranges (and any app's port or pre-flight port outside
+  # them: an older app's port + 100, an adopted app's own); an older host's 4100-4199 apps keep
+  # their pre-flight ports 4200-4299 in "outside"
+  lo=$PR_LO hi=$PR_HI
   for a in "$R"/apps/*/app.conf; do
     [[ -f $a ]] || continue
     p=$(sed -n 's/^port=//p' "$a"); sp=$(sed -n 's/^preflight_port=//p' "$a")
     u=$(sed -n 's/^user=//p' "$a"); db=$(sed -n 's/^database=//p' "$a"); a=${a%/app.conf}; a=${a##*/}
     u=${u:-tando-$a}; [[ $p =~ ^[0-9]+$ ]] && sp=${sp:-$((p + 100))}
     [[ $p =~ ^[0-9]+$ && $sp =~ ^[0-9]+$ ]] || continue
-    for x in "$p" "$sp"; do ((x >= lo && x <= hi)) || outside[$x]=1; done
+    for x in "$p" "$sp"; do ((x >= lo && x <= hi || x >= PF_LO && x <= PF_HI)) || outside[$x]=1; done
     u=$(id -u "$u" 2> /dev/null) || continue
     for x in "$p" "$sp"; do [[ ", ${own[$u]:-}, " == *", $x, "* ]] || own[$u]+="${own[$u]:+, }$x"; done
     # PostgreSQL only for apps with a database: another app could hold every connection slot
@@ -2005,7 +2056,7 @@ fw_sync() {
     echo "    type filter hook output priority 0; policy accept;"
     for u in "${!own[@]}"; do
       echo "    oifname \"lo\" meta skuid $u tcp dport { ${own[$u]} } accept"
-      echo "    oifname \"lo\" meta skuid $u tcp dport { $lo-$hi, 2019$others } reject with tcp reset"
+      echo "    oifname \"lo\" meta skuid $u tcp dport { $lo-$hi, $PF_LO-$PF_HI, 2019$others } reject with tcp reset"
       [[ -n ${pgu[$u]:-} ]] || echo "    oifname \"lo\" meta skuid $u tcp dport 5432 reject with tcp reset"
       # the cloud provider's metadata service (instance keys and tokens on many clouds): an app
       # tricked into fetching a URL (SSRF) must not reach it
@@ -2104,9 +2155,15 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
   mkdir -p "$R/apps"
   host_lock
   load "$R/host.conf" H
-  : "${H[apps_domain]:=localhost}" "${H[tls]:=off}" "${H[port_min]:=4100}" "${H[port_max]:=4199}"
+  : "${H[apps_domain]:=localhost}" "${H[tls]:=off}"
+  # ports: a host set up before the pre-flight range (no preflight_min) with the old default range
+  # 4100-4199 (100 apps) gets the new one; its apps keep their ports (and port + 100 as pre-flight)
+  if [[ -z ${H[preflight_min]:-} && ${H[port_min]:-} == 4100 && ${H[port_max]:-} == 4199 ]]; then H[port_max]=$PORT_MAX; fi
+  : "${H[port_min]:=$PORT_MIN}" "${H[port_max]:=$PORT_MAX}" "${H[preflight_min]:=$PREFLIGHT_MIN}" "${H[preflight_max]:=$PREFLIGHT_MAX}"
   for kv in "$@"; do
     case $kv in
+      port_min=*|port_max=*|preflight_min=*|preflight_max=*)
+        [[ ${kv#*=} =~ ^[0-9]{4,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
       apps_domain=*) [[ ${kv#*=} =~ ^[a-z0-9.-]+$ ]] || die "bad apps_domain"; H[apps_domain]=${kv#*=};;
       tls=off|tls=internal|tls=auto) H[tls]=${kv#*=};;
       domain_tls=off|domain_tls=internal|domain_tls=auto) H[domain_tls]=${kv#*=};;
@@ -2163,6 +2220,8 @@ EOF
   grep -q '^import /etc/caddy/tando/\*\.caddy' /etc/caddy/Caddyfile 2>/dev/null ||
     printf '\nimport /etc/caddy/tando/*.caddy\n' >> /etc/caddy/Caddyfile
   for kv in "${!H[@]}"; do H[$kv]=$(int_norm "${H[$kv]}"); done
+  port_ranges; port_ranges_ok || die "port ranges: $PR_WHY"
+  # an app whose port is outside the new range keeps it (fw_sync still closes it to other apps)
   save "$R/host.conf" H
   chmod 644 "$R/host.conf"
   caddy_admin_private
@@ -2265,16 +2324,21 @@ EOF
     step pg_stat_statements ok "$RT_DETAIL"
   fi
   step apps run
-  # settings such as tls change every site: re-render them (each reloads Caddy only if it changed)
-  local n=0
+  # settings such as tls change every site: re-render them. O(apps), not O(apps squared): the units
+  # and sites are written first (only what changed), then one daemon-reload and one Caddy reload
+  # for all of them (DR_FLAG, WC_STAGE), and only when something changed
+  local n=0 drf=$R/.setup-reload.$$
+  rm -f "$drf"
   for a in "$R"/apps/*/app.conf; do
     [[ -f $a ]] || continue
     a=${a%/app.conf}; n=$((n + 1))
     # (under the app's lock: a deploy or domain change of it writes the same files)
-    ( app "${a##*/}"; lock 300; app_perms; write_unit || exit 1; jobs_follow; write_caddy || exit 1; journal_dir ) ||
+    ( DR_FLAG=$drf WC_STAGE=1; app "${a##*/}"; lock 300; app_perms; WU_CHANGED=0; write_unit || exit 1
+      ((WU_CHANGED)) && dreload; jobs_follow; write_caddy || exit 1; journal_dir ) ||
       die "could not update the units and Caddy site of ${a##*/}"
   done
-  ((n)) && systemctl daemon-reload
+  [[ -f $drf ]] && { rm -f "$drf"; systemctl daemon-reload; }
+  caddy_install_staged || die "$WC_WHY; the sites are as they were: run tando host setup again once that is fixed"
   fw_sync || die "the per-app loopback rules could not be loaded (above); run tando host setup again"
   step apps ok "$n app$( ((n == 1)) || echo s)"
   echo ok=1
@@ -2282,12 +2346,18 @@ EOF
 
 # write_if_changed file: stdin into file, only when it differs (a re-run touches nothing)
 # (a hidden temp file beside it, renamed over it: never half a file, never a file systemd reads)
+# WIC_CHANGED=1 when it wrote the file (callers reset it first: a daemon-reload only then)
 write_if_changed() {
   local t; t=$(mktemp "${1%/*}/.${1##*/}.XXXXXX") || return 1
   cat > "$t" || { rm -f "$t"; return 1; }
   if cmp -s "$t" "$1"; then rm -f "$t"; return 0; fi
   chmod 644 "$t" && mv -f "$t" "$1" || { rm -f "$t"; return 1; }
+  WIC_CHANGED=1
 }
+# dreload: systemctl daemon-reload (it re-reads every unit file: with 100 apps about a second of
+# PID 1). Inside host setup's per-app loop (DR_FLAG names a file) it is only noted there: setup
+# reloads once after the loop.
+dreload() { if [[ -n ${DR_FLAG:-} ]]; then : > "$DR_FLAG"; else systemctl daemon-reload; fi; }
 
 # runtimes, installed when the first app needs one (tando up), or by host setup node=yes ...
 # RT_DETAIL says what is there afterwards.
@@ -2388,10 +2458,10 @@ cmd_doctor() {
     else row check warn "metrics sample" "no sample in the last 3 minutes (tando-watch.timer)"; fi
   fi
   if [[ -n ${H[port_min]:-} && -n ${H[port_max]:-} && -n ${H[apps_domain]:-} ]]; then
-    row check ok "host.conf" "*.${H[apps_domain]} tls=${H[tls]:-off} ports ${H[port_min]}-${H[port_max]}"
+    row check ok "host.conf" "*.${H[apps_domain]} tls=${H[tls]:-off} ports ${H[port_min]}-${H[port_max]}, pre-flight ${H[preflight_min]:-$PREFLIGHT_MIN}-${H[preflight_max]:-$PREFLIGHT_MAX}"
   elif [[ -f $R/host.conf ]]; then row check fail "host.conf" "empty or incomplete: tando host setup <host> rewrites it"
   else row check fail "host.conf" "missing: tando host setup <host>"; fi
-  : "${H[port_min]:=4100}" "${H[port_max]:=4199}"
+  local PR_LO PR_HI PF_LO PF_HI; port_ranges
   local cv; cv=$(caddy version 2> /dev/null | cut -d' ' -f1); cv=${cv#v}
   if [[ -n ${H[public_port]:-} && $cv =~ ^2\.[0-6]\. ]]; then
     row check warn "caddy log" "Caddy $cv does not log requests whose Host has a port, and public_port=${H[public_port]} gives every one a port: their requests are not in tando requests"
@@ -2566,7 +2636,9 @@ cmd_doctor() {
   else row check warn alerts "not set up: tando host setup"; fi
   # host care: one row from its last summary (tando host status is the machine's own view)
   [[ -x $R/bin/tando-host ]] && "$R/bin/tando-host" doctor 2> /dev/null
-  row check ok apps "$n apps, ports used $n of $((H[port_max] - H[port_min] + 1))"
+  local pn=$((PR_HI - PR_LO + 1))
+  if ((n * 10 >= pn * 9)); then row check warn apps "$n apps, ports used $n of $pn ($PR_LO-$PR_HI): widen the range before it is full (tando host setup <host> port_max=<port>)"
+  else row check ok apps "$n apps, ports used $n of $pn ($PR_LO-$PR_HI)"; fi
   if ((mt > 0 && caps > mt)); then
     row check warn "memory caps" "$((caps / 1048576)) MB of caps over $((mt / 1048576)) MB RAM"
   else row check ok "memory caps" "$((caps / 1048576)) MB of caps, $((mt / 1048576)) MB RAM"; fi
@@ -2608,17 +2680,39 @@ ports_used() {
   done
   echo "$used"
 }
-# port_pick lo hi: a port for a new app (prints it; fails when there is none). The app port and
-# its pre-flight port (+100) must both be free: no other app's port or pre-flight port (its
-# preflight_port, else port + 100; a stopped app listens on neither, so ss alone misses them, and
-# a range wider than 100 ports would hand out another app's pre-flight port), and nothing listens
+# port_pick lo hi plo phi: the port of a new app from lo-hi and its pre-flight port from plo-phi
+# (prints "port preflight"; fails when either range has none free). Neither is any app's port or
+# pre-flight port (its preflight_port, else port + 100 for apps made before preflight_port: a
+# stopped app listens on neither, so ss alone misses them), Caddy's admin port or PostgreSQL's,
+# nor a port something listens on (one ss for the whole scan, not one per port)
 port_pick() {
-  local p used; used=$(ports_used)
-  for ((p = $1; p <= $2; p++)); do
-    [[ $used == *" $p "* || $used == *" $((p + 100)) "* ]] && continue
-    ss -Hltn "sport = :$p or sport = :$((p + 100))" | grepq . || { echo "$p"; return 0; }
-  done
+  local p q used
+  used="$(ports_used) 2019 5432 $(ss -Hltn 2> /dev/null | awk '{ p = $4; sub(/.*:/, "", p); printf "%s ", p }') "
+  for ((p = $1; p <= $2; p++)); do [[ $used == *" $p "* ]] || break; done
+  ((p <= $2)) || return 1
+  for ((q = $3; q <= $4; q++)); do [[ $used == *" $q "* || $q == "$p" ]] || { echo "$p $q"; return 0; }; done
   return 1
+}
+# port_ranges: PR_LO PR_HI (app ports) and PF_LO PF_HI (pre-flight ports) from host.conf, with the
+# defaults: 4100-4999 and 14100-14999 (900 apps; a host set up before these keys keeps its own)
+PORT_MIN=4100 PORT_MAX=4999 PREFLIGHT_MIN=14100 PREFLIGHT_MAX=14999
+port_ranges() {
+  PR_LO=${H[port_min]:-$PORT_MIN} PR_HI=${H[port_max]:-$PORT_MAX}
+  PF_LO=${H[preflight_min]:-$PREFLIGHT_MIN} PF_HI=${H[preflight_max]:-$PREFLIGHT_MAX}
+}
+# port_ranges_ok: the ranges as host setup takes them, or PR_WHY says what is wrong
+port_ranges_ok() {
+  local x; PR_WHY=""
+  for x in "$PR_LO" "$PR_HI" "$PF_LO" "$PF_HI"; do
+    [[ $x =~ ^[1-9][0-9]{3,4}$ ]] && ((x >= 1024 && x <= 65535)) || { PR_WHY="ports are 1024 to 65535 (got $x)"; return 1; }
+  done
+  ((PR_LO <= PR_HI && PF_LO <= PF_HI)) || { PR_WHY="a range goes from its lower port to its higher one"; return 1; }
+  ((PR_HI < PF_LO || PF_HI < PR_LO)) || { PR_WHY="the app ports ($PR_LO-$PR_HI) and the pre-flight ports ($PF_LO-$PF_HI) must not overlap"; return 1; }
+  for x in 2019 5432; do
+    ((x >= PR_LO && x <= PR_HI || x >= PF_LO && x <= PF_HI)) && { PR_WHY="the port ranges must not contain $x (Caddy's admin port, PostgreSQL)"; return 1; }
+  done
+  ((PF_HI - PF_LO >= PR_HI - PR_LO)) || { PR_WHY="the pre-flight range needs at least as many ports as the app range"; return 1; }
+  return 0
 }
 cmd_configure() {
   need_root
@@ -2817,8 +2911,10 @@ cmd_configure() {
     flock -w 120 8 || die "another app is being created on this server and takes too long ($R/.ports.lock); try again"
     # another `tando up` of this same app created it while this one waited
     [[ -f $D/app.conf ]] && die "another tando up created $A a moment ago; run this one again (it then deploys to it)"
-    p=$(port_pick "${H[port_min]}" "${H[port_max]}") || die "no free port in ${H[port_min]}-${H[port_max]}"
-    C[port]=$p C[created]=$(now)
+    port_ranges
+    p=$(port_pick "$PR_LO" "$PR_HI" "$PF_LO" "$PF_HI") ||
+      die "no free port in $PR_LO-$PR_HI (or pre-flight port in $PF_LO-$PF_HI): widen them with tando host setup <host> port_max=<port>, or remove an app"
+    C[port]=${p% *} C[preflight_port]=${p#* } C[created]=$(now)
     # what an earlier app of this name left (an interrupted destroy: no app.conf, no user, not a
     # creation in progress) is removed first, so the new app starts with no old state or history
     if [[ -d $D && ! -f $D/.creating ]] && ! id "tando-$A" &> /dev/null; then rm -rf "${D:?}"; fi
@@ -3363,7 +3459,7 @@ run_release() {
   # its own last lines (journald may still be writing them: wait up to 3 s)
   for i in 1 2 3 4 5 6; do
     journalctl --sync 2> /dev/null; [[ -n $(jns) ]] && journalctl "$(jns)" --sync 2> /dev/null
-    last=$(journalctl --namespace='*' "_SYSTEMD_UNIT=$unit.service" _TRANSPORT=stdout -o cat --no-pager -n 60 2> /dev/null)
+    last=$(app_journal "_SYSTEMD_UNIT=$unit.service" _TRANSPORT=stdout -o cat --no-pager -n 60 2> /dev/null)
     [[ -n $last ]] && break
     sleep 0.5
   done
@@ -5939,7 +6035,7 @@ sync_jobs() {
     job_busy "$b.service" && continue
     rm -f "$f"; systemctl reset-failed "$b.service" 2> /dev/null; changed=1
   done
-  ((changed)) && systemctl daemon-reload
+  ((changed)) && dreload
   # the timers not yet enabled and running, in one call (200 jobs: one systemctl, not 200)
   local todo=() off=()
   for k in ${new[@]+"${new[@]}"}; do
@@ -5952,6 +6048,8 @@ sync_jobs() {
     todo+=("$k")
   done
   ((${#off[@]})) && systemctl disable -q --now "${off[@]}" 2> /dev/null
+  # (a timer systemd has not read yet: host setup's one reload comes too late for it)
+  ((${#todo[@]})) && [[ -n ${DR_FLAG:-} && -f $DR_FLAG ]] && systemctl daemon-reload
   ((${#todo[@]})) && { systemctl enable -q --now "${todo[@]}" || rc=1; }
   return $rc
 }
@@ -5971,8 +6069,10 @@ cmd_run_job() { # app name (as the app user)
 # those its unit wrote after a cursor taken before it started (the comment in cmd_job_run says why
 # not its invocation id or a time window): the unit's stdout/stderr, in its app's journal namespace
 # (or the system journal when it has none).
-job_jq() { JQ=(journalctl --namespace='*' "_SYSTEMD_UNIT=$1" _TRANSPORT=stdout -o cat --no-pager); }
-job_jsync() { journalctl --sync 2> /dev/null; [[ -n $(jns) ]] && journalctl "$(jns)" --sync 2> /dev/null; return 0; }
+# (only this app's namespace and the main journal: --namespace='*' opens every app's journal
+# files, so with N apps each job start read N namespaces)
+job_jq() { local j; j=$(jns); JQ=(journalctl ${j:+"$j"} "_SYSTEMD_UNIT=$1" _TRANSPORT=stdout -o cat --no-pager); }
+job_jsync() { local j; j=$(jns); journalctl --sync 2> /dev/null; [[ -n $j ]] && journalctl "$j" --sync 2> /dev/null; return 0; }
 job_cursor() { # unit: the cursor of the last line it wrote (empty: none yet)
   local JQ; job_jq "$1"
   "${JQ[@]}" -n 1 --show-cursor 2> /dev/null | sed -n 's/^-- cursor: //p'
@@ -6089,7 +6189,7 @@ cmd_job_run() {
   # milliseconds is gone by then (seen: its lines stored without the id). Not by time either: the
   # clock a command reads and journald's stamps were seen half a second apart on a virtual machine.
   # A unit runs one job at a time, so every line of it after the cursor is this run's.
-  local i out cur="" jq=(journalctl --namespace='*' "_SYSTEMD_UNIT=$u" _TRANSPORT=stdout -o cat --no-pager)
+  local i out cur="" JQ jq; job_jq "$u"; jq=("${JQ[@]}")
   jsync() { job_jsync; }
   jsync
   cur=$(job_cursor "$u")

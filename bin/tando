@@ -167,6 +167,7 @@ cmd_host() {
           access_keep_for=*|ci_max_mb=*|ci_max_files=*|ci_max_file_mb=*|app_max_mb=*) ;;
           rate_limit=on|rate_limit=off|rate_limit=auto|conn_limit=*|conn_rate=*) ;;
           request_log_max=*) ;;
+          port_min=*|port_max=*|preflight_min=*|preflight_max=*) ;;
           care=on|care=off) ;;   # host care's security updates (tando-host install; not the agent's)
           --pg-stat-statements) pgss=1;;   # PostgreSQL's top statements (a restart: asked below)
           *) usage_err "bad setting: $kv" host;;
