@@ -152,9 +152,15 @@ idle → copy → preflight → switch → verify → idle      (verified, last_
          └────────┴──→ idle (bad; current untouched)
 ```
 
-copy: `rsync -c --link-dest` of the upload (no links followed) into a root-owned release: a file
-with the same bytes as in the live release is a hard link to that file (root-owned, mode 640 or
-750, so the release's chown and chmod leave it unchanged); a shared file that is not, or that lies
+copy: the upload (no links followed) into a root-owned release: a file with the same bytes as in
+the live release is a hard link to that file. Which files have the same bytes comes from the live
+release's manifest (`sums/<id>`, root's: per file of the upload its sha256, size, and identity in
+the release and in `incoming/`, written last in its import): only the upload's new or changed files
+are hashed, and a live file is trusted unread while it is the recorded inode with the recorded
+mtime and size, root's with mode 640 or 750. A live release without a valid manifest (an older
+agent's, a damaged one: it ends with a sha256 of its lines) is compared byte for byte, `rsync -c
+--link-dest`, as before; either way the new release gets one. The shared file is root-owned, mode 640 or
+750 (so the release's chown and chmod leave it unchanged); a shared file that is not, or that lies
 in a `writable`, `public_dirs` or assets directory, is copied (`unshare_release`), so nothing done
 to one release shows in another. Never a link to `incoming/` (the uploader writes there). Then
 link shared dirs, make `writable` dirs app-owned. preflight: the same sandbox on port+100, health-checked; a Next.js release also has to load

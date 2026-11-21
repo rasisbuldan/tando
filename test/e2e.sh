@@ -1165,6 +1165,38 @@ rm -rf "$t"
 EOF
 )
 check "HL6 the import's owner and mode are those of chown -R and chmod -R, and a file already right is not touched (${hl6:-same})" test -z "$hl6"
+# HL7-HL9: with the live release's manifest (sums/<id>) the import reads none of the live
+# release's bytes: an unchanged file's access time stays as set (a read sets it: relatime) and it
+# is still shared; a same-size change is copied. Without a manifest (an older agent's release) or
+# with a damaged one, the import compares bytes as before (a manifest whose line was changed would
+# otherwise link the old bytes)
+SM=/opt/tando/apps/skewn/sums
+srv "sudo touch -a -d 2001-01-01 $RA/$hl4/lib/same.bin"
+at4=$(srv "sudo stat -c '%i %X' $RA/$hl4/lib/same.bin")
+echo one > lib/flip.txt
+echo 5 > VERSION; "$R" deploy > "$E/hl5.out" 2>&1; rc=$?; hr5=$(rid "$E/hl5.out")
+# shellcheck disable=SC2034  # read in the eval of a check below
+at5=$(srv "sudo stat -c '%i %X' $RA/$hr5/lib/same.bin")
+check "HL7 the next import read no byte of the live release's unchanged file and shares it (rc=$rc; $at4 / $at5); a same-size change is copied" \
+  eval '[ $rc = 0 ] && [ -n "$at4" ] && [ "$at4" = "$at5" ] && [ "$(srv "sudo cat $RA/$hr5/VERSION")" = 5 ] && srv "sudo test -s $SM/$hr5"'
+srv "sudo rm -f $SM/$hr5"
+echo two > lib/flip.txt
+echo 6 > VERSION; "$R" deploy > "$E/hl6.out" 2>&1; rc=$?; hr6=$(rid "$E/hl6.out")
+check "HL8 a live release without a manifest: the import compares bytes (rc=$rc): the change is copied, the rest shared, a manifest written" \
+  eval '[ $rc = 0 ] && [ "$(srv "sudo cat $RA/$hr6/lib/flip.txt $RA/$hr6/VERSION" | tr "\n" " ")" = "two 6 " ] &&
+        [ "$(hl "$hr5" lib/same.bin | cut -d" " -f1)" = "$(hl "$hr6" lib/same.bin | cut -d" " -f1)" ] && srv "sudo test -s $SM/$hr6"'
+# the manifest says flip.txt holds the next deploy's bytes (same size); its own checksum is not changed
+h2=$(printf 'two\n' | shasum -a 256 | cut -c1-64) h3=$(printf 'tri\n' | shasum -a 256 | cut -c1-64)
+srv "sudo sed -i 's/^$h2\(.*\tlib\/flip.txt\)$/$h3\1/' $SM/$hr6"
+# shellcheck disable=SC2034  # read in the eval of a check below
+hl9m=$(srv "sudo grep -c '^$h3' $SM/$hr6")
+echo tri > lib/flip.txt
+echo 7 > VERSION; "$R" deploy > "$E/hl7.out" 2>&1; rc=$?
+# shellcheck disable=SC2034  # read in the eval of a check below
+hr7=$(rid "$E/hl7.out")
+check "HL9 a damaged manifest is not trusted (rc=$rc, changed lines $hl9m): the new bytes are copied, the rest shared" \
+  eval '[ $rc = 0 ] && [ "$hl9m" = 1 ] && [ "$(srv "sudo cat $RA/$hr7/lib/flip.txt")" = tri ] &&
+        [ "$(hl "$hr6" lib/same.bin | cut -d" " -f1)" = "$(hl "$hr7" lib/same.bin | cut -d" " -f1)" ]'
 cd "$W" || exit 2
 
 for a in skew plain spa skewn cz; do "$R" destroy "$a" --purge --yes > /dev/null 2>&1; done   # (section 20 counts the host's apps)

@@ -469,6 +469,8 @@ i deploy run-activation deploy.jobs 1 fail after
 i deploy run-activation jobs.write 1 fail after
 k deploy run-activation imp.assets 1 kill before
 k deploy run-activation imp.assets2 1 kill before
+y deploy run-activation imp.sum 1 kill before
+y deploy run-activation imp.sum_mv 1 kill before
 e deploy run-activation run.queue 1 fail before
 j stop stop caddy.mv 1 fail after
 k rollback rollback post:activation 1 kill before
@@ -487,6 +489,8 @@ QUEUE_CELLS="
 q deploy run-activation sw.caddy_up 1 queue-fail after
 q deploy run-activation ra.restart 1 queue-fail after
 q deploy run-activation pre.stop 1 queue-kill after"
+# y: a deploy killed just before its release's manifest is written (sums/<id>) and after its temp
+# file was flushed, before the mv: recovery drops the release with its manifest and temp file
 # x: a destroy killed after its units went, before the Caddy site,
 # database and user (it left them, and the slice and firewall rules, until destroy ran again)
 # the other kinds: one or two cells where their path differs from node's (a static site has no

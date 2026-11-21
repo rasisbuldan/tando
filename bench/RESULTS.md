@@ -748,3 +748,35 @@ What this says:
   reproduced either (one CPU here is not shared with five apps; the writer is steady, not bursty).
 - `ionice`: the loop device's scheduler is `none` (no BFQ) and `io.max` throttles above the scheduler, so an
   I/O priority cannot be measured on this harness; not changed.
+
+## Slow disk: the manifest, 21 Nov 2026
+
+The copy no longer reads the live release: the import trusts the live release's manifest
+(`sums/<id>`, docs/ARCHITECTURE.md "copy") instead of `rsync -c --link-dest`. Script:
+`DROP=1 STEPS=0 run-slowdisk.sh <tree> <label> <app dir> 3`, throttle A (10 MB/s, 600 / 300 IOPS), with
+two additions: DROP=1 drops the page cache inside the test server before each warm deploy (the
+owner's server evicts the live release between deploys; the harness above kept it cached), and
+rd_mb, the bytes read from the throttled loop disk during the whole deploy (`/sys/block/loopN/stat`,
+sectors read). The app: a synthetic node tree the size of the owner's (61 MB, 1,847 files of random
+bytes and a 3-line server.js; the bench Next.js app was not built for this run), one small file changed
+per deploy. Trees: main `84f1ae2` and the branch `perf-manifest`. One server at a time; another
+agent's tests shared the laptop.
+
+| Warm deploy, 3 runs each | main | perf-manifest |
+|---|---|---|
+| copy phase, s | 7.3, 6.1, 6.3 | 7.4, 1.0, 0.9 |
+| read from disk during the deploy, MB | 128.9, 129.1, 129.4 | 68.8, 69.1, 72.7 |
+| deploy wall clock, s | 15.8, 16.2, 15.6 | 10.5, 11.3, 11.6 |
+| worst request during the deploy, ms | 119, 111, 116 | 214, 211, 107 |
+| failed requests | 0 | 0 |
+
+What this says:
+- main reads the tree twice per deploy: once in the upload (the client's `rsync -c` checksums
+  every file of `incoming/` on the server) and once more in the copy (the live release). The branch
+  reads it once: the upload's read is the 69-73 MB left, and it is not this change's.
+- The first warm deploy after the cold one is as slow on the branch (7.4 s) as on main. Not
+  explained here: the manifest's `incoming/` identities of the cold upload may not match after the
+  first warm upload, so the whole upload is hashed once (from disk, after the drop). Runs 2 and 3
+  hash only the changed file.
+- The worst request stayed under 0.25 s on both; the 5 s request on the owner's server is not
+  reproduced (as above).
