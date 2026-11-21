@@ -4,8 +4,8 @@ import { Button } from "./ui/button";
 import { Table, Td, Th, Tr } from "./ui/table";
 import { Tip } from "./ui/tooltip";
 import { Empty } from "./panel";
-import { Mono, Missing, PhaseBar } from "./bits";
-import { phases, resultKind } from "@/lib/shape";
+import { Mono, Missing, PhaseBar, PhaseLegend } from "./bits";
+import { phases, resultKind, rollbackTarget } from "@/lib/shape";
 import { fmtDateTime, fmtSecs, shortId } from "@/lib/format";
 import type { HistoryRow, Release } from "@/lib/types";
 
@@ -16,11 +16,12 @@ export function HistoryTable({ rows }: { rows: HistoryRow[] }) {
   const sorted = [...rows].sort((a, b) => b.at - a.at);
   return (
     <>
+      <PhaseLegend />
       <div className="overflow-x-auto rounded-lg border border-border bg-card">
-        <Table className="min-w-[980px]">
+        <Table className="min-w-[1000px]">
           <thead><tr>
             <Th className="w-[150px]">Time</Th><Th className="w-[130px]">Release</Th><Th className="w-[84px]">Kind</Th><Th className="w-[104px]">Result</Th>
-            <Th className="w-[110px]">Deployer</Th><Th className="w-[210px]">Phases</Th><Th>Note</Th>
+            <Th className="w-[110px]">Deployer</Th><Th className="w-[240px]">Phases</Th><Th>Note</Th>
           </tr></thead>
           <tbody>
             {sorted.slice(0, n).map((h) => {
@@ -48,6 +49,7 @@ export function HistoryTable({ rows }: { rows: HistoryRow[] }) {
 /** releases: live and rollback target tagged; no action buttons until M4 */
 export function ReleasesTable({ rows }: { rows: Release[] }) {
   if (rows.length === 0) return <Empty>No releases yet. Deploy with <code>tando deploy</code>.</Empty>;
+  const target = rollbackTarget(rows);
   return (
     <div className="overflow-x-auto rounded-lg border border-border bg-card">
       <Table className="min-w-[560px]">
@@ -60,7 +62,7 @@ export function ReleasesTable({ rows }: { rows: Release[] }) {
                 <Td><Mono>{r.id}</Mono></Td>
                 <Td>{fmtDateTime(r.deployed_at)}</Td>
                 <Td><Badge kind={k.kind}>{k.word}</Badge></Td>
-                <Td><span className="inline-flex gap-2">{r.current && <Tag>live</Tag>}{r.last_good && !r.current && <Tag>rollback target</Tag>}</span></Td>
+                <Td><span className="inline-flex gap-2">{r.current && <Tag>live</Tag>}{r.id === target && <Tag>rollback target</Tag>}</span></Td>
               </Tr>
             );
           })}

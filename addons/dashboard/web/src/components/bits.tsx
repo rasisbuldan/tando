@@ -6,7 +6,8 @@ import { Card } from "./ui/card";
 import { cn } from "@/lib/cn";
 import { DASH, fmtAgo, fmtDateTime } from "@/lib/format";
 import type { Phase } from "@/lib/shape";
-import { fmtSecs } from "@/lib/format";
+import { fmtDurShort, fmtSecs } from "@/lib/format";
+import { PHASES } from "@/lib/shape";
 
 export const Missing = () => <span className="text-faint">{DASH}</span>;
 export function Mono({ children, className }: { children: ReactNode; className?: string }) { return <span className={cn("mono", className)}>{children}</span>; }
@@ -52,23 +53,41 @@ export function MetricCard({ label, value, unit, sub, right }: { label: string; 
 
 const PHASE_FILL = ["text-chart-1", "text-chart-2", "text-chart-3", "text-chart-4", "text-chart-5", "text-chart-6"];
 const PHASE_KEYS = ["build_s", "upload_s", "release_s", "preflight_s", "switch_s", "verify_s"];
-/** horizontal stacked bar (SVG width attributes, no style prop), total to the right */
+/** horizontal stacked bar (SVG width attributes, no style prop), total to the right in the short form.
+ *  Each segment has its own hover: the phase and its seconds. */
 export function PhaseBar({ phases, total, label }: { phases: Phase[]; total: number | null; label: string }) {
   const sum = phases.reduce((s, p) => s + p.s, 0);
   const W = 120;
   let x = 0;
   return (
-    <span className="inline-flex items-center gap-2">
+    <span className="inline-flex items-center gap-2 whitespace-nowrap">
       <svg role="img" aria-label={label} width={W} height="16" className="shrink-0">
         {sum > 0 && phases.map((p) => {
           const w = Math.max(2, (p.s / sum) * W);
-          const el = <rect key={p.key} x={x} y="0" width={Math.max(0, w - 1)} height="16" className={PHASE_FILL[PHASE_KEYS.indexOf(p.key)] ?? "text-chart-1"} fill="currentColor" />;
+          const el = (
+            <rect key={p.key} x={x} y="0" width={Math.max(0, w - 1)} height="16" className={PHASE_FILL[PHASE_KEYS.indexOf(p.key)] ?? "text-chart-1"} fill="currentColor">
+              <title>{`${p.label} ${fmtSecs(p.s)}`}</title>
+            </rect>
+          );
           x += w;
           return el;
         })}
       </svg>
-      <span>{fmtSecs(total)}</span>
+      <span>{fmtDurShort(total)}</span>
     </span>
+  );
+}
+
+/** the six phases once, above a table of phase bars: the colour of each segment */
+export function PhaseLegend() {
+  return (
+    <ul aria-label="Phases" className="m-0 mb-2 flex list-none flex-wrap items-center gap-x-4 gap-y-1 p-0 text-xs leading-4 text-muted-foreground">
+      {PHASES.map((p, i) => (
+        <li key={p.key} className="inline-flex items-center gap-1.5">
+          <svg aria-hidden="true" width="10" height="10" className={PHASE_FILL[i]}><rect width="10" height="10" rx="2" fill="currentColor" /></svg>{p.label}
+        </li>
+      ))}
+    </ul>
   );
 }
 
