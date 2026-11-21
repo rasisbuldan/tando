@@ -276,6 +276,15 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
   out but a constant build id does not, is replaced by the newer release's, by a rename). A new file
   is a `cp -l` (a hard link); a name that exists keeps its file. A failure only says so: the
   app answers what is not shared.
+- **Compression:** every site block has `encode zstd gzip` (Caddy's own; `compress = off` leaves it
+  out). It skips an answer that has a Content-Encoding already, one under 512 bytes, and types that
+  are not text (an event stream, images), and a websocket upgrade never reaches it. On the fly a
+  200 KB script costs about 2 to 3 ms of CPU a request; so `assets_link` also makes a `<file>.gz`
+  (`gzip -9`, only in the shared directory, never in the release) of each new text file (js, css, svg,
+  json, html, wasm, map, txt, xml) of 1 KB or more that shrinks, lists it in the release's record
+  like any other file (so `assets_gc` removes it with its file), and the assets `file_server` has
+  `precompressed gzip`: Caddy sends the .gz as it is (about 0.3 ms). No .zst: a visitor that accepts
+  zstd and gzip is sent the .gz.
 - **Pruning:** `prune` ends with `assets_gc`: records of releases that are gone are removed, then
   every file of the shared directory that no kept release lists. Releases are kept as before (5, and
   current, last_good and the target), so the files of the last releases stay and nothing grows without

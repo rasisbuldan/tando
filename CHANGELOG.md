@@ -15,6 +15,19 @@ first, grouped by area.
   and a Next.js package are still refused, with what to do (docs/RECIPES.md, "One package of a
   monorepo"). A Next.js package used to get a tando.conf from init and be refused only at
   deploy; init refuses it now.
+- Added: HTTP compression. Every site now has Caddy's `encode zstd gzip` (stock Caddy 2.6.2): text
+  answers of 512 bytes or more go out zstd or gzip compressed with `Vary: Accept-Encoding`; an
+  answer the app compressed itself is not compressed again, and event streams and websockets pass
+  unbuffered (first event of a test stream after 2 ms of 1.2 s). `compress = off` in tando.conf
+  turns it off. For the fingerprinted files (`assets`), text types of 1 KB or more that shrink also
+  get a `<file>.gz` (`gzip -9`) made once when the release is linked, listed with the release's
+  files (pruning removes them) and sent as they are by the assets `file_server` (`precompressed
+  gzip`): the earlier measurement was 1.8-3.4 ms CPU a request for a 200 KB script on the fly
+  against about 0.27 ms precompressed. Deploy cost, measured: 7 text files / 585 KB of a Next.js
+  build take 25 ms of `gzip -9` and add 180 KB (31%) to the shared assets directory; files that
+  were linked before are not compressed again. The bench Next.js app itself was not built here.
+  Tests: CG0 and CZ in e2e.sh, N13 in e2e-next.sh. Not done: `.zst` copies (a visitor that
+  accepts both gets the .gz).
 
 ## 0.2.1 - 2026-11-21
 
