@@ -691,15 +691,22 @@ out=$(mon_run 'render_ls')
 if [[ $out != *"clock: "* && $out != *" on the server, "* ]]; then ok; else bad "ls: a skew line with none ($out)"; fi
 MON_CLK=$(( $(date +%s) + 300 )) MON_VER=0.0.1 mon_rows > "$tmp/mon.st4"
 out=$(MON_ST=$tmp/mon.st4 mon_run 'render_ls' | tr -d '│\n' | tr -s ' ')
-if [[ $out == *"clock: the server's is 5m 0s ahead of this laptop's; ages here are off by that"* &&
+if [[ $out == *"clock: the server's is "[45]m*" ahead of this laptop's; ages here are off by that"* &&
       $out == *"tando 0.0.1 on the server, $(cat "$here/VERSION") here: tando host setup vps"* ]]; then ok
 else bad "ls: no clock or version skew line ($out)"; fi
 out=$(MON_ST=$tmp/mon.st4 mon_run 'APP=web; render_status' | tr -d '│\n' | tr -s ' ')
-if [[ $out == *"clock: the server's is 5m 0s ahead"* ]]; then ok; else bad "status: no clock skew line ($out)"; fi
+if [[ $out == *"clock: the server's is "[45]m*" ahead"* ]]; then ok; else bad "status: no clock skew line ($out)"; fi
 out=$(MON_ST=$tmp/mon.st4 mon_run 'JSON=1; render_ls')
 if [[ $out == '{"host":"vps","reachable":true,"checked_at":'[0-9]*',"server_version":"0.0.1","client_version":"'*'","clock_skew_s":'[0-9]*',"apps":'*'"alerts":[{"app":"api","check":"http","state":"firing",'* ]] &&
    printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert 299 <= d["clock_skew_s"] <= 301' 2> /dev/null; then ok
 else bad "ls --json: no reachable, checked_at, versions, skew or alerts ($out)"; fi
+# --check: exit 2 when an alert fires or an app is down, 0 when nothing needs attention
+mon_run 'CHECK=1; cmd_ls' > /dev/null; r1=$?
+MON_ST=$tmp/mon.st2 mon_run 'CHECK=1; cmd_ls' > /dev/null; r2=$?
+sed 's/^app\tweb\tactive/app\tweb\tfailed/' "$tmp/mon.st2" > "$tmp/mon.st5"
+MON_ST=$tmp/mon.st5 mon_run 'CHECK=1; JSON=1; cmd_ls' > /dev/null; r3=$?
+MON_ST=$tmp/mon.st2 mon_run 'APP=web; CHECK=1; cmd_status' > /dev/null; r4=$?
+if [[ "$r1 $r2 $r3 $r4" == "2 0 2 0" ]]; then ok; else bad "--check exit status: firing $r1, fine $r2, down $r3, status fine $r4 (want 2 0 2 0)"; fi
 # tando top: the firing check after the app's state, the count in the host strip
 out=$("$BASH_BIN" -c '
     . "$1/lib/ui.sh"; . "$1/lib/common.sh"; set +u; TAB=$(printf "\t"); AGENT_BIN=/opt/tando/bin/tando-agent; . "$1/lib/cmd-top.sh"

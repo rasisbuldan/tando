@@ -347,7 +347,15 @@ cache_apps() {
   awk -F '\t' '$1 == "app" {print $2}' "$TMPD/st" | write_file "$CFG/cache/apps.$HOST" 2> /dev/null
   return 0
 }
-cmd_ls() { resolve 0; watch_loop render_ls fetch_status; }
+# --check: after the view, exit 2 when something needs attention (an app down, an alert firing;
+# with --all also a server that did not answer), 0 when not. For scripts and the menu bar app.
+check_flag() { [ -z "$CHECK" ] || [ -z "$WATCH" ] || usage_err "--check goes without --watch" "${ARGS[0]:-}"; }
+# attention <rows file>...: how many apps are down (failed) plus alerts firing
+attention() {
+  awk -F '\t' '($1 == "app" && $3 == "failed") || ($1 == "alert" && $4 == "firing") { n++ } END { print n + 0 }' "$@"
+}
+check_exit() { [ -n "$CHECK" ] || return 0; [ "$(attention "$TMPD/st")" = 0 ] || exit 2; }
+cmd_ls() { resolve 0; check_flag; watch_loop render_ls fetch_status; check_exit; }
 
 hist_rows() { # max -> TIME (GMT) RELEASE KIND RESULT TOTAL, newest first; the notes -> $TMPD/notes
   local r a ts id kind res tot b u c p s v note
@@ -523,7 +531,9 @@ cmd_status() {
   if [ -z "$APP" ]; then cmd_ls; return; fi
   valid_app "$APP" || die "bad app name (a-z, 0-9, -; 2-24 characters)"
   SPC="" SPM=""
+  check_flag
   watch_loop render_status fetch_status "$APP"
+  check_exit
 }
 
 cmd_history() {
@@ -1014,7 +1024,12 @@ host_err() { # the reason a host did not answer, in a few words
 cmd_ls_all() {
   LS_HOSTS=$(all_hosts)
   [ -n "$LS_HOSTS" ] || die "no hosts registered: tando host add"
+  check_flag
   watch_loop render_ls_all fetch_ls_all
+  [ -n "$CHECK" ] || return 0
+  local h; for h in $LS_HOSTS; do [ "$(cat "$TMPD/h.$h.rc")" = 0 ] || exit 2; done
+  # shellcheck disable=SC2046  # a list of file names (host names: no spaces)
+  [ "$(cd "$TMPD" && attention $(for h in $LS_HOSTS; do printf 'h.%s.st ' "$h"; done))" = 0 ] || exit 2
 }
 # shellcheck disable=SC2086  # a list of host names
 fetch_ls_all() { rm -f "$TMPD"/h.*.rc; fetch_hosts $LS_HOSTS; }

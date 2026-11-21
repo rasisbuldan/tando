@@ -6,6 +6,9 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: `tando ls --check` and `tando status --check`: exit status 2 when an app is down or an
+  alert fires (with `--all`, also when a server does not answer), 0 when nothing needs attention;
+  for scripts and the menu bar app, which reads `tando ls --all --json --check`.
 - Added: a clock and version skew line in `tando ls` and `tando status`: when the server's clock
   is more than 30 s off the laptop's (every "3m ago" is off by as much), or its tando differs
   from the client's. `status` has a new `server` row (the server's clock and VERSION), printed

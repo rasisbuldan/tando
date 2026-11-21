@@ -100,7 +100,7 @@ Example: `tando history -n 10`
 ## Run
 
 ### status
-`tando status [app] [--watch N] [-H host] [--json]`. Flags also `-a`. Arguments: 0-1.
+`tando status [app] [--watch N] [-H host] [--json] [--check]`. Flags also `-a`. Arguments: 0-1.
 One app in detail: state, release, memory, cpu (the last minute: `12%  last minute`), last 16 minutes, logs, alerts, its database
 (`database  postgres  412 MB, 3 of 10 connections`: the size and the connections of its role
 against the role's limit, as the alert checks last read them), backups, releases,
@@ -389,7 +389,7 @@ Example: `tando restore --from-host 3f9a01c2b7de --all -H newvps`
 ## Observe
 
 ### ls
-`tando ls [-H host] [--all] [--watch N] [--json]`. Arguments: none. `-a` is refused.
+`tando ls [-H host] [--all] [--watch N] [--json] [--check]`. Arguments: none. `-a` is refused.
 The apps of a server: state, deploy age, memory, cpu over the last minute (`CPU 1M`), uptime, link (never cut: other columns are
 dropped first at 80 columns). While an alert fires for an app, an ALERT column names the checks
 (`http`, `slow`, ...) and the footer counts them; `--json` has `alerts_firing` and `firing` per
@@ -398,6 +398,11 @@ as much), or its tando is not this client's version, one yellow line says so (al
 status`); `--json` has `reachable`, `checked_at`, `server_version`, `client_version`,
 `clock_skew_s` and `alerts`. `--all`: every registered server, with `--watch` and `--json`. A
 worker that does not run while its app does gets a line under the table.
+`--check` (ls, status; not with `--watch`): after the view, exit status 2 when an app is down or
+an alert fires (with `--all`: also a server that did not answer), 0 when nothing needs attention,
+1 when the server could not be asked (as without it). For scripts and a menu bar badge:
+`tando ls --all --json --check` gives, per server, `reachable`, `checked_at`, each app's `state`,
+`alerts_firing` and `firing`, and every alert in `alerts`.
 Example: `tando ls --all`
 
 ### alerts
