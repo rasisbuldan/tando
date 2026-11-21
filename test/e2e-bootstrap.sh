@@ -133,9 +133,15 @@ srv 'sudo systemctl start tando-watch.service'   # one run of the checks now, no
 grep -q "0 failed" "$E/doctor.out" ||
   srv 'systemctl status tando-watch.service tando-watch.timer --no-pager; sudo journalctl -u tando-watch -n 30 --no-pager' >&2
 # (one warning is expected here: Caddy 2.6.2 with public_port, a test-only setting, logs no request;
-# and one is wanted: a server with an app and no outside heartbeat says so, without failing)
-check "4b doctor: all green but for the missing heartbeat, which is a warning with its command (rc=$rc)" eval '[ $rc = 0 ] && grep -q "0 failed" "$E/doctor.out" &&
-  [ "$(grep "● warn" "$E/doctor.out" | grep -vc "caddy log\|^│ heartbeat ")" = 0 ] && grep -q "^│ heartbeat .*● warn" "$E/doctor.out" &&
+# and one is wanted: a server with an app and no outside heartbeat says so, without failing.
+# The test servers share the Docker VM's disk: when the other suites' containers have filled it to
+# 90%, doctor's disk warning is the truth about that machine, not about this setup; it is let
+# through only when df on the server says the same)
+dpct=$(srv 'df -Pk / | tail -1' | awk '{ sub(/%/, "", $5); print $5 + 0 }')
+# (89: the two reads are a few seconds apart; a disk at 97% is a failure, never let through)
+okwarn="caddy log\|^│ heartbeat "; [ "${dpct:-0}" -ge 89 ] && okwarn="$okwarn\|^│ disk  *● warn  *9[0-6]% used"
+check "4b doctor: all green but for the missing heartbeat, which is a warning with its command (rc=$rc, disk ${dpct:-?}%)" eval '[ $rc = 0 ] && grep -q "0 failed" "$E/doctor.out" &&
+  [ "$(grep "● warn" "$E/doctor.out" | grep -vc "$okwarn")" = 0 ] && grep -q "^│ heartbeat .*● warn" "$E/doctor.out" &&
   tr -d "│\n" < "$E/doctor.out" | tr -s " " | grep -q "tando alerts heartbeat"'
 
 echo "INFO empty VM to a live link: $((t_live - t0)) s (VM start $((t_up - t0)) s, host setup $((t_setup - t_up)) s, first up with Node $((t_live - t_setup)) s)"
