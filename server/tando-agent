@@ -765,6 +765,10 @@ write_caddy() {
     [[ -z $split && ( ${H[tls]:-off} == internal || ( -n ${C[domains]:-} && $dt == internal ) ) ]] && echo "	tls internal"
     # request log for every state of the site; headers and query strings are left out
     [[ -x $LOGS ]] && "$LOGS" caddy-log "$A"
+    # compression (compress = off turns it off): Caddy's encode handler wraps every answer of the
+    # site; it leaves alone a response that has a Content-Encoding already (an app's own, a
+    # precompressed asset), a small one, one that is not text, and a websocket or event stream
+    [[ ${C[compress]:-on} == off ]] || echo "	encode zstd gzip"
     # a Host with a port (site.example:443) reaches the site, but Caddy before 2.7 does not log
     # it: answer 400, so nothing is served unlogged (public_port, a test setup, stays allowed)
     echo "	@tandoport {"
@@ -801,7 +805,8 @@ write_caddy() {
       echo "	handle @tandoassets {"
       [[ -n $acc ]] && echo "		header Cache-Control \"$acc\""
       echo "		root * $D/assets"
-      echo "		file_server"
+      if [[ ${C[compress]:-on} == off ]]; then echo "		file_server"
+      else echo "		file_server {"; echo "			precompressed gzip"; echo "		}"; fi
       echo "	}"
     fi
     # Before the first release is live ($D/current is made when it switches) a visitor gets a 503
@@ -1310,6 +1315,25 @@ assets_spec() {
 assets_list() {
   find "$1" -type f -user root ! -path $'*\n*' ! -path $'*\t*' ! -path '*\\*' -printf '%P\t%i\t%s\n'
 }
+# assets_gzip src root file...: for each text file (js css svg json html wasm map txt xml) of 1 KB or
+# more that gzip -9 makes smaller, a copy <file>.gz in root (never in the release: it is the app's),
+# so Caddy's file_server sends it as it is (precompressed): no CPU per request, and the bytes of a
+# 200 KB script cost about 0.3 ms instead of 2 to 3 ms. (assets_link lists them in the manifest.)
+# A file that is already there, or a failure, is skipped: the request is compressed on the fly.
+assets_gzip() {
+  local src=$1 root=$2 f sz; shift 2
+  for f in "$@"; do
+    [[ -n $f ]] || continue
+    case ${f##*.} in js|mjs|css|svg|json|html|htm|wasm|map|txt|xml) ;; *) continue;; esac
+    [[ -f $src/$f && ! -e $src/$f.gz && ! -e $root/$f.gz ]] || continue
+    sz=$(stat -c %s "$src/$f") && ((sz >= 1024)) || continue
+    gzip -9 -n -c "$src/$f" > "$root/$f.gz.tmp" 2> /dev/null &&
+      (($(stat -c %s "$root/$f.gz.tmp") < sz)) &&
+      chmod 644 "$root/$f.gz.tmp" && mv -f "$root/$f.gz.tmp" "$root/$f.gz" ||
+      rm -f "$root/$f.gz.tmp"
+  done
+  return 0
+}
 # assets_link id: hard-link release id's fingerprinted files into $D/assets (see above). 1 when
 # something could not be done: the release then keeps its files for the app to answer.
 assets_link() {
@@ -1350,11 +1374,19 @@ assets_link() {
     fi
     assets_list "$src" | cut -f1 | sed "s|^|${url#/}|" >> "$man"
     fp imp.assets
+    # a changed file's old .gz is stale: it goes before the new bytes arrive
+    [[ ${C[compress]:-on} == off ]] || for f in "${chg[@]}"; do rm -f "$root/$f.gz"; done
     ((${#add[@]})) && { (cd "$src" && printf '%s\0' "${add[@]}" | xargs -0 cp -l --parents -t "$root" --) || return 1; }
     fp imp.assets2
     for f in "${chg[@]}"; do   # (a link beside it, then a rename: the name never goes missing)
       ln "$src/$f" "$root/$f.new" && mv -f "$root/$f.new" "$root/$f" || return 1
     done
+    # precompressed copies (assets_gzip) of the files that are new in $D/assets, listed like them
+    if [[ ${C[compress]:-on} != off ]]; then
+      ((${#add[@]} + ${#chg[@]})) && assets_gzip "$src" "$root" "${add[@]}" "${chg[@]}"
+      # (every .gz that exists is listed, also those a kept release made: this release needs them too)
+      while IFS= read -r f; do [[ -f $root/$f.gz && ! -e $src/$f.gz ]] && echo "${url#/}$f.gz"; done < <(assets_list "$src" | cut -f1) >> "$man"
+    fi
   done <<< "$spec"
   # (a kill before this line leaves files nobody lists: assets_gc takes them)
   sort -u -o "$man" "$man"; sync "$man"
@@ -2584,7 +2616,7 @@ cmd_configure() {
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" \
-    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]"
+    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -2603,6 +2635,7 @@ cmd_configure() {
       health) [[ $v =~ ^/[A-Za-z0-9._~/?=\&%-]*$ ]] || die "bad health path: $v";;
       path) [[ $v =~ ^(/[A-Za-z0-9._~-]+)+$ ]] || die "bad path: $v (like /shop)";;
       spa) [[ $v =~ ^(true|false)$ ]] || die "spa must be true or false";;
+      compress) [[ $v =~ ^(on|off)$ ]] || die "compress must be on or off";;
       data) if [[ ${C[recipe]:-} == container ]]; then   # the volume's path inside the container
               [[ $v =~ ^(/[A-Za-z0-9_.-]+)+$ && $v != */../* ]] || die "bad data path: $v (like /data)"
             else
@@ -5455,10 +5488,10 @@ CONF_KEYS_A=(recipe image container_port build_memory start start_shell release 
   health path data writable backup database db_statement_timeout db_idle_tx_timeout db_temp_limit
   memory health_timeout soak cpu tasks max_conns max_requests stop_timeout hold log_max log_keep
   log_rate access_log request_log_max health_expect health_fails health_recover job_timeout job_spread
-  job_missed assets)
+  job_missed assets compress)
 CONF_KEYS=" ${CONF_KEYS_A[*]} "
 # what a record of the first agent that recorded every setting knew (conf=1 without keys=)
-CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets } job.* "
+CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress } job.* "
 conf_key() {
   case $1 in job.*|worker.*) return 0;; *[[:space:]]*|'') return 1;; esac
   [[ $CONF_KEYS == *" $1 "* ]]

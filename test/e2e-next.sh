@@ -300,5 +300,19 @@ check "N12g the page's own scripts all load (200) through the shared directory" 
   eval 'bad=0; for p in $(curl -s "$(url /demo)" | grep -o "/demo/_next/static/[^\"]*\.js" | sort -u); do
           [ "$(curl -s -o /dev/null -w "%{http_code}" "$(url "$p")")" = 200 ] || bad=1; done; [ $bad = 0 ]'
 
+# N13. compression of the build's text files: a .gz made once at link time (docs/ARCHITECTURE.md
+#      "Assets"), listed so the prune above took the pruned releases' copies, sent as it is
+CJ=$(find .next/static/chunks -name '*.js' -size +4k | head -1); CJ=${CJ#.next/static/}
+curl -s -m 8 -H 'Accept-Encoding: gzip' -D "$E/n13.h" -o "$E/n13.gz" "$(url "/demo/_next/static/$CJ")"
+ngz=$(srv "sudo find $A/assets -name '*.gz' | wc -l" | tr -d ' ')
+orph=$(srv "cd $A/assets && find . -name '*.gz' | while read -r g; do [ -f \"\${g%.gz}\" ] || echo \"\$g\"; done" | wc -l | tr -d ' ')
+check "N13a a script of the build ($CJ) is sent gzip, precompressed ($ngz .gz files, $orph without their file), with Vary and the same bytes" \
+  eval 'tr -d "\r" < "$E/n13.h" | grep -qi "^content-encoding: gzip" && tr -d "\r" < "$E/n13.h" | grep -qi "^vary: .*accept-encoding" &&
+        [ "$ngz" -ge 1 ] && [ "$orph" = 0 ] && [ "$(gunzip -c "$E/n13.gz" | cksum)" = "$(cksum < ".next/static/$CJ")" ]'
+curl -s -m 8 -H 'Accept-Encoding: gzip' -D "$E/n13p.h" -o "$E/n13p.gz" "$(url /demo)"; curl -s -m 8 -o "$E/n13p.id" "$(url /demo)"
+check "N13b the page (HTML) is compressed on the fly: gzip, smaller than the plain answer, and it gunzips to an HTML page" \
+  eval 'tr -d "\r" < "$E/n13p.h" | grep -qi "^content-encoding: gzip" && [ "$(wc -c < "$E/n13p.gz")" -lt "$(wc -c < "$E/n13p.id")" ] &&
+        [ "$(wc -c < "$E/n13p.id")" -gt 512 ] && gunzip -c "$E/n13p.gz" | head -c 200 | grep -qi "<!DOCTYPE html\|<html"'
+
 echo "$FAILS failed"
 [ $FAILS -eq 0 ]

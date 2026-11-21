@@ -41,6 +41,7 @@ configure() {
     [ -n "${C_stop_timeout:-}" ] && printf 'stop_timeout=%s\n' "$C_stop_timeout"
     [ -n "${C_hold:-}" ] && printf 'hold=%s\n' "$C_hold"
     [ -n "${C_assets:-}" ] && printf 'assets=%s\n' "$C_assets"
+    [ "${C_compress:-}" = off ] && printf 'compress=off\n'   # (on is the default; an older agent knows no compress)
     [ -n "$C_job_timeout" ] && printf 'job_timeout=%s\n' "$C_job_timeout"
     [ -n "$C_job_spread" ] && printf 'job_spread=%s\n' "$C_job_spread"
     [ -n "$C_job_missed" ] && printf 'job_missed=%s\n' "$C_job_missed"
