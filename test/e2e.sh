@@ -1005,6 +1005,23 @@ check "AS5 release 1 was pruned (kept $nrel releases): its file answers $code1 a
 nfiles=$(srv "sudo find /opt/tando/apps/skew/assets -type f | wc -l" | tr -d ' ')
 nlist=$(srv "sudo cat \$(sudo find /opt/tando/apps/skew/assetlog -maxdepth 1 -type f ! -name '*.*') | sort -u | wc -l" | tr -d ' ')
 check "AS5b the shared directory holds exactly what the kept releases list ($nfiles files, $nlist listed)" test "$nfiles" = "$nlist" -a "$nfiles" -ge 2
+# CG0. precompressed copies of the hashed text files (made at link time; listed so pruning takes them)
+AD=/opt/tando/apps/skew
+check "CG0a release 8's script has a .gz in the shared directory, and its tiny stylesheet (under 1 KB) has none" \
+  eval 'srv "test -f $AD/assets/assets/index-$H8.js.gz" && srv "test -f $AD/assets/assets/style-$H8.css" && ! srv "test -e $AD/assets/assets/style-$H8.css.gz"'
+ngz=$(srv "find $AD/assets -name '*.gz' | wc -l" | tr -d ' ')
+orph=$(srv "cd $AD/assets && find . -name '*.gz' | while read -r g; do [ -f \"\${g%.gz}\" ] || echo \"\$g\"; done" | wc -l | tr -d ' ')
+listed=$(srv "sudo cat \$(sudo find $AD/assetlog -maxdepth 1 -type f ! -name '*.*') | grep -c '\\.gz\$'" | tr -d ' ')
+check "CG0b the kept releases list the .gz files ($ngz on disk, $listed listed, $orph without their file), and release 1's went with it when it was pruned" \
+  eval '[ "$orph" = 0 ] && [ "$ngz" -ge 1 ] && [ "$listed" -ge 1 ] && [ -z "$(srv "find $AD/assets -name \"*$H1*\"")" ]'
+curl -s -m 5 -H 'Accept-Encoding: gzip' -D "$E/cg.h" -o "$E/cg.gz" "http://skew.localhost:$HP/assets/index-$H8.js"
+check "CG0c a visitor that accepts gzip gets the precompressed file: Content-Encoding gzip, Vary, the immutable header, and after gunzip the same bytes" \
+  eval 'tr -d "\r" < "$E/cg.h" | grep -qi "^content-encoding: gzip" && tr -d "\r" < "$E/cg.h" | grep -qi "^vary: .*accept-encoding" &&
+        tr -d "\r" < "$E/cg.h" | grep -qi "^cache-control: public, max-age=31536000, immutable" &&
+        [ "$(gunzip -c "$E/cg.gz" | cksum)" = "$(cksum < "$E/ref/rel8.js")" ] && [ "$(wc -c < "$E/cg.gz")" -lt 500 ]'
+check "CG0d one that does not accept it gets the plain bytes, no Content-Encoding" \
+  eval 'h=$(curl -s -m 5 -H "Accept-Encoding: identity" -D - -o "$E/cg.id" "http://skew.localhost:$HP/assets/index-$H8.js" | tr -d "\r"); ! echo "$h" | grep -qi "^content-encoding" &&
+        [ "$(cksum < "$E/cg.id")" = "$(cksum < "$E/ref/rel8.js")" ]'
 # detection says nothing about names that are not hashed: no mount, no header
 mkdir -p "$W/plain/assets"; printf 'app = plain\nrecipe = static\n' > "$W/plain/tando.conf"
 echo "x" > "$W/plain/assets/app.js"; echo "x" > "$W/plain/assets/logo-large.png"; echo "<h1>plain</h1>" > "$W/plain/index.html"
@@ -1057,6 +1074,53 @@ check "AS7c a container app with assets is refused by the server" \
   eval 'agent_check container "assets=assets" | grep -q "assets is not supported for a container"'
 check "AS7d a bad assets value is refused (a path outside the release)" \
   eval 'agent_check node "assets=../etc" | grep -q "bad assets"'
+# CZ. compression (docs/CONFIG.md "compress"): Caddy's encode for text answers, never twice, never
+# for a stream; `compress = off` sends everything as it is. A node app that makes each kind of answer.
+mkdir -p "$W/cz"; cp "$ROOT/test/fixtures/compress-server.js" "$W/cz/server.js"; cd "$W/cz" || exit 2
+printf 'app = cz\nrecipe = node\nstart = node server.js\nhealth = /\nmemory = 128M\n' > tando.conf
+"$R" up > "$E/cz1.out" 2>&1; rc=$?
+czu() { echo "http://cz.localhost:$HP$1"; }
+czh() { curl -s -m 8 -D - -o /dev/null -H "Accept-Encoding: $1" "$(czu "$2")" | tr -d '\r'; }   # headers
+check "CZ0 the compression test app deploys (rc=$rc)" test $rc = 0 -a "$(get cz /)" = ok
+check "CZ1 a 68 KB text answer to a visitor that accepts gzip is gzip with Vary: Accept-Encoding, and gunzip gives the bytes of the plain answer" \
+  eval 'h=$(czh gzip /big); echo "$h" | grep -qi "^content-encoding: gzip" && echo "$h" | grep -qi "^vary: .*accept-encoding" &&
+        [ "$(curl -s -m 8 -H "Accept-Encoding: gzip" "$(czu /big)" | gunzip | cksum)" = "$(curl -s -m 8 "$(czu /big)" | cksum)" ] &&
+        [ "$(curl -s -m 8 -H "Accept-Encoding: gzip" "$(czu /big)" | wc -c)" -lt 20000 ]'
+check "CZ1b zstd is used when the visitor accepts it, and its bytes decode to the same too" \
+  eval 'czh "gzip, zstd" /big | grep -qi "^content-encoding: zstd" &&
+        [ "$(curl -s -m 8 -H "Accept-Encoding: zstd" "$(czu /big)" | zstd -dc | cksum)" = "$(curl -s -m 8 "$(czu /big)" | cksum)" ]'
+check "CZ2 a visitor that sends no Accept-Encoding gets the plain answer (68 KB, no Content-Encoding)" \
+  eval '! curl -s -D - -o /dev/null "$(czu /big)" | grep -qi "^content-encoding" && [ "$(curl -s "$(czu /big)" | wc -c)" -gt 60000 ]'
+check "CZ3 an app that compresses by itself is not compressed again: one gzip layer, the app's own bytes" \
+  eval 'h=$(czh "gzip, zstd" /own); [ "$(echo "$h" | grep -ci "^content-encoding")" = 1 ] && echo "$h" | grep -qi "^content-encoding: gzip" &&
+        [ "$(curl -s -m 8 -H "Accept-Encoding: gzip, zstd" "$(czu /own)" | gunzip | cksum)" = "$(curl -s -m 8 "$(czu /big)" | cksum)" ]'
+sse=$(curl -sN -m 10 -H 'Accept-Encoding: gzip' -D "$E/cz.sse.h" -w '%{time_starttransfer} %{time_total}' "$(czu /sse)")
+sse_first=$(echo "$sse" | tail -1 | awk '{print $1}'); sse_total=$(echo "$sse" | tail -1 | awk '{print $2}')
+check "CZ4 an event stream (4 events, 400 ms apart) still streams: the first byte after ${sse_first}s of ${sse_total}s, all 4 events, not compressed" \
+  eval 'awk -v a="$sse_first" -v b="$sse_total" "BEGIN { exit !(b > 1.0 && a < 0.5 && a < b / 2) }" && [ "$(echo "$sse" | grep -c "^data: ")" = 4 ] &&
+        ! grep -qi "^content-encoding" "$E/cz.sse.h"'
+# shellcheck disable=SC2034  # read in the eval of a check below
+ws=$(curl -s -m 5 -i --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' -H 'Accept-Encoding: gzip' "$(czu /ws)")
+check "CZ5 a websocket upgrade still switches protocols and the app's bytes after it arrive" \
+  eval 'echo "$ws" | head -1 | grep -q " 101" && echo "$ws" | tail -1 | grep -q "ws-ok" && ! echo "$ws" | grep -qi "^content-encoding"'
+check "CZ6 a custom domain of the site is in the same block as encode, and Caddy 2.6 accepts the file" \
+  eval '"$R" domain add cz.example.test --force > "$E/czdom.out" 2>&1; srv "sudo grep -q \"encode zstd gzip\" /etc/caddy/tando/cz.caddy" &&
+        srv "sudo grep -q cz.example.test /etc/caddy/tando/cz.caddy" && srv "sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile" > /dev/null 2>&1 &&
+        czh gzip /big | grep -qi "^content-encoding: gzip"'
+"$R" stop > "$E/cz-stop.out" 2>&1; "$R" start > "$E/cz-start.out" 2>&1
+check "CZ7 after stop and start the site is still compressed" eval 'czh gzip /big | grep -qi "^content-encoding: gzip"'
+printf 'app = cz\nrecipe = node\nstart = node server.js\nhealth = /\nmemory = 128M\ncompress = off\n' > tando.conf
+"$R" deploy > "$E/cz2.out" 2>&1; rc=$?
+check "CZ8 compress = off (rc=$rc): the same visitor gets the plain 68 KB, no Content-Encoding, no Vary, and the site has no encode line" \
+  eval 'h=$(czh "gzip, zstd" /big); [ $rc = 0 ] && ! echo "$h" | grep -qi "^content-encoding" && ! echo "$h" | grep -qi "^vary" &&
+        ! srv "sudo grep -q encode /etc/caddy/tando/cz.caddy" && [ "$(curl -s -m 8 -H "Accept-Encoding: gzip" "$(czu /big)" | wc -c)" -gt 60000 ]'
+cp tando.conf "$E/cz-keep.conf"; echo "compress = maybe" >> tando.conf
+# shellcheck disable=SC2034  # read in the eval of a check below
+czbad=$("$R" deploy 2>&1); cp "$E/cz-keep.conf" tando.conf
+check "CZ9 a bad value is refused by the client and by the server" \
+  eval 'echo "$czbad" | grep -q "compress must be on or off" && agent_check node "compress=maybe" | grep -q "compress must be on or off"'
+cd "$W/skewn" || exit 2   # (the next section, HL, works in the node app of AS7)
 # HL. a release shares the live release's unchanged files by hard link (docs/ARCHITECTURE.md "copy"):
 # never a file of a writable or assets directory, never one the app can write, and no change to one
 # release shows in another
@@ -1103,7 +1167,7 @@ EOF
 check "HL6 the import's owner and mode are those of chown -R and chmod -R, and a file already right is not touched (${hl6:-same})" test -z "$hl6"
 cd "$W" || exit 2
 
-for a in skew plain spa skewn; do "$R" destroy "$a" --purge --yes > /dev/null 2>&1; done   # (section 20 counts the host's apps)
+for a in skew plain spa skewn cz; do "$R" destroy "$a" --purge --yes > /dev/null 2>&1; done   # (section 20 counts the host's apps)
 # 20. several hosts: the same container under two names plus one that does not answer
 "$R" host add test2 vmadmin@127.0.0.1 --port $SP --key "$ROOT/test/server/id_test" --insecure-test >&2  # the one insecure entry
 "$R" host add dead vmadmin@127.0.0.1 --port 2299 --key "$ROOT/test/server/id_test" --no-check >&2

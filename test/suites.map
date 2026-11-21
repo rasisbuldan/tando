@@ -60,6 +60,8 @@ lib/cmd-top.sh           lint ui-test e2e-cli e2e-top
 lib/hostcare.sh          lint ui-test e2e-cli e2e-host
 lib/offsite.sh           lint ui-test e2e-cli e2e-offsite e2e-data
 lib/studio.sh            lint ui-test e2e-cli e2e-studio
+lib/cmd-menubar.sh       lint ui-test e2e-cli install-test
+macos/*                  ui-test install-test
 
 # ---- server side
 server/tando-adopt       lint ui-test e2e-ci e2e-status e2e-adopt
@@ -96,6 +98,8 @@ test/go.sh               go
 test/ui-test*            ui-test lint
 test/native-test.sh      ui-test lint
 test/detect-test.sh      ui-test lint
+test/menubar-*           ui-test lint
+test/fixtures/menubar/*  ui-test
 test/fixtures/apps/*     ui-test e2e-frameworks
 test/e2e-frameworks.sh   e2e-frameworks lint
 test/pty-run.sh          ui-test e2e-top lint
@@ -120,3 +124,4 @@ test/sec2/*              e2e-sec2 lint
 test/sec3/*              e2e-sec2 lint
 test/load/*              lint
 test/race/*              lint
+test/fixtures/compress-server.js  e2e

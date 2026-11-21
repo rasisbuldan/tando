@@ -305,6 +305,7 @@ C_memory="" C_timeout="" C_path="" C_data="" C_jobs="" C_writable="" C_backup=""
 C_soak="" C_spa=""
 C_logs=""   # log_max, log_keep, log_rate, access_log as key=value lines (checked by the server)
 C_image="" C_container_port="" C_build_memory="" C_dockerfile="" C_node="" C_domain="" C_www=""
+C_compress=""   # on (default) or off: Caddy compresses text answers (checked by the server too)
 C_assets=""   # fingerprinted files served from Caddy: off, or <dir>[, <url prefix>] (checked by the server too)
 C_job_timeout=""   # seconds a scheduled job may run (the server's default: 3600)
 C_job_spread="" C_job_missed=""   # the spread of a job's start (default 15 s), run or skip a run missed while the server was off
@@ -564,6 +565,8 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 999 ] || die "$f:$n: hold is 1 to 999 seconds (got \"$v\")";;
       stop_timeout) C_stop_timeout=$v
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 999 ] || die "$f:$n: stop_timeout is 1 to 999 seconds (got \"$v\")";;
+      compress) C_compress=$v
+        case $v in on|off) ;; *) die "$f:$n: compress must be on or off (got \"$v\")";; esac;;
       assets) C_assets=$v
         case $v in off) ;;
           *[!A-Za-z0-9_./,\ ~-]*|""|/*|*..*) die "$f:$n: assets is off, or a directory in the release like assets and optionally the URL prefix: assets, /static/ (got \"$v\")";; esac

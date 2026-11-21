@@ -6,6 +6,18 @@ first, grouped by area.
 
 ## Unreleased
 
+- New: `tando menubar install` (macOS): a menu bar icon for every registered server, built from
+  source with `swiftc` (Command Line Tools only), signed ad hoc, started at login by a LaunchAgent.
+  Every minute it runs `tando ls --all --json` and requests each running app's link from the
+  laptop: a red count of the problems (a server it cannot reach, an app down or failed, a link
+  failing two checks in a row, a firing alert), dimmed when nothing could be checked, a
+  notification once per new problem and once when it clears. The menu lists each server's apps
+  with their links, the firing alerts, Refresh now and `tando status` in Terminal. It works only
+  while the laptop is on and online: it adds to `tando alerts heartbeat`, it does not replace it.
+  `uninstall`, `status`, `install --dry-run`; docs/COMMANDS.md, "menubar".
+- `tando ls --json` (and `ls --all --json`) has the server's alerts (`alerts`: app, check, state,
+  since, detail), as `status --json` has for one app.
+
 - New: one package of a monorepo deploys from its own directory (`cd apps/api && tando up`) with
   no extra settings, for pnpm and npm workspaces. tando up installs the workspace at its root on a
   fresh clone, builds in the package, and ships the package with every package it uses at run time
@@ -21,6 +33,19 @@ first, grouped by area.
   of a warm deploy) is not written again, and the live release's files keep their change time.
   Same result as before (a check compares the two on every kind of file). Measured on a disk
   throttled to 10 MB/s with another app writing: bench/RESULTS.md, "Slow disk".
+- Added: HTTP compression. Every site now has Caddy's `encode zstd gzip` (stock Caddy 2.6.2): text
+  answers of 512 bytes or more go out zstd or gzip compressed with `Vary: Accept-Encoding`; an
+  answer the app compressed itself is not compressed again, and event streams and websockets pass
+  unbuffered (first event of a test stream after 2 ms of 1.2 s). `compress = off` in tando.conf
+  turns it off. For the fingerprinted files (`assets`), text types of 1 KB or more that shrink also
+  get a `<file>.gz` (`gzip -9`) made once when the release is linked, listed with the release's
+  files (pruning removes them) and sent as they are by the assets `file_server` (`precompressed
+  gzip`): the earlier measurement was 1.8-3.4 ms CPU a request for a 200 KB script on the fly
+  against about 0.27 ms precompressed. Deploy cost, measured: 7 text files / 585 KB of a Next.js
+  build take 25 ms of `gzip -9` and add 180 KB (31%) to the shared assets directory; files that
+  were linked before are not compressed again. The bench Next.js app itself was not built here.
+  Tests: CG0 and CZ in e2e.sh, N13 in e2e-next.sh. Not done: `.zst` copies (a visitor that
+  accepts both gets the .gz).
 
 ## 0.2.1 - 2026-11-21
 
