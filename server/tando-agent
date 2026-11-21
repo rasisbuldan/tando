@@ -2231,6 +2231,7 @@ Type=oneshot
 ExecStart=$AGENT app-down %i
 EOF
   { systemctl daemon-reload && systemctl enable -q tando-recover.service; } || die "could not enable the recover unit"
+  studio_setup || die "could not install the studio service (sudo journalctl -u tando-studio shows why)"
   got="units, journals"
   local mem; mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
   if [[ $swap != no ]] && ! swapon --show=NAME --noheadings 2> /dev/null | grepq . &&
@@ -2451,7 +2452,11 @@ cmd_doctor() {
     row check ok "caddy import" "/etc/caddy/tando/*.caddy"
   else row check fail "caddy import" "missing from /etc/caddy/Caddyfile"; fi
   [[ ${H[postgres]:-} == yes ]] && pg_doctor
-  [[ -x $STUDIO ]] && row check ok "studio sessions" "$(studio_rows | awk -F'\t' -v t="$(now)" 'BEGIN { s = "none open" } { s = (NR == 1 ? "" : s ", ") $2 " (" $6 ", " int((t - $4) / 60) " min)" } END { print s }')"
+  if [[ -x $STUDIO ]]; then
+    if systemctl is-active -q tando-studio.service; then
+      row check ok "studio" "$(studio_rows | awk -F'\t' 'BEGIN { s = "running, no session" } { s = "running, " $2 " session(s), open: " ($3 == "-" ? "none" : $3) } END { print s }')"
+    else row check warn "studio" "not running: tando host setup <host>"; fi
+  fi
   if [[ -x $R/bin/tando-gate ]]; then   # CI: sshd reads deploy keys as tando-keys (docs/CI.md)
     if getent passwd tando-keys > /dev/null && [[ -f /etc/ssh/sshd_config.d/50-tando-ci.conf ]]; then
       row check ok "ci keys" "sshd reads them as tando-keys; $(ls -d "$R"/ci/*/ 2> /dev/null | wc -l) apps with keys"
@@ -4576,17 +4581,15 @@ cmd_db_psql() { # interactive, over ssh -t; runs as the app user with the app's 
   cd /tmp && exec runuser -u "$AU" -- psql -h 127.0.0.1 -U "$DB_ROLE" -d "$DB_ROLE"
 }
 
-# >>> db studio: `tando db studio` (srv/studio, tando-studio; docs/ARCHITECTURE.md "db studio")
-# db-studio <app> ro <sid> <idle-min> <port> <host-name> [hb=N idle-s=N timeout=N]: the studio of
-# the app's database, read-only, for as long as the admin's ssh session lasts. It runs as the
-# app's user in a transient unit (tando-<app>-studio-<sid:0:12>) under tando.slice: no network
-# port (SocketBindDeny, and the unit can only reach localhost), no capabilities, the app's env
-# not loaded; the role's password reaches it as a systemd credential (root-only file here, gone
-# with the unit). Its socket is in /run/tando-studio/<sid>, a directory only the admin (owner)
-# and the app's group can enter: the admin's ssh -L reaches it, nobody else. stdin is the
-# client's heartbeat through ssh (EOF or 45 s of silence end it); stdout the "ready" and
-# "stopped" lines. At most STUDIO_MAX at once on the host, counted and started under a lock. The
-# last arguments are for test/e2e-studio.sh (shorter heartbeat, idle time and statement limit).
+# >>> db studio: `tando db studio` (srv/studio, tando-studio; docs/STUDIO.md, docs/ARCHITECTURE.md "db studio")
+# One always-on service per server, tando-studio.service (studio_setup, run by host setup): a front
+# as root with CAP_SETUID and CAP_SETGID only, on unix sockets only, that starts a helper per app
+# and browser session as the app's user (the per-app studio: read-only, the scope guard, its
+# limits), on demand; idle, it holds no helper and no database connection. The agent mints the
+# one-time codes (db-studio-code, admin logins only) through the front's ctl socket, and hands
+# each admin their own socket (/run/tando-studio/u/<login>/s, 0600 owned by the login: their
+# ssh -L reaches it, nobody else's). The front never reads an env file or a password: a helper
+# reads its own app's DATABASE_URL (the env is root:<app group> 0640).
 # units_unload unit...: wait until these units have ended (60 s at most) and are no longer loaded
 # (3 s more); systemd
 # unloads a unit nothing references on its next garbage collection pass; seen on systemd 259: a
@@ -4609,14 +4612,84 @@ units_unload() {
   done
   systemctl daemon-reload
 }
-STUDIO=$R/bin/tando-studio STUDIO_RUN=/run/tando-studio STUDIO_CRED=/run/tando/studio STUDIO_MAX=2
-studio_units() { systemctl list-units --plain --no-legend --state=active,activating 'tando-*-studio-*' 2> /dev/null | awk '{ print $1 }'; }
-studio_rows() { # running studios: studio <app> <sid12> <started epoch> <mode> <admin>
-  local u a m w e
-  while IFS= read -r u; do
-    read -r _ _ a m w e < <(systemctl show -P Description "$u" 2> /dev/null)   # tando studio <app> <mode> <admin> <epoch>
-    row studio "$a" "${u##*-studio-}" "$e" "$m" "$w"
-  done < <(studio_units)
+STUDIO=$R/bin/tando-studio STUDIO_RUN=/run/tando-studio
+studio_ctl() { "$STUDIO" ctl "$@" 2> /dev/null; }   # one request to the service's front
+studio_rows() { # the service: studio <tokens> <helpers: app,app|-> (nothing when it does not run)
+  local l; l=$(studio_ctl ls) || return 0
+  [[ $l =~ ^tokens=([0-9]+)\ helpers=([a-z0-9,-]+)$ ]] && row studio "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+  return 0
+}
+# studio_setup: (host setup) the service's units; what the per-session studios of older versions
+# left (their transient units, credentials, session directories) goes first. The restart loads a
+# new binary and revokes every token (docs/STUDIO.md).
+studio_setup() {
+  [[ -x $STUDIO ]] || return 0
+  local u us=()
+  while IFS= read -r u; do [[ -n $u ]] && us+=("$u"); done < <(systemctl list-units --all --plain --no-legend 'tando-*-studio-*' 2> /dev/null | awk '{ print $1 }')
+  ((${#us[@]})) && systemctl stop "${us[@]}" 2> /dev/null
+  rm -rf /run/tando/studio
+  [[ -d $STUDIO_RUN ]] && find "$STUDIO_RUN" -mindepth 1 -maxdepth 1 -regextype egrep -regex '.*/[0-9a-f]{32}' -exec rm -rf {} + 2> /dev/null
+  local p=() x
+  for x in ${SD_HARD[@]+"${SD_HARD[@]}"}; do [[ $x == RestrictAddressFamilies=* ]] || p+=("$x"); done
+  write_if_changed /etc/systemd/system/tando-studio.service <<EOF || return 1
+[Unit]
+Description=tando: database studio (tando db studio; docs/STUDIO.md)
+After=network.target postgresql.service
+
+[Service]
+ExecStart=$STUDIO service
+Restart=always
+RestartSec=2
+# root for one thing: starting a helper as an app's user (no file, network or system capability)
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+RuntimeDirectory=tando-studio
+RuntimeDirectoryMode=0711
+UMask=0077
+# unix sockets only; the helpers reach PostgreSQL on 127.0.0.1 (as their app's uid: fw_sync)
+RestrictAddressFamilies=AF_UNIX AF_INET
+SocketBindDeny=any
+IPAddressDeny=any
+IPAddressAllow=localhost
+MemoryMax=128M
+MemorySwapMax=0
+TasksMax=64
+CPUWeight=20
+Nice=10
+IOSchedulingClass=idle
+OOMScoreAdjust=500
+Environment=GOMAXPROCS=1 GOMEMLIMIT=16MiB
+$(printf '%s\n' ${p[@]+"${p[@]}"})
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  # a helper's database backend: its pid, dropped in lower/ by the front, checked and lowered by root
+  write_if_changed /etc/systemd/system/tando-studio-lower.path <<EOF || return 1
+[Unit]
+Description=tando: lower the priority of the studio's database processes
+
+[Path]
+DirectoryNotEmpty=$STUDIO_RUN/lower
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  write_if_changed /etc/systemd/system/tando-studio-lower.service <<EOF || return 1
+[Unit]
+Description=tando: lower the priority of the studio's database processes
+
+[Service]
+Type=oneshot
+ExecStart=$AGENT db-studio-lower
+EOF
+  systemctl daemon-reload && systemctl enable -q tando-studio.service tando-studio-lower.path &&
+    systemctl restart tando-studio.service && systemctl restart tando-studio-lower.path
 }
 # studio_lower pid: the studio said its PostgreSQL backend is <pid>. Never taken on trust: the pid
 # must be a process of the postgres user whose parent is this cluster's postmaster, whose title
@@ -4643,80 +4716,50 @@ studio_lower() {
     CPUWeight t 1 IOWeight t 1 Description s "tando studio $A: its database process" 0 > /dev/null 2>&1 || return 1
   renice -n 19 -p "$pid" > /dev/null 2>&1 && ionice -c 3 -p "$pid" > /dev/null 2>&1
 }
+# db-studio: the per-session verb of older clients
 cmd_db_studio() {
+  die "the studio on <host> is now one service for the whole server: update tando on this computer, then tando db studio again"
+}
+# db-studio-code <app> <port> <host-name>: a one-time code (60 s) for the admin who runs this to
+# open <app> from 127.0.0.1:<port> of their laptop: code=<code> probe=<word> sock=<their socket>
+cmd_db_studio_code() {
   need_root; app "$1"
   [[ ${C[database]:-} == postgres ]] || die "$A has no database (add database = postgres to tando.conf, then tando up)"
-  local mode=${2:-} sid=${3:-} idle=${4:-} port=${5:-} hn=${6:-} x extra=() who=${SUDO_USER:-root} g
-  [[ $mode == ro ]] || die "the studio is read-only in this version (writes: tando db psql)"
-  [[ $sid =~ ^[0-9a-f]{32}$ ]] || die "bad studio session id"
-  [[ $idle =~ ^[0-9]{1,3}$ ]] && ((10#$idle >= 1 && 10#$idle <= 240)) || die "bad idle time (1 to 240 minutes)"
+  local port=${2:-} hn=${3:-} who=${SUDO_USER:-root} out sock i
   [[ $port =~ ^[0-9]{4,5}$ ]] && ((10#$port >= 1024 && 10#$port <= 65535)) || die "bad port"
   [[ $hn =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}$ ]] || die "bad host name"
-  local prio=1
-  for x in "${@:7}"; do
-    [[ $x == prio=off ]] && { prio=0; continue; }   # (bench/run-studio.sh: the unscoped case)
-    [[ $x =~ ^(hb|idle-s|timeout|conn-idle)=[0-9]{1,5}$ ]] || die "bad studio option"
-    extra+=("--${x%%=*}" "${x#*=}")
-  done
   [[ $who != tando-d-* ]] || die "a CI deploy key cannot open the studio"
   [[ $who =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,31}$ ]] || die "bad admin name"
   [[ -x $STUDIO ]] || die "the studio is not installed on <host>: tando host setup <host>"
-  pg_isready -q -h 127.0.0.1 || die "PostgreSQL does not answer on <host>: tando doctor <host>"
-  g=$(id -gn "$AU" 2> /dev/null) || die "the user $AU does not exist"
-  db_creds
-  local u="tando-$A-studio-${sid:0:12}" d=$STUDIO_RUN/$sid cred=$STUDIO_CRED/$A.$sid.cred p=() line ready=0 reason=""
-  lockfile "$R/.studio.lock"; exec 8>"$R/.studio.lock"
-  flock -w 30 8 || die "another studio is starting on <host>; try again"
-  install -d -m 700 -o root -g root /run/tando "$STUDIO_CRED" && install -d -m 711 -o root -g root "$STUDIO_RUN" ||
-    die "could not create $STUDIO_RUN"
-  local open; open=$(studio_rows)
-  if (($(grep -c . <<< "$open") >= STUDIO_MAX)); then
-    die "$STUDIO_MAX studios are open on <host> already ($(awk -F'\t' '{ printf "%s%s (%s)", (NR > 1 ? ", " : ""), $2, $6 }' <<< "$open")): close one, or tando db studio --stop -a <app>"
-  fi
-  [[ ! -e $d ]] || die "studio session $sid exists"
-  mkdir -m 770 "$d" && chown "$who:$g" "$d" || die "could not create $d"
-  (umask 077; printf 'user=%s\ndb=%s\npassword=%s\n' "$DB_ROLE" "$DB_ROLE" "$DB_PW" > "$cred") || die "could not write the studio's credential"
-  # (ReadWritePaths is the parent: a path named there is a mount point inside the unit, which
-  # ExecStopPost, run in the unit's namespace, could not remove; the 0711 root parent and the 0770
-  # session directories keep every other session out of reach)
-  for x in "Description=tando studio $A $mode $who $(now)" "User=$AU" "Group=$g" NoNewPrivileges=yes ProtectSystem=strict \
-      ProtectHome=yes PrivateTmp=yes PrivateDevices=yes PrivateIPC=yes CapabilityBoundingSet= AmbientCapabilities= \
-      SocketBindDeny=any "RestrictAddressFamilies=AF_INET AF_UNIX" IPAddressDeny=any IPAddressAllow=localhost \
-      "ReadWritePaths=$STUDIO_RUN" UMask=0077 "LoadCredential=db:$cred" "ExecStopPost=+/bin/rm -rf $d $cred" \
-      MemoryMax=96M MemorySwapMax=0 TasksMax=32 CPUWeight=50 Nice=10 IOSchedulingClass=idle OOMScoreAdjust=500 RuntimeMaxSec=12h Slice=tando.slice \
-      "Environment=GOMAXPROCS=1 GOMEMLIMIT=48MiB" "${SD_HARD[@]}"; do
-    [[ $x == RestrictAddressFamilies=AF_INET\ AF_INET6* ]] || p+=(-p "$x")   # (SD_HARD's: this one has no IPv6, no netlink)
-  done
+  systemctl is-active -q tando-studio.service || systemctl start tando-studio.service 2> /dev/null ||
+    die "the studio service does not run on <host>: tando host setup <host> (sudo journalctl -u tando-studio shows why)"
+  for ((i = 0; i < 50; i++)); do [[ -S $STUDIO_RUN/ctl ]] && break; sleep 0.1; done
+  out=$("$STUDIO" ctl code "$who" "$A" "$port" "$hn" 2>&1) || die "${out#error=}"
+  [[ $out =~ ^code=[A-Za-z0-9_-]+\ probe=[A-Za-z0-9_-]+\ sock=(/run/tando-studio/u/[A-Za-z0-9_.-]+/s)$ ]] || die "the studio service answered: $out"
+  sock=${BASH_REMATCH[1]}
+  [[ -S $sock && ! -L $sock ]] && chown "$who" "$sock" && chmod 600 "$sock" || die "could not hand $sock to $who"
   AUDIT_NOTE="read-only, port $port"
-  [[ -x $LOGS ]] && "$LOGS" audit-write db-studio "$A" started "read-only, port $port" < /dev/null &> /dev/null   # (the end: audit_done)
-  trap '' PIPE
-  shopt -s lastpipe
-  # the relay: two kinds of line only; the lock goes with the first one (the unit is counted by then)
-  systemd-run --quiet --pipe --wait --collect --unit="$u" "${p[@]}" "$STUDIO" serve --sock "$d/s" --app "$A" \
-      --host "$hn" --admin "$who" --port "$port" --idle "$idle" ${extra[@]+"${extra[@]}"} 8>&- |
-    while IFS= read -r line; do
-      exec 8>&-
-      case $line in
-        "ready code="*) ready=1; printf '%s\n' "$line" 2> /dev/null;;
-        "stopped reason="*) reason=$line; printf '%s\n' "$line" 2> /dev/null;;
-        "backend pid="*) ((prio)) && { studio_lower "${line#backend pid=}" ||
-          echo "tando-agent: warning: could not lower the priority of the studio's database process" >&2; };;
-      esac
-    done
-  rm -rf "${d:?}" "$cred"   # (gone with the unit already; a unit that never started leaves them)
-  units_unload "$u"
-  # the last one out removes the two directories (under the lock: a studio starting creates them)
-  exec 8>"$R/.studio.lock"; flock -w 10 8 && rmdir "$STUDIO_RUN" "$STUDIO_CRED" 2> /dev/null; exec 8>&-
-  [[ $reason =~ ^stopped\ reason=([a-z]+)\ queries=([0-9]+)$ ]] &&
-    AUDIT_NOTE="read-only, ended: ${BASH_REMATCH[1]}, ${BASH_REMATCH[2]} queries"
-  ((ready)) || { AUDIT_NOTE="did not start"; exit 1; }
+  echo "$out"
+}
+# db-studio-lower: (tando-studio-lower.service) every <app>.<pid> the front dropped in lower/
+cmd_db_studio_lower() {
+  need_root
+  local f n a pid
+  for f in "$STUDIO_RUN"/lower/*; do
+    [[ -f $f ]] || continue
+    n=${f##*/}; rm -f "$f"; a=${n%.*} pid=${n##*.}
+    valid_app "$a" && [[ -f $R/apps/$a/app.conf ]] || continue
+    ( app "$a"; DB_ROLE=$(db_role); studio_lower "$pid" ) ||
+      echo "tando-agent: warning: could not lower the priority of the studio's database process $pid ($a)" >&2
+  done
   return 0
 }
-cmd_db_studio_ls() { # [app]: database=0|1 for the app, installed=0|1, the running studios; without
-  # an app also every app: app <name> <database 0|1> <database bytes> <state> (the client's picker)
+cmd_db_studio_ls() { # [app]: database=0|1 for the app, installed=0|1, service=1 (this version), the
+  # service's row; without an app also every app: app <name> <database 0|1> <database bytes> <state>
   need_root
   if [[ -n ${1:-} ]]; then app "$1"; echo "database=$([[ ${C[database]:-} == postgres ]] && echo 1 || echo 0)"; fi
   echo "installed=$([[ -x $STUDIO ]] && echo 1 || echo 0)"
+  echo "service=1"
   studio_rows
   [[ -z ${1:-} ]] || return 0
   local f a db sizes="" sz st
@@ -4731,16 +4774,22 @@ cmd_db_studio_ls() { # [app]: database=0|1 for the app, installed=0|1, the runni
     row app "$a" "$db" "${sz:--}" "$st"
   done
 }
-cmd_db_studio_stop() { # [app]: stop the app's studios (all of the host's without one)
+cmd_db_studio_stop() { # [app]: end the app's helpers; without one every token and helper (a restart)
   need_root
-  local us=() u
-  if [[ -n ${1:-} ]]; then app "$1"; while IFS= read -r u; do [[ $u == tando-$A-studio-* ]] && us+=("$u"); done < <(app_units)
-  else while IFS= read -r u; do us+=("$u"); done < <(studio_units); fi
-  ((${#us[@]})) && { systemctl stop "${us[@]}" 2> /dev/null; units_unload "${us[@]}"; }
-  lockfile "$R/.studio.lock"; exec 8>"$R/.studio.lock"   # (the last one: its agent went with its ssh session)
-  flock -w 10 8 && rmdir "$STUDIO_RUN" "$STUDIO_CRED" 2> /dev/null; exec 8>&-
-  AUDIT_NOTE="${#us[@]} stopped"
-  echo "stopped=${#us[@]}"
+  local n=0 out
+  if [[ -n ${1:-} ]]; then
+    app "$1"
+    out=$(studio_ctl revoke "$A") && [[ $out =~ ^revoked=([0-9]+)$ ]] && n=${BASH_REMATCH[1]}
+  else
+    if out=$(studio_ctl ls) && [[ $out =~ helpers=([a-z0-9,-]+)$ && ${BASH_REMATCH[1]} != - ]]; then
+      n=$(tr ',' '\n' <<< "${BASH_REMATCH[1]}" | grep -c .)
+    fi
+    if systemctl is-enabled -q tando-studio.service 2> /dev/null; then
+      systemctl restart tando-studio.service || die "could not restart the studio service"
+    fi
+  fi
+  AUDIT_NOTE="$n stopped"
+  echo "stopped=$n"
 }
 # <<< db studio
 
@@ -4898,7 +4947,7 @@ destroy_finish() {
   pgrep -u "$AU" > /dev/null 2>&1 &&
     die "processes of $AU survive a kill: $(pgrep -u "$AU" | tr '\n' ' ')- nothing removed; run tando destroy again"
   for u in "${units[@]}"; do rm -f "/etc/systemd/system/$u"; done
-  rm -f "$STUDIO_CRED/$A".*.cred   # (an open studio's: its unit was stopped above)
+  [[ -x $STUDIO ]] && studio_ctl revoke "$A" > /dev/null   # (its studio helpers: killed with the user's processes above)
   rm -f "/etc/systemd/system/tando-$A.service" "/etc/systemd/system/$(app_slice)"
   systemctl daemon-reload
   fp ds.site
@@ -6347,22 +6396,16 @@ case $verb in
   activate|run-activation) audit deploy "${1:-}";;
   configure|rollback|env-set|env-unset|env-ls|start|stop|restart|unlock|destroy|backup-run|\
   backup-restore|backup-cat|db-url|db-psql|shell|job-run|job-pause) audit "$verb" "${1:-}";;
-  db-studio|db-studio-stop) audit "$verb" "${1:-}";;
+  db-studio|db-studio-code|db-studio-stop) audit "$verb" "${1:-}";;
 esac
 # Verbs that change an app run to their end when the ssh session that started them drops: the
 # next write to the closed connection would otherwise kill the agent half-way (an app stopped
 # for a restore and never started again, a new env never checked). Their output then goes
 # nowhere. (A handler, not an ignored signal: the commands they run keep the default.)
-# db-studio too: its session ends when the laptop goes (Ctrl-C drops the ssh session), and the
-# agent must live to see its unit end and unload it (units_unload) and remove its directories.
 case $verb in
-  configure|rollback|env-set|env-unset|start|stop|restart|destroy|backup-run|backup-restore|domain-add|domain-rm|db-studio)
+  configure|rollback|env-set|env-unset|start|stop|restart|destroy|backup-run|backup-restore|domain-add|domain-rm)
     trap 'exec > /dev/null 2>&1' PIPE HUP;;
 esac
-# (and a Ctrl-C at the laptop, which ssh may pass on as SIGINT, does not end the studio's relay
-# before it has unloaded the session's unit: the studio ends by itself when the laptop is gone.
-# A handler, not an ignored signal, so systemd-run and the studio keep the default)
-[[ $verb == db-studio ]] && trap ':' INT
 case $verb in
   info) cmd_info;;
   setup) cmd_setup "$@";;
@@ -6417,6 +6460,7 @@ case $verb in
   db-psql) cmd_db_psql "$@";;
   db-info) cmd_db_info "$@";;
   db-studio) cmd_db_studio "$@";; db-studio-ls) cmd_db_studio_ls "$@";; db-studio-stop) cmd_db_studio_stop "$@";;
+  db-studio-code) cmd_db_studio_code "$@";; db-studio-lower) cmd_db_studio_lower "$@";;
   shell) cmd_shell "$@";;
   shell-put) cmd_shell_put "$@";;
   busy) cmd_busy "$@";;
