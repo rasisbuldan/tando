@@ -5103,6 +5103,9 @@ cmd_releases() {
     [[ $i == "${S[last_good]:-}" ]] && last=1
     row rel "$i" "${S[status_$i]:-pending}" "$cur" "$last"
   done
+  # where it was last deployed from (user@machine:path; tando-dash deploys from that folder)
+  [[ -n ${C[origin]:-} ]] && row origin "${C[origin]}"
+  return 0
 }
 
 cmd_history() { # [app] [n]

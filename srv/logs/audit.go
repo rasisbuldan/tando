@@ -43,7 +43,10 @@ var (
 // Origin is who asked and from where: the sudo user and the ssh client address of the calling
 // session (found in the environment of an ancestor process); internal runs (timers, boot) are
 // "system" from "local", or the requester the agent passes to an activation (TANDO_AUDIT_WHO,
-// TANDO_AUDIT_FROM).
+// TANDO_AUDIT_FROM). A request from the tando dashboard says so: its client puts TANDO_FROM=dashboard
+// in front of `sudo` in the ssh command, so it is in the environment of the same ancestor as
+// SSH_CONNECTION, and from is "dashboard" instead of the address. Only with sudo (SUDO_USER): a
+// deploy key's tando-gate refuses such a command and starts the agent without sudo.
 func (l *Logs) Origin() (who, from string) {
 	getenv := l.Getenv
 	if getenv == nil {
@@ -53,13 +56,17 @@ func (l *Logs) Origin() (who, from string) {
 	ip := ""
 	for p := l.PPID; p > 1; {
 		if env, err := os.ReadFile(filepath.Join(l.Env.Proc, strconv.Itoa(p), "environ")); err == nil {
+			dash := false
 			for e := range bytes.SplitSeq(env, []byte{0}) {
 				if v, ok := bytes.CutPrefix(e, []byte("SSH_CONNECTION=")); ok {
 					ip, _, _ = strings.Cut(string(v), " ")
-					break
 				}
+				dash = dash || string(e) == "TANDO_FROM=dashboard"
 			}
 			if ip != "" {
+				if dash && who != "" {
+					ip = "dashboard"
+				}
 				break
 			}
 		}
@@ -95,7 +102,7 @@ func (l *Logs) Origin() (who, from string) {
 	if !reWho.MatchString(who) {
 		who = "unknown"
 	}
-	if !reAddr.MatchString(ip) && ip != "local" {
+	if !reAddr.MatchString(ip) && ip != "local" && ip != "dashboard" {
 		ip = "unknown"
 	}
 	return who, ip

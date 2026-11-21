@@ -277,12 +277,12 @@ func TestShutdownLeavesWrites(t *testing.T) {
 	if !until(5*time.Second, func() bool { return e.srv.idem.lookup("shut-key-0001").Status == "done" }) {
 		t.Fatal("write did not finish")
 	}
-	// a restart while a write ran: the record says unknown, not running
+	// a restart while a write ran: the record is handed over to be reattached (TestReattach)
 	st, _ := openIdem(filepath.Join(e.dir, "x.json"), filepath.Join(e.dir, "ops"), 10, time.Hour, time.Now)
-	r, _, _ := st.begin(context.Background(), "run-key-00001", "h", writeReq{Action: "noop", Host: "a", App: "web"})
-	st.start(r)
+	r, _, _ := st.begin(context.Background(), "run-key-00001", "h", "", writeReq{Action: "noop", Host: "a", App: "web"})
+	st.start(r, nil)
 	st2, _ := openIdem(filepath.Join(e.dir, "x.json"), filepath.Join(e.dir, "ops"), 10, time.Hour, time.Now)
-	if got := st2.lookup("run-key-00001"); got == nil || got.Status != "unknown" {
+	if got := st2.lookup("run-key-00001"); got == nil || got.Status != "running" || len(st2.reattach) != 1 {
 		t.Fatalf("after restart: %+v", got)
 	}
 	_ = syscall.Getpid

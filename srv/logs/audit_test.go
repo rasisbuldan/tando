@@ -54,6 +54,30 @@ func TestAudit(t *testing.T) {
 	if who, from := h.l.Origin(); who != "unknown" || from != "10.1.1.1" {
 		t.Fatal(who, from)
 	}
+	// the dashboard: TANDO_FROM=dashboard beside SSH_CONNECTION (sudo's environment); passed on
+	// to an activation; never from another variable's value, nor without sudo (a deploy key)
+	h.l.PPID, env = 300, map[string]string{"SUDO_USER": "vmadmin"}
+	h.write("proc/100/environ", "SSH_CONNECTION=192.168.215.1 50000 10.0.0.2 22\x00TANDO_FROM=dashboard\x00")
+	if who, from := h.l.Origin(); who != "vmadmin" || from != "dashboard" {
+		t.Fatal("dashboard:", who, from)
+	}
+	h.write("proc/100/environ", "SSH_CONNECTION=192.168.215.1 50000 10.0.0.2 22\x00TANDO_FROM=dashboardx\x00SSH_ORIGINAL_COMMAND=TANDO_FROM=dashboard\x00")
+	if _, from := h.l.Origin(); from != "192.168.215.1" {
+		t.Fatal("not the marker:", from)
+	}
+	h.write("proc/100/environ", "SSH_CONNECTION=192.168.215.1 50000 10.0.0.2 22\x00TANDO_FROM=dashboard\x00")
+	env = map[string]string{}
+	if _, from := h.l.Origin(); from != "192.168.215.1" {
+		t.Fatal("without sudo:", from)
+	}
+	h.l.PPID, env = 1, map[string]string{"TANDO_AUDIT_WHO": "alice", "TANDO_AUDIT_FROM": "dashboard"}
+	if who, from := h.l.Origin(); who != "alice" || from != "dashboard" {
+		t.Fatal("activation:", who, from)
+	}
+	env = map[string]string{"TANDO_AUDIT_FROM": "dashboard2"}
+	if _, from := h.l.Origin(); from != "unknown" {
+		t.Fatal(from)
+	}
 	env = map[string]string{"SUDO_USER": "vmadmin"}
 	if _, from := h.l.Origin(); from != "unknown" {
 		t.Fatal("sudo without ssh:", from)

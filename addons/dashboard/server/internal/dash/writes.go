@@ -29,15 +29,10 @@ import (
 // The child runs in its own process group with its output in a file, so neither a client that
 // goes away nor tando-dash stopping kills it (tando's CLI owns the operation).
 
-// action: a write the page can ask for. M4 adds deploy, rollback, stop, start, restart, env set.
-type action struct {
-	argv func(host, app string) []string
-}
-
-// actions: noop is harmless (tando --version) and exercises the whole mechanism in tests
-var actions = map[string]action{
-	"noop": {argv: func(host, app string) []string { return []string{"--version"} }},
-}
+// actions: the writes the page can ask for (actions.go builds their argv). noop is harmless
+// (tando --version) and exercises the whole mechanism in tests.
+var actions = map[string]bool{"noop": true, "deploy": true, "rollback": true, "stop": true, "start": true,
+	"restart": true, "env-set": true}
 
 const maxConfirms = 128
 
@@ -101,8 +96,9 @@ type writeReq struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
-func (q *writeReq) check() *apiError {
-	if _, ok := actions[q.Action]; !ok {
+// check: the action and the names (and, with params, the action's params)
+func (q *writeReq) check(params bool) *apiError {
+	if !actions[q.Action] {
 		return &apiError{Status: 400, Code: "bad_request", Msg: "no such action"}
 	}
 	if !ValidHost(q.Host) {
@@ -110,6 +106,11 @@ func (q *writeReq) check() *apiError {
 	}
 	if !ValidApp(q.App) {
 		return &apiError{Status: 400, Code: "bad_request", Msg: "app: a-z, 0-9, -; 2-24 characters"}
+	}
+	if params {
+		if _, e := q.params(); e != nil {
+			return e
+		}
 	}
 	return nil
 }
@@ -120,7 +121,7 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 	if _, ok := decode(w, r, &q); !ok {
 		return
 	}
-	if e := q.check(); e != nil {
+	if e := q.check(false); e != nil {
 		writeErr(w, e)
 		return
 	}
@@ -145,18 +146,25 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 	if _, ok := decode(w, r, &q); !ok {
 		return
 	}
-	if e := q.check(); e != nil {
+	if e := q.check(true); e != nil {
 		writeErr(w, e)
 		return
 	}
+	p, _ := q.params()
 	// the body that counts: everything but the confirm token (a retry of the same action may
-	// come with a fresh token after the first was used)
+	// come with a fresh token after the first was used) and env-set's value (no trace of it on
+	// disk; compared in memory only)
 	conf := q.Confirm
-	q.Confirm = ""
-	canon, _ := json.Marshal(q)
+	cq := q
+	cq.Confirm, cq.Params = "", canonParams(q.Action, p)
+	canon, _ := json.Marshal(cq)
 	hash := s.idem.hash(canon)
+	vmac := ""
+	if p.Value != nil {
+		vmac = s.idem.valueMAC(*p.Value)
+	}
 
-	rec, existing, err := s.idem.begin(r.Context(), key, hash, q)
+	rec, existing, err := s.idem.begin(r.Context(), key, hash, vmac, q)
 	if err != nil {
 		switch {
 		case errors.Is(err, errKeyReused):
@@ -181,43 +189,45 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, e)
 		return
 	}
-	if !s.confirms.use(conf, q.Action, q.Host, q.App) {
+	refuse := func(e *apiError) {
 		s.writes.unlock(lockKey)
-		e := &apiError{Status: 403, Code: "confirm", Msg: "this confirmation has expired or was for something else; confirm again"}
 		s.idem.abort(key, e)
 		writeErr(w, e)
-		return
 	}
 	if !s.knownHost(q.Host) {
-		s.writes.unlock(lockKey)
-		e := &apiError{Status: 404, Code: "no_host", Msg: "no host named " + q.Host + " (tando host ls)"}
-		s.idem.abort(key, e)
-		writeErr(w, e)
+		refuse(&apiError{Status: 404, Code: "no_host", Msg: "no host named " + q.Host + " (tando host ls)"})
 		return
 	}
-	argv := actions[q.Action].argv(q.Host, q.App)
-	if _, err := Allowed(argv); err != nil {
-		s.writes.unlock(lockKey)
-		e := cliErr(err)
-		s.idem.abort(key, e)
-		writeErr(w, e)
+	// (before the token is used: a deploy refused for its folder can be confirmed again)
+	pl, e := s.prepare(r.Context(), &q, p)
+	if e != nil {
+		refuse(e)
 		return
 	}
-	s.idem.start(rec)
+	if !s.confirms.use(conf, q.Action, q.Host, q.App) {
+		refuse(&apiError{Status: 403, Code: "confirm", Msg: "this confirmation has expired or was for something else; confirm again"})
+		return
+	}
+	if _, err := Allowed(pl.argv); err != nil {
+		refuse(cliErr(err))
+		return
+	}
+	s.idem.start(rec, pl.base)
 	v := rec.view(false, "") // before the child can end and change the record
 	s.wg.Add(1)
-	go s.runWrite(rec, lockKey, argv, q.Host)
+	go s.runWrite(rec, lockKey, pl, q.Host)
 	writeJSON(w, 202, v)
 }
 
-// runWrite: the write's child, detached from the request and from shutdown
-func (s *Server) runWrite(rec *idemRec, lockKey string, argv []string, host string) {
+// runWrite: the write's child, detached from the request and from shutdown; then its outcome
+// from the server
+func (s *Server) runWrite(rec *idemRec, lockKey string, pl *plan, host string) {
 	defer s.wg.Done()
 	defer s.writes.unlock(lockKey)
 	defer func() {
 		if v := recover(); v != nil {
 			s.logf("panic in a write: %v", v)
-			s.idem.finish(rec, "failed", -1, errPanic.Error())
+			s.idem.finish(rec, "failed", -1, "", errPanic.Error(), nil)
 		}
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.WriteTimeout)
@@ -229,15 +239,41 @@ func (s *Server) runWrite(rec *idemRec, lockKey string, argv []string, host stri
 	if out != nil {
 		defer out.Close()
 	}
-	res, err := s.cfg.Runner.Run(ctx, Req{Argv: argv, Host: host, Out: out, OnStart: func(pid int) { s.idem.setPid(rec, pid) }})
-	status, msg := "done", ""
-	if err != nil {
-		status, msg = "failed", cliErr(err).Msg
-		if s.idem.tail(rec.Key) == "" && res.Stderr != "" {
-			msg = firstLine(res.Stderr)
-		}
+	env := writeEnv
+	if rec.Action == "noop" {
+		env = nil
 	}
-	s.idem.finish(rec, status, res.Exit, msg)
+	res, err := s.cfg.Runner.Run(ctx, Req{Argv: pl.argv, Host: host, Out: out, Dir: pl.dir, Stdin: pl.stdin, Env: env,
+		OnStart: func(pid int) { s.idem.setPid(rec, pid) }})
+	exit := res.Exit
+	if err != nil && exit == 0 {
+		exit = -1 // (killed, or never started)
+	}
+	s.idem.childEnded(rec, exit)
+	if rec.Action == "noop" {
+		status, msg := "done", ""
+		if err != nil {
+			status, msg = "failed", cliErr(err).Msg
+			if s.idem.tail(rec.Key) == "" && res.Stderr != "" {
+				msg = firstLine(res.Stderr)
+			}
+		}
+		s.idem.finish(rec, status, exit, "", msg, nil)
+		return
+	}
+	octx, ocancel := context.WithTimeout(context.Background(), s.cfg.OutcomeWait+s.cfg.ReadTimeout)
+	defer ocancel()
+	o := s.readOutcome(octx, rec, exit)
+	status, code, msg := verdict(rec, o, exit, s.idem.tail(rec.Key))
+	if status == "unknown" && err == nil {
+		status = "done"
+	} else if status == "unknown" && exit > 0 {
+		status = "failed"
+	}
+	if status == "failed" && msg == "" && err != nil {
+		msg = cliErr(err).Msg
+	}
+	s.idem.finish(rec, status, exit, code, msg, o)
 }
 
 // GET /api/action?key=: a write's record and the end of its output (a reloaded page reattaches)
@@ -297,20 +333,26 @@ func (l *writeLocks) count() int {
 var errKeyReused = errors.New("key reused with another body")
 
 type idemRec struct {
-	Key     string    `json:"key"`
-	Hash    string    `json:"hash"`
-	Action  string    `json:"action"`
-	Host    string    `json:"host"`
-	App     string    `json:"app"`
-	Status  string    `json:"status"` // running, done, failed, unknown
-	Exit    int       `json:"exit"`
-	Message string    `json:"message,omitempty"`
-	Pid     int       `json:"pid,omitempty"`
-	Started time.Time `json:"started"`
-	Ended   time.Time `json:"ended,omitempty"`
+	Key     string `json:"key"`
+	Hash    string `json:"hash"`
+	Action  string `json:"action"`
+	Host    string `json:"host"`
+	App     string `json:"app"`
+	Status  string `json:"status"` // running, done, failed, unknown
+	Exit    int    `json:"exit"`
+	Code    string `json:"code,omitempty"` // failed: busy (another operation held the app)
+	Message string `json:"message,omitempty"`
+	// ChildEnded: the CLI ended (Exit is its status); the outcome may still be being read
+	ChildEnded bool       `json:"child_ended,omitempty"`
+	Base       *histEntry `json:"base,omitempty"`    // deploy, rollback: the newest history entry before
+	Outcome    *outcome   `json:"outcome,omitempty"` // what the server said once the CLI ended
+	Pid        int        `json:"pid,omitempty"`
+	Started    time.Time  `json:"started"`
+	Ended      time.Time  `json:"ended,omitempty"`
 
 	admitted chan struct{} // closed when admission is decided
 	reject   *apiError     // admission refused (the record is then forgotten)
+	vmac     string        // env-set: HMAC of the value with a key that is never written (memory only)
 }
 
 func (r *idemRec) httpStatus() int {
@@ -337,6 +379,12 @@ func (r *idemRec) view(replay bool, output string) map[string]any {
 	if r.Message != "" {
 		v["message"] = r.Message
 	}
+	if r.Code != "" {
+		v["code"] = r.Code
+	}
+	if r.Outcome != nil {
+		v["outcome"] = r.Outcome
+	}
 	if output != "" {
 		v["output"] = output
 	}
@@ -351,7 +399,10 @@ type idemStore struct {
 	ttl    time.Duration
 	now    func() time.Time
 	secret []byte
+	memKey []byte // valueMAC's key: never written anywhere
 	m      map[string]*idemRec
+	// reattach: records that were running when tando-dash stopped (New takes them over)
+	reattach []*idemRec
 }
 
 type idemFile struct {
@@ -361,6 +412,7 @@ type idemFile struct {
 
 func openIdem(file, opsDir string, max int, ttl time.Duration, now func() time.Time) (*idemStore, error) {
 	st := &idemStore{file: file, opsDir: opsDir, max: max, ttl: ttl, now: now, m: map[string]*idemRec{}}
+	st.memKey, _ = hex.DecodeString(randHex(32))
 	var f idemFile
 	if b, err := os.ReadFile(file); err == nil {
 		if json.Unmarshal(b, &f) != nil {
@@ -378,8 +430,8 @@ func openIdem(file, opsDir string, max int, ttl time.Duration, now func() time.T
 		if r == nil || !keyRe.MatchString(r.Key) {
 			continue
 		}
-		if r.Status == "running" { // tando-dash stopped while it ran: tando has the outcome
-			r.Status, r.Message = "unknown", "tando-dash restarted while this ran; read the outcome from tando (status, history)"
+		if r.Status == "running" { // tando-dash stopped while it ran: the server says how it ended
+			st.reattach = append(st.reattach, r)
 		}
 		r.admitted = make(chan struct{})
 		close(r.admitted)
@@ -403,12 +455,22 @@ func (st *idemStore) logPath(key string) string {
 	return filepath.Join(st.opsDir, hashHex(key)[:32]+".log")
 }
 
+// valueMAC: env-set's value under a key that lives in memory only (a reused key with another
+// value is refused while this tando-dash runs; nothing on disk can be checked against a guess)
+func (st *idemStore) valueMAC(v string) string {
+	m := hmac.New(sha256.New, st.memKey)
+	m.Write([]byte(v))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
 // begin: the record of key: an existing one (after its admission is decided), or a new pending one
-func (st *idemStore) begin(ctx context.Context, key, hash string, q writeReq) (*idemRec, bool, error) {
+func (st *idemStore) begin(ctx context.Context, key, hash, vmac string, q writeReq) (*idemRec, bool, error) {
 	st.mu.Lock()
 	if r := st.m[key]; r != nil {
+		rv := r.vmac
 		st.mu.Unlock()
-		if subtle.ConstantTimeCompare([]byte(r.Hash), []byte(hash)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(r.Hash), []byte(hash)) != 1 ||
+			rv != "" && vmac != "" && subtle.ConstantTimeCompare([]byte(rv), []byte(vmac)) != 1 {
 			return nil, false, errKeyReused
 		}
 		select {
@@ -427,7 +489,7 @@ func (st *idemStore) begin(ctx context.Context, key, hash string, q writeReq) (*
 		return nil, false, ErrBusy
 	}
 	r := &idemRec{Key: key, Hash: hash, Action: q.Action, Host: q.Host, App: q.App, Status: "pending",
-		Started: st.now(), admitted: make(chan struct{})}
+		Started: st.now(), admitted: make(chan struct{}), vmac: vmac}
 	st.m[key] = r
 	st.mu.Unlock()
 	return r, false, nil
@@ -444,10 +506,10 @@ func (st *idemStore) abort(key string, e *apiError) {
 	}
 }
 
-func (st *idemStore) start(r *idemRec) {
+func (st *idemStore) start(r *idemRec, base *histEntry) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	r.Status = "running"
+	r.Status, r.Base = "running", base
 	r.Started = st.now()
 	close(r.admitted)
 	st.saveLocked()
@@ -460,10 +522,18 @@ func (st *idemStore) setPid(r *idemRec, pid int) {
 	st.saveLocked()
 }
 
-func (st *idemStore) finish(r *idemRec, status string, exit int, msg string) {
+// childEnded: the CLI ended with exit; the outcome is read next (the record stays running)
+func (st *idemStore) childEnded(r *idemRec, exit int) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	r.Status, r.Exit, r.Message, r.Ended = status, exit, msg, st.now()
+	r.ChildEnded, r.Exit = true, exit
+	st.saveLocked()
+}
+
+func (st *idemStore) finish(r *idemRec, status string, exit int, code, msg string, o *outcome) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	r.Status, r.Exit, r.Code, r.Message, r.Outcome, r.Ended = status, exit, code, msg, o, st.now()
 	st.saveLocked()
 }
 

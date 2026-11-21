@@ -156,6 +156,9 @@ snap_app() {
   cp "$TMPD/st" "$TMPD/st.keep"
   grep "^rel$TAB" "$TMPD/s.releases" > "$TMPD/st"
   printf ',"releases":'; rel_json
+  # where it was last deployed from (user@machine:path; the releases verb's origin row)
+  row=$(awk -F '\t' '$1 == "origin" { print $2; exit }' "$TMPD/s.releases")
+  if [ -n "$row" ] && [ "$row" != - ]; then printf ',"origin":%s' "$(json_str "$row")"; else printf ',"origin":null'; fi
   printf ',"history":'; snap_history "$a"
   cp "$TMPD/st.keep" "$TMPD/st"
   printf ',"metrics":'; snap_metrics "$sn"

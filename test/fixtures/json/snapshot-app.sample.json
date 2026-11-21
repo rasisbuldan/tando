@@ -163,6 +163,7 @@
  ],
  "app": {
   "name": "shop",
+  "origin": "alice@laptop:/src/shop",
   "status": {
    "app": "shop",
    "state": "running",

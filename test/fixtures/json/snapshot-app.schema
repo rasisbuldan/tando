@@ -62,6 +62,7 @@ app.metrics.series[].state:null-or-string
 app.metrics.series[].t:number
 app.metrics.to:null-or-number
 app.name:string
+app.origin:null-or-string
 app.releases:array
 app.releases[].current:bool
 app.releases[].deployed_at:null-or-number

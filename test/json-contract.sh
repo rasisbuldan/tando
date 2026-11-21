@@ -118,6 +118,12 @@ check "N9 restarts are per-bucket deltas clamped at 0 (a counter reset is 0, a g
   q "$SA" '[p["restarts"] for p in d["app"]["metrics"]["series"][-6:]] == [0, 1, None, 0, 1, 0]'
 check "N10 history has the deployer from the audit log's who (deploy, rollback; null when not found)" \
   q "$SA" '[h["deployer"] for h in d["app"]["history"]] == ["ci-bot", "alice", None]'
+check "N10b app.origin: where it was last deployed from (the releases verb's origin row)" \
+  q "$SA" 'd["app"]["origin"] == "alice@laptop:/src/shop"'
+: > "$T/log"; TANDO_FROM=dashboard tando releases shop -H web-1 > /dev/null 2>&1
+check "N10c TANDO_FROM=dashboard (tando-dash's writes) goes in front of sudo in the ssh command" grep -q "TANDO_FROM=dashboard sudo -n /opt/tando/bin/tando-agent releases shop" "$T/log"
+: > "$T/log"; TANDO_FROM=dashboard2 tando releases shop -H web-1 > /dev/null 2>&1; TANDO_FROM= tando releases shop -H web-1 > /dev/null 2>&1
+check "N10d any other TANDO_FROM, or none: not in the ssh command" eval '! grep -q TANDO_FROM "$T/log" && test "$(grep -c "tando-agent releases" "$T/log")" = 2'
 check "N11 health: uptime, p95, 24 hourly probe points (null where none), incidents, database" \
   q "$SA" 'd["app"]["health"]["p95_ms"] == 85 and len(d["app"]["health"]["series"]["points"]) == 24 and d["app"]["health"]["series"]["points"][2]["avg_ms"] is None and d["app"]["health"]["incidents"][0]["check"] == "down" and d["app"]["database"]["connection_limit"] == 20'
 for r in 1h:60:60 7d:168:3600; do

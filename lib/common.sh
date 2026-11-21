@@ -923,6 +923,10 @@ EOS
 agent_raw() {
   local s="" a rc
   [ "$1" = sudo ] && { s="sudo -n "; shift; }
+  # run by the tando dashboard (tando-dash sets TANDO_FROM=dashboard): in front of sudo, beside the
+  # session's SSH_CONNECTION, so the audit line says from=dashboard (srv/logs Origin). Only this
+  # value; never with a deploy key (its gate refuses such a command)
+  [ -n "$s" ] && [ "${TANDO_FROM:-}" = dashboard ] && [ -z "${DEPLOY_KEY:-}" ] && s="TANDO_FROM=dashboard $s"
   for a in "$@"; do
     case $a in ""|*[!A-Za-z0-9_.:=/@,+-]*) die "internal: unsafe argument '$a'";; esac
   done
