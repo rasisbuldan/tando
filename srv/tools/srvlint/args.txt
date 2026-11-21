@@ -1,7 +1,7 @@
 daemon/daemon.go runShow	systemctl	systemctl show -P ActiveState <param unit: callers pass constants or validated values>
 gate/admin.go install	useradd	useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment "tando sshd reads CI keys as this user" -- tando-keys
 gate/gate.go log	logger	logger -p <param prio: callers pass constants or validated values> -t tando-gate -- <param msg: callers pass constants or validated values>
-gate/keymode.go agentRO	tando-agent	tando-agent deploy-status <valid:app> <valid:req.ID>
+gate/keymode.go agentRO	tando-agent	tando-agent deploy-status <valid:app> <valid:req.ID> <valid:req.Wait>
 gate/keymode.go agentRO	tando-agent	tando-agent history <valid:app> <valid:req.HistoryN>
 gate/keymode.go agentRO	tando-agent	tando-agent releases <valid:app>
 gate/keymode.go agentRO	tando-agent	tando-agent status <valid:app>
@@ -35,8 +35,9 @@ gate/users.go ensureUser	systemctl	systemctl mask --quiet -- user@<..>
 gate/users.go ensureUser	useradd	useradd --system --user-group --no-create-home --home-dir <value-of:--home-dir:h> --shell <value-of:--shell:g.P.Gate> -u <int> --comment "tando CI deploys for "<..> -- tando-d-<..>
 gate/users.go ensureUser	usermod	usermod -aG tando-m-<..> -- tando-d-<..>
 gate/users.go ensureUser	usermod	usermod -p * -- tando-d-<..>
-gate/users.go newUID	getent	getent group -- <int>
-gate/users.go newUID	getent	getent passwd -- <int>
+gate/users.go newUID	getent	getent <one of passwd|group>
+gate/users.go newUID	getent	getent group -- <after--:s>
+gate/users.go newUID	getent	getent passwd -- <after--:s>
 gate/users.go removeUser	getent	getent group -- tando-d-<..>
 gate/users.go removeUser	groupdel	groupdel -- tando-d-<..>
 gate/users.go removeUser	systemctl	systemctl unmask --quiet -- user@<..>
@@ -123,4 +124,4 @@ watch/verbs_install.go systemctl	systemctl	systemctl enable -q tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl reset-failed tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl start tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl try-restart tandod.service
-# positions: 561 constant, 55 prefixed, 5 int, 46 validated, 3 value of an option, 10 after --, 0 other
+# positions: 563 constant, 55 prefixed, 3 int, 47 validated, 3 value of an option, 12 after --, 0 other

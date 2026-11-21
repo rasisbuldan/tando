@@ -163,6 +163,21 @@ watch	systemd-run sendmail`
 	}
 }
 
+// os/exec outside internal/run: only cmd/tando-studio/spawn.go, under its own name (the good
+// tree has that one); another file of the package, or the file with an alias, is caught
+func TestExecImporters(t *testing.T) {
+	res := analyze(t, "bad")
+	for _, want := range []string{"/bad/cmd/tando-studio/other.go", "/bad/cmd/tando-studio/spawn.go"} {
+		found := false
+		for _, f := range res.Findings {
+			found = found || strings.Contains(f.Pos, want) && f.Group == "exec" && strings.Contains(f.Msg, "imports os/exec")
+		}
+		if !found {
+			t.Errorf("%s: no [exec] finding for its os/exec import", want)
+		}
+	}
+}
+
 func TestGoModWithARequirement(t *testing.T) {
 	res := analyze(t, "badmod")
 	if len(res.Findings) != 1 || res.Findings[0].Group != "deps" || !strings.Contains(res.Findings[0].Msg, "require") {
