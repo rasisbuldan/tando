@@ -568,7 +568,12 @@ printf '#!/bin/sh\n# exits with the status the suite wrote (0 without one)\nexit
 printf 'app = ops\nrecipe = node\nstart = node server.js\nhealth = /health\nmemory = 128M\njob.flaky = yearly | sh job.sh\njob.gone = yearly | sh job.sh\njob.slow = yearly | sleep 60\njob.slow.timeout = 3\n' > "$W/ops/tando.conf"
 (cd "$W/ops" && "$R" up > "$E/up-ops.out" 2>&1) || { tail -5 "$E/up-ops.out" >&2; fail "30 up ops (an app with two jobs)"; }
 jcode() { srv "echo $1 | sudo tee /opt/tando/apps/ops/shared/code > /dev/null"; }
-jtimer() { srv "sudo systemctl start tando-ops_job-$1.service" > /dev/null 2>&1; true; }   # what its timer does
+# jtimer: a run started as its timer starts it (the job's unit, not tando jobs run). The job's
+# start condition (job-due) skips a time that passed during its previous run; a real timer only
+# fires at a time of the schedule, so the condition lets it through: here, where the schedule's
+# time has not come, the one-run mark that job-run leaves stands in for that (it only affects
+# job-due; the run itself is the timer's)
+jtimer() { srv "sudo touch /opt/tando/apps/ops/jobhist/$1.now; sudo systemctl start tando-ops_job-$1.service" > /dev/null 2>&1; true; }
 jdet() { since_mark | grep -q "$1"; }
 mark; wruns 2
 check "30a jobs scheduled that never ran: no alert, no state" \

@@ -133,8 +133,9 @@ check "J1c a job deployed from a cron schedule: its timer has the OnCalendar tex
   eval 'unit q timer | grep -qx "OnCalendar=\*-\*-\* \*:00/15:00" && J jobs > "$E/jobs0.out" 2>&1 && grep -q "^│ q  *\*/15 \* \* \* \*" "$E/jobs0.out" &&
         grep -q "^│ qs  *0 9 \* \* mon-fri" "$E/jobs0.out" && unit qs timer | grep -qx "OnCalendar=Mon..Fri \*-\*-\* 09:00:00"'
 cat "$E/jobs0.out" >&2
+# (a later run shows its date when it falls on another day: near midnight the second or third does)
 check "J3b tando jobs before any run: never, the next three runs by the server's clock and its zone" \
-  eval 'grep -q "next runs, server time (" "$E/jobs0.out" && grep -Eq "^│   q  [0-9-]+ [0-9:]+, [0-9:]+, [0-9:]+" "$E/jobs0.out" &&
+  eval 'grep -q "next runs, server time (" "$E/jobs0.out" && grep -Eq "^│   q  [0-9-]+ [0-9:]+, ([0-9-]+ )?[0-9:]+, ([0-9-]+ )?[0-9:]+" "$E/jobs0.out" &&
         grep -q "^│ a  *yearly  *in\|^│ a  *yearly  *\([0-9]\{4\}-\)\?[0-9][0-9]-" "$E/jobs0.out" && grep -q "^│ a .* never " "$E/jobs0.out"'
 check "J3c the server's zone is named (the time zone of every schedule)" grep -Eq 'server time \((UTC|[A-Z]{3,4})' "$E/jobs0.out"
 check "J3c2 one word for the zone: GMT in the header as in the NEXT column, never UTC beside it" \
@@ -280,8 +281,12 @@ sleep 12   # (a paused job's time goes by)
 J jobs resume pz > /dev/null 2>&1
 sleep 3
 runs1=$(srv "sudo cat $AD/jobhist/pz | wc -l")
-check "J8d resume: the timer is back, and the 12 s it was off were not made up ($runs0 -> $runs1 runs)" \
-  eval '[ "$(srv "systemctl is-enabled tando-jb_job-pz.timer; systemctl is-active tando-jb_job-pz.timer" | tr "\n" " ")" = "enabled active " ] && [ "$runs1" = "$runs0" ]'
+# a run made up for the time it was off would start at the resume, off the schedule; a run in
+# these 3 s at one of its times (every 10 s: :x0, plus at most 1 s of systemd's accuracy) is due.
+# (Counting runs instead failed whenever a time of the schedule fell in the 3 s: 1 run in 3.)
+offsched=$(srv "sudo tail -n +$((runs0 + 1)) $AD/jobhist/pz" | awk -F'\t' '$1 % 10 > 1 { print $1 }')
+check "J8d resume: the timer is back, and the 12 s it was off were not made up (runs since: $((runs1 - runs0)), off the schedule: ${offsched:-none})" \
+  eval '[ "$(srv "systemctl is-enabled tando-jb_job-pz.timer; systemctl is-active tando-jb_job-pz.timer" | tr "\n" " ")" = "enabled active " ] && [ -z "$offsched" ]'
 t_until 30 eval '[ "$(srv "sudo cat $AD/jobhist/pz | wc -l")" -gt "$runs0" ]'
 check "J8e and it runs at its next time again" eval '[ "$(srv "sudo cat $AD/jobhist/pz | wc -l")" -gt "$runs0" ]'
 J jobs pause nosuch > "$E/pause-no.out" 2>&1; rc=$?
