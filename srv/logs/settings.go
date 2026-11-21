@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"tando/srv/internal/apps"
 )
 
 // Built-in defaults. log_max 256M is only the upper bound of the default: an app without its own
@@ -37,6 +39,8 @@ func Valid(k, v string) bool {
 	switch k {
 	case "journal_max", "log_max", "request_log_max":
 		return reSize.MatchString(v) && sizeBytes(v) >= 4194304
+	case "log_budget": // host only: what every app's journal and request log may hold together
+		return v == "auto" || reSize.MatchString(v) && sizeBytes(v) >= 16777216
 	case "log_keep", "access_keep_for":
 		n, _ := strconv.ParseInt(v[:max(len(v)-1, 0)], 10, 64)
 		return reKeep.MatchString(v) && n >= 1 && keepHours(v) <= 87600
@@ -160,14 +164,30 @@ func hostSetting(h map[string]string, k string) string {
 	return defaults[k]
 }
 
+// budgetPct: the default log_budget (auto), a share of the file system that holds the logs.
+const budgetPct = 20
+
+// logBudgetMB: the host's log_budget (logs.conf; auto: budgetPct % of the log file system), in MB.
+func (l *Logs) logBudgetMB(tot int64) int64 {
+	if v := l.loadHost()["log_budget"]; v != "" && v != "auto" && Valid("log_budget", v) {
+		return sizeBytes(norm(v)) / 1048576
+	}
+	return tot * budgetPct / 100 / 1024
+}
+
 // fairShare is the default journal cap: min(capMB, fairPct % of the file system that holds the
-// journals), at least 16M.
+// journals, the app's share of log_budget), at least 16M. The share: log_budget over the number
+// of apps, four fifths of it for the journal (the request log's default is a quarter of that, so
+// an app's two default caps together are its share). With 100 apps on 80 GB: 128M each, not 256M.
 func (l *Logs) fairShare(capMB int64) string {
 	tot, _, err := diskKB(l.P.VarLog)
 	if err != nil {
 		return strconv.FormatInt(min(256, capMB), 10) + "M"
 	}
 	m := tot * fairPct / 100 / 1024
+	if names, _ := apps.Names(l.Env.Root); len(names) > 0 {
+		m = min(m, l.logBudgetMB(tot)*4/5/int64(len(names)))
+	}
 	m = min(max(m, 16), capMB)
 	if m == 2048 {
 		return "2G"

@@ -35,6 +35,7 @@ Limits
   hold            seconds Caddy holds requests at a restart (default 15)
   stop_timeout    seconds a stopping process may finish (default 10)
   idle_stop       6h, 10m, 30s, on (6h): stop the web process after that long without a request, start it on the next one (default off)
+  priority        high or low: killed last or first when memory runs out
 Assets
   compress        off: send answers as they are (default on: text is gzip or zstd compressed)
   assets          off, or <dir>[, <url prefix>]: hashed files kept across releases (next and static: found by themselves)
@@ -45,6 +46,8 @@ Data
   db_statement_timeout  postgres, like 30s, or off (default 30s)
   db_idle_tx_timeout    postgres, like 5m, or off (default 5m)
   db_temp_limit         postgres temp files, like 1G, or off (default 1G)
+  db_pool         postgres connections through pgbouncer (default 5)
+  db_direct       true: DATABASE_URL skips pgbouncer (LISTEN/NOTIFY, session locks)
 Release command (not static, not container)
   release         command run on the server before every switch
   release_shell   true: run it with sh -c (default false)
@@ -53,7 +56,7 @@ Jobs
   job.<name>      <schedule> | <command>, like daily | node nightly.js or */15 * * * * | node sync.js
                   (cron or systemd calendar syntax, the server's time zone)
   job_timeout     seconds any job may run, 1-86400 (default 3600)
-  job_spread      seconds a job's start is spread over, 0-3600 (default 15)
+  job_spread      seconds a job's start is spread over, 0-3600 (default: a sixth of its period, at most 600)
   job_missed      run (default): a run missed while the server was off is made up once; skip
   job.<name>.timeout  seconds for one job
   job.<name>.spread   the same, for one job

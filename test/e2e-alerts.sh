@@ -630,7 +630,8 @@ check "31a up with database = postgres: PostgreSQL accepts connections (it is in
 srv 'sudo tee /root/pghold.sh > /dev/null' <<'PGHOLD'
 #!/bin/sh
 # pghold.sh N: N idle sessions of the role of app ops, open until this unit is stopped
-url=$(/opt/tando/bin/tando-agent db-url ops | sed -n 's/^url=//p')
+# (to PostgreSQL itself: through pgbouncer, an idle session holds no server connection)
+url=$(/opt/tando/bin/tando-agent db-url ops | sed -n 's/^url=//p' | sed 's/:6432\//:5432\//')
 i=0
 while [ "$i" -lt "$1" ]; do sleep 900 | psql -q "$url" & i=$((i + 1)); done
 wait
@@ -640,6 +641,8 @@ pghas() { [ "$(pgconns)" = "$1" ]; }
 pghold() { srv "sudo systemd-run -q --collect --unit=pghold /bin/sh /root/pghold.sh $1"; until_ 30 pghas "$1"; }
 pgfree() { srv 'sudo systemctl stop pghold.service' 2> /dev/null; until_ 30 pghas 0; }
 aset db_conn_for=2
+# (the deploy asked pgbouncer as the role once: its server connection closes after 60 s idle)
+until_ 90 pghas 0
 mark; wruns 2
 "$R" status -a ops > "$E/status-ops.out" 2>&1; "$R" health ops > "$E/health-ops.out" 2>&1
 "$R" status -a ops --json > "$E/status-ops.json" 2>&1
@@ -664,12 +667,14 @@ pgfree; wruns 2
 check "31i released: resolved, one notification" eq "$(pgconns)/$(st ops.db_conns.st)/$(nev resolved ops db_conns)" 0/ok/1
 # the database's own numbers, from the same psql (check_dbstats.go): <app>.db, read-db, snapshot
 dbline() { srv 'sudo tail -1 /var/lib/tando/metrics/ops.db' 2> /dev/null; }
-check "31n ops.db: a line a minute with the server's version, max_connections 20 and its commit counter (0600, no statement text)" \
-  eval 'dbline | awk -F "\t" "{ exit !(\$2 >= 140000 && \$3 == 20 && \$8 ~ /^[0-9]+\$/) }" &&
+# (max_connections: sized from the server's RAM by host setup, in tando's file of settings)
+pgmax=$(srv "sudo sed -n 's/^max_connections = //p' /etc/postgresql/*/main/conf.d/tando.conf")
+check "31n ops.db: a line a minute with the server's version, max_connections ${pgmax:-?} and its commit counter (0600, no statement text)" \
+  eval '[ -n "$pgmax" ] && dbline | awk -F "\t" "{ exit !(\$2 >= 140000 && \$3 == $pgmax && \$8 ~ /^[0-9]+\$/) }" &&
         [ "$(srv "sudo stat -c %a /var/lib/tando/metrics/ops.db")" = 600 ] && srv "! sudo test -e /var/lib/tando/metrics/ops.dbtop"'
 "$R" snapshot --json -H t --app ops --range 1h > "$E/snap-db.json" 2>&1
 check "31o snapshot --app: database.series over the range, database.latest from the newest sample, no top_queries (pg_stat_statements off)" \
-  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["app"]["database"]; sys.exit(0 if len(d["series"]) == 60 and d["latest"]["server_version_num"] >= 140000 and d["latest"]["max_connections"] == 20 and d["top_queries"] is None else 1)' "$E/snap-db.json"
+  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["app"]["database"]; sys.exit(0 if len(d["series"]) == 60 and d["latest"]["server_version_num"] >= 140000 and d["latest"]["max_connections"] == int(sys.argv[2]) and d["top_queries"] is None else 1)' "$E/snap-db.json" "${pgmax:-0}"
 pgstart() { srv 'sudo -u postgres psql -At -c "SELECT pg_postmaster_start_time()"' 2> /dev/null; }
 pgstart > "$E/pg-start0"
 "$R" host setup t tls=off --pg-stat-statements --yes > "$E/setup-pgss.out" 2>&1; nodaemon
@@ -677,7 +682,13 @@ srv 'sudo systemctl stop tando-watch.timer'
 check "31p host setup --pg-stat-statements: the step says PostgreSQL restarted once, the module is preloaded with track_utility off" \
   eval 'grep -q "pg_stat_statements.*PostgreSQL restarted once" "$E/setup-pgss.out" &&
         [ "$(srv "sudo -u postgres psql -At -c \"SHOW pg_stat_statements.track_utility\"")" = off ]'
-wruns 3
+# statements in ops's database as its role (pg_stat_statements records from the restart on: without
+# any, nothing is written and top_queries stays null); the top statements go with the minute's
+# line, at most one a minute: runs until the file is there
+srv 'url=$(sudo /opt/tando/bin/tando-agent db-url ops | sed -n "s/^url=//p"); for i in 1 2 3; do psql -q "$url" -c "SELECT count(*) FROM pg_class" > /dev/null; done' ||
+  echo "31q: the statements in ops's database failed" >&2
+dbtop() { srv 'sudo test -s /var/lib/tando/metrics/ops.dbtop'; }
+T_UNTIL_STEP=5 until_ 120 wrun_and dbtop
 check "31q its top statements: ops.dbtop (0600), in snapshot's top_queries; the history file has no statement text" \
   eval '"$R" snapshot --json -H t --app ops --range 1h > "$E/snap-db2.json" 2>&1 &&
         python3 -I -c "import json,sys; d=json.load(open(sys.argv[1]))[\"app\"][\"database\"]; sys.exit(0 if d[\"top_queries\"] and d[\"top_queries\"][\"queries\"] else 1)" "$E/snap-db2.json" &&

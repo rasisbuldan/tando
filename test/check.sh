@@ -85,7 +85,8 @@ fi
 # ---- c3 go (changed packages only; the test cache is on)
 if grep -qE '^srv/(.*\.go|go\.mod)$' "$tmp/exist"; then
   if command -v go > /dev/null 2>&1; then
-    pk=$(grep '^srv/.*\.go$' "$tmp/exist" | sed 's|^srv/||; s|/[^/]*$||' | sort -u | sed 's|^|./|' | tr '\n' ' ')
+    # (a fixture under testdata/ is no package of its own: Go skips it; its test's package is the one)
+    pk=$(grep '^srv/.*\.go$' "$tmp/exist" | sed 's|^srv/||; s|/[^/]*$||; s|/testdata/.*||; s|/testdata$||' | sort -u | sed 's|^|./|' | tr '\n' ' ')
     grep -q '^srv/go\.mod$' "$tmp/exist" && pk=./...
     gof=$(grep '^srv/.*\.go$' "$tmp/exist" | sed 's|^srv/||' | tr '\n' ' ')
     # shellcheck disable=SC2086  # package and file lists are word lists

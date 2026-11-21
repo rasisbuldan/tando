@@ -12,9 +12,11 @@ case "$*" in *" -O "*|*" -O"*) exit 0;; esac
 [ -n "${STUB_LOG:-}" ] && printf '%s\n' "$cmd" >> "$STUB_LOG"
 # STUB_HANG: a command that matches it takes 2 s (a long write, for the busy mark of host rename)
 case ${STUB_HANG:-} in "") ;; *) case $cmd in *"$STUB_HANG"*) sleep 2;; esac;; esac
-# a host entry whose target is 192.0.2.99 is down; 192.0.2.98 hangs (a timeout)
+# a host entry whose target is 192.0.2.99 is down; 192.0.2.98 hangs (a timeout). The hung one's
+# pid (the sleep's, after exec) goes to $STUB_LOG.hung: a test looks for its own, never for any
+# "sleep 60" on the machine (another run's would be there)
 case "$*" in *@192.0.2.99*) echo "ssh: connect to host 192.0.2.99 port 22: Connection refused" >&2; exit 255;;
-  *@192.0.2.98*) exec sleep 60;; esac
+  *@192.0.2.98*) [ -n "${STUB_LOG:-}" ] && echo $$ >> "$STUB_LOG.hung"; exec sleep 60;; esac
 tab() { local IFS='	'; printf '%s\n' "$*"; }
 
 status_rows() {

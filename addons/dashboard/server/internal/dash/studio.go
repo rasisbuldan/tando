@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,71 +14,77 @@ import (
 	"time"
 )
 
-// The database studio from the dashboard (docs/SPEC.md "Database studio"). tando-dash starts
-// `tando db studio <app> -H <host> --json` as a long-running child and hands the page the
-// studio's one-time link, which the page opens in a window of its own. The studio's own page,
-// key and Stop stay exactly as in the terminal; nothing of the studio passes through tando-dash.
+// The database studio from the dashboard (docs/SPEC.md "Database studio"). The server's studio is
+// always on (docs/STUDIO.md); what tando-dash holds is ONE ssh forward per host to it, started by
+// the first click and closed after 30 min without one:
 //
-//   - a confirmed action: a confirm token (kind "studio") for exactly this host and app, every time;
-//   - an Idempotency-Key: the same key again returns the first answer (in memory only: the link
-//     is never written to disk or logged) and starts nothing;
-//   - at most 1 dashboard studio per host (the server allows 2: the other stays free for the
-//     terminal) and 4 in all, counted apart from the reads' and log streams' limiter (the studio
-//     opens its own ssh connection);
+//   - the forward is `tando db studio <app> -H <host> --json` (the CLI; exact argv in the
+//     allowlist), a long-running child whose first stdout line is {"url","port","sid"};
+//   - every click after that writes "mint <app>" on the child's stdin and reads one more such line:
+//     a fresh one-time code on the same port. No confirmation, no stop: the page opens the link
+//     in a new tab at once. The link is never stored, logged or written to disk;
+//   - at most 4 forwards in all, counted apart from the reads' and log streams' limiter (the
+//     forward is its own ssh connection);
 //   - the child's stdin is a pipe tando-dash holds: when tando-dash dies, the CLI sees EOF and ends
-//     its session (lib/studio.sh --json). Its process group gets SIGTERM on Stop and on Close;
-//     its pid is in cache/dash-studios.json (0600) so a tando-dash started after a crash stops
-//     what is left (the pid's command line checked first).
+//     its forward. Its process group gets SIGTERM on idle and on Close; its pid is in
+//     cache/dash-studios.json (0600) so a tando-dash started after a crash stops what is left
+//     (the pid's command line checked first).
 
 const (
-	studioPerHost   = 1
 	studioMax       = 4
-	studioMaxKeys   = 128
-	studioKeyTTL    = 10 * time.Minute
+	studioIdle      = 30 * time.Minute
 	studioReadyWait = 45 * time.Second
 	studioStopWait  = 8 * time.Second
 )
 
-var studioURLRe = regexp.MustCompile(`^http://127\.0\.0\.1:[0-9]{1,5}/#c=[A-Za-z0-9_-]{8,128}$`)
+// the link as the CLI prints it: the code works once; &app= names the app the studio opens
+var studioURLRe = regexp.MustCompile(`^http://127\.0\.0\.1:[0-9]{1,5}/#c=[A-Za-z0-9_-]{8,128}(&app=[a-z0-9-]{2,24})?$`)
 
 func argvStudio(host, app string) []string {
 	return []string{"db", "studio", app, "-H", host, "--json"}
 }
 
-type studioChild struct {
-	Host  string    `json:"host"`
-	App   string    `json:"app"`
-	Since time.Time `json:"since"`
-	Pid   int       `json:"pid"`
-
-	starting bool
-	stdin    *os.File
-	done     chan struct{}
+// studioLine: one line of the child's stdout that carries a link or the CLI's refusal
+type studioLine struct {
+	URL string
+	Err string
 }
 
-// studioAnswer: an open's answer, kept for its Idempotency-Key (memory only)
-type studioAnswer struct {
-	what   string // host/app
-	done   chan struct{}
-	status int
-	body   map[string]any
-	at     time.Time
+// studioRec: a child as cache/dash-studios.json keeps it
+type studioRec struct {
+	Host  string    `json:"host"`
+	App   string    `json:"app"` // the app of the first click (the child's argv)
+	Since time.Time `json:"since"`
+	Pid   int       `json:"pid"`
+}
+
+type tunnel struct {
+	studioRec
+
+	mu    sync.Mutex // one click at a time per host
+	up    bool       // started: Pid, stdin and lines are set
+	dead  bool       // ended or failed to start: a click gets a new one
+	stdin *os.File
+	lines chan studioLine
+	done  chan struct{}
+	timer *time.Timer
+	last  time.Time
 }
 
 type studios struct {
 	mu     sync.Mutex
-	byHost map[string]*studioChild
-	keys   map[string]*studioAnswer
+	byHost map[string]*tunnel
 	file   string
 	path   func() string
 	env    []string
 	now    func() time.Time
+	idle   time.Duration
 	wg     sync.WaitGroup
 	logf   func(string, ...any)
 }
 
 func newStudios(file string, path func() string, env []string, now func() time.Time, logf func(string, ...any)) *studios {
-	st := &studios{byHost: map[string]*studioChild{}, keys: map[string]*studioAnswer{}, file: file, path: path, env: env, now: now, logf: logf}
+	st := &studios{byHost: map[string]*tunnel{}, file: file, path: path, env: env, now: now, idle: studioIdle, logf: logf}
 	st.cleanLeftovers()
 	return st
 }
@@ -91,7 +96,7 @@ func (st *studios) cleanLeftovers() {
 	if err != nil {
 		return
 	}
-	var old []studioChild
+	var old []studioRec
 	_ = json.Unmarshal(b, &old)
 	for _, c := range old {
 		if c.Pid <= 1 || !ValidHost(c.Host) || !ValidApp(c.App) {
@@ -120,10 +125,10 @@ func isStudioChild(pid int, host, app string) bool {
 
 // saveLocked: the pids of the running children (0600)
 func (st *studios) saveLocked() {
-	l := []studioChild{}
-	for _, c := range st.byHost {
-		if c.Pid > 0 {
-			l = append(l, *c)
+	l := []studioRec{}
+	for _, t := range st.byHost {
+		if t.Pid > 0 {
+			l = append(l, t.studioRec)
 		}
 	}
 	b, _ := json.Marshal(l)
@@ -132,26 +137,9 @@ func (st *studios) saveLocked() {
 	}
 }
 
-// list: the dashboard's studios now (the overview carries it)
-func (st *studios) list() []map[string]any {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	l := []map[string]any{}
-	for _, c := range st.byHost {
-		state := "open"
-		if c.starting {
-			state = "starting"
-		}
-		l = append(l, map[string]any{"host": c.Host, "app": c.App, "since": c.Since.UTC().Format(time.RFC3339), "state": state})
-	}
-	sort.Slice(l, func(i, j int) bool { return l[i]["host"].(string) < l[j]["host"].(string) })
-	return l
-}
-
 type studioReq struct {
-	Host    string `json:"host"`
-	App     string `json:"app"`
-	Confirm string `json:"confirm,omitempty"`
+	Host string `json:"host"`
+	App  string `json:"app"`
 }
 
 func (q *studioReq) check() *apiError {
@@ -164,14 +152,9 @@ func (q *studioReq) check() *apiError {
 	return nil
 }
 
-// POST /api/studio/open {host, app, confirm} with Idempotency-Key -> {url, host, app, since}
+// POST /api/studio/open {host, app} -> {url, host, app}: a fresh one-time link to the server's
+// studio, through the host's forward (started when there is none)
 func (s *Server) studioOpen(w http.ResponseWriter, r *http.Request) {
-	st := s.studios
-	key := r.Header.Get("Idempotency-Key")
-	if !keyRe.MatchString(key) {
-		apiErr(w, 400, "idempotency_key", "an Idempotency-Key header (8-128 letters, digits, -) is required")
-		return
-	}
 	var q studioReq
 	if _, ok := decode(w, r, &q); !ok {
 		return
@@ -184,89 +167,116 @@ func (s *Server) studioOpen(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 404, "no_host", "no host named "+q.Host+" (tando host ls)")
 		return
 	}
-	what := q.Host + "/" + q.App
-	st.mu.Lock()
-	if a := st.keys[key]; a != nil {
-		st.mu.Unlock()
-		if a.what != what {
-			apiErr(w, 422, "key_reused", "this Idempotency-Key was used for another request")
-			return
-		}
-		select {
-		case <-a.done:
-		case <-r.Context().Done():
-			return
-		}
-		body := map[string]any{"replay": true}
-		for k, v := range a.body {
-			body[k] = v
-		}
-		writeJSON(w, a.status, body)
-		return
-	}
-	now := st.now()
-	for k, a := range st.keys {
-		select {
-		case <-a.done:
-			if now.Sub(a.at) > studioKeyTTL {
-				delete(st.keys, k)
-			}
-		default:
-		}
-	}
-	if len(st.keys) >= studioMaxKeys {
-		st.mu.Unlock()
-		apiErr(w, 503, "busy", "too many studio requests remembered; retry later")
-		return
-	}
-	if c := st.byHost[q.Host]; c != nil {
-		st.mu.Unlock()
-		msg := "the dashboard's studio on " + q.Host + " is open for " + c.App + ": it is in the window it opened; Stop it to start a new one"
-		if c.App == q.App {
-			msg = "the studio of " + q.App + " is open in another window (its link works once); Stop it to start a new one"
-		}
-		writeErr(w, &apiError{Status: 409, Code: "studio_open", Msg: msg,
-			Extra: map[string]any{"app": c.App, "since": c.Since.UTC().Format(time.RFC3339)}})
-		return
-	}
-	if len(st.byHost) >= studioMax {
-		st.mu.Unlock()
-		apiErr(w, 503, "busy", "the dashboard has 4 studios open already; Stop one first")
-		return
-	}
-	c := &studioChild{Host: q.Host, App: q.App, Since: now, starting: true, done: make(chan struct{})}
-	st.byHost[q.Host] = c
-	a := &studioAnswer{what: what, done: make(chan struct{}), at: now}
-	st.keys[key] = a
-	st.mu.Unlock()
-
-	fail := func(e *apiError) {
-		st.mu.Lock()
-		if st.byHost[q.Host] == c {
-			delete(st.byHost, q.Host)
-		}
-		delete(st.keys, key) // a refusal or a failed start is not remembered: the key can be used again
-		st.mu.Unlock()
-		a.status, a.body = e.Status, map[string]any{"error": e}
-		close(a.done)
-		writeErr(w, e)
-	}
-	if !s.confirms.use(q.Confirm, "studio", q.Host, q.App) {
-		fail(&apiError{Status: 403, Code: "confirm", Msg: "this confirmation has expired or was for something else; confirm again"})
-		return
-	}
-	url, e := st.start(c, argvStudio(q.Host, q.App))
+	url, e := s.studios.open(q.Host, q.App)
 	if e != nil {
-		fail(e)
+		writeErr(w, e)
 		return
 	}
-	a.status, a.body = 200, map[string]any{"url": url, "host": q.Host, "app": q.App, "since": c.Since.UTC().Format(time.RFC3339)}
-	close(a.done)
-	writeJSON(w, 200, a.body)
+	writeJSON(w, 200, map[string]any{"url": url, "host": q.Host, "app": q.App})
 }
 
-// start: the child, until its ready line (the link) or its end. c is reserved in byHost.
-func (st *studios) start(c *studioChild, argv []string) (string, *apiError) {
+// open: the host's forward (started by this first click), then one code for app
+func (st *studios) open(host, app string) (string, *apiError) {
+	for try := 0; try < 2; try++ {
+		st.mu.Lock()
+		t := st.byHost[host]
+		if t == nil {
+			if len(st.byHost) >= studioMax {
+				st.mu.Unlock()
+				return "", &apiError{Status: 503, Code: "busy", Msg: "the dashboard has 4 database forwards open already; they close after 30 min unused"}
+			}
+			t = &tunnel{studioRec: studioRec{Host: host, App: app, Since: st.now()}}
+			st.byHost[host] = t
+		}
+		st.mu.Unlock()
+		t.mu.Lock()
+		if t.dead {
+			t.mu.Unlock()
+			continue
+		}
+		url, e, retry := st.click(t, app)
+		t.mu.Unlock()
+		if retry && try == 0 {
+			continue
+		}
+		return url, e
+	}
+	return "", &apiError{Status: 502, Code: "cli", Msg: "the database forward on " + host + " ended; click again"}
+}
+
+// click (t.mu held): start the child when this is the first click, else ask it for a code.
+// retry: the forward was found ended, a new one may be started.
+func (st *studios) click(t *tunnel, app string) (string, *apiError, bool) {
+	if !t.up {
+		url, e := st.start(t, argvStudio(t.Host, t.App), app)
+		if e != nil {
+			st.drop(t)
+			return "", e, false
+		}
+		st.armIdle(t)
+		return url, nil, false
+	}
+	select {
+	case <-t.done:
+		return "", nil, true
+	default:
+	}
+	for len(t.lines) > 0 { // (a late line of an earlier timed-out ask)
+		<-t.lines
+	}
+	if _, err := t.stdin.WriteString("mint " + app + "\n"); err != nil {
+		return "", nil, true
+	}
+	timer := time.NewTimer(studioReadyWait)
+	defer timer.Stop()
+	select {
+	case l := <-t.lines:
+		if l.Err != "" {
+			return "", &apiError{Status: 502, Code: "cli", Msg: l.Err}, false
+		}
+		st.armIdle(t)
+		return l.URL, nil, false
+	case <-t.done:
+		return "", nil, true
+	case <-timer.C:
+		_ = syscall.Kill(-t.Pid, syscall.SIGTERM)
+		return "", &apiError{Status: 504, Code: "timeout", Msg: "the studio did not answer within 45 s"}, false
+	}
+}
+
+// drop: t is gone (failed start or ended)
+func (st *studios) drop(t *tunnel) {
+	st.mu.Lock()
+	if st.byHost[t.Host] == t {
+		delete(st.byHost, t.Host)
+	}
+	st.saveLocked()
+	st.mu.Unlock()
+	t.dead = true
+}
+
+// armIdle (t.mu held): the forward closes after st.idle without a click
+func (st *studios) armIdle(t *tunnel) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	t.last = st.now()
+	if t.timer != nil {
+		t.timer.Reset(st.idle)
+		return
+	}
+	t.timer = time.AfterFunc(st.idle, func() {
+		st.mu.Lock()
+		cur := st.byHost[t.Host] == t
+		st.mu.Unlock()
+		if cur {
+			st.logf("closed the database forward to %s: no click for %s", t.Host, st.idle)
+			st.stopChild(t)
+		}
+	})
+}
+
+// start: the child, until its first line (the link) or its end. t is reserved in byHost.
+func (st *studios) start(t *tunnel, argv []string, app string) (string, *apiError) {
 	if _, err := Allowed(argv); err != nil {
 		return "", cliErr(err)
 	}
@@ -299,26 +309,35 @@ func (st *studios) start(c *studioChild, argv []string) (string, *apiError) {
 		return "", &apiError{Status: 502, Code: "start", Msg: "could not run " + path + ": " + err.Error()}
 	}
 	pid := cmd.Process.Pid
+	t.lines = make(chan studioLine, 8)
+	t.done = make(chan struct{})
 	st.mu.Lock()
-	c.Pid, c.stdin = pid, inW
+	t.Pid, t.stdin, t.up = pid, inW, true
 	st.saveLocked()
 	st.mu.Unlock()
 
-	ready := make(chan string, 1)
-	go func() { // the ready line, then the rest is read and dropped (the CLI must never block on it)
+	go func() { // the child's lines that carry a link or an error; the rest is read and dropped (the CLI must never block on it)
 		defer outR.Close()
 		sc := bufio.NewScanner(outR)
-		sent := false
 		for sc.Scan() {
-			if sent {
+			var m struct {
+				URL   string `json:"url"`
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(sc.Bytes(), &m) != nil {
 				continue
 			}
-			var m struct {
-				URL string `json:"url"`
-			}
-			if json.Unmarshal(sc.Bytes(), &m) == nil && studioURLRe.MatchString(m.URL) {
-				ready <- m.URL
-				sent = true
+			switch {
+			case m.URL != "" && studioURLRe.MatchString(m.URL):
+				select {
+				case t.lines <- studioLine{URL: m.URL}:
+				default:
+				}
+			case m.Error != "":
+				select {
+				case t.lines <- studioLine{Err: oneLineErr(m.Error)}:
+				default:
+				}
 			}
 		}
 	}()
@@ -329,86 +348,75 @@ func (st *studios) start(c *studioChild, argv []string) (string, *apiError) {
 		_ = syscall.Kill(-pid, syscall.SIGKILL) // what it left in its group (its stdin watcher, an ssh)
 		inW.Close()
 		st.mu.Lock()
-		if st.byHost[c.Host] == c {
-			delete(st.byHost, c.Host)
+		if st.byHost[t.Host] == t {
+			delete(st.byHost, t.Host)
+		}
+		if t.timer != nil {
+			t.timer.Stop()
 		}
 		st.saveLocked()
 		st.mu.Unlock()
-		close(c.done)
+		close(t.done)
 	}()
-	t := time.NewTimer(studioReadyWait)
-	defer t.Stop()
+	timer := time.NewTimer(studioReadyWait)
+	defer timer.Stop()
 	select {
-	case url := <-ready:
-		st.mu.Lock()
-		c.starting = false
-		st.mu.Unlock()
-		return url, nil
-	case <-c.done:
+	case l := <-t.lines:
+		if l.Err != "" {
+			return "", &apiError{Status: 502, Code: "cli", Msg: l.Err}
+		}
+		return l.URL, nil
+	case <-t.done:
 		msg := firstLine(errw.String())
 		if msg == "" {
 			msg = "tando db studio ended before the studio answered"
 		}
 		return "", &apiError{Status: 502, Code: "cli", Msg: msg}
-	case <-t.C:
+	case <-timer.C:
 		_ = syscall.Kill(-pid, syscall.SIGTERM)
 		return "", &apiError{Status: 504, Code: "timeout", Msg: "the studio did not start within 45 s"}
 	}
 }
 
-// stopChild: SIGTERM to the group (the CLI ends its session, as Ctrl-C does), SIGKILL if it
+func oneLineErr(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 200 {
+		s = s[:200]
+	}
+	return s
+}
+
+// stopChild: SIGTERM to the group (the CLI ends its forward, as Ctrl-C does), SIGKILL if it
 // takes longer than studioStopWait; returns when it has ended
-func (st *studios) stopChild(c *studioChild) {
-	_ = syscall.Kill(-c.Pid, syscall.SIGTERM)
+func (st *studios) stopChild(t *tunnel) {
+	if t.Pid <= 0 || t.done == nil {
+		return
+	}
+	_ = syscall.Kill(-t.Pid, syscall.SIGTERM)
 	select {
-	case <-c.done:
+	case <-t.done:
 		return
 	case <-time.After(studioStopWait):
 	}
-	_ = syscall.Kill(-c.Pid, syscall.SIGKILL)
+	_ = syscall.Kill(-t.Pid, syscall.SIGKILL)
 	select {
-	case <-c.done:
+	case <-t.done:
 	case <-time.After(3 * time.Second):
 	}
 }
 
-// closeAll: tando-dash stops: every child's group gets SIGTERM and its stdin is closed
+// closeAll: tando-dash stops: every child's group gets SIGTERM and its idle timer stops
 func (st *studios) closeAll() {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	for _, c := range st.byHost {
-		if c.Pid > 0 {
-			_ = syscall.Kill(-c.Pid, syscall.SIGTERM)
+	for _, t := range st.byHost {
+		if t.timer != nil {
+			t.timer.Stop()
+		}
+		if t.Pid > 0 {
+			_ = syscall.Kill(-t.Pid, syscall.SIGTERM)
 		}
 	}
-}
-
-// POST /api/studio/stop {host, app} -> {stopped}
-func (s *Server) studioStop(w http.ResponseWriter, r *http.Request) {
-	var q studioReq
-	if _, ok := decode(w, r, &q); !ok {
-		return
-	}
-	if e := q.check(); e != nil {
-		writeErr(w, e)
-		return
-	}
-	st := s.studios
-	st.mu.Lock()
-	c := st.byHost[q.Host]
-	if c == nil || c.App != q.App {
-		st.mu.Unlock()
-		writeJSON(w, 200, map[string]any{"stopped": false, "studios": st.list()})
-		return
-	}
-	if c.starting || c.Pid <= 0 {
-		st.mu.Unlock()
-		apiErr(w, 409, "starting", "the studio is still starting; Stop again in a moment")
-		return
-	}
-	st.mu.Unlock()
-	st.stopChild(c)
-	writeJSON(w, 200, map[string]any{"stopped": true, "studios": st.list()})
 }
 
 // lockedCap: a capWriter the exec copier writes while the handler may read it

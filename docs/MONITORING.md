@@ -28,7 +28,7 @@ tando alerts backup-ping                     # a URL called after each whole run
   and `/var/cache/tando-logs` writable, `NoNewPrivileges`, `MemoryMax=160M`, `GOMEMLIMIT=20MiB`,
   `GOGC=50`, `GOMAXPROCS=1`, `Nice=5`, `CPUWeight=20`, `OOMScoreAdjust=-200`; what writes elsewhere
   (the agent's recover-all and stop, sendmail) runs in transient units of its own. Its own memory
-  stays under `GOMEMLIMIT` (6-20 MB); `MemoryMax` leaves room for the page cache of the journals
+  stays under `GOMEMLIMIT` (6-20 MB; the live ring keeps 16 bytes per app per point, 2.3 MiB for 200 apps in an hour); `MemoryMax` leaves room for the page cache of the journals
   and programs it reads each minute. At 64M (up to 0.2) that cache was evicted every tick and read
   again from disk; `tando host setup` rewrites an older unit, reloads systemd and restarts tandod.
 - **The switch and the fallback**: `tando-watch.timer` still fires every minute, but starts

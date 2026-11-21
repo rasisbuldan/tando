@@ -75,8 +75,86 @@ type Live struct {
 	Statfs func(path string) (used, size uint64, err error) // nil: fsinfo.Statfs of "/"
 
 	mu   sync.Mutex
-	ring []Point // oldest first, at most Keep
+	ring []cpoint // oldest first, at most Keep; compact (see capp)
+	cur  Point    // the latest point in full: Rows answers from it, the next CPU is computed against it
+	has  bool
 	last time.Time
+	tab  table
+}
+
+// capp is an app in the ring: 16 bytes (the names and states are interned in table). The ring
+// keeps only what RingRows writes; the rest of a point lives in cur.
+type capp struct {
+	Mem    int64
+	CPU    int32 // per mille of a core, -1: none
+	Name   uint16
+	Active uint8
+}
+
+type cpoint struct {
+	At   int64
+	Host Host
+	Apps []capp
+}
+
+// table interns app names and ActiveState words. A name stays after its app is gone (an
+// app dies rarely; the host has at most a few hundred over its life).
+type table struct {
+	names  []string
+	nameID map[string]uint16
+	acts   []string
+	actID  map[string]uint8
+}
+
+func (t *table) name(s string) uint16 {
+	if id, ok := t.nameID[s]; ok {
+		return id
+	}
+	if t.nameID == nil {
+		t.nameID = map[string]uint16{}
+	}
+	if len(t.names) >= 1<<16-1 {
+		return 0 // cannot happen on a real host; row shows the first name rather than panic
+	}
+	id := uint16(len(t.names))
+	t.names = append(t.names, s)
+	t.nameID[s] = id
+	return id
+}
+
+func (t *table) act(s string) uint8 {
+	if id, ok := t.actID[s]; ok {
+		return id
+	}
+	if t.actID == nil {
+		t.actID = map[string]uint8{}
+	}
+	if len(t.acts) >= 255 {
+		return 0
+	}
+	id := uint8(len(t.acts))
+	t.acts = append(t.acts, s)
+	t.actID[s] = id
+	return id
+}
+
+// add puts a point in the ring (and makes it the latest). Caller holds mu.
+func (l *Live) add(p Point) {
+	c := cpoint{At: p.At, Host: p.Host, Apps: make([]capp, len(p.Apps))}
+	for i, a := range p.Apps {
+		cpu := a.CPU
+		if cpu > 1<<31-1 {
+			cpu = 1<<31 - 1
+		}
+		c.Apps[i] = capp{Mem: a.Mem, CPU: int32(cpu), Name: l.tab.name(a.Name), Active: l.tab.act(a.Active)}
+	}
+	if len(l.ring) >= Keep {
+		copy(l.ring, l.ring[1:])
+		l.ring[len(l.ring)-1] = cpoint{}
+		l.ring = l.ring[:Keep-1]
+	}
+	l.ring = append(l.ring, c)
+	l.cur, l.has = p, true
 }
 
 // New makes the fast loop of a host.
@@ -113,19 +191,16 @@ func (l *Live) Sample() Point {
 	now := l.Env.Now()
 	l.mu.Lock()
 	var prev *Point
-	if n := len(l.ring); n > 0 {
-		prev = &l.ring[n-1]
+	if l.has {
+		pc := l.cur
+		prev = &pc
 	}
 	l.mu.Unlock()
 	p := Point{At: now.Unix(), Host: l.host(prev)}
 	names, _ := apps.Names(l.Env.Root)
 	p.Apps = l.apps(names, prev, now)
 	l.mu.Lock()
-	if len(l.ring) >= Keep {
-		copy(l.ring, l.ring[1:])
-		l.ring = l.ring[:Keep-1]
-	}
-	l.ring = append(l.ring, p)
+	l.add(p)
 	l.last = now
 	l.mu.Unlock()
 	return p
@@ -278,10 +353,10 @@ func num(n int64) string {
 func (l *Live) Rows(w *out.Writer, app string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.ring) == 0 {
+	if !l.has {
 		return
 	}
-	p := &l.ring[len(l.ring)-1]
+	p := &l.cur
 	h := p.Host
 	w.Row("lhost", decimal.Itoa(p.At), h.Load, decimal.Itoa(h.MemUsed), decimal.Itoa(h.MemTotal), num(h.CPU),
 		strconv.FormatUint(h.DiskUsed, 10), strconv.FormatUint(h.DiskSize, 10))
@@ -305,10 +380,11 @@ func (l *Live) RingRows(w *out.Writer, app string) {
 		p := &l.ring[i]
 		w.Row("rhost", decimal.Itoa(p.At), p.Host.Load, decimal.Itoa(p.Host.MemUsed), num(p.Host.CPU))
 		for _, a := range p.Apps {
-			if app != "" && a.Name != app {
+			name := l.tab.names[a.Name]
+			if app != "" && name != app {
 				continue
 			}
-			w.Row("rapp", a.Name, decimal.Itoa(p.At), decimal.Itoa(a.Mem), num(a.CPU), a.Active)
+			w.Row("rapp", name, decimal.Itoa(p.At), decimal.Itoa(a.Mem), num(int64(a.CPU)), l.tab.acts[a.Active])
 		}
 	}
 }

@@ -245,8 +245,12 @@ How runs behave.
 - A run the server missed because it was off or down is made up once when it is back
   (`job_missed = run`, the default: systemd's `Persistent=`); `job_missed = skip` waits for the
   next time. A deploy does not make up a run, and neither does `tando jobs resume`.
-- A job's start is spread over `job_spread` seconds (default 15; `RandomizedDelaySec=`), so the
-  hourly jobs of many apps do not start together; `job_spread = 0` starts them on the second. A
+- A job's start is spread over `job_spread` seconds (default: a sixth of its period, at most 10
+  minutes; `RandomizedDelaySec=` with `FixedRandomDelay=yes`, so each timer keeps its own offset),
+  so the hourly jobs of many apps do not start together; `job_spread = 0` starts them on the second.
+  At most `job_slots` job runs go on at once on the server (all apps; host setup, default the
+  number of CPUs, at least 2): a run waits for a slot before it starts, and the wait counts in its
+  timeout. A
   job's `job.<name>.spread` and `.missed` set one job.
 - The last 50 runs of each job (start, result, duration, exit status; never output) are kept on the
   server (`jobhist/` in the app's directory, root only), so `ls` answers after the journal has
@@ -359,8 +363,10 @@ statement, the error's position selected in the editor, notices, CSV download). 
   text is kept.
 - **For programs: `--json`.** No browser and no box: one line `{"url":"http://127.0.0.1:<port>/#c=<code>&app=<app>","port":<port>,"sid":"<word>"}`
   on stdout when the forward answers, and the forward ends when the command's stdin reaches EOF
-  (the program that started it closed the pipe or died), as Ctrl-C would. The dashboard add-on
-  runs it so (addons/dashboard/docs/SPEC.md "Database studio").
+  (the program that started it closed the pipe or died), as Ctrl-C would. Against the always-on
+  studio, a line `mint <app>` on stdin prints one more such line on the same port with a fresh
+  code for that app (`{"error":"..."}` when it cannot), so one forward serves many links. The
+  dashboard add-on runs it so (addons/dashboard/docs/SPEC.md "Database studio").
 - **Older servers.** Against a server set up by an older tando the command starts that server's
   per-session studio as before (`--idle M`, one app per studio). An older tando against a newer
   server is told to update.
@@ -418,7 +424,7 @@ Example: `tando restore --from-host 3f9a01c2b7de --all -H newvps`
 ## Observe
 
 ### ls
-`tando ls [-H host] [--all] [--watch N | --follow] [--json] [--check]`. Arguments: none. `-a` is refused.
+`tando ls [-H host] [--all] [--all-rows] [--watch N | --follow] [--json] [--check]`. Arguments: none. `-a` is refused.
 The apps of a server: state, deploy age, memory, cpu over the last minute (`CPU 1M`), uptime, link (never cut: other columns are
 dropped first at 80 columns). While an alert fires for an app, an ALERT column names the checks
 (`http`, `slow`, ...) and the footer counts them; `--json` has `alerts_firing` and `firing` per
@@ -430,7 +436,11 @@ server's `address` and ssh `user` as registered (`tando host add`; a name stays 
 what needs attention (a server not answering, an app down, an alert firing, host care to do,
 clock or version skew), one line each with the command to look closer, then every app of every
 server (HOST APP STATE ALERT MEMORY CPU 1M UP) with those needing attention on top; with
-`--watch` and `--json` (one object per server, as `ls --json`). A
+`--watch` and `--json` (one object per server, as `ls --json`). Above 50 apps on a server (`ls` or
+`ls --all`) the table is a summary: a line with the count per state, then only the apps that are
+down or have an alert firing (a server in `ls --all` gets one count line under the table);
+`--all-rows` lists every app; `--json` always has every app. The rows are made in one awk pass, so
+200 apps render in well under a second. A
 worker that does not run while its app does gets a line under the table. `--json` has `apps` and
 `alerts` (each alert's app, check, state `firing` or `pending`, since, detail; a host check has app
 `host`); with `--all`, a server that did not answer is `{"host", "address", "user", "error",
@@ -569,9 +579,9 @@ Example: `tando audit -n 20`
 
 ### host
 `tando host add <name> <user@address> [--port N] [--key FILE] [--yes] [--force] [--no-check]`
-`tando host setup <name> [apps_domain=D] [tls=auto|internal|off] [setting=value ...] [--pg-stat-statements] [--yes]`
+`tando host setup <name> [apps_domain=D] [tls=auto|internal|off] [setting=value ...] [--pg-stat-statements] [--pg-restart] [--yes]`
 `tando host ls` · `tando host rm <name>` · `tando host rename <old> <new>` · `tando host rename --drop-alias <old>`
-Flags: `--port --key --insecure-test --no-check --deploy --force --yes --drop-alias --pg-stat-statements`. Subcommands: add (2),
+Flags: `--port --key --insecure-test --no-check --deploy --force --yes --drop-alias --pg-stat-statements --pg-restart`. Subcommands: add (2),
 ls (default, 0), setup (1+), rm (1), rename (1-2).
 `ls` shows each server's `user@address` (TARGET) as registered; a name is shown as is, never
 looked up. `rename` changes a server's name on this laptop only (no server stores it; its audit
@@ -592,7 +602,13 @@ nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Setting
 `ci_max_file_mb=`, `unit_drop=`, `journal_max=` (not in help.txt), and the per-client limits on ports
 80/443: `rate_limit=on|off|auto` (auto: on when tando owns Caddy), `conn_limit=N` (connections at
 once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections per second, burst
-3x; default 100). Without `apps_domain`, links use
+3x; default 100). Scale (docs/ARCHITECTURE.md, "Many apps on one server"): `port_min=`,
+`port_max=` (app ports, default 4100-4999), `preflight_min=`, `preflight_max=` (pre-flight ports,
+default 14100-14999; the ranges must not overlap or hold 2019 or 5432), `uid_min=`, `uid_max=`
+(new app users' ids, default 30000-39999), `mem_overcommit=` (default 1.5; 0 turns the check off),
+`job_slots=`, `backup_window=HH:MM-HH:MM` (default 01:00-05:00, the server's time),
+`backup_jobs=1|2` (backups at once, default 1), `log_budget=` (all apps' logs together, default
+`auto`: 20% of the log file system). Without `apps_domain`, links use
 `<ip-with-dashes>.sslip.io` (an outside service). `--deploy` and `--insecure-test` are not in the
 usage (docs/DEV-NOTES.md, mismatch 7). `care=on|off`: host care's security updates (on by default where tando
 installed Caddy itself; docs/HOSTCARE.md). `--pg-stat-statements` (with PostgreSQL on the server):
@@ -601,6 +617,14 @@ turns on `pg_stat_statements` for the top statements of each app's database (`ta
 once (every app's database is away for a few seconds); setup asks first, `--yes` does not ask.
 A later run restarts nothing. The extension goes in the `postgres` database only, with
 `track_utility` off (docs/MONITORING.md, PostgreSQL). Never turned on by anything else.
+With PostgreSQL on the server, setup also sizes it from the server's RAM and runs pgbouncer
+("Database connections and pgbouncer" below). `--pg-restart`: when the sized
+`max_connections` or `shared_buffers` differ from what PostgreSQL runs with (a server set up by an
+older tando, more RAM, `pg_max_connections=N`), they need a restart, which drops every app's
+database connections for a few seconds; setup then leaves PostgreSQL running, says so in its
+database step and in `tando doctor` (row `postgresql settings`), and restarts it only with
+`--pg-restart` (asked first, `--yes` does not ask). A server with no app database yet restarts by
+itself. `pg_max_connections=N` (20 to 9999; `auto`: from RAM again) sets max_connections.
 Example: `tando host setup vps apps_domain=apps.example.com tls=auto`
 
 `tando host status [name] [--json] [--watch N]` · `tando host care [name]` ·
@@ -789,12 +813,62 @@ port only while it runs (a probe through Caddy would keep it awake) and raises n
 it is idle; the per-minute recovery leaves it idle. A deploy of an idle app starts the new release
 (it goes idle again later). Caddy keeps no pooled connection to it (`keepalive off`), so the
 timer starts with the last request. A restart stops requests in flight.
+### Database connections and pgbouncer
+
+Apps with `database = postgres` share one PostgreSQL. `tando host setup` sizes it from the
+server's RAM (MemTotal, or a container's memory limit when lower):
+
+| Setting | Value | On 8 GB |
+|---|---|---|
+| `max_connections` | one per 80 MB, in tens, 50 to 400 (`pg_max_connections=N` in host setup) | 100 |
+| `shared_buffers` | 15% of RAM | about 1.2 GB |
+| `work_mem` | RAM / max_connections / 16, 2 to 32 MB | 4 MB |
+| `maintenance_work_mem`, `effective_cache_size` | 1/32 of RAM (16 MB to 1 GB), half of RAM | 245 MB, 3.9 GB |
+
+They are in `/etc/postgresql/<version>/main/conf.d/tando.conf`. A change of `max_connections` or
+`shared_buffers` waits for `tando host setup <host> --pg-restart` (see host setup above).
+
+**pgbouncer.** Setup also runs one pgbouncer for all apps, on 127.0.0.1:6432 only (no unix
+socket; apps without a database cannot reach it, as with 5432), in transaction pooling: a server
+connection belongs to an app only for the length of one transaction, and is closed after a minute
+idle. Each app gets at most `db_pool` server connections (default 5) however many its own pool
+opens, so 100 apps fit in about 100 PostgreSQL connections. pgbouncer checks the app's password
+against the role's SCRAM secret (`/etc/pgbouncer/userlist.txt`, root:postgres 0640, kept in step
+when an app is created, destroyed or gets a new password); `/etc/pgbouncer/pgbouncer.ini` is
+rewritten by tando, edits there do not last.
+
+| Variable | Points at | Used by |
+|---|---|---|
+| `DATABASE_URL` | pgbouncer (6432), or PostgreSQL (5432) with `db_direct = true` | the app, its workers and jobs |
+| `DATABASE_URL_DIRECT` | PostgreSQL (5432), always | the release command, which gets it as `DATABASE_URL` |
+
+tando's backups and restores, `tando db psql`, the studio and tando-watch connect to PostgreSQL
+directly. **What transaction pooling does not keep** between two transactions of the app:
+`LISTEN`/`NOTIFY`, session advisory locks (`pg_advisory_lock`; `pg_advisory_xact_lock` works),
+session `SET` (use `SET LOCAL` inside the transaction), temporary tables kept across transactions,
+`WITH HOLD` cursors, and prepared statements with drivers that prepare them by SQL (`PREPARE`).
+Protocol-level prepared statements work with pgbouncer 1.21 and newer (Ubuntu 24.04 has 1.22);
+an older pgbouncer needs them off in the driver (for example `prepareThreshold=0` in JDBC, or
+`statement_cache_size=0` in asyncpg). An app that needs any of these sets `db_direct = true`.
+
+**Per app in tando.conf:** `db_pool = N` (1 to 999, default 5): pgbouncer's server connections for
+the app; with `db_direct = true`, what the app's own pool should stay within. The role may hold
+`db_pool + 5` connections (the 5 for migrations, backups, the studio and `db psql`). A deploy is
+refused when the apps' `db_pool` together would pass max_connections less 8 (3 for the superuser,
+5 for tando), unless it does not raise the app's own. `db_direct = true` gives the app PostgreSQL
+itself (and its own pool is then capped by the role's limit only).
+
+**Upgrading.** `tando host setup` installs pgbouncer but leaves running apps alone: an app moves
+to pgbouncer on its next deploy, unless it sets `db_direct = true`. Setup says how many apps are
+still direct. A deploy whose role pgbouncer does not let in (pgbouncer down, for example) keeps
+the direct URL and warns. A rollback keeps the current `DATABASE_URL`; to go back to a direct
+connection set `db_direct = true` and deploy. An older tando agent on the server keeps working
+with a pooled `DATABASE_URL`. `tando db` shows how the app connects.
 
 ### Database limits
 
-Apps with `database = postgres` share one PostgreSQL (20 connections, 10 per app). Each app's role
-gets limits, so one query or one forgotten transaction cannot take the database from the others.
-Per app in tando.conf; `off` turns one off.
+Each app's role gets limits, so one query or one forgotten transaction cannot take the database
+from the others. Per app in tando.conf; `off` turns one off.
 
 | Setting | Default | Limits | When it trips, the app sees |
 |---|---|---|---|

@@ -396,11 +396,12 @@ C_image="" C_container_port="" C_build_memory="" C_dockerfile="" C_node="" C_dom
 C_compress=""   # on (default) or off: Caddy compresses text answers (checked by the server too)
 C_assets=""   # fingerprinted files served from Caddy: off, or <dir>[, <url prefix>] (checked by the server too)
 C_job_timeout=""   # seconds a scheduled job may run (the server's default: 3600)
-C_job_spread="" C_job_missed=""   # the spread of a job's start (default 15 s), run or skip a run missed while the server was off
+C_job_spread="" C_job_missed=""   # the spread of a job's start (default: a sixth of its period, at most 600 s), run or skip a run missed while the server was off
 C_workers=""       # worker.<name> = <command> and their .memory, .stop_timeout as key=value lines
 C_release="" C_release_shell="" C_release_timeout=""   # the release command (lib/deploy.sh; checked by the server too)
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
 C_idle_stop=""     # scale to zero: stop after this long without a connection (10m, 30s, 2h, off)
+C_priority=""   # high or low: who the OOM killer takes last or first (checked by the server too)
 
 # trim_v text -> TRIM: without leading and trailing white space (no fork; conf_load runs it per line)
 trim_v() { TRIM=${1#"${1%%[![:space:]]*}"}; TRIM=${TRIM%"${TRIM##*[![:space:]]}"}; }
@@ -435,6 +436,10 @@ conf_chk_extra() {
     db_temp_limit) CHK_MSG="db_temp_limit is a size like 512M or 2G (up to 999G), or off"
       case $2 in off) return 0;; *M) set -- "$n" 6;; *G) set -- "$n" 3;; *) return 1;; esac
       ui_int "$1" && [ "${1#0}" = "$1" ] && [ ${#1} -le "$2" ];;
+    # the app's connections through pgbouncer (or its own pool's size with db_direct = true)
+    db_pool) CHK_MSG="db_pool is a number of connections, 1 to 999"
+      ui_int "$2" && [ "${2#0}" = "$2" ] && [ "$2" -ge 1 ] && [ "$2" -le 999 ];;
+    db_direct) CHK_MSG="db_direct is true or false"; case $2 in true|false) true;; *) false;; esac;;
   esac
 }
 # ---- job schedules: the 5-field cron syntax as systemd's OnCalendar ---------------------------
@@ -653,6 +658,8 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       idle_stop) C_idle_stop=$v
         case $v in on|off|[1-9]s|[1-9]m|[1-9]h|[1-9][0-9]s|[1-9][0-9]m|[1-9][0-9]h|[1-9][0-9][0-9]s|[1-9][0-9][0-9]m|[1-9][0-9][0-9]h) ;;
           *) die "$f:$n: idle_stop is a time like 6h, 10m or 30s, on (6h) or off (got \"$v\")";; esac;;
+      priority) C_priority=$v
+        case $v in high|normal|low) ;; *) die "$f:$n: priority must be high, normal or low (got \"$v\")";; esac;;
       hold) C_hold=$v
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 999 ] || die "$f:$n: hold is 1 to 999 seconds (got \"$v\")";;
       stop_timeout) C_stop_timeout=$v
@@ -671,7 +678,7 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       backup) C_backup=$v;;
       database) C_database=$v;;
       log_max|log_keep|log_rate|access_log|request_log_max|health_expect|health_fails|health_recover|\
-      db_statement_timeout|db_idle_tx_timeout|db_temp_limit)
+      db_statement_timeout|db_idle_tx_timeout|db_temp_limit|db_pool|db_direct)
         conf_chk_extra "$k" "$v" || die "$f:$n: $CHK_MSG (got \"$v\")"
         C_logs="$C_logs$k=$v
 ";;

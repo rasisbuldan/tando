@@ -502,7 +502,10 @@ is clean, so the CLIs relay it as it is).
      (`scrubEnv`); nothing comes from the parent (a test sets variables and checks).
    - `srv/tools/srvlint` (`cd srv && go run ./tools/srvlint ./...`) reads every `.go` file's syntax
      tree (standard library only: `go/parser`, `go/types` for names and constants) and fails on:
-     `os/exec` imported outside `internal/run` under any name (alias, dot, blank); a call or
+     `os/exec` imported outside `internal/run` under any name (alias, dot, blank), but for one
+     file, `cmd/tando-studio/spawn.go` under its own name (`execImporters` in the tool: the studio
+     front starts its own binary as another uid with a passed listener, which `run.Cmd` cannot;
+     `srv/studio/source_test.go` holds it to that one call); a call or
      reference to `os.StartProcess`, `syscall.Exec`/`ForkExec`/`StartProcess`, resolved through the
      real import path; `syscall.Syscall*`/`RawSyscall*` with a number that is not on the per-package
      list in the tool (today `gate`: fstatat, readlinkat, unlinkat; `logs`: fstatat); cgo, plugins,

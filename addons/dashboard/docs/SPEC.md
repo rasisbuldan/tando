@@ -79,12 +79,15 @@ the review itself is not in the repository). The design guideline is docs/DESIGN
    sortable by state, memory, CPU, restarts, last deploy.
 2. **Deploys (all apps):** a timeline of recent deploys across apps with phase bars and results.
 3. **Alerts:** firing and pending across servers; history; where notifications go.
-4. **Server:** load and memory charts (1h/24h/7d); disk gauge; alerts; doctor (on demand); host
-   to-dos; backups line (last, offsite); its apps.
+4. **Server:** the observability sections (CPU, Memory, Disk, Network, Pressure, Monitoring cost;
+   1h/24h/7d; below); disk gauge; alerts; doctor (on demand); host to-dos; backups line (last,
+   offsite); its apps; "Database studio".
 5. **App:** header (state + reason, release, link, actions: deploy, rollback, restart, stop/start)
    and tabs:
-   - Overview: memory, CPU, restarts charts; probe p95 24h; uptime and incidents; workers;
-     database line (size, connections vs limit); firing alerts.
+   - Overview: memory, CPU, restarts charts; slice row (throttled, OOM kills, tasks, memory
+     pressure); probe p95 24h; uptime and incidents; workers; database line (size, connections
+     vs limit); firing alerts.
+   - Database (apps with a database): see "Observability pages".
    - Deploys: history with phase bars and deployer; releases (live, rollback target, rollback
      button per release).
    - Logs: tail with level/text/worker/release filters, follow.
@@ -93,34 +96,53 @@ the review itself is not in the repository). The design guideline is docs/DESIGN
    - Jobs: schedule, next runs, past runs (result, duration).
    - Env: names only, the change log with notes, "set a variable" (write-only).
    - What changed: between two releases, env changes and deploy notes.
-   Cut from v1: the Database and Backups pages (a line each), the job output viewer (M-later).
+   Cut from v1: the Backups page (a line), the job output viewer (M-later). The Database page of v1 is the Database tab above.
 
-## Database studio (owner, 21 Nov: a new window, never a view inside the dashboard)
-- Under each app with a database (`database` in its status row) the sidebar has a "Database"
-  row; the app header has "Open database" (the same action). Every open is confirmed: "Open a
-  read-only SQL session on <app> (<server>)? It ends when you press Stop, after 30 min unused, or
-  when the dashboard stops." (confirm token of kind `studio`), then `POST /api/studio/open
-  {host, app, confirm}` with an `Idempotency-Key` (the same key: the same answer, no second
-  studio; kept in memory only).
-- tando-dash runs `tando db studio <app> -H <host> --json` (exact argv in the allowlist) as a
-  long-running child and answers with the studio's one-time link (`http://127.0.0.1:<port>/#c=`,
-  single use, 60 s), never logged or written to disk. The page opens it with
-  `window.open(url, "_blank", "noopener")` (the Mac window hands it to the default browser) and
-  keeps "Nothing opened? Open it here" for a blocked pop-up. The studio's page trades the code
-  itself; its key never passes through tando-dash; no proxy.
-- At most 1 dashboard studio per server (the server allows 2: the other stays free for the
-  terminal), 4 in all, counted apart from the 3-per-host limiter of reads and log streams (the
-  studio has its own ssh connection). A second app on the same server: 409 naming the open one.
-  The CLI's refusal ("2 studios are open on ... already") is the message.
-- The overview poll carries `studios` ([{host, app, since, state}]): the row shows "open · Stop".
-  Stop is `POST /api/studio/stop {host, app}`: SIGTERM to the child's process group (the CLI
-  ends its session as Ctrl-C does). A child that ends on its own (Stop in the studio page, idle,
-  sleep) is noticed and the row closes.
-- Never orphaned: the child's stdin is a pipe tando-dash holds; `--json` ends the session at its
+## Database studio (owner, 21 Nov: a new tab, opened directly; never a view inside the dashboard)
+- The server's studio is always on (docs/STUDIO.md). Under each app with a database (`database` in
+  its status row) the sidebar has a "Database" row; the app header and the Database tab have "Open
+  database"; the Server page has "Database studio" (it opens on the server's first app with a
+  database; the studio's own page switches apps). **A click opens the studio in a new tab at once:
+  no dialog, no confirmation.** The page opens the tab on the click itself (a pop-up blocker lets
+  it through), then sends it to the link when the answer comes; on a failure the tab closes and a
+  one-line notice says why. The studio's page trades the code itself; its key never passes through
+  tando-dash; no proxy.
+- `POST /api/studio/open {host, app}` (session cookie and the usual Origin / JSON checks; no
+  confirm token, no Idempotency-Key: a double click mints two codes, which is harmless) answers
+  `{url, host, app}`: a fresh one-time link (`http://127.0.0.1:<port>/#c=<code>&app=<app>`, works
+  once, within a minute), never logged, never written to disk.
+- **One lazy ssh forward per host.** The first click starts `tando db studio <app> -H <host> --json`
+  (exact argv in the allowlist) as a long-running child: its first stdout line is the link. Every
+  later click on the host, for any app, writes `mint <app>` (the name validated first) on the
+  child's stdin and reads one more line: a fresh code on the same port (the CLI's `--json` mode,
+  lib/studio.sh). A line `{"error":"..."}` is the answer's message and the forward stays. The
+  forward closes after 30 min without a click (SIGTERM to the child's group); the next click starts
+  a new one. At most 4 forwards in all, counted apart from the 3-per-host limiter of reads and
+  log streams (the forward is its own ssh connection). A tando CLI older than this
+  change ignores `mint`: the second click then times out after 45 s and closes the forward (the
+  dashboard wants the tando of its own version).
+- Never orphaned: the child's stdin is a pipe tando-dash holds; `--json` ends the forward at its
   EOF (tando-dash died). On shutdown every child's group gets SIGTERM. The children's pids are in
   `cache/dash-studios.json` (0600); a tando-dash started after a crash sends SIGTERM to each one
-  whose command line is still that studio's (pid leads its group), then empties the file.
+  whose command line is still that studio's (pid leads its group), then empties the file. A child
+  that ends on its own (lost ssh, sleep) is noticed; the next click starts a new one.
+- Removed with the per-session studio: the confirm token of kind `studio`, the Idempotency-Key
+  and its memory, one-studio-per-server slots, Stop (`/api/studio/stop`), the `studios` list in
+  the overview poll, the confirmation dialog.
 - The audit line's `from` says `dashboard` (TANDO_FROM, as for writes).
+
+## Observability pages (owner, 21 Nov: a cloud VM's monitoring tab, concise)
+- **Server:** the sections CPU, Memory, Disk, Network, Pressure and Monitoring cost, 20 charts from
+  `host_metrics` (`series`, `extended`, `monitoring`; docs/COMMANDS.md "snapshot"). Sections fold;
+  charts below the fold draw lazily. Steal and swap carry no alert styling. DESIGN.md "Observability".
+- **App Overview:** a slice row: CPU throttled %, OOM kills in the range, tasks against the limit,
+  memory pressure (from the app's `metrics.series`).
+- **App Database tab** (apps with a database; its own lazy chunk): connections by state against the
+  max, commits and rollbacks per second, rows per second by kind, cache hit %, deadlocks, temp
+  bytes, longest transaction and longest idle-in-transaction, wraparound %, size and growth a day,
+  the top queries when present (query text is always rendered as text), "Open database".
+- Budget unchanged: first route <= 150 KB gzipped; the Server page and the Database tab are lazy
+  chunks (checked by `npm run check:size`).
 
 ## Milestones (implementation: Opus for critical parts, Sonnet for straightforward ones)
 - **M1 data + server (Opus):** `snapshot --json`, `env-names`, `state_reason`, deployer, host

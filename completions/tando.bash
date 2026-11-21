@@ -67,7 +67,7 @@ _tando() {
     releases) subs="" flags="$flags -H --json -a" args="apps";;
     history) subs="" flags="$flags -n -H --json -a" args="apps";;
     status) subs="" flags="$flags --watch --follow -H --json --check -a" args="apps";;
-    ls) subs="" flags="$flags -H --all --watch --follow --json --check" args="";;
+    ls) subs="" flags="$flags -H --all --all-rows --watch --follow --json --check" args="";;
     snapshot) subs="" flags="$flags --json -H --all --app --range -a --follow" args="";;
     logs) subs="pull" flags="$flags -f -n --since --until --grep -i --regex -E -a -H --level --release --deploy --worker --json" args="apps";;
     start) subs="" flags="$flags -H -a" args="apps";;
@@ -79,7 +79,7 @@ _tando() {
     db) subs="psql url studio info" flags="$flags -a -H --show --no-open --json --idle --stop" args="apps";;
     backup) subs="ls now restore pull offsite" flags="$flags --json -a -H --yes --show --saved --import --rotate" args="apps";;
     restore) subs="" flags="$flags -a --yes -H --from-host --all" args="";;
-    host) subs="add setup ls rm rename status care update reboot" flags="$flags --port --key --yes --force --insecure-test --no-check --deploy --json --watch --all --now --updates --reboot --window --tz --lead --even-with-other-sites --drop-alias --pg-stat-statements" args=""
+    host) subs="add setup ls rm rename status care update reboot" flags="$flags --port --key --yes --force --insecure-test --no-check --deploy --json --watch --all --now --updates --reboot --window --tz --lead --even-with-other-sites --drop-alias --pg-stat-statements --pg-restart" args=""
       [ "$COMP_CWORD" -eq $((i + 2)) ] && case $sub in setup|rm|rename) args=hosts;; esac;;
     domain) subs="add rm ls" flags="$flags --www --wait --force -a -H" args="apps";;
     doctor) subs="" flags="$flags --verbose --json -H" args="hosts";;

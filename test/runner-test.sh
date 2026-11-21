@@ -116,20 +116,24 @@ check "r5d the label filter is this run's (tando.run=tando-rt$$-<pid>)" \
 wait "$apid" 2> /dev/null
 
 # ---- r6 test/server/up.sh with the fake docker (bare: no HTTP wait)
+# up_env: up.sh with none of the variables it reads from outside (inside test/all.sh, the run's
+# TANDO_TEST_RUN, image and ports are exported: r6e then saw the outer run's label), only those given
+up_env() { env -u TANDO_TEST_RUN -u TANDO_TEST_IMAGE_BUILT -u TANDO_TEST_BARE -u TANDO_TEST_NAME -u TANDO_TEST_NODE \
+  -u TANDO_TEST_CADDY -u TANDO_TEST_DOCKER_ARGS -u TANDO_TEST_SSH_PORT -u TANDO_TEST_HTTP_PORT "$@"; }
 U=$E/up; mkdir -p "$U"
 cp test/server/up.sh "$U/"; printf '#!/bin/bash\nexit 0\n' > "$U/ssh.sh"; chmod +x "$U/ssh.sh"
 : > "$U/id_test"; : > "$U/id_test.pub"
 : > "$FAKE_DOCKER_LOG"
-img=$(TANDO_TEST_BARE=1 "$U/up.sh" --build-only)
+img=$(up_env TANDO_TEST_BARE=1 "$U/up.sh" --build-only)
 check "r6 --build-only builds and prints the image ($img), starts nothing" \
   test "$img" = tando-testvm:bare -a "$(grep -c '^build' "$FAKE_DOCKER_LOG")" = 1 -a "$(grep -c '^run' "$FAKE_DOCKER_LOG")" = 0
 : > "$FAKE_DOCKER_LOG"
-TANDO_TEST_BARE=1 TANDO_TEST_IMAGE_BUILT=tando-testvm:bare TANDO_TEST_RUN=rt-label TANDO_TEST_NAME=tando-rt$$-u \
+up_env TANDO_TEST_BARE=1 TANDO_TEST_IMAGE_BUILT=tando-testvm:bare TANDO_TEST_RUN=rt-label TANDO_TEST_NAME=tando-rt$$-u \
   "$U/up.sh" > /dev/null 2>&1; rc=$?
 check "r6b a start after it does not build (rc=$rc)" test "$rc" = 0 -a "$(grep -c '^build' "$FAKE_DOCKER_LOG")" = 0
 check "r6c TANDO_TEST_RUN labels the container" grep -q '^run .*--label tando.run=rt-label ' "$FAKE_DOCKER_LOG"
 : > "$FAKE_DOCKER_LOG"
-TANDO_TEST_BARE=1 TANDO_TEST_IMAGE_BUILT=tando-testvm:other TANDO_TEST_NAME=tando-rt$$-u "$U/up.sh" > /dev/null 2>&1
+up_env TANDO_TEST_BARE=1 TANDO_TEST_IMAGE_BUILT=tando-testvm:other TANDO_TEST_NAME=tando-rt$$-u "$U/up.sh" > /dev/null 2>&1
 check "r6d another image's name does not skip the build" test "$(grep -c '^build' "$FAKE_DOCKER_LOG")" = 1
 check "r6e no run label without TANDO_TEST_RUN" sh -c "! grep -q 'tando.run' '$FAKE_DOCKER_LOG'"
 

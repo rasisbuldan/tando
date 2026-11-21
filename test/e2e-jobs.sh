@@ -201,9 +201,11 @@ srv "sudo -u tando-jb touch $AD/shared/data/ok"; J jobs run flip > /dev/null 2>&
 check "J4f the next success resolves it" eval '! J status 2>&1 | grep -q "job.flip"'
 
 # ---- J5. spread and missed run ---------------------------------------------------------------------------
-check "J5a the defaults: starts spread over 15 s, a missed run made up once (Persistent=true)" \
-  eval 'unit q timer | grep -qx "RandomizedDelaySec=15" && unit q timer | grep -qx "Persistent=true" &&
-        [ "$(srv "systemctl show -P RandomizedDelayUSec tando-jb_job-q.timer")" = 15s ]'
+# (q runs every 15 minutes: spread over a sixth of that, at a fixed offset per timer)
+check "J5a the defaults: starts spread over a sixth of the period (150 s), fixed, a missed run made up once (Persistent=true)" \
+  eval 'unit q timer | grep -qx "RandomizedDelaySec=150" && unit q timer | grep -qx "FixedRandomDelay=yes" &&
+        unit q timer | grep -qx "Persistent=true" &&
+        [ "$(srv "systemctl show -P RandomizedDelayUSec tando-jb_job-q.timer")" = "2min 30s" ]'
 check "J5b job.<name>.missed = skip: Persistent=false for that job only" \
   eval 'unit qs timer | grep -qx "Persistent=false" && unit q timer | grep -qx "Persistent=true"'
 

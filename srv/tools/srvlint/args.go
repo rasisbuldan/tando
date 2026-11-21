@@ -47,6 +47,7 @@ var validated = map[string]string{
 	"gate tando-agent app":          "valid.App: starts with a letter",
 	"gate tando-agent req.ID":       "valid.ID: digits and '-' in a fixed shape, starts with a digit (request.go)",
 	"gate tando-agent req.HistoryN": "1-3 digits (request.go)",
+	"gate tando-agent req.Wait":     "waitRe: wait=[a-z]{1,16}, never starts with - (request.go)",
 	"gate tando-agent p.Token":      "validToken (gate.go tokenRe)",
 	"gate tando-agent l.Token":      "read back from the lease file, written by the gate from a validToken value",
 	"gate tando-agent string(m[1])": "the token the agent printed, matched by a token regexp (rootmode.go)",

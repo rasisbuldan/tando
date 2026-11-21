@@ -77,8 +77,17 @@ func (l *Logs) LogDoctor(ctx context.Context, w *out.Writer) {
 			held += n
 		}
 	}
-	_, avail, _ := diskKB(l.P.VarLog)
+	tot, avail, _ := diskKB(l.P.VarLog)
 	mb := func(n int64) string { return strconv.FormatInt(n/1048576, 10) }
+	// the budget the defaults are split from (log_budget): explicit caps can add up past it
+	if bud := l.logBudgetMB(tot); bud > 0 {
+		if sum/1048576 > bud {
+			w.Row("check", "warn", "log budget", "app log caps "+mb(sum)+" MB, over log_budget "+strconv.FormatInt(bud, 10)+
+				" MB: lower log_max of the largest apps in tando.conf, or raise log_budget (tando host setup <host> log_budget=<size>)")
+		} else {
+			w.Row("check", "ok", "log budget", mb(sum)+" MB of "+strconv.FormatInt(bud, 10)+" MB (log_budget) for "+strconv.Itoa(len(names))+" apps")
+		}
+	}
 	if sum-held > avail*1024 {
 		w.Row("check", "warn", "log caps", "app log caps "+mb(sum)+" MB: they may still grow by "+mb(sum-held)+
 			" MB, only "+strconv.FormatInt(avail/1024, 10)+" MB free (lower log_max in tando.conf)")

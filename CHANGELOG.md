@@ -11,6 +11,57 @@ first, grouped by area.
   behind Caddy; the first request waits about 0.1-0.3 s for a small app). `tando ls` says
   `idle`; the monitor and the per-minute recovery do not wake it. Not for static sites,
   containers (docs/COMMANDS.md, "Scale to zero").
+- Scale: a server holds 100 apps and more (tuned for 4 vCPU / 8 GB). Upgrade with
+  `tando host setup <host>`; apps keep their ports, users and settings.
+  - Ports: the app range is 4100-4999 (was 4100-4199: app 101 was refused), set with `port_min=`
+    and `port_max=`; a new app's pre-flight port comes from its own range, 14100-14999
+    (`preflight_min=`, `preflight_max=`), kept as `preflight_port`. A server still on the old
+    default range is widened by host setup.
+  - Users: new app users get ids from 30000-39999 (`uid_min=`, `uid_max=`), not 200-999, which
+    ran out after about 250 apps made over a server's life.
+  - Restarts of different apps no longer wait for each other (the hold window's lock is shared).
+  - A job's start and end read only its app's journal, not every app's.
+  - Host setup reloads systemd and Caddy once for all apps, and only when something changed (it
+    took minutes with 100 apps).
+  - Memory: a deploy that raises an app's memory caps over RAM x 1.5 (`mem_overcommit=`) is refused
+    unless `--force`. New `priority = high|low` in tando.conf.
+  - Jobs: the default spread is a sixth of the period (hourly: 10 minutes), at a fixed offset per
+    timer; at most `job_slots` runs at once on the server.
+  - Backups: one queue for the whole server (`tando-backups.timer`, 01:00-05:00, one backup at a
+    time; `backup_window=`, `backup_jobs=`) instead of a timer per app at midnight.
+  - Logs: `log_budget=` (default 20% of the disk) is split across the apps' default log caps;
+    `tando doctor` compares the caps with it.
+
+- Changed: `tando ls` (and `ls --all`, per server) above 50 apps shows a summary: the count per
+  state and only the apps that are down or have an alert firing; `--all-rows` lists every app;
+  `--json` is unchanged. The rows are built in one awk pass instead of several forks per app:
+  100 apps rendered in 0.9 s before, 0.1 s now (200: 1.8 s, 0.17 s).
+- Changed: tandod's 5 s live ring keeps 16 bytes per app per point (interned names and states,
+  the latest point whole) instead of about 165: an hour of 200 apps is 2.3 MiB, not 22 MiB;
+  GOMEMLIMIT stays 20MiB. The socket answers are unchanged.
+- Changed (dashboard add-on): the database studio opens directly. A click on "Database" in the
+  sidebar, "Open database" or the Server page's "Database studio" opens the studio in a new tab
+  with no dialog; tando-dash keeps one lazy ssh forward per server (closed after 30 min without a
+  click) and mints a fresh one-time link for each click. The confirmation, Stop, the per-app slot
+  and the Idempotency-Key of the old per-session studio are gone. `tando db studio --json` accepts
+  a line `mint <app>` on stdin and answers with one more JSON line (a fresh code on the same port).
+- Added (dashboard add-on): the Server page is a cloud-VM monitoring tab: sections CPU, Memory,
+  Disk, Network, Pressure and Monitoring cost (20 charts: stacked CPU, swap, IOPS, throughput,
+  latency, TCP, pressure, tandod's own cost, ...) that fold and draw when scrolled to; the app
+  Overview shows throttled %, OOM kills, tasks against the limit and memory pressure; apps with a
+  database get a Database tab (connections, transactions, rows, cache hit, deadlocks, temp files,
+  long transactions, size and growth, top queries).
+- PostgreSQL for 100 apps on one server: `tando host setup` sizes it from the server's RAM
+  (max_connections 100 and shared_buffers 15% on 8 GB, instead of 20 and 32 MB) and runs one
+  pgbouncer for all apps (127.0.0.1:6432, transaction pooling, `db_pool` server connections per
+  app, default 5). An app's `DATABASE_URL` points at pgbouncer from its next deploy;
+  `db_direct = true` keeps PostgreSQL itself (LISTEN/NOTIFY, session advisory locks, session SET,
+  prepared statements on old drivers). New `DATABASE_URL_DIRECT` (always PostgreSQL itself) is the
+  release command's `DATABASE_URL`. A deploy is refused when the apps' `db_pool` together would
+  pass max_connections. On a server whose apps already have databases, new memory settings wait
+  for `tando host setup <host> --pg-restart` (asked first; a restart drops every app's
+  connections for seconds); setup and `tando doctor` say so. `tando db` shows how the app
+  connects (docs/COMMANDS.md, "Database connections and pgbouncer").
 - Fixed: a new app could get another app's pre-flight port (its port + 100) as its own port once
   the port range was widened past 100 ports (what the docs advise when it is used up): that app's
   every deploy and env change then failed with "pre-flight port in use", and the loopback rules let

@@ -84,6 +84,20 @@ check "D1r apt failed once (the stand-in) and setup tried again by itself ($trie
   eval '[ $rc = 0 ] && [ "$tries" = 1 ] && srv "sudo test -e /root/apt-failed-once"'
 srv 'sudo rm -f /usr/local/sbin/apt-get'
 
+# G1-G2. PostgreSQL sized from the server's RAM, pgbouncer in front of it (docs/ARCHITECTURE.md)
+pgconf() { srv "sudo sed -n 's/^$1 = //p' /etc/postgresql/*/main/conf.d/tando.conf"; }
+pgshow() { srv "sudo -u postgres psql -X -At -c 'SHOW $1'"; }
+sbmb() { srv "sudo -u postgres psql -X -At -c \"SELECT setting::bigint * 8 / 1024 FROM pg_settings WHERE name = 'shared_buffers'\""; }
+mc=$(pgconf max_connections); sb=$(pgconf shared_buffers)
+ram=$(tr -d '│\n ' < "$E/setup.out" | grep -o 'from[0-9]*MBofRAM' | head -1 | tr -cd '0-9')
+want=$(( (${ram:-0} / 80 + 5) / 10 * 10 )); [ "$want" -lt 50 ] && want=50; [ "$want" -gt 400 ] && want=400
+check "G1 PostgreSQL runs sized from the RAM setup names (${ram:-?} MB): max_connections $mc (one per 80 MB, 50 to 400), shared_buffers $sb (15%)" \
+  eval '[ -n "$ram" ] && [ "$mc" = "$want" ] && [ "$(pgshow max_connections)" = "$mc" ] &&
+        [ "$sb" = "$((ram * 15 / 100))MB" ] && [ "$(sbmb)MB" = "$sb" ]'
+check "G2 pgbouncer runs on 127.0.0.1:6432 only (no unix socket); setup's database step says so" \
+  eval 'srv "systemctl is-active -q pgbouncer" && [ "$(srv "ss -Hltn sport = :6432" | awk "{ print \$4 }" | tr "\n" " ")" = "127.0.0.1:6432 " ] &&
+        srv "! test -e /var/run/postgresql/.s.PGSQL.6432" && tr -d "│\n " < "$E/setup.out" | grep -q "pgbounceron127.0.0.1:6432,transactionpooling"'
+
 # P1. out of memory, the kernel must not pick the postmaster; a connection's process stays killable
 pv=$(srv "ls /etc/postgresql")   # the major version this server installed
 pm=$(srv "head -1 /run/postgresql/$pv-main.pid")
@@ -103,6 +117,10 @@ srv "echo -900 | sudo tee /proc/$pm/oom_score_adj > /dev/null"
 # D2. up creates the role, database and DATABASE_URL; the app answers
 "$R" up > "$E/up.out" 2>&1; rc=$?; cat "$E/up.out" >&2
 check "D2 up with database = postgres: app answers ($(page))" test "$(page)" = "notes v1 db=0 file=0"
+# penv app KEY: the value in the environment of the app's running process
+penv() { local pid; pid=$(srv "systemctl show -P MainPID tando-$1"); srv "sudo cat /proc/$pid/environ" | tr '\0' '\n' | sed -n "s/^$2=//p"; }
+check "G3 the app (answering, D2) runs with pgbouncer's DATABASE_URL (6432), and DATABASE_URL_DIRECT PostgreSQL's (5432)" \
+  eval 'penv notes DATABASE_URL | grep -q "@127.0.0.1:6432/tando_notes$" && penv notes DATABASE_URL_DIRECT | grep -q "@127.0.0.1:5432/tando_notes$"'
 
 # D3. the password stays on the server
 "$R" env ls > "$E/envls.out" 2>&1; cat "$E/envls.out" >&2
@@ -111,10 +129,17 @@ check "D3a env ls masks the database password" grep -q 'postgres://tando_notes:\
 check "D3b db url without --show is refused" eval '[ $rc != 0 ] && grep -q -- "--show" "$E/url1.out"'
 url=$("$R" db url --show)
 pw=${url#postgres://tando_notes:}; pw=${pw%%@*}
-check "D3c db url --show prints the URL" \
-  eval 'echo "$url" | grep -q "^postgres://tando_notes:[0-9a-f]\{48\}@127.0.0.1:5432/tando_notes$"'
+check "D3c db url --show prints the URL (pgbouncer's)" \
+  eval 'echo "$url" | grep -q "^postgres://tando_notes:[0-9a-f]\{48\}@127.0.0.1:6432/tando_notes$"'
 check "D3d the password is not stored on the laptop" \
   eval '! grep -rq "$pw" "$TANDO_CONFIG_DIR" "$W/notes" --exclude-dir=node_modules 2> /dev/null'
+# shellcheck disable=SC2034  # (read in the check's eval)
+ul=$(srv "sudo cat /etc/pgbouncer/userlist.txt"); ini=$(srv "sudo cat /etc/pgbouncer/pgbouncer.ini")
+check "G4 pgbouncer knows tando_notes: its SCRAM secret (not the password), a pool of 5; its files root:postgres 0640; env ls masks DATABASE_URL_DIRECT" \
+  eval 'echo "$ul" | grep -qF "\"tando_notes\" \"SCRAM-SHA-256\$" && ! echo "$ul" | grep -q "$pw" &&
+        echo "$ini" | grep -qx "tando_notes = host=127.0.0.1 port=5432 dbname=tando_notes pool_size=5 max_db_connections=5" &&
+        [ "$(srv "sudo stat -c %U:%G:%a /etc/pgbouncer/userlist.txt /etc/pgbouncer/pgbouncer.ini" | sort -u)" = root:postgres:640 ] &&
+        grep -q "DATABASE_URL_DIRECT.*postgres://tando_notes:\*\*\*\*@127.0.0.1:5432" "$E/envls.out"'
 
 # D4. the role reaches only its own database
 rm -rf "${W:?}/notes2"; cp -R "$W/notes" "$W/notes2"
@@ -370,7 +395,13 @@ mode=$(ls -l "$E/pulled.tar" | cut -c1-10)
 check "D10b the pulled backup is readable by its owner only ($mode)" test "$mode" = "-rw-------"
 
 # D11. daily timer and status
-check "D11a the daily backup timer is enabled" eval 'srv "systemctl is-enabled -q tando-notes-backup.timer"'
+# (one queue for every app's daily backup: the host's timer starts the app's backup unit)
+check "D11a the daily backup: the host's queue timer is enabled, the app has its backup unit and no timer of its own" \
+  eval 'srv "systemctl is-enabled -q tando-backups.timer && test -f /etc/systemd/system/tando-notes-backup.service &&
+            ! test -e /etc/systemd/system/tando-notes-backup.timer"'
+srv "sudo systemctl start tando-backups.service" > /dev/null 2>&1
+check "D11c the queue backs the app up (backup-all; backup_daily_ok in its state)" \
+  eval 'srv "sudo grep -q ^backup_daily_ok= /opt/tando/apps/notes/state"'
 COLUMNS=100 "$R" status > "$E/status.out" 2>&1; cat "$E/status.out" >&2
 check "D11b status shows the database and the last backup" \
   eval 'grep -q "database.*postgres" "$E/status.out" && grep -q "backup.*daily, last" "$E/status.out"'
@@ -397,14 +428,16 @@ pid=$(srv "systemctl show -P MainPID tando-hsql")
 check "D14 database = sqlite: DATABASE_PATH in data, daily backup on" \
   eval 'srv "sudo cat /proc/$pid/environ" | tr "\\0" "\\n" |
         grep -qx DATABASE_PATH=/opt/tando/apps/hsql/shared/data/app.sqlite &&
-        srv "systemctl is-enabled -q tando-hsql-backup.timer"'
+        srv "test -f /etc/systemd/system/tando-hsql-backup.service"'
 
 # D16. PostgreSQL slots: an app without database = postgres cannot reach 5432 at all (it could
 # hold every connection slot by never answering the password request); the app with a database
 # still can; a client that stalls in authentication is dropped after 5 s; one role holds at most 10
-pgtry() { srv "sudo systemd-run --quiet --wait --pipe --collect -p User=$1 bash -c 'exec 3<>/dev/tcp/127.0.0.1/5432 && echo open || echo refused' 2> /dev/null"; }
+pgtry() { srv "sudo systemd-run --quiet --wait --pipe --collect -p User=$1 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${2:-5432} && echo open || echo refused' 2> /dev/null"; }
 check "D16a hsql (sqlite) cannot connect to 127.0.0.1:5432 ($(pgtry tando-hsql))" test "$(pgtry tando-hsql)" = refused
 check "D16b notes (postgres) can ($(pgtry tando-notes))" test "$(pgtry tando-notes)" = open
+check "G12 nor to pgbouncer's 6432 ($(pgtry tando-hsql 6432)); notes can ($(pgtry tando-notes 6432))" \
+  eval '[ "$(pgtry tando-hsql 6432)" = refused ] && [ "$(pgtry tando-notes 6432)" = open ]'
 check "D16c authentication_timeout 5s, role connection limit 10" \
   eval '[ "$(srv "sudo -u postgres psql -At -c \"SHOW authentication_timeout\"")" = 5s ] &&
         [ "$(srv "sudo -u postgres psql -At -c \"SELECT rolconnlimit FROM pg_roles WHERE rolname = '"'"'tando_notes'"'"'\"")" = 10 ]'
@@ -472,6 +505,23 @@ check "P12d host setup gave an app without limits (set up by an older tando) the
 srv "sudo rm -rf /etc/postgresql/99"
 check "P12e without the newer version the doctor row is ok again" \
   eval 'pg_rows version | grep -q "^check.ok.*$pv/main"'
+# G9-G10. a new max_connections on a server whose apps have databases waits for the owner's yes
+# (a restart drops every app's connections): PostgreSQL runs with 37 here, tando's file says otherwise
+pgpid() { srv "head -1 /run/postgresql/$pv-main.pid"; }
+srv "sudo sed -i 's/^max_connections = .*/max_connections = 37/' /etc/postgresql/$pv/main/conf.d/tando.conf && sudo systemctl restart postgresql"
+T_UNTIL_STEP=0.5 t_until 30 srv "pg_isready -q -h 127.0.0.1"
+# shellcheck disable=SC2034  # (read in the check's eval)
+pm2=$(pgpid)
+"$R" host setup test public_port=$HP > "$E/setup3.out" 2>&1; rc=$?; cat "$E/setup3.out" >&2
+check "G9 host setup (rc=$rc): max_connections $mc waits, PostgreSQL not restarted (still $(pgshow max_connections)); the step says --pg-restart; doctor warns" \
+  eval '[ $rc = 0 ] && [ "$(pgpid)" = "$pm2" ] && [ "$(pgshow max_connections)" = 37 ] &&
+        tr -d "│\n " < "$E/setup3.out" | grep -q "keepsitsoldmax_connectionsuntilarestart.*--pg-restart" &&
+        pg_rows settings | grep -q "^check.warn.*max_connections wait for a restart"'
+"$R" host setup test public_port=$HP --pg-restart --yes > "$E/setup4.out" 2>&1; rc=$?; cat "$E/setup4.out" >&2
+T_UNTIL_STEP=0.5 t_until 30 eval '[ "$(page)" = "notes v3 db=3 file=3" ]'
+check "G10 host setup --pg-restart (rc=$rc): restarted, max_connections $(pgshow max_connections); the app answers ($(page)); no warning" \
+  eval '[ $rc = 0 ] && [ "$(pgpid)" != "$pm2" ] && [ "$(pgshow max_connections)" = "$mc" ] &&
+        [ "$(page)" = "notes v3 db=3 file=3" ] && ! pg_rows settings | grep -q warn'
 # R. the release command (release = in tando.conf) with database = postgres: DATABASE_URL is set
 # for it and a migration that creates a table works; a failing one fails the deploy and names the
 # pre-deploy backup, which the owner can restore (tando itself restores nothing)
@@ -489,8 +539,8 @@ if (!process.env.DATABASE_URL) { console.error('DATABASE_URL is not set'); proce
     await c.query('DELETE FROM notes');
     throw new Error('migration 0002 failed on purpose');
   }
-  await c.query('CREATE TABLE IF NOT EXISTS migrated (v text, uid int)');
-  await c.query('INSERT INTO migrated VALUES ($1, $2)', [fs.readFileSync('VERSION', 'utf8').trim(), process.getuid()]);
+  await c.query('CREATE TABLE IF NOT EXISTS migrated (v text, uid int, port text)');
+  await c.query('INSERT INTO migrated VALUES ($1, $2, $3)', [fs.readFileSync('VERSION', 'utf8').trim(), process.getuid(), new URL(process.env.DATABASE_URL).port]);
   await c.end();
   console.log('migrated');
 })().catch((e) => { console.error(e.message); process.exit(1); });
@@ -500,9 +550,9 @@ echo "release = node migrate.js" >> tando.conf
 echo 4 > VERSION
 "$R" deploy > "$E/rel1.out" 2>&1; rc=$?; cat "$E/rel1.out" >&2
 uidn=$(srv "id -u tando-notes"); : "$uidn"   # (read inside the check's eval string)
-got=$(psql_as tando_notes "$pw" tando_notes 'SELECT v, uid FROM migrated')
-check "R1 release command with database = postgres (rc=$rc): DATABASE_URL was set, the migration created its table as the app's user ($got)" \
-  eval '[ $rc = 0 ] && [ -n "$uidn" ] && [ "$uidn" != 0 ] && [ "$got" = "4|$uidn" ] && [ "$(page)" = "notes v4 db=3 file=3" ]'
+got=$(psql_as tando_notes "$pw" tando_notes 'SELECT v, uid, port FROM migrated')
+check "R1 release command with database = postgres (rc=$rc): DATABASE_URL was set (PostgreSQL's own, 5432), the migration created its table as the app's user ($got)" \
+  eval '[ $rc = 0 ] && [ -n "$uidn" ] && [ "$uidn" != 0 ] && [ "$got" = "4|$uidn|5432" ] && [ "$(page)" = "notes v4 db=3 file=3" ]'
 half() { psql_as tando_notes "$pw" tando_notes "SELECT count(*) FROM pg_tables WHERE tablename = 'half'"; }
 echo fail > MIGRATE; echo 5 > VERSION
 "$R" deploy > "$E/rel2.out" 2>&1; rc=$?; cat "$E/rel2.out" >&2
@@ -517,11 +567,38 @@ check "R4 the owner restores it by hand (rc=$rc): the rows the command deleted a
   eval '[ $rc = 0 ] && [ "$(page)" = "notes v4 db=3 file=3" ] &&
         [ "$(psql_as tando_notes "$pw" tando_notes "SELECT count(*) FROM migrated")" = 1 ]'
 
+# G5-G7. per app: db_direct = true (PostgreSQL's own port), db_pool (pgbouncer's pool and the
+# role's limit), and the pools together against max_connections
+cd "$W/notes2" || exit 2
+cp tando.conf "$E/notes2.conf"
+echo 'db_direct = true' >> tando.conf; echo 7 > VERSION
+"$R" deploy > "$E/g5.out" 2>&1; rc=$?; tail -3 "$E/g5.out" >&2
+check "G5 db_direct = true (rc=$rc): DATABASE_URL is PostgreSQL's own (5432), the app answers ($(page notes2))" \
+  eval '[ $rc = 0 ] && penv notes2 DATABASE_URL | grep -q "@127.0.0.1:5432/tando_notes2$" && page notes2 | grep -q "^notes v7"'
+cp "$E/notes2.conf" tando.conf; echo 'db_pool = 7' >> tando.conf; echo 8 > VERSION
+"$R" deploy > "$E/g6.out" 2>&1; rc=$?; tail -3 "$E/g6.out" >&2
+# shellcheck disable=SC2034  # (read in the check's eval)
+ini=$(srv "sudo cat /etc/pgbouncer/pgbouncer.ini")
+lim=$(srv "sudo -u postgres psql -X -At -c \"SELECT rolconnlimit FROM pg_roles WHERE rolname = 'tando_notes2'\"")
+check "G6 db_pool = 7, db_direct gone (rc=$rc): on pgbouncer again with a pool of 7, the role's limit 12 ($lim), the app answers" \
+  eval '[ $rc = 0 ] && penv notes2 DATABASE_URL | grep -q "@127.0.0.1:6432/tando_notes2$" &&
+        echo "$ini" | grep -qx "tando_notes2 = host=127.0.0.1 port=5432 dbname=tando_notes2 pool_size=7 max_db_connections=7" &&
+        [ "$lim" = 12 ] && page notes2 | grep -q "^notes v8"'
+{ cat "$E/notes2.conf"; echo 'db_pool = 999'; } > tando.conf; echo 9 > VERSION
+"$R" deploy > "$E/g7.out" 2>&1; rc=$?; cat "$E/g7.out" >&2
+check "G7 db_pool = 999 is refused (rc=$rc): the pools would pass max_connections; it says what to do; v8 serves" \
+  eval '[ $rc != 0 ] && tr -d "│\n " < "$E/g7.out" | grep -q "PostgreSQLhasforthem.*smallerdb_pool" && page notes2 | grep -q "^notes v8"'
+{ cat "$E/notes2.conf"; echo 'db_pool = 7'; } > tando.conf
+cd "$W/notes" || exit 2
+
 # D15. destroy keeps a final backup and drops the database
 echo notes2 | (cd "$W/notes2" && "$R" destroy) > "$E/destroy.out" 2>&1; rc=$?; cat "$E/destroy.out" >&2
 gone=$(srv "sudo -u postgres psql -At -c \"SELECT count(*) FROM pg_database WHERE datname = 'tando_notes2'\"")
 check "D15 destroy: final backup kept, database dropped (rc=$rc, db left: $gone)" \
   eval '[ $rc = 0 ] && [ "$gone" = 0 ] && srv "sudo ls $BK/notes2" | grep -q -- "-final$"'
+check "G8 destroy took tando_notes2 out of pgbouncer (its user and its database); tando_notes stays" \
+  eval '! srv "sudo grep -q tando_notes2 /etc/pgbouncer/userlist.txt /etc/pgbouncer/pgbouncer.ini" &&
+        srv "sudo grep -q tando_notes /etc/pgbouncer/pgbouncer.ini"'
 
 echo
 cat "$E/pgmem"

@@ -11,28 +11,54 @@ import (
 
 	"tando/srv/internal/atomicfile"
 	"tando/srv/internal/bashread"
+	"tando/srv/internal/decimal"
 	"tando/srv/internal/fsinfo"
 )
 
-// newUID is a system uid no user or group has, and that no removed user had (tando-agent's
-// new_uid: files a removed user left where tando does not clean must never belong to a later
-// one). getent, so every NSS source counts, as useradd checks.
+// newUID is an id for a new user from tando's band (host.conf uid_min-uid_max, default
+// 30000-39999; tando-agent's new_uid): no user or group has it (passwd and group read once with
+// getent, then the one picked asked of NSS by number, as useradd does), and no removed user had
+// it (retired-uids: files a removed user left where tando does not clean must never belong to a
+// later one) while the band has others; then the retired ones are used again, oldest first.
 func (g *Gate) newUID() (int, error) {
 	retired, _ := os.ReadFile(filepath.Join(g.P.Root, "retired-uids"))
-	for u := 999; u >= 200; u-- {
-		s := strconv.Itoa(u)
-		if _, err := g.quiet(10*time.Second, "getent", "passwd", "--", s); err == nil {
-			continue
+	hc, _ := os.ReadFile(filepath.Join(g.P.Root, "host.conf"))
+	lo, hi := 30000, 39999
+	if a, ok := decimal.Parse(kvOf(hc, "uid_min"), 9); ok {
+		if b, ok := decimal.Parse(kvOf(hc, "uid_max"), 9); ok && a <= b {
+			lo, hi = int(a), int(b)
 		}
-		if _, err := g.quiet(10*time.Second, "getent", "group", "--", s); err == nil {
-			continue
-		}
-		if lineIn(retired, s) {
-			continue
-		}
-		return u, nil
 	}
-	return 0, die("no free system uid left (200-999)")
+	used := map[string]bool{}
+	for _, db := range []string{"passwd", "group"} {
+		out, _ := g.quiet(30*time.Second, "getent", db)
+		for _, l := range bashread.LinesAll(out) {
+			if f := bytes.Split([]byte(l), []byte(":")); len(f) > 2 {
+				used[string(f[2])] = true
+			}
+		}
+	}
+	free := func(s string) bool {
+		if used[s] {
+			return false
+		}
+		if _, err := g.quiet(10*time.Second, "getent", "passwd", "--", s); err == nil {
+			return false
+		}
+		_, err := g.quiet(10*time.Second, "getent", "group", "--", s)
+		return err != nil
+	}
+	for u := lo; u <= hi; u++ {
+		if s := strconv.Itoa(u); !lineIn(retired, s) && free(s) {
+			return u, nil
+		}
+	}
+	for _, s := range bashread.LinesAll(retired) {
+		if n, ok := decimal.Parse(s, 9); ok && int(n) >= lo && int(n) <= hi && free(s) {
+			return int(n), nil
+		}
+	}
+	return 0, die("no free uid left in %d-%d (uid_min, uid_max in tando host setup)", lo, hi)
 }
 
 // lineIn: data has a line that is exactly s (grep -qx).

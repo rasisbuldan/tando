@@ -68,6 +68,15 @@ var dynamicPrograms = map[string]string{
 	"watch s.bin":    "tando-logs",  // execScanner.bin = <root>/bin/tando-logs, the one-shot's log scan (pretick.go)
 }
 
+// execImporters: the one file outside internal/run that may import os/exec, under its own name
+// (path under srv/, and why). The studio's front starts its own binary as a helper under the
+// app's uid with its listening socket passed as fd 3 (docs/STUDIO.md): run.Cmd has neither, and
+// the studio's packages may not import run at all. srv/studio/source_test.go holds the file to
+// exactly one call of package exec, exec.Command(sp.Bin, "serve", ...).
+var execImporters = map[string]string{
+	"cmd/tando-studio/spawn.go": "the studio front's helper: its own binary, another uid, a passed listener",
+}
+
 // pathResolvers: functions that return the path of an installed program from its name: the
 // name (this argument) is what is listed.
 var pathResolvers = map[string]int{
@@ -514,7 +523,7 @@ func (p *pkg) checkImports(isRun bool) {
 			test := p.isTest(im)
 			dot := im.Name != nil && im.Name.Name == "."
 			switch {
-			case ip == "os/exec" && !(isRun && !test):
+			case ip == "os/exec" && !(isRun && !test) && !p.execImporter(im):
 				p.report(im, "exec", "imports os/exec (as %s): only %s/internal/run may; start programs with run.Cmd", importName(im), p.module)
 			case forbiddenImports[ip] != "":
 				p.report(im, "exec", "imports %s (%s)", ip, forbiddenImports[ip])
@@ -525,6 +534,12 @@ func (p *pkg) checkImports(isRun bool) {
 			}
 		}
 	}
+}
+
+// execImporter: im is os/exec, imported under its own name by the file execImporters names
+func (p *pkg) execImporter(im *ast.ImportSpec) bool {
+	f := filepath.ToSlash(p.fset.Position(im.Pos()).Filename)
+	return im.Name == nil && execImporters[p.dir+"/"+filepath.Base(f)] != ""
 }
 
 func importName(im *ast.ImportSpec) string {
