@@ -74,11 +74,14 @@ func TestScan(t *testing.T) {
 	if o != "top\tboom\t1\t502\tGET /after/roll\nscan\tboom\t0\t0\t0\t1\t1\t13\t0\n" {
 		t.Fatalf("%q", o)
 	}
-	// errors: the scan first, then the groups of the window, newest first, with samples
+	// errors: the scan first, then the groups of the window, newest first, their hourly counts
+	// (hours <id> <hour:count>, for errors --json's series), then the samples
 	o, err := h.rows(func(w *out.Writer) error { return h.l.Errors(ctx(), "boom", "", "", w) })
 	rows = strings.Split(strings.TrimSuffix(o, "\n"), "\n")
-	if err != nil || len(rows) != 5 || !strings.HasPrefix(rows[0], "err\t") || !strings.Contains(rows[0], "\t3\t3\t") ||
-		!strings.HasPrefix(rows[2], "sample\t") {
+	hour := strconv.FormatInt(1794589940/3600*3600, 10)
+	if err != nil || len(rows) != 7 || !strings.HasPrefix(rows[0], "err\tdbcd785a\t") || !strings.Contains(rows[0], "\t3\t3\t") ||
+		rows[2] != "hours\tdbcd785a\t"+hour+":3" || rows[3] != "hours\ta84a58c0\t"+hour+":1" ||
+		!strings.HasPrefix(rows[4], "sample\t") {
 		t.Fatalf("%q %v", rows, err)
 	}
 	_, err = h.rows(func(w *out.Writer) error { return h.l.Errors(ctx(), "boom", "1d", "", w) })

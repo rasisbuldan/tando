@@ -218,9 +218,9 @@ Set by tando: PORT, HOME, TANDO_DATA_DIR (and DATABASE_URL with database =).
 Example: tando env set STRIPE_KEY        (paste, then Enter)
 
 @@ jobs
-flags: -a= -H= -n=
+flags: -a= -H= -n= --json
 subs: ls=0-1 run=1 log=1 pause=1 resume=1 default=ls
-usage: tando jobs [ls [app]] [-H host]
+usage: tando jobs [ls [app]] [-H host] [--json]
 usage: tando jobs run <name>
 usage: tando jobs log <name> [-n N]
 usage: tando jobs pause <name> | resume <name>
@@ -267,9 +267,9 @@ timeouts. One PostgreSQL major version is used and kept: tando doctor says when
 a newer one appears (docs/COMMANDS.md, "Upgrading PostgreSQL").
 
 @@ backup
-flags: -a= -H= --yes --show --saved --import --rotate
+flags: -a= -H= --yes --show --saved --import --rotate --json
 subs: ls=0-1 now=0-1 restore=1 pull=2 offsite=0+ default=ls
-usage: tando backup ls [app]
+usage: tando backup ls [app] [--json]
 usage: tando backup now [app]
 usage: tando backup restore <id> [--yes]
 usage: tando backup pull <id> <file>
@@ -370,9 +370,9 @@ at tando up. The app's own link (<app>.<apps_domain>) keeps working.
 Example: tando domain add example.com
 
 @@ doctor
-flags: -H= --verbose
+flags: -H= --verbose --json
 args: 0-1
-usage: tando doctor [host] [--verbose]
+usage: tando doctor [host] [--verbose] [--json]
 Check a server: connection, sudo, every tando piece and its version, Caddy,
 DNS, disk, memory, timers and every app. Works on a server that is not set up
 yet (it then says what setup would do). After a client upgrade the programs
@@ -448,9 +448,9 @@ counts as one, grouped by exception type and the app's first frame. For each:
 how often, first and last seen, the release it appeared in, one sample.
 
 @@ requests
-flags: -a= -H= --last= --since= -n= -f --4xx
+flags: -a= -H= --last= --since= -n= -f --4xx --json
 subs: summary=0-1 tail=0-1 errors=0-1 default=summary
-usage: tando requests [summary [app]] [--since 15m|1h|24h]
+usage: tando requests [summary [app]] [--since 15m|1h|24h] [--json]
 usage: tando requests tail [app] [-n N] [-f]
 usage: tando requests errors [app] [--since W] [--4xx]
 The app's request log as Caddy wrote it: counts, status codes, latency

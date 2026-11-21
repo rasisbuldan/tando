@@ -345,3 +345,34 @@ func lessStr(s string, from int64) bool {
 	}
 	return s < strconv.FormatInt(from, 10)
 }
+
+// Hours is each group's hourly counts that fall in a window starting at from (the hour holding
+// from included, as Window counts them), by group id: "hour:count,..." with the hour's start in
+// epoch seconds, oldest first, only hours that had errors. For tando errors --json's series.
+func Hours(data []byte, from int64) map[string]string {
+	res := map[string]string{}
+	for l := range strings.SplitSeq(strings.TrimSuffix(string(data), "\n"), "\n") {
+		if l == "" {
+			continue
+		}
+		f := strings.Split(l, "\t")
+		var b strings.Builder
+		for p := range strings.SplitSeq(field(f, 9), ",") {
+			q1, q2, _ := strings.Cut(p, ":")
+			q2, _, _ = strings.Cut(q2, ":")
+			h, err1 := strconv.ParseInt(q1, 10, 64)
+			c, err2 := strconv.ParseInt(q2, 10, 64)
+			if err1 != nil || err2 != nil || h < 0 || c <= 0 || h+3600 <= from {
+				continue
+			}
+			if b.Len() > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(strconv.FormatInt(h, 10) + ":" + strconv.FormatInt(c, 10))
+		}
+		if id := field(f, 0); id != "" {
+			res[id] = b.String()
+		}
+	}
+	return res
+}

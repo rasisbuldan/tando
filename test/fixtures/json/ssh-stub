@@ -2,9 +2,9 @@
 # test/fixtures/json/ssh-stub: a stand-in for ssh in test/json-contract.sh. It never connects
 # anywhere: it answers the remote command tando sends with canned agent rows (invented data), by
 # what the command asks for. Every call is appended to $STUB_LOG (one line: the remote command),
-# so a test can count the execs. Times are around T=1795000000 (2026-11-18 GMT).
+# so a test can count the execs. Times are around T=1795000000 (2026-11-18 GMT), or $STUB_T.
 set -u
-T=1795000000
+T=${STUB_T:-1795000000}
 cmd=""
 # the remote command is the last argument; options before it (-p, -o, -i, -n, -t) are skipped
 for a; do cmd=$a; done
@@ -31,6 +31,80 @@ status_rows() {
 }
 
 case $cmd in
+  *"tando-agent status shop"*)
+    status_rows | grep -v -e '^app	[^s]' -e '^alert	api'
+    tab rel 20261117-101010 verified 1 1
+    tab rel 20261116-101010 verified 0 0
+    tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1
+    exit 0;;
+  *"tando-agent history"*)
+    tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1
+    tab hist api $((T - 9000)) 20261117-090909 deploy verified 30.0 20.0 3.0 1.0 2.0 0.4 3.6 "first try" -
+    exit 0;;
+  *"tando-agent releases"*)
+    tab rel 20261117-101010 verified 1 1; tab rel 20261116-101010 verified 0 0; exit 0;;
+  *"tando-agent env-log"*)
+    tab envlog 1 $((T - 4000)) alice set "rotate the session key" - SESSION_SECRET -
+    tab envlog 2 $((T - 90000)) alice import - DATABASE_URL,PUBLIC_BASE_URL - -
+    exit 0;;
+  *"tando-agent jobs"*)
+    tab zone UTC Etc/UTC
+    tab job nightly daily $((T + 3600)) $((T - 82800)) success 0 "node scripts/nightly.js"
+    tab jobx nightly on 12.5 "2026-11-19 00:00" "2026-11-20 00:00" "2026-11-21 00:00"
+    tab job sync "*/15 * * * *" - $((T - 600)) failed 2 "node scripts/sync.js"
+    tab jobx sync paused 3.0 - - -
+    exit 0;;
+  *"tando-agent backup-ls"*)
+    tab backup 20261117-030000-daily daily $((T - 79200)) 10485760 "data, database" both
+    tab backup 20261116-030000-daily daily $((T - 165600)) 10400000 "data, database" local+failed
+    tab offsite-error "the bucket did not answer (timeout)"
+    exit 0;;
+  *"tando-agent doctor"*)
+    tab check ok ssh "connected as admin"
+    tab check ok agent "0.2.2"
+    tab check warn disk "81% used on /: tando host status <host> lists what to clean"
+    tab check fail caddy "not running: sudo systemctl start caddy"
+    exit 0;;
+  *"tando-agent req-summary"*)
+    printf 'files=2\nwindow=900\nfrom=%s\nto=%s\nbucket=60\ntotal=120\nc1xx=0\nc2xx=100\nc3xx=5\nc4xx=10\nc5xx=5\n' $((T - 900)) $T
+    printf 'p50_ms=12.50\np95_ms=80.00\np99_ms=200.00\nmax_ms=900.00\navg_ms=20.10\n'
+    printf 'counts=%s\ncounts_5xx=%s\nunparsed=0\npaths=3\noldest=%s\n' \
+      8,8,8,8,8,8,8,8,8,8,8,8,8,8,8 0,0,0,0,0,0,0,0,0,0,0,0,0,2,3 $((T - 86400))
+    tab code 200 100; tab code 304 5; tab code 404 10; tab code 502 5
+    tab path "GET /" 60 10.00 50.00 0
+    tab path "GET /api/items/:n" 40 30.00 900.00 5
+    tab path 'POST /cart "x"' 20 15.00 40.00 0
+    exit 0;;
+  *"tando-agent errors"*)
+    tab err 0a1b2c3d 3 7 $((T - 7000)) $((T - 100)) 20261117-101010 node "TypeError at handler (server.js)" "TypeError: x is null"
+    tab err 4e5f6a7b 1 1 $((T - 300)) $((T - 300)) 20261117-101010 line "error line" "ERROR {db} timeout after 100 ms"
+    tab hours 0a1b2c3d $(((T - 7000) / 3600 * 3600)):1,$(((T - 100) / 3600 * 3600)):2
+    tab hours 4e5f6a7b $(((T - 300) / 3600 * 3600)):1
+    tab sample 0a1b2c3d "TypeError: x is null"
+    tab sample 4e5f6a7b "ERROR {db} timeout after 100 ms"
+    exit 0;;
+  *"tando-watch show"*)
+    tab run ok - "last run 20 s ago"
+    tab alert api down firing $((T - 900)) exited - 0 0
+    tab alert host disk pending $((T - 120)) "85% used" - 1 0
+    tab notifier phone ntfy ntfy.sh/topic $((T - 900)) 0 0 - - 0
+    tab hist $((T - 900)) fire api down exited
+    tab hist $((T - 5000)) resolve shop http "back to normal"
+    tab hist $((T - 6000)) fire shop http "5xx at 12%"
+    exit 0;;
+  *"tando-watch health"*)
+    tab up shop 9993 9987 1430 9980 2 12 85 40,42,-,38,39,41,40,40,39,38,37,36,40,41,42,43,44,40,39,38,37,36,35,34 ok 33 -
+    tab up api 9500 9900 1430 9980 1 15 90 - down - down
+    tab inc shop $((T - 50000)) $((T - 49700)) down "exited with status 1"
+    tab inc api $((T - 900)) - down exited
+    exit 0;;
+  *"tando-agent host status"*)
+    tab sys web-1 "Ubuntu 24.04" 6.8.0 arm64 kvm 864000 2 0.37 2048000000 1024000000 40000000000 12000000000 0 0 $((T - 60)) $((T - 3600)) 1
+    tab care security on "Sun 03:00" UTC 10 - 1 0 $((T + 86400))
+    tab finding updates apt warn $((T - 7200)) 1 2 "3 security updates" "openssl, libc6, curl" "tando host update web-1"
+    tab upgraded $((T - 604800)) tando 12 "openssl libc6"
+    tab check ok agent 0.2.2
+    exit 0;;
   *"tando-agent status"*)
     status_rows
     case $cmd in *loadavg*) tab loadavg 0.42 0.37 0.30;; esac

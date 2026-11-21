@@ -616,6 +616,7 @@ func (a *app) scanRequestsRaw(w *out.Writer) (tot, e5, p95, skip int64) {
 // first, each with its sample:
 //
 //	err <id> <count in window> <count total> <first> <last> <release> <kind> <label> <title>
+//	hours <id> <hour start:count,...>    the hours of the window that had errors, oldest first
 //	sample <id> <line>
 func (l *Logs) Errors(ctx context.Context, name, window, count string, w *out.Writer) error {
 	if err := l.needRoot(); err != nil {
@@ -654,6 +655,14 @@ func (l *Logs) Errors(ctx context.Context, name, window, count string, w *out.Wr
 	rows := errscan.Window(data, l.Env.Now().Unix()-ws, int(n))
 	for _, r := range rows {
 		w.Row(append([]string{"err"}, r...)...)
+	}
+	// each group's errors per hour in the window (hours <id> <hour:count,...>): an older client
+	// reads err and sample rows only
+	hours := errscan.Hours(data, l.Env.Now().Unix()-ws)
+	for _, r := range rows {
+		if h := hours[r[0]]; h != "" && reGroupID.MatchString(r[0]) {
+			w.Row("hours", r[0], h)
+		}
 	}
 	for _, r := range rows {
 		id := r[0]

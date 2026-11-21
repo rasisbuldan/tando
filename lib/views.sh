@@ -712,6 +712,27 @@ jobs_pause() {
   fi
 }
 
+# jobs --json: {"host", "app", "zone", "zone_name", "jobs": [...]}; per job its schedule, state (on,
+# paused, running), next and last run (epoch), result and exit code of the last run, how long it
+# took (seconds), the command, and next_runs: the next three times by the server's clock and zone,
+# as the server writes them ("2026-11-21 09:00").
+jobs_json() {
+  printf '{"host":%s,"app":%s' "$(json_str "$HOST")" "$(json_str "$APP")"
+  awk -F '\t' '
+    function s(v) { if (v == "-" || v == "") return "null"; gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); return "\"" v "\"" }
+    function n(v) { return (v ~ /^-?[0-9]+(\.[0-9]+)?$/) ? v : "null" }
+    $1 == "zone" { zone = $2; zn = $3; next }
+    $1 == "job" { N[++nj] = $2; CAL[$2] = $3; NX[$2] = $4; LA[$2] = $5; RE[$2] = $6; CO[$2] = $7; CM[$2] = $8; next }
+    $1 == "jobx" { ST[$2] = $3; DU[$2] = $4; R1[$2] = $5; R2[$2] = $6; R3[$2] = $7; next }
+    END {
+      printf ",\"zone\":%s,\"zone_name\":%s,\"jobs\":[", s(zone), s(zn)
+      for (i = 1; i <= nj; i++) { j = N[i]
+        r = ""; if (R1[j] != "" && R1[j] != "-") r = s(R1[j]); if (R2[j] != "" && R2[j] != "-") r = r "," s(R2[j]); if (R3[j] != "" && R3[j] != "-") r = r "," s(R3[j])
+        printf "%s{\"name\":%s,\"schedule\":%s,\"state\":%s,\"next_run\":%s,\"last_run\":%s,\"result\":%s,\"exit_code\":%s,\"duration_s\":%s,\"command\":%s,\"next_runs\":[%s]}",
+          (i > 1 ? "," : ""), s(j), s(CAL[j]), s(ST[j] == "" ? "on" : ST[j]), n(NX[j]), n(LA[j]), s(RE[j]), n(CO[j]), n(DU[j]), s(CM[j]), r
+      }
+      printf "]}\n" }' "$TMPD/st"
+}
 cmd_jobs() {
   resolve 1
   case "${ARGS[1]:-ls}" in
@@ -722,6 +743,7 @@ cmd_jobs() {
   local r n cal next last res code cmd lastw resw st dur n1 n2 n3 nextw tw zone zname x pd
   agent_raw sudo jobs "$APP" full > "$TMPD/st" || exit 1
   NOW=$(now)
+  if [ -n "$JSON" ]; then jobs_json; return 0; fi
   {
     printf 'JOB\tSCHEDULE\tNEXT\tLAST\tRESULT\tTOOK\tCOMMAND\n'
     while IFS=$TAB read -r r n cal next last res code cmd; do
@@ -919,6 +941,17 @@ cmd_doctor() {
   agent_raw sudo doctor $(server_sums) "$(client_version)" "status=$(server_sums tando-status | tr -d ' ')" \
     "tandod=$(server_sums tandod | tr -d ' ')" "offsite=$(server_sums tando-offsite | tr -d ' ')" \
     "host=$(server_sums tando-host | tr -d ' ')" "studio=$(server_sums tando-studio | tr -d ' ')" > "$TMPD/st" || exit 1
+  if [ -n "$JSON" ]; then
+    # {"host", "checks": [{name, state (ok, warn, fail), detail}], "failed", "warnings"}: every
+    # check as the agent wrote it (each program on its own row, as --verbose); exit 1 on a failure
+    printf '{"host":%s,"checks":' "$(json_str "$HOST")"
+    awk -F '\t' -v OFS='\t' -v h="$HOST" '$1 == "check" { d = $4; gsub(/<host>/, h, d); print $3, $2, d }' "$TMPD/st" |
+      to_json "name:s,state:s,detail:s"
+    fail=$(awk -F '\t' '$1 == "check" && $2 != "ok" && $2 != "warn"' "$TMPD/st" | grep -c .)
+    warn=$(awk -F '\t' '$1 == "check" && $2 == "warn"' "$TMPD/st" | grep -c .)
+    printf ',"failed":%s,"warnings":%s}\n' "$fail" "$warn"
+    [ "$fail" -eq 0 ]; return
+  fi
   # after a client upgrade every program differs: nine near-identical rows would bury the findings
   # that matter, so they become one row (--verbose lists each)
   while IFS=$TAB read -r r state name detail; do
@@ -1008,6 +1041,16 @@ cmd_backup_ls() {
   local r id kind created size what where off="" err=""
   agent_raw sudo backup-ls "$APP" > "$TMPD/st" || exit 1
   NOW=$(now)
+  if [ -n "$JSON" ]; then
+    # {"host", "app", "backups": [{id, kind, created, size_bytes, holds, where}], "offsite_error"};
+    # where: local, both, offsite, local+pending, local+uploading, local+failed (null: no offsite)
+    printf '{"host":%s,"app":%s,"backups":' "$(json_str "$HOST")" "$(json_str "$APP")"
+    awk -F '\t' -v OFS='\t' '$1 == "backup" { print $2, $3, $4, $5, $6, $7 }' "$TMPD/st" |
+      to_json "id:s,kind:s,created:n,size_bytes:n,holds:s,where:s"
+    err=$(awk -F '\t' '$1 == "offsite-error" { e = $2 } END { print e }' "$TMPD/st")
+    printf ',"offsite_error":%s}\n' "$( [ -n "$err" ] && json_str "$err" || printf null)"
+    return 0
+  fi
   # WHERE (a 7th field from an agent with offsite copies): local, both, offsite, local+pending ...
   grep -Eq '	(offsite|both|local\+[a-z]+)$' "$TMPD/st" && off=1
   {
