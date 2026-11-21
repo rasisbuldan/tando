@@ -1156,8 +1156,10 @@ t0=$SECONDS; "$R" ls -H test > /dev/null 2>&1; one=$((SECONDS - t0))
 t0=$SECONDS
 COLUMNS=100 "$R" ls --all > "$E/all.out" 2>&1; rc=$?; cat "$E/all.out" >&2
 secs=$((SECONDS - t0))
-check "20a ls --all: one box per host, the dead one unreachable with its reason, in ${secs}s (one host: ${one}s)" \
-  eval '[ $rc = 0 ] && [ "$(grep -c "╭─ tando ls" "$E/all.out")" = 3 ] && grep -q "unreachable  connection refused" "$E/all.out" &&
+check "20a ls --all: one box for the 3 hosts, the dead one first, not answering with its reason, both others' apps, in ${secs}s (one host: ${one}s)" \
+  eval '[ $rc = 0 ] && [ "$(grep -c "╭─ tando ls --all .* 3 servers" "$E/all.out")" = 1 ] &&
+        sed -n 2p "$E/all.out" | grep -q "dead  not answering: connection refused" &&
+        grep -Eq "^│ test +[a-z]" "$E/all.out" && grep -Eq "^│ test2 +[a-z]" "$E/all.out" &&
         [ $secs -le $((2 * one + 6)) ]'
 COLUMNS=120 "$R" host ls > "$E/hostls.out" 2>&1; cat "$E/hostls.out" >&2
 check "20b host ls shows app counts and reachability, with the reason for the dead one" \

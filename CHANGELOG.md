@@ -6,6 +6,11 @@ first, grouped by area.
 
 ## Unreleased
 
+- Changed: `tando ls --all` is a one-screen morning check: one box for every server, first what
+  needs attention (a server not answering, an app down, an alert firing, host care to do, clock
+  or version skew) with the command to look closer, then every app of every server with those
+  on top. It was one full `tando ls` box per server. `--json` is unchanged (one object per
+  server), plus `reachable` and `checked_at`.
 - Changed: the client's shared ssh connection stays open 10 minutes after the last command
   (`ControlPersist=600`, was 60 s), so a `tando ls` a few minutes after the last one does not pay
   a new ssh handshake (test server: 0.37 s cold, 0.25 s after 75 s idle with the change; more on

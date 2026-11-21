@@ -131,7 +131,8 @@ flags: -H= --all --watch= --json --check
 args: 0
 usage: tando ls [-H host] [--all] [--watch N] [--json] [--check]
 The apps of a server: state, when deployed, memory, cpu, uptime and link.
---all shows every registered server. --check: exit status 2 when an app is
+--all: every registered server in one box, what needs attention first.
+--check: exit status 2 when an app is
 down, an alert fires or (with --all) a server does not answer; 0 when not.
 Example: tando ls --all
 

@@ -1035,23 +1035,81 @@ cmd_ls_all() {
 fetch_ls_all() { rm -f "$TMPD"/h.*.rc; fetch_hosts $LS_HOSTS; }
 render_ls_all() {
   local h e sep=""
-  [ -n "$JSON" ] && printf '{"hosts":['
+  if [ -z "$JSON" ]; then render_ls_summary; return 0; fi
+  printf '{"hosts":['
   for h in $LS_HOSTS; do
     if [ "$(cat "$TMPD/h.$h.rc")" = 0 ]; then
       cp "$TMPD/h.$h.st" "$TMPD/st"; HOST=$h NOW=$(now)
-      if [ -n "$JSON" ]; then printf '%s' "$sep"; render_ls | tr -d '\n'; sep=,; else render_ls; fi
-    elif [ -n "$JSON" ]; then
-      e=$(host_err "$h")
-      printf '%s{"host":%s,"reachable":false,"checked_at":%s,"error":%s}' "$sep" "$(json_str "$h")" "$(now)" \
-        "$(json_str "${e:-unreachable}")"; sep=,
+      printf '%s' "$sep"; render_ls | tr -d '\n'; sep=,
     else
-      ui_box_open "tando ls" "$h"
-      ui_box_line "$(ui_badge failed unreachable)  $(host_err "$h")"
-      ui_box_close
+      e=$(host_err "$h")
+      printf '%s{"host":%s,"error":%s,"reachable":false,"checked_at":%s}' "$sep" "$(json_str "$h")" \
+        "$(json_str "${e:-unreachable}")" "$(now)"; sep=,
     fi
   done
-  [ -n "$JSON" ] && printf ']}\n'
+  printf ']}\n'
   return 0
+}
+# render_ls_summary: the morning check, one box for every server: what needs attention first
+# (a server not answering, an app down, an alert firing, host care to do, clock or version skew),
+# then every app of every server, those that need attention on top
+render_ls_summary() {
+  local h r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx
+  local nh=0 na=0 natt=0 rank upt x todo fail
+  : > "$TMPD/att"; : > "$TMPD/all.rows"
+  for h in $LS_HOSTS; do
+    nh=$((nh + 1))
+    if [ "$(cat "$TMPD/h.$h.rc")" != 0 ]; then
+      printf '%s  %s\n' "$(ui_badge failed "$h")" "not answering: $(host_err "$h")" >> "$TMPD/att"; continue
+    fi
+    cp "$TMPD/h.$h.st" "$TMPD/st"; HOST=$h NOW=$(now)
+    firing_load; skew_load
+    grep -q "^check${TAB}fail${TAB}caddy" "$TMPD/st" 2> /dev/null &&
+      printf '%s  caddy is not running: no app is reachable (tando doctor -H %s)\n' "$(ui_badge failed "$h")" "$h" >> "$TMPD/att"
+    while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx; do
+      [ "$r" = app ] || continue
+      na=$((na + 1)) rank=1
+      state=$(down_word "$a" "$(state_word "$state" "$rel" "$recipe")")
+      firing_of "$a"; cpu_min "${cpum:-}"
+      if [ "$state" = down ]; then
+        rank=0; printf '%s  %s is down: tando logs -a %s -H %s\n' "$(ui_badge failed "$h")" "$a" "$a" "$h" >> "$TMPD/att"
+      fi
+      if [ -n "$FIRED" ]; then
+        rank=0; printf '%s  %s: %s firing: tando alerts -H %s\n' "$(ui_badge failed "$h")" "$a" "$FIRED" "$h" >> "$TMPD/att"
+      fi
+      [ $rank = 0 ] && natt=$((natt + 1))
+      upt=-; [ "$state" = running ] && upt=$(ui_dur "$up")
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$h" "$a" "$(state_badge "$state")" \
+        "$( [ -n "$FIRED" ] && printf '%s%s%s' "$UI_RED" "$FIRED" "$UI_NC" || printf -- -)" "$(mb "$mem")" "$CPUP" "$upt" >> "$TMPD/all.rows"
+    done < "$TMPD/st"
+    # alerts not of an app (the host's: disk, memory, ...)
+    for x in $FIRING; do
+      grep -q "^app${TAB}${x%%:*}${TAB}" "$TMPD/st" && continue
+      printf '%s  %s firing: tando alerts -H %s\n' "$(ui_badge failed "$h")" "${x#*:}" "$h" >> "$TMPD/att"
+    done
+    while IFS=$TAB read -r r todo fail _x; do
+      [ "$r" = hostcare ] && ui_int "$todo" && [ "$todo" -gt 0 ] || continue
+      printf '%s  server: %s to do%s: tando host status %s\n' "$(ui_badge deploying "$h")" "$todo" \
+        "$(ui_int "$fail" && [ "$fail" -gt 0 ] && printf ', %s failing' "$fail")" "$h" >> "$TMPD/att"
+    done < "$TMPD/st"
+    x=${SKEW:-0}; [ "$x" -lt 0 ] && x=$((-x))
+    [ "$x" -gt "$SKEW_MAX" ] && printf '%s  clock %s off this laptop'"'"'s\n' "$(ui_badge deploying "$h")" "$(ui_dur "$x")" >> "$TMPD/att"
+    [ -n "$SRV_VER" ] && [ -n "$CLI_VER" ] && [ "$SRV_VER" != "$CLI_VER" ] &&
+      printf '%s  tando %s there, %s here: tando host setup %s\n' "$(ui_badge deploying "$h")" "$SRV_VER" "$CLI_VER" "$h" >> "$TMPD/att"
+  done
+  ui_box_open "tando ls --all" "$(plural "$nh" server)"
+  watch_stale_line
+  if [ -s "$TMPD/att" ]; then
+    while IFS= read -r x; do ui_box_wrap "$x"; done < "$TMPD/att"
+  else ui_box_line "$(ui_badge ok "nothing needs attention")"; fi
+  ui_box_sep
+  if [ "$na" -gt 0 ]; then
+    { printf 'HOST\tAPP\tSTATE\tALERT\tMEMORY\tCPU 1M\tUP\n'; sort -t "$TAB" -k1,1n -k2,2 -k3,3 "$TMPD/all.rows" | cut -f2-; } |
+      ui_table "l,l,l,l,r!3,r!2,r!1"
+  else ui_box_line "no apps yet"; fi
+  local foot; foot="$(plural "$na" app)"
+  [ "$natt" -gt 0 ] && foot="$foot, ${UI_RED}$natt need attention${UI_NC}"
+  ui_box_close "$foot ${UI_G_MID} tando ls -H <host> for one ${UI_G_MID} $(watch_note)"
 }
 
 host_ls() {

@@ -396,7 +396,11 @@ dropped first at 80 columns). While an alert fires for an app, an ALERT column n
 app. When the server's clock is more than 30 s off this laptop's (every age on screen is off by
 as much), or its tando is not this client's version, one yellow line says so (also in `tando
 status`); `--json` has `reachable`, `checked_at`, `server_version`, `client_version`,
-`clock_skew_s` and `alerts`. `--all`: every registered server, with `--watch` and `--json`. A
+`clock_skew_s` and `alerts`. `--all`: every registered server in one box, the morning check: first
+what needs attention (a server not answering, an app down, an alert firing, host care to do,
+clock or version skew), one line each with the command to look closer, then every app of every
+server (HOST APP STATE ALERT MEMORY CPU 1M UP) with those needing attention on top; with
+`--watch` and `--json` (one object per server, as `ls --json`). A
 worker that does not run while its app does gets a line under the table.
 `--check` (ls, status; not with `--watch`): after the view, exit status 2 when an app is down or
 an alert fires (with `--all`: also a server that did not answer), 0 when nothing needs attention,

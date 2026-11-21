@@ -707,6 +707,38 @@ sed 's/^app\tweb\tactive/app\tweb\tfailed/' "$tmp/mon.st2" > "$tmp/mon.st5"
 MON_ST=$tmp/mon.st5 mon_run 'CHECK=1; JSON=1; cmd_ls' > /dev/null; r3=$?
 MON_ST=$tmp/mon.st2 mon_run 'APP=web; CHECK=1; cmd_status' > /dev/null; r4=$?
 if [[ "$r1 $r2 $r3 $r4" == "2 0 2 0" ]]; then ok; else bad "--check exit status: firing $r1, fine $r2, down $r3, status fine $r4 (want 2 0 2 0)"; fi
+# ls --all: one box for every server, what needs attention first (a server not answering, an app
+# down, an alert firing, host care), then every app with those on top; --json keeps one object
+# per host, an unreachable one with "error" and "reachable": false
+sed 's/^app\tweb\tactive/app\tweb\tfailed/' "$MON_ST" > "$tmp/mon.st6"; printf 'hostcare\t3\t0\t1\t1\n' >> "$tmp/mon.st6"
+grep -v '^alert' "$MON_ST" > "$tmp/mon.st7"
+allrun() { mon_run 'LS_HOSTS="calm dead vps"; cp "$2" "$TMPD/h.vps.st"; cp "$3" "$TMPD/h.calm.st"
+  echo 0 > "$TMPD/h.vps.rc"; echo 0 > "$TMPD/h.calm.rc"; echo 255 > "$TMPD/h.dead.rc"
+  echo "ssh: connect to host 192.0.2.1 port 22: Connection refused" > "$TMPD/h.dead.err"; '"$1" "$tmp/mon.st6" "$tmp/mon.st7"; }
+mon_run() { # (again, with the files of allrun as $2 $3)
+    "$BASH_BIN" -c '
+        . "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/deploy.sh"; . "$1/lib/views.sh"
+        TMPD=$(mktemp -d); CFG=$TMPD; HOST=vps; TANDO_HOME=$1; APP=""; JSON=""; WATCH=""; ui_init 80
+        resolve() { :; }
+        agent_raw() { cat "$MON_ST"; }
+        fetch_status; set -- "$2" "$3" "$4"; eval "$1"; rc=$?; rm -rf "$TMPD"; exit $rc' _ "$here" "$@" 2>&1
+}
+out=$(allrun 'render_ls_all' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+att=$(sed -n '2,/^├/p' <<< "$out" | tr -d '│' | tr -s ' ')
+tbl=$(sed -n '/^│ HOST /,/^╰/p' <<< "$out")
+if [[ $out == "╭─ tando ls --all "*"3 servers ─╮"* && $att == *"dead not answering: connection refused"*"vps web is down: tando logs -a web -H vps"*"vps api: http firing: tando alerts -H vps"*"vps server: 3 to do: tando host status vps"* ]] &&
+   [[ "$(sed -n 2,3p <<< "$tbl" | awk '{print $2}' | tr '\n' ' ')" == "vps vps " ]] && grep -Eq '^│ calm +web +● running +- ' <<< "$tbl" &&
+   [[ $out == *"4 apps, 2 need attention"* ]]; then ok
+else bad "ls --all: no summary with what needs attention first ($out)"; fi
+out=$(allrun 'JSON=1; render_ls_all')
+if printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); h={x["host"]: x for x in d["hosts"]}; assert h["dead"]["reachable"] is False and h["dead"]["error"] and h["vps"]["reachable"] is True and len(h["vps"]["apps"]) == 2' 2> /dev/null &&
+   [[ $out == '{"hosts":[{"host":"calm","reachable":true,'*'{"host":"dead","error":"connection refused","reachable":false,'* ]]; then ok
+else bad "ls --all --json: reachable per host ($out)"; fi
+# the shared ssh connection stays 10 minutes after the last command (ControlPersist=600; was 60)
+out=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; CFG=$(mktemp -d); mkdir -p "$CFG/hosts"
+  printf "target=admin@192.0.2.1\nport=22\nkind=admin\n" > "$CFG/hosts/vps"; host_use vps; printf "%s\n" "${SSHO[@]}"; rm -rf "$CFG"' _ "$here" 2>&1)
+if grep -qx 'ControlPersist=600' <<< "$out" && grep -qx 'ControlMaster=auto' <<< "$out"; then ok
+else bad "host_use: the shared connection does not persist 10 minutes ($out)"; fi
 # tando top: the firing check after the app's state, the count in the host strip
 out=$("$BASH_BIN" -c '
     . "$1/lib/ui.sh"; . "$1/lib/common.sh"; set +u; TAB=$(printf "\t"); AGENT_BIN=/opt/tando/bin/tando-agent; . "$1/lib/cmd-top.sh"
