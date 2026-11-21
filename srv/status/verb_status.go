@@ -71,6 +71,8 @@ func (c *Collector) Status(ctx context.Context, w io.Writer, name string) error 
 	upt := c.uptime()
 	s := newSink()
 	s.row(HostRow(c.host(upt))...)
+	// the server's clock and tando version, for the client's skew line (the agent's server row)
+	s.row("server", decimal.Itoa(c.now()), c.versionLine())
 	if r := c.hostcareRow(); r != nil { // host care's counts (tando ls's hint), when root can read them
 		s.row(r...)
 	}

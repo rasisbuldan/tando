@@ -191,6 +191,48 @@ worker_hint() {
   done < "$TMPD/st"
   return 0
 }
+# skew_load: from the server row of status (the server's clock and tando version; an older agent
+# sends none): SKEW (server minus laptop seconds, "" unknown), SRV_VER, CLI_VER (no fork)
+SKEW_MAX=30
+skew_load() {
+  local r se sv _x
+  SKEW="" SRV_VER="" CLI_VER=""
+  { IFS= read -r CLI_VER || :; } < "${TANDO_HOME:-.}/VERSION" 2> /dev/null
+  case $CLI_VER in [0-9]*.[0-9]*.[0-9]*) case $CLI_VER in *[!0-9.]*) CLI_VER="";; esac;; *) CLI_VER="";; esac
+  while IFS=$TAB read -r r se sv _x; do
+    [ "$r" = server ] || continue
+    ui_int "$se" && [ ${#se} -le 12 ] && ui_int "${NOW:-}" && SKEW=$((10#$se - NOW))
+    case $sv in [0-9]*.[0-9]*.[0-9]*) case $sv in *[!0-9.]*) ;; *) SRV_VER=$sv;; esac;; esac
+  done < "$TMPD/st"
+  return 0
+}
+# skew_line: one line when the server's clock is off from this laptop's by more than SKEW_MAX
+# seconds (every age on screen is off by as much), or the server's tando is not this client's
+skew_line() {
+  skew_load
+  local d=${SKEW:-0} w=ahead
+  [ "$d" -lt 0 ] && d=$((-d)) w=behind
+  if [ "$d" -gt "$SKEW_MAX" ]; then
+    ui_box_wrap "${UI_YELLOW}clock: the server's is $(ui_dur "$d") $w of this laptop's; ages here are off by that (is time sync on, here and there?)${UI_NC}"
+  fi
+  if [ -n "$SRV_VER" ] && [ -n "$CLI_VER" ] && [ "$SRV_VER" != "$CLI_VER" ]; then
+    ui_box_wrap "${UI_YELLOW}tando $SRV_VER on the server, $CLI_VER here: tando host setup $HOST (or update this laptop's tando)${UI_NC}"
+  fi
+  return 0
+}
+# json_meta: the fields every ls/status --json object starts with, after "host": reachable, when
+# the data was read (laptop clock), the server's clock and version, this client's, the skew
+json_meta() {
+  skew_load
+  printf ',"reachable":true,"checked_at":%s,"server_version":%s,"client_version":%s,"clock_skew_s":%s' \
+    "$NOW" "$( [ -n "$SRV_VER" ] && json_str "$SRV_VER" || printf null)" \
+    "$( [ -n "$CLI_VER" ] && json_str "$CLI_VER" || printf null)" "${SKEW:-null}"
+}
+# json_alerts: ,"alerts":[...] every alert row (firing and pending, apps and the host)
+json_alerts() {
+  printf ',"alerts":'
+  awk -F '\t' -v OFS='\t' '$1 == "alert" { print $2, $3, $4, $5, $6 }' "$TMPD/st" | to_json "app:s,check:s,state:s,since:n,detail:s"
+}
 # firing_load: FIRING = " app:check ..." for every firing alert in $TMPD/st (no fork)
 firing_load() {
   local r fa fc fs _x
@@ -214,7 +256,8 @@ firing_of() {
 render_ls() {
   local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx n=0 upt dep
   if [ -n "$JSON" ]; then
-    printf '{"host":%s,"apps":' "$(json_str "$HOST")"; app_json_rows | to_json "$APP_JSON"; printf '}\n'
+    printf '{"host":%s' "$(json_str "$HOST")"; json_meta
+    printf ',"apps":'; app_json_rows | to_json "$APP_JSON"; json_alerts; printf '}\n'
     return
   fi
   firing_load
@@ -239,6 +282,7 @@ render_ls() {
   } > "$TMPD/rows"
   ui_box_open "tando ls" "$HOST"
   watch_stale_line
+  skew_line
   host_line
   grep -q "^check${TAB}fail${TAB}caddy" "$TMPD/st" 2> /dev/null &&
     ui_box_line "${UI_RED}caddy is not running: no app is reachable (tando doctor)${UI_NC}"
@@ -351,6 +395,7 @@ render_status() {
   [ "$state" = running ] && upt=$(ui_dur "$up")
   ui_box_open "$a" "$HOST"
   watch_stale_line
+  skew_line
   if [ "$state" = down ]; then
     ui_kv state "$(state_badge down) (not stopped by you)   ${UI_DIM}recipe${UI_NC} $recipe"
     ui_kv next "tando logs -a $a; then tando start -a $a"
@@ -464,12 +509,12 @@ HIST_JSON="at:n,app:s,release:s,kind:s,result:s,total_s:n,build_s:n,upload_s:n,c
 hist_json() { grep "^hist$TAB" "$TMPD/st" | sort -t "$TAB" -k3,3nr | cut -f2-15 |
   awk -F '\t' -v OFS='\t' '{ print $2, $1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14 }' | to_json "$HIST_JSON"; }
 status_json() {
-  printf '{"host":%s,"app":' "$(json_str "$HOST")"
+  printf '{"host":%s' "$(json_str "$HOST")"; json_meta
+  printf ',"app":'
   app_json_rows | to_json "$APP_JSON" | sed 's/^\[//; s/\]$//'
   printf ',"releases":'; rel_json
   printf ',"history":'; hist_json
-  printf ',"alerts":'
-  awk -F '\t' -v OFS='\t' '$1 == "alert" { print $2, $3, $4, $5, $6 }' "$TMPD/st" | to_json "app:s,check:s,state:s,since:n,detail:s"
+  json_alerts
   pg_json "$TMPD/st" "$APP"
   printf '}\n'
 }
@@ -982,7 +1027,8 @@ render_ls_all() {
       if [ -n "$JSON" ]; then printf '%s' "$sep"; render_ls | tr -d '\n'; sep=,; else render_ls; fi
     elif [ -n "$JSON" ]; then
       e=$(host_err "$h")
-      printf '%s{"host":%s,"error":%s}' "$sep" "$(json_str "$h")" "$(json_str "${e:-unreachable}")"; sep=,
+      printf '%s{"host":%s,"reachable":false,"checked_at":%s,"error":%s}' "$sep" "$(json_str "$h")" "$(now)" \
+        "$(json_str "${e:-unreachable}")"; sep=,
     else
       ui_box_open "tando ls" "$h"
       ui_box_line "$(ui_badge failed unreachable)  $(host_err "$h")"

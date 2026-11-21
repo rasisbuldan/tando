@@ -6,6 +6,13 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: a clock and version skew line in `tando ls` and `tando status`: when the server's clock
+  is more than 30 s off the laptop's (every "3m ago" is off by as much), or its tando differs
+  from the client's. `status` has a new `server` row (the server's clock and VERSION), printed
+  the same by the shell agent and tando-status. `ls --json` and `status --json` now carry
+  `reachable`, `checked_at`, `server_version`, `client_version`, `clock_skew_s` and `alerts`
+  (every firing or pending alert); an unreachable host in `ls --all --json` has
+  `"reachable":false`.
 - Changed: CPU in `tando ls` and `tando status` is the last minute's, with and without `--watch`
   (`CPU 1M`; status: `12%  last minute`); it was the average since the app started, or under
   `--watch` a delta timed by the laptop's whole seconds, so a pegged app could read 0%. It comes

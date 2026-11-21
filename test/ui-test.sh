@@ -618,11 +618,12 @@ mon_rows() { # the default stub: one host, apps web (running) and api (running, 
     printf 'app\tweb\tactive\t3001\t20261101-101010\tok\t52428800\t134217728\t9000000000\t0\t3600\thttp://web.example.test\tnode\toff\t-\t-\t1000\t2000\t10\t0\t-\t-\t1024\t256\t-\t123\n'
     printf 'app\tapi\tactive\t3002\t20261101-101010\tok\t52428800\t134217728\t9000000000\t0\t3600\thttp://api.example.test\tnode\tdaily\t%s\t-\t1000\t2000\t10\t0\t-\t-\t1024\t256\t-\t-\n' $((n - 30 * 3600))
     printf 'alert\tapi\thttp\tfiring\t%s\t5xx 12%% of 300 requests\n' $((n - 120))
+    printf 'server\t%s\t%s\n' "${MON_CLK:-$n}" "${MON_VER:-$(cat "$here/VERSION")}"
 }
 mon_run() { # code: run with the views loaded, the stub agent answering from $tmp/mon.st
     "$BASH_BIN" -c '
         . "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/deploy.sh"; . "$1/lib/views.sh"
-        TMPD=$(mktemp -d); CFG=$TMPD; HOST=vps; APP=""; JSON=""; WATCH=""; ui_init 80
+        TMPD=$(mktemp -d); CFG=$TMPD; HOST=vps; TANDO_HOME=$1; APP=""; JSON=""; WATCH=""; ui_init 80
         resolve() { :; }
         agent_raw() { cat "$MON_ST"; }
         fetch_status; eval "$2"; rc=$?; rm -rf "$TMPD"; exit $rc' _ "$here" "$1" 2>&1
@@ -684,6 +685,21 @@ if grep -Eq '^│ cpu +12%  last minute' <<< "$out"; then ok; else bad "status: 
 out=$(mon_run 'JSON=1; render_ls')
 if [[ $out == *'"app":"web",'*'"cpu_percent":12.3,'*'"app":"api",'*'"cpu_percent":null,'* ]]; then ok
 else bad "ls --json: cpu_percent is not the last minute's ($out)"; fi
+# the server's clock 5 minutes ahead, an older tando there: one line each in ls and status; none
+# when they agree; --json carries both, with reachable and checked_at (what a menu bar badge needs)
+out=$(mon_run 'render_ls')
+if [[ $out != *"clock: "* && $out != *" on the server, "* ]]; then ok; else bad "ls: a skew line with none ($out)"; fi
+MON_CLK=$(( $(date +%s) + 300 )) MON_VER=0.0.1 mon_rows > "$tmp/mon.st4"
+out=$(MON_ST=$tmp/mon.st4 mon_run 'render_ls' | tr -d '│\n' | tr -s ' ')
+if [[ $out == *"clock: the server's is 5m 0s ahead of this laptop's; ages here are off by that"* &&
+      $out == *"tando 0.0.1 on the server, $(cat "$here/VERSION") here: tando host setup vps"* ]]; then ok
+else bad "ls: no clock or version skew line ($out)"; fi
+out=$(MON_ST=$tmp/mon.st4 mon_run 'APP=web; render_status' | tr -d '│\n' | tr -s ' ')
+if [[ $out == *"clock: the server's is 5m 0s ahead"* ]]; then ok; else bad "status: no clock skew line ($out)"; fi
+out=$(MON_ST=$tmp/mon.st4 mon_run 'JSON=1; render_ls')
+if [[ $out == '{"host":"vps","reachable":true,"checked_at":'[0-9]*',"server_version":"0.0.1","client_version":"'*'","clock_skew_s":'[0-9]*',"apps":'*'"alerts":[{"app":"api","check":"http","state":"firing",'* ]] &&
+   printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert 299 <= d["clock_skew_s"] <= 301' 2> /dev/null; then ok
+else bad "ls --json: no reachable, checked_at, versions, skew or alerts ($out)"; fi
 # tando top: the firing check after the app's state, the count in the host strip
 out=$("$BASH_BIN" -c '
     . "$1/lib/ui.sh"; . "$1/lib/common.sh"; set +u; TAB=$(printf "\t"); AGENT_BIN=/opt/tando/bin/tando-agent; . "$1/lib/cmd-top.sh"

@@ -103,6 +103,20 @@ func (c *Collector) version() string {
 	return strings.TrimRight(string(bytes.ReplaceAll(b, []byte{0}, nil)), "\n")
 }
 
+// versionLine is the first line of VERSION ("unknown" without one), as the agent's
+// `IFS= read -r sv < "$R/VERSION"` for the server row of status.
+func (c *Collector) versionLine() string {
+	b, err := readBounded(filepath.Join(c.Env.Root, "VERSION"), 4096, false)
+	if err != nil {
+		return "unknown"
+	}
+	l, _, _ := bytes.Cut(b, []byte{'\n'})
+	if v := string(bytes.ReplaceAll(l, []byte{0}, nil)); v != "" {
+		return v
+	}
+	return "unknown"
+}
+
 // agentSum is `cksum < "$AGENT" | cut -d' ' -f1`.
 func (c *Collector) agentSum() string {
 	sum, err := cksum.File(c.bin("tando-agent"))

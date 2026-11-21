@@ -12,7 +12,8 @@ import (
 	"tando/srv/internal/fsinfo"
 )
 
-const hostRow = "host\tbox\t3\t0.52\t2048000000\t512000000\t1024000\t409600\t5000"
+// (then the server row: the clock and the first line of VERSION, "unknown" without the file)
+const hostRow = "host\tbox\t3\t0.52\t2048000000\t512000000\t1024000\t409600\t5000\nserver\t1800000000\tunknown"
 
 func running(start string) map[string]string {
 	return map[string]string{"ActiveState": "active", "MemoryMax": "134217728", "CPUUsageNSec": "2500000000",
@@ -381,5 +382,18 @@ func TestStatusRestoreCut(t *testing.T) {
 	if !strings.Contains(got, "\nrestorecut\tweb\t20261114-180000-manual\t20261114-180100-safety\tdatabase\n") ||
 		strings.Count(got, "restorecut") != 1 {
 		t.Fatalf("want one restorecut row for web, got:\n%s", got)
+	}
+}
+
+// the server row: the clock and the first line of VERSION, for the client's skew line
+func TestStatusServerRow(t *testing.T) {
+	h := newHost(t)
+	h.write("root/VERSION", "1.4.2\nsomething else\n")
+	got, err := h.out(func(c *Collector, b *bytes.Buffer) error { return c.Status(context.Background(), b, "") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\nserver\t1800000000\t1.4.2\n") {
+		t.Errorf("no server row with the version: %q", got)
 	}
 }

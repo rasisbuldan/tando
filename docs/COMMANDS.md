@@ -393,7 +393,10 @@ Example: `tando restore --from-host 3f9a01c2b7de --all -H newvps`
 The apps of a server: state, deploy age, memory, cpu over the last minute (`CPU 1M`), uptime, link (never cut: other columns are
 dropped first at 80 columns). While an alert fires for an app, an ALERT column names the checks
 (`http`, `slow`, ...) and the footer counts them; `--json` has `alerts_firing` and `firing` per
-app. `--all`: every registered server, with `--watch` and `--json`. A
+app. When the server's clock is more than 30 s off this laptop's (every age on screen is off by
+as much), or its tando is not this client's version, one yellow line says so (also in `tando
+status`); `--json` has `reachable`, `checked_at`, `server_version`, `client_version`,
+`clock_skew_s` and `alerts`. `--all`: every registered server, with `--watch` and `--json`. A
 worker that does not run while its app does gets a line under the table.
 Example: `tando ls --all`
 

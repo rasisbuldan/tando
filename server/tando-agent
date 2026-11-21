@@ -4936,6 +4936,9 @@ cmd_status() {
   { read -r _; read -r _ dt du _; } < <(df -Pk /)
   row host "$hn" "$cpus" "$la" $((mt * 1024)) $(((mt - ma) * 1024)) $((dt * 1024)) \
     $((du * 1024)) "$UPT"
+  # the server's clock and tando version, for the client's skew line (srv/status prints the same)
+  local sv=""; { IFS= read -r sv || :; } < "$R/VERSION" 2> /dev/null
+  row server "$EPOCHSECONDS" "${sv:-unknown}"
   # host care's counts (tando-host's summary, root 600), as tando-status prints them
   local hk hv hat _h1 htodo hfail hwarn
   if [[ -r /var/lib/tando/hostcare/summary ]]; then
