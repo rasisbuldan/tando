@@ -370,7 +370,13 @@ mode=$(ls -l "$E/pulled.tar" | cut -c1-10)
 check "D10b the pulled backup is readable by its owner only ($mode)" test "$mode" = "-rw-------"
 
 # D11. daily timer and status
-check "D11a the daily backup timer is enabled" eval 'srv "systemctl is-enabled -q tando-notes-backup.timer"'
+# (one queue for every app's daily backup: the host's timer starts the app's backup unit)
+check "D11a the daily backup: the host's queue timer is enabled, the app has its backup unit and no timer of its own" \
+  eval 'srv "systemctl is-enabled -q tando-backups.timer && test -f /etc/systemd/system/tando-notes-backup.service &&
+            ! test -e /etc/systemd/system/tando-notes-backup.timer"'
+srv "sudo systemctl start tando-backups.service" > /dev/null 2>&1
+check "D11c the queue backs the app up (backup-all; backup_daily_ok in its state)" \
+  eval 'srv "sudo grep -q ^backup_daily_ok= /opt/tando/apps/notes/state"'
 COLUMNS=100 "$R" status > "$E/status.out" 2>&1; cat "$E/status.out" >&2
 check "D11b status shows the database and the last backup" \
   eval 'grep -q "database.*postgres" "$E/status.out" && grep -q "backup.*daily, last" "$E/status.out"'
@@ -397,7 +403,7 @@ pid=$(srv "systemctl show -P MainPID tando-hsql")
 check "D14 database = sqlite: DATABASE_PATH in data, daily backup on" \
   eval 'srv "sudo cat /proc/$pid/environ" | tr "\\0" "\\n" |
         grep -qx DATABASE_PATH=/opt/tando/apps/hsql/shared/data/app.sqlite &&
-        srv "systemctl is-enabled -q tando-hsql-backup.timer"'
+        srv "test -f /etc/systemd/system/tando-hsql-backup.service"'
 
 # D16. PostgreSQL slots: an app without database = postgres cannot reach 5432 at all (it could
 # hold every connection slot by never answering the password request); the app with a database

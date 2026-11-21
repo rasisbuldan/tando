@@ -2231,6 +2231,8 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
     case $kv in
       port_min=*|port_max=*|preflight_min=*|preflight_max=*)
         [[ ${kv#*=} =~ ^[0-9]{4,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
+      backup_window=*) [[ ${kv#*=} =~ ^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "bad backup_window: like 01:00-05:00"; H[backup_window]=${kv#*=};;
+      backup_jobs=1|backup_jobs=2|backup_jobs=3|backup_jobs=4) H[backup_jobs]=${kv#*=};;
       job_slots=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,2}$ ]] || die "bad job_slots: 1 to 999 job runs at once"; H[job_slots]=${kv#*=};;
       mem_overcommit=*) [[ ${kv#*=} =~ ^[0-9]{1,2}(\.[0-9]{1,2})?$ ]] || die "bad mem_overcommit: like 1.5 (0: no check)"; H[mem_overcommit]=${kv#*=};;
       uid_min=*|uid_max=*)   # the band of new app users' ids (new_uid); apps made before keep theirs
@@ -2407,11 +2409,12 @@ EOF
     a=${a%/app.conf}; n=$((n + 1))
     # (under the app's lock: a deploy or domain change of it writes the same files)
     ( DR_FLAG=$drf WC_STAGE=1; app "${a##*/}"; lock 300; app_perms; WU_CHANGED=0; write_unit || exit 1
-      ((WU_CHANGED)) && dreload; jobs_follow; write_caddy || exit 1; journal_dir ) ||
+      ((WU_CHANGED)) && dreload; jobs_follow; write_caddy || exit 1; journal_dir; sync_backup_timer ) ||
       die "could not update the units and Caddy site of ${a##*/}"
   done
   DR_FLAG=$drf prio_sync
   [[ -f $drf ]] && { rm -f "$drf"; systemctl daemon-reload; }
+  backup_sched_install || die "could not enable the backup queue (tando-backups.timer)"
   caddy_install_staged || die "$WC_WHY; the sites are as they were: run tando host setup again once that is fixed"
   fw_sync || die "the per-app loopback rules could not be loaded (above); run tando host setup again"
   step apps ok "$n app$( ((n == 1)) || echo s)"
@@ -2741,7 +2744,7 @@ name_free() {
     d-*|m-*) NAME_WHY="$1 is reserved (tando-$1 is the deploy user or settings group of an app ${1#?-})";;
     rx-*|adopt-*|unadopt-*) NAME_WHY="$1 is reserved (tando-$1 is a unit tando uses for the app ${1#*-})";;
     *-backup) NAME_WHY="$1 is reserved (tando-$1 is the backup unit of an app ${1%-backup})";;
-    watch|watch-fallback|host|host-boot|host-window|metrics|offsite|recover|firewall|down)
+    watch|watch-fallback|host|host-boot|host-window|metrics|offsite|recover|firewall|down|backups)
       NAME_WHY="$1 is reserved (tando-$1 is one of tando's own units)";;
   esac
   [[ -z $NAME_WHY ]]
@@ -4460,19 +4463,96 @@ rs_end() {
   return 0
 }
 
+# sync_backup_timer: the app's daily backup unit, tando-<app>-backup.service (backup = daily), which
+# the host's backup queue starts (tando-backups.timer, backup_all). The per-app timer of before
+# (every app at midnight + up to 30 min) goes: host setup removes it from every app.
 sync_backup_timer() {
-  local f=/etc/systemd/system/tando-$A-backup
-  if [[ ${C[backup]:-off} == daily ]]; then
-    printf '[Unit]\nDescription=tando backup %s\n\n[Service]\nType=oneshot\nExecStart=%s backup-run %s daily\n' \
-      "$A" "$AGENT" "$A" > "$f.service"
-    printf '[Unit]\nDescription=tando daily backup %s\n\n[Timer]\nOnCalendar=daily\n' "$A" > "$f.timer"
-    printf 'RandomizedDelaySec=30min\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' >> "$f.timer"
-    systemctl daemon-reload
-    systemctl enable -q --now "tando-$A-backup.timer"
-  elif [[ -f $f.timer ]]; then
-    systemctl disable -q --now "tando-$A-backup.timer"
-    rm -f "$f.timer" "$f.service"
+  local f=/etc/systemd/system/tando-$A-backup ch=0
+  if [[ -f $f.timer ]]; then
+    systemctl disable -q --now "tando-$A-backup.timer" 2> /dev/null
+    rm -f "$f.timer" "/var/lib/systemd/timers/stamp-tando-$A-backup.timer"; ch=1
   fi
+  if [[ ${C[backup]:-off} == daily ]]; then
+    WIC_CHANGED=0
+    printf '[Unit]\nDescription=tando backup %s\n\n[Service]\nType=oneshot\nExecStart=%s backup-run %s daily\n' \
+      "$A" "$AGENT" "$A" | write_if_changed "$f.service"
+    ((WIC_CHANGED)) && ch=1
+  elif [[ -f $f.service ]]; then
+    rm -f "$f.service"; ch=1
+  fi
+  ((ch)) && dreload
+  return 0
+}
+
+# ---- the backup queue: one host timer, the apps' daily backups one or two at a time ------------
+# tando-backups.timer starts tando-backups.service (backup-all) at the start of backup_window
+# (host.conf, default 01:00-05:00, the server's time). It starts the backup unit of every app with
+# backup = daily, backup_jobs (1 or 2, default 1) at a time, in an order by a hash of the app's name
+# (the same every night, different from the alphabet); none is started after the window's end
+# (the doctor warns about a backup older than 2 days). An app backed up in the last 20 hours is
+# skipped (the run made up after the server was off: Persistent).
+BACKUP_WINDOW=01:00-05:00
+backup_window() { # -> "HH:MM HH:MM" (start, end) from host.conf, else the default
+  local w=${H[backup_window]:-$BACKUP_WINDOW}
+  [[ $w =~ ^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || w=$BACKUP_WINDOW
+  echo "${w%-*} ${w#*-}"
+}
+backup_order() { # app...: by a hash of the name (cksum), one per line
+  local a
+  for a; do printf '%s %s\n' "$(printf '%s' "$a" | cksum | cut -d' ' -f1)" "$a"; done | sort -n | cut -d' ' -f2
+}
+backup_sched_install() {
+  local w; w=$(backup_window)
+  WIC_CHANGED=0
+  write_if_changed /etc/systemd/system/tando-backups.service <<EOF
+[Unit]
+Description=tando: the daily backups of every app, one queue
+
+[Service]
+Type=oneshot
+ExecStart=$AGENT backup-all
+EOF
+  write_if_changed /etc/systemd/system/tando-backups.timer <<EOF
+[Unit]
+Description=tando: the daily backup window
+
+[Timer]
+OnCalendar=*-*-* ${w% *}:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  ((WIC_CHANGED)) && systemctl daemon-reload
+  systemctl -q is-enabled tando-backups.timer 2> /dev/null && systemctl -q is-active tando-backups.timer ||
+    systemctl enable -q --now tando-backups.timer
+}
+cmd_backup_all() {
+  need_root
+  load "$R/host.conf" H
+  local w s e t0 endt f a k=${H[backup_jobs]:-1} apps=() n=0 late=0 last
+  [[ $k =~ ^[1-4]$ ]] || k=1
+  w=$(backup_window); s=${w% *}; e=${w#* }
+  t0=$(now); endt=$(date -d "today $e" +%s)
+  # a window over midnight (22:00-03:00), or a run made up after the window's end: until the end next comes
+  ((endt > t0)) || endt=$((endt + 86400))
+  for f in "$R"/apps/*/app.conf; do
+    [[ -f $f ]] && grepq -x 'backup=daily' "$f" || continue
+    a=${f%/app.conf}; a=${a##*/}
+    last=$(sed -n 's/^backup_daily_ok=//p' "$R/apps/$a/state" 2> /dev/null)
+    [[ $last =~ ^[0-9]+$ ]] && ((t0 - last < 72000)) && continue
+    apps+=("$a")
+  done
+  for a in $(backup_order ${apps[@]+"${apps[@]}"}); do
+    if (( $(now) >= endt )); then late=$((late + 1)); continue; fi
+    while (( $(jobs -rp | wc -l) >= k )); do wait -n; done
+    systemctl start "tando-$a-backup.service" &
+    n=$((n + 1))
+  done
+  wait
+  echo "started=$n"
+  ((late == 0)) || echo "tando-agent: $late backup(s) not started: the backup window ($s-$e) ended first; widen it (tando host setup <host> backup_window=01:00-06:00) or set backup_jobs=2" >&2
+  return 0
 }
 
 # ---- PostgreSQL: one role and one database per app, named tando_<app> ---------------------
@@ -6746,6 +6826,7 @@ case $verb in
   container-stop) cmd_container_stop "$@";;
   destroy) cmd_destroy "$@";;
   backup-run) cmd_backup_run "$@";;
+  backup-all) cmd_backup_all;;   # the backup queue (tando-backups.service)
   backup-ls) cmd_backup_ls "$@";;
   backup-cat) cmd_backup_cat "$@";;
   backup-restore) cmd_backup_restore "$@";;

@@ -271,5 +271,31 @@ printf 'c.service\n' > "$T/busy"   # b's run ended without its job-end
 check "U10h a slot whose run is over is taken over" eval 'js job_slot_take d.service && grep -qx d.service "$T/jobslots/2/unit"'
 kill "$jp" 2> /dev/null
 
+# ---- U11 backups: one host queue (tando-backups.timer at the start of backup_window) instead of a
+# timer per app that all fired at midnight; an app keeps only its backup unit, and its timer of
+# before goes (host setup does it for every app). (systemctl: a stub; /etc and /var in $T)
+sb() { # backup-setting -> what is left of the app's backup units, and the systemctl calls
+  : > "$T/calls"
+  # shellcheck disable=SC2016
+  R=$T BK=$1 "$BASH" -c 'eval "$1"; systemctl() { echo "$*" >> "$R/calls"; }; A=a1 AGENT=/x/tando-agent; C_backup=$BK; sync_backup_timer
+    ls "$R/etc/systemd/system" | grep backup | tr "\n" " "' _ \
+    "$(agent_fn sync_backup_timer write_if_changed dreload | sed "s#/etc/#$T/etc/#g; s#/var/lib/#$T/var/lib/#g; s/\${C\[backup\]:-off}/\${C_backup:-off}/")"
+}
+rm -rf "${T:?}/etc"; mkdir -p "$T/etc/systemd/system" "$T/var/lib/systemd/timers"
+printf '[Timer]\nOnCalendar=daily\n' > "$T/etc/systemd/system/tando-a1-backup.timer"; : > "$T/var/lib/systemd/timers/stamp-tando-a1-backup.timer"
+check "U11a an app's timer of before goes, its backup unit stays" eq "$(sb daily)" "tando-a1-backup.service "
+check "U11b ... disabled first, and its stamp is gone" eval 'grep -q "disable -q --now tando-a1-backup.timer" "$T/calls" && [ ! -e "$T/var/lib/systemd/timers/stamp-tando-a1-backup.timer" ]'
+check "U11c again: nothing changes, no daemon-reload" eval '[ "$(sb daily)" = "tando-a1-backup.service " ] && ! grep -q daemon-reload "$T/calls"'
+check "U11d backup off: the unit goes" eq "$(sb off)" ""
+check "U11e host setup moves every app to the queue and installs it" eval \
+  'sed -n "/^cmd_setup() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "journal_dir; sync_backup_timer" &&
+   sed -n "/^cmd_setup() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "backup_sched_install"'
+# shellcheck disable=SC2016
+bo=$("$BASH" -c 'eval "$1"; backup_order zeta alpha mid' _ "$(agent_fn backup_order)" | tr '\n' ' ')
+check "U11f the queue's order: a hash of the name, the same each night (not the alphabet)" eval \
+  '[ "$bo" != "alpha mid zeta " ] && [ "$(echo $bo | tr " " "\n" | sort | tr "\n" " ")" = "alpha mid zeta " ]'
+bw() { "$BASH" -c 'eval "$1"; BACKUP_WINDOW=01:00-05:00; H_w=$2; backup_window' _ "$(agent_fn backup_window | sed 's/\${H\[backup_window\]:-/${H_w:-/')" "$1"; }
+check "U11g backup_window: 01:00-05:00 by default, a bad one is the default" eq "$(bw '') / $(bw 22:30-03:00) / $(bw 25:00-1)" "01:00 05:00 / 22:30 03:00 / 01:00 05:00"
+
 echo "core-unit: $n checks, $nf failed"
 [ "$nf" = 0 ]
