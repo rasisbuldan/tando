@@ -21,6 +21,17 @@ first, grouped by area.
 - Added: `tando host setup <host> --pg-stat-statements` turns on PostgreSQL's
   `pg_stat_statements` (asks first: PostgreSQL restarts once). Then the top 10 normalized
   statements of each app's database are in `tando snapshot`, latest only (`<app>.dbtop`, 0600).
+- Added: live views every 5 s. tandod keeps a second loop beside the minute's checks (srv/live):
+  every 5 s each app's memory, CPU, tasks and unit state and the host's load, memory, CPU and disk,
+  from the cgroup v2 files, /proc and the bus connection it already has; no program started, no file
+  written, an hour kept in memory, the alert rules untouched (still per minute). `tando status
+  --follow` and `tando ls --follow` show it over one ssh session that stays open (the server pushes
+  a frame every 5 s: `tando-agent status-follow`); an older server, or one without tandod or cgroup
+  v2, is polled every 5 s instead. docs/MONITORING.md, "Live views".
+- Added (dashboard add-on): live refresh every 5 s while a page is visible: one `tando snapshot
+  --json --follow` per server (new: a line every 5 s over one ssh session) answers the polls; an
+  app's page lays the live row over its own snapshot. The follow ends 30 s after the page is hidden.
+- `tando menubar`: an app's "Open status in Terminal" uses `tando status --follow`.
 - Monitoring, lighter (slice 1): tandod's `MemoryMax` is 160M instead of 64M. At 64M its cgroup
   evicted the page cache of the journals and programs it reads every minute and read them again
   (on a real server: about 300 MB a minute of re-reads); its own memory still stays under 20 MB.

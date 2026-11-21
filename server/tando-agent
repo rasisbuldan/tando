@@ -130,7 +130,7 @@ fi
 # cmd_releases, cmd_history, cmd_busy, cmd_info): they are only that FALLBACK, and go once the
 # agent itself is ported. (test/e2e-status.sh removes this block to compare the two.)
 case ${1:-} in
-  status|deploy-status|releases|history|busy|info)
+  status|status-follow|deploy-status|releases|history|busy|info)
     # only while the install's manifest (.versions, written after a complete set was installed) is
     # newer than this agent and tando-status: a new agent never execs an old tando-status that
     # lacks a verb (it would exit with a usage error); bash file tests, no fork
@@ -138,6 +138,9 @@ case ${1:-} in
           ! $R/bin/tando-status -nt $R/bin/.versions ]]; then
       case $1 in
         status) [[ -z ${2:-} ]] || valid_app "$2" || die "invalid app name";;
+        status-follow) # (status frames every 5 s from tandod's fast loop: tando status --follow)
+          need_root; [[ -z ${2:-} ]] || valid_app "$2" || die "invalid app name"
+          shopt -s execfail; exec "$R/bin/tando-status" follow ${2:+"$2"};;
         deploy-status|releases) valid_app "${2:-}" || die "invalid app name";;
         history) [[ ${3:-20} =~ ^[0-9]+$ ]] || die "bad count"
                  [[ -z ${2:-} ]] || valid_app "$2" || die "invalid app name";;
@@ -6418,6 +6421,7 @@ case $verb in
   rollback) cmd_rollback "$@";;
   deploy-status) cmd_deploy_status "$@";;
   status) cmd_status "$@";;
+  status-follow) die "no live view without tando-status: run tando host setup";;
   releases) cmd_releases_verb "$@";;
   history) cmd_history "$@";;
   env-set) cmd_env set "$@";;

@@ -37,7 +37,10 @@ cmd/tando-logs/         main: dispatches the verbs of tando-logs and version
 logs/                   domain: journals, request log, error scan, audit, log settings (structure below)
   journal/ reqlog/ errscan/ lines/   its parsers: no files, no commands, table, golden and fuzz tests
 cmd/tando-status/       main: dispatches the agent's read-only verbs and version; errors as "tando-agent: ..."
-status/                 domain: status, deploy-status, releases, history, busy, info (structure below)
+status/                 domain: status, deploy-status, releases, history, busy, info, follow (structure below)
+live/                   domain: tandod's 5 s loop for the live views: cgroup v2 files, /proc, statfs and
+                        the unit state over the daemon's bus; an hour in memory; starts nothing, writes
+                        nothing, feeds no alert (docs/MONITORING.md, "Live views")
 cmd/tando-host/         main: dispatches host care's verbs (status, check, care-*, update-*, reboot*, ...)
 hostcare/               domain: facts, findings, the summary file, care mode, the reboot rule (below)
 cmd/tando-offsite/      main: dispatches the verbs of tando-offsite and version
@@ -76,8 +79,8 @@ every domain package, `run` every one but metrics (which starts programs only th
 `kv`; status's `load`); `kvfile` logs, watch, apps (`load`/`save`); `atomicfile` metrics, watch,
 gate, logs, status (`save`, `atomic`, `put`); `lock` watch, gate, logs (`lockfile` + `flock -w`);
 `fsinfo` gate, logs, status, watch (`[[ -d ]]`, `[[ -f ]]`, df); `cksum` status, watch;
-`systemd` metrics, watch, status; `sdbus` status, daemon; `cgroup` metrics, watch, status (`app_cg`,
-`memstat`, `evcount`); `apps` metrics, watch, logs.
+`systemd` metrics, watch, status; `sdbus` status, daemon; `cgroup` metrics, watch, status, live (`app_cg`,
+`memstat`, `evcount`); `apps` metrics, watch, logs, live.
 
 **Duplicates that differ on purpose** (each a thin local wrapper over the shared code, with a
 comment saying why): watch's `clean` (a control becomes a space, invalid UTF-8 becomes U+FFFD,

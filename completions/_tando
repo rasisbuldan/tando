@@ -29,7 +29,7 @@ _tando() {
     'history:Deploys and rollbacks with their result and phase times, newest first. Without'
     'status:One app in detail - state, release, memory, cpu, the last 16 minutes, logs,'
     'ls:The apps of a server - state, when deployed, memory, cpu, uptime and link.'
-    'snapshot:Everything a dashboard shows of a server, in one ssh call per server - apps'
+    'snapshot:tando snapshot --json --follow [-H host]'
     'logs:The apps output (stdout and stderr), from its own journal on the server.'
     'start:Start a stopped app. Requests are held while it starts, so none is dropped.'
     'stop:Stop the app. Visitors get 503 <app> is stopped until tando start; jobs'
@@ -87,9 +87,9 @@ _tando() {
         rollback) subs="" flags="-H -a" args="apps" ;;
         releases) subs="" flags="-H --json -a" args="apps" ;;
         history) subs="" flags="-n -H --json -a" args="apps" ;;
-        status) subs="" flags="--watch -H --json --check -a" args="apps" ;;
-        ls) subs="" flags="-H --all --watch --json --check" args="" ;;
-        snapshot) subs="" flags="--json -H --all --app --range -a" args="" ;;
+        status) subs="" flags="--watch --follow -H --json --check -a" args="apps" ;;
+        ls) subs="" flags="-H --all --watch --follow --json --check" args="" ;;
+        snapshot) subs="" flags="--json -H --all --app --range -a --follow" args="" ;;
         logs) subs="pull" flags="-f -n --since --until --grep -i --regex -E -a -H --level --release --deploy --worker --json" args="apps" ;;
         start) subs="" flags="-H -a" args="apps" ;;
         stop) subs="" flags="-H -a" args="apps" ;;

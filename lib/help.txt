@@ -117,34 +117,40 @@ time of the release command (release = in tando.conf), when a deploy ran one.
 Example: tando history -n 10
 
 @@ status
-flags: -a= -H= --watch= --json --check
+flags: -a= -H= --watch= --follow --json --check
 args: 0-1
-usage: tando status [app] [--watch N] [-H host] [--json] [--check]
+usage: tando status [app] [--watch N | --follow] [-H host] [--json] [--check]
 One app in detail: state, release, memory, cpu, the last 16 minutes, logs,
 alerts, backups, releases and recent deploys. Outside a project and without
 an app it shows tando ls. --watch N repaints every N seconds (Ctrl-C stops).
+--follow: live, every 5 s, over one connection (the server pushes; an older
+server is asked every 5 s instead).
 --check: exit status 2 when the app is down or an alert fires (0 when not).
 Example: tando status --watch 2
 
 @@ ls
-flags: -H= --all --watch= --json --check
+flags: -H= --all --watch= --follow --json --check
 args: 0
-usage: tando ls [-H host] [--all] [--watch N] [--json] [--check]
+usage: tando ls [-H host] [--all] [--watch N | --follow] [--json] [--check]
 The apps of a server: state, when deployed, memory, cpu, uptime and link.
+--follow: live, every 5 s (as tando status --follow).
 --all: every registered server in one box, what needs attention first.
 --check: exit status 2 when an app is
 down, an alert fires or (with --all) a server does not answer; 0 when not.
 Example: tando ls --all
 
 @@ snapshot
-flags: -a= -H= --all --app= --range= --json
+flags: -a= -H= --all --app= --range= --json --follow
 args: 0
 usage: tando snapshot --json [-H host | --all] [--app A] [--range 1h|24h|7d]
+       tando snapshot --json --follow [-H host]
 Everything a dashboard shows of a server, in one ssh call per server: apps
 with their state and its reason, load, memory, disk, clock, versions, alerts.
 --app adds that app's releases, deploys (with who deployed), metrics over the
 range (every bucket present, null where there was no sample) and health.
 --all: every registered server in parallel, one JSON line each.
+--follow: one line every 5 s over one ssh session (the server's live view);
+exit status 3 at once when the server has none (then poll without it).
 
 @@ logs
 flags: -a= -H= -f -n= --since= --until= --grep= --regex -E -i --level= --release= --deploy= --worker= --json
@@ -188,7 +194,9 @@ args: 0-1
 usage: tando top [host] [--watch N] [--read-only]
 A live full-screen dashboard of every registered server: apps, graphs, logs
 and history; start, stop, restart and rollback from the keyboard (not with
---read-only). --watch N refreshes every N seconds (default 2). q quits.
+--read-only). Live: the servers push every 5 s over one ssh session each
+(an older server is asked every 2 s). --watch N asks every N seconds instead.
+q quits.
 
 @@ env
 flags: -a= -H= --show --names --note= --json
