@@ -112,36 +112,46 @@ configure_wait() {
 # start, restart, rollback, backup ...). When it has not answered within a second, it asks the
 # server what holds the app (verb busy) and says so on stderr with about how long, instead of
 # waiting in silence (a release soaking holds it up to its soak). stdin and stdout as `agent`.
+# The asking runs beside the call (aw_watch), so the answer is taken the moment it arrives: a
+# loop of 0.25 s sleeps here added up to a quarter of a second to every restart and rollback.
 agent_wait() {
-  local pid i=0 t0 rc=0 v=$1
+  local pid wpid rc=0 v=$1
   [ "$v" = sudo ] && v=$2
   cat > "$TMPD/aw.in"
   agent_raw "$@" < "$TMPD/aw.in" > "$TMPD/aw.out" &
   pid=$!
-  trap 'kill $pid 2> /dev/null; bail 130' INT TERM
-  # after 1 s, then every 2 s (at most 8 times), ask the server whether this call waits for the
-  # app's lock: only a call that waits says so (busy_waiting=1; an agent without that field: any
-  # holder), never one that is just slow (its own restart and health check hold the lock)
-  local q=0
-  while kill -0 $pid 2> /dev/null; do
-    sleep 0.25; i=$((i + 1))
-    [ $i -ge 4 ] && [ $(( (i - 4) % 8 )) = 0 ] && [ $q -lt 8 ] || continue
-    q=$((q + 1))
-    ERRF=$TMPD/aw.err agent_raw sudo busy "$APP" < /dev/null > "$TMPD/aw.busy" 2> /dev/null || continue
-    kv_read "$TMPD/aw.busy" busy busy_phase busy_left busy_soak busy_waiting busy_by
-    [ -n "$K_busy" ] && [ "$K_busy_waiting" != 0 ] || continue
-    t0=$(now)
-    BUSY_ID=$K_busy BUSY_PHASE=$K_busy_phase BUSY_LEFT=$K_busy_left BUSY_SOAK=$K_busy_soak BUSY_T=$t0
-    BUSY_BY=$(printf '%s' "$K_busy_by" | tr -cd 'a-z -')
-    busy_text
-    note "tando: waiting for $BUSY_WHAT; then $v runs"
-    break
-  done
+  aw_watch "$v" < /dev/null > /dev/null &
+  wpid=$!
+  trap 'kill $pid $wpid 2> /dev/null; bail 130' INT TERM
   wait $pid || rc=$?
+  kill $wpid 2> /dev/null; wait $wpid 2> /dev/null
   trap 'echo >&2; exit 130' INT
   trap 'exit 143' TERM
   cat "$TMPD/aw.out"
   [ $rc = 0 ] || bail 1
+}
+# aw_watch verb: after 1 s, then every 2 s (at most 8 times), whether the call waits for the app's
+# lock: only a call that waits says so (busy_waiting=1; an agent without that field: any holder),
+# never one that is just slow (its own restart and health check hold the lock). Killed by
+# agent_wait when the call ends: its sleep goes with it (no sleep left holding the caller's pipes)
+aw_watch() {
+  local q=0 sp=""
+  trap '[ -n "$sp" ] && kill $sp 2> /dev/null; exit 0' TERM
+  sleep 1 > /dev/null 2>&1 & sp=$!; wait $sp
+  while [ $q -lt 8 ]; do
+    q=$((q + 1))
+    if ERRF=$TMPD/aw.err agent_raw sudo busy "$APP" < /dev/null > "$TMPD/aw.busy" 2> /dev/null; then
+      kv_read "$TMPD/aw.busy" busy busy_phase busy_left busy_soak busy_waiting busy_by
+      if [ -n "$K_busy" ] && [ "$K_busy_waiting" != 0 ]; then
+        BUSY_ID=$K_busy BUSY_PHASE=$K_busy_phase BUSY_LEFT=$K_busy_left BUSY_SOAK=$K_busy_soak BUSY_T=$(now)
+        BUSY_BY=$(printf '%s' "$K_busy_by" | tr -cd 'a-z -')
+        busy_text
+        note "tando: waiting for $BUSY_WHAT; then $1 runs"
+        return 0
+      fi
+    fi
+    sleep 2 > /dev/null 2>&1 & sp=$!; wait $sp
+  done
 }
 
 # node_major: the Node.js major this project asks for: node = in tando.conf, .nvmrc, or
@@ -524,8 +534,11 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   node_install
   agent info > "$TMPD/info"
   proto_check "$TMPD/info"
-  kv_read "$TMPD/info" arch libc version glibc
+  kv_read "$TMPD/info" arch libc version glibc dswait
   version_notice "$K_version"
+  # deploy-status wait=<phase> (below): always for an admin (an agent without it ignores the word);
+  # through a deploy key's gate only when it says it takes it (an older gate refuses the call)
+  DSWAIT=1; [ -z "${DEPLOY_KEY:-}" ] || [ "$K_dswait" = 1 ] || DSWAIT=""
   if [ "$C_recipe" = container ] && [ -z "$C_image" ]; then
     ENGINE=$(command -v docker || command -v podman) ||
       die "the container recipe builds the image here: install docker or podman, or set image = <name>"
@@ -687,9 +700,10 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
 # act_follow id t0: follows the activation of release id until its result (K_* from deploy-status;
 # returns 0), or until it is live and soaking (the box closed, after_live done: returns 3)
 act_follow() {
-  local id=$1 t0=$2 errs=0 late=""
+  local id=$1 t0=$2 errs=0 late="" dsw=""
   trap 'echo; note "detached: release $id keeps activating on the server; follow it with tando status --watch 2"; exit 130' INT TERM
   SHOWN="" SOAKING="" QUEUED_SAID=""
+  [ -z "$DSWAIT" ] || dsw=wait=copy   # (the activation starts with the copy)
   # a deadline: an activation that neither ends nor dies is reported, not waited for forever
   local rto=0; [ -z "$C_release" ] || rto=${C_release_timeout:-300}
   # (counted from the end of a queue: a queued activation waits for the app up to an hour on the
@@ -697,15 +711,17 @@ act_follow() {
   local dlen=$(( 2 * ${C_timeout:-60} + ${C_soak:-${TANDO_SOAK:-30}} + rto + 900 ))
   local deadline=$(( $(now) + dlen ))
   while :; do
-    if ! agent_raw sudo deploy-status "$APP" "$id" > "$TMPD/ds"; then
-      errs=$((errs + 1))
+    # wait=<phase>: the server answers when the phase changes (or after 10 s) and says waited=1,
+    # one ssh call instead of a poll every 0.5 s; an older server answers at once without it
+    if ! agent_raw sudo deploy-status "$APP" "$id" ${dsw:+"$dsw"} > "$TMPD/ds"; then
+      errs=$((errs + 1)) dsw=""
       [ $errs -lt 60 ] || die "lost contact; the activation continues on the server: tando releases"
       sleep 1
       continue
     fi
     errs=0
     kv_read "$TMPD/ds" phase result message link venv t_copy t_preflight t_release t_switch t_verify soak \
-      waiting_for waiting_phase waiting_left
+      waiting_for waiting_phase waiting_left waited
     [ "$K_phase" = queued ] && deadline=$(( $(now) + dlen ))
     # queued behind another activation (its soak, a rollback): say for what, once
     if [ "$K_phase" = queued ] && [ -n "$K_waiting_phase" ] && [ -z "${QUEUED_SAID:-}" ]; then
@@ -734,11 +750,15 @@ act_follow() {
     # (past it, one more answer is asked for first: a laptop that slept through the activation
     # reports its result, not that it has not finished)
     if [ "$(now)" -gt "$deadline" ]; then
-      [ -n "$late" ] || { late=1; continue; }
+      [ -n "$late" ] || { late=1; dsw=""; continue; }
       ui_box_close "release $id: still activating after $(ui_dur $(( deadline - ${t0%.*} )))"
       die "the activation of $id has not finished; it may still be running on $HOST: tando status -a $APP, tando doctor"
     fi
-    sleep 0.5
+    # (an answer that waited and still shows the phase asked about: the server's 10 s were up, or
+    # it misbehaves; a pause all the same, so nothing can turn this into a busy loop)
+    [ "$K_waited" = 1 ] && [ "wait=$K_phase" != "$dsw" ] || sleep 0.5
+    dsw=""
+    [ -z "$DSWAIT" ] || case $K_phase in ""|*[!a-z]*) ;; *) dsw="wait=$K_phase";; esac
   done
   return 0
 }

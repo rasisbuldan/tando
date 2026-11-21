@@ -52,6 +52,7 @@ type Request struct {
 	Build     string   // VActivate: seconds, checked
 	Upload    string
 	ID        string // VDeployStatus: a release id
+	Wait      string // VDeployStatus: "wait=<phase>" or "" (the agent answers once past that phase)
 	HistoryN  string // VHistory: 1-3 digits ("20" when not given)
 	TokenSent bool   // the token was a word of the request (not on stdin)
 }
@@ -59,6 +60,7 @@ type Request struct {
 var (
 	requestCharsRe = regexp.MustCompile(`^[A-Za-z0-9_.:=/@,+ -]+$`)
 	releaseIDRe    = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}(-[0-9]{1,3})?$`)
+	waitRe         = regexp.MustCompile(`^wait=[a-z]{1,16}$`)
 	historyNRe     = regexp.MustCompile(`^[0-9]{1,3}$`)
 )
 
@@ -198,10 +200,16 @@ func ParseRequest(cmd string, want Want) (Request, error) {
 			return Request{}, bad
 		}
 	case VDeployStatus:
-		if len(args) != 1 || !releaseIDRe.MatchString(args[0]) {
+		if len(args) < 1 || len(args) > 2 || !releaseIDRe.MatchString(args[0]) {
 			return Request{}, bad
 		}
 		r.ID = args[0]
+		if len(args) == 2 {
+			if !waitRe.MatchString(args[1]) {
+				return Request{}, bad
+			}
+			r.Wait = args[1]
+		}
 	case VReleases, VStatus:
 		if len(args) != 0 {
 			return Request{}, bad

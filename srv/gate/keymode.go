@@ -73,7 +73,11 @@ func (g *Gate) dispatchKey(app string, req Request) error {
 		p := fmt.Sprintf("token=%s\nbuild=%s\nupload=%s\n", tok, req.Build, req.Upload)
 		return g.sudoRoot(app, "activate", strings.NewReader(p), 2*60*60)
 	case VDeployStatus:
-		return g.agentRO(func(f []string, l string) bool { return deployStatusKey(l) }, "deploy-status", app, req.ID)
+		a := []string{"deploy-status", app, req.ID}
+		if req.Wait != "" {
+			a = append(a, req.Wait)
+		}
+		return g.agentRO(func(f []string, l string) bool { return deployStatusKey(l) }, a...)
 	case VReleases:
 		// (release rows only: never the origin row, user@machine:path of the last deployer)
 		return g.agentRO(func(f []string, l string) bool { return f[0] == "rel" }, "releases", app)
@@ -142,11 +146,13 @@ func (g *Gate) info() error {
 		libc = "musl"
 	}
 	w.KV("libc", libc)
+	// deploy-status takes wait=<phase> here (an older gate refuses it: the client asks first)
+	w.KV("dswait", "1")
 	return w.Flush()
 }
 
 var deployStatusKeys = []string{"id", "phase", "result", "message", "link", "venv", "started", "soak",
-	"t_build", "t_upload", "t_copy", "t_preflight", "t_release", "t_switch", "t_verify", "waiting_for", "waiting_phase", "waiting_left"}
+	"t_build", "t_upload", "t_copy", "t_preflight", "t_release", "t_switch", "t_verify", "waiting_for", "waiting_phase", "waiting_left", "waited"}
 
 // deployStatusKey: a deploy-status line the key may see (no log= lines: they can carry
 // customer data).
