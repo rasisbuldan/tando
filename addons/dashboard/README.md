@@ -13,7 +13,8 @@ archive. Its version matches the tando CLI it is installed for (`VERSION`).
   build output is not committed, so the release build runs the web build first:
   `(cd web && npm ci && npm run build) && (cd server && go build ...)`. Developing the web app
   without a server: `web/dev/restart.sh` builds both and runs tando-dash against `web/dev/fake-tando.sh`
-  (fixtures; one reachable host, one not).
+  (fixtures; one reachable host, one not; the writes are emulated with state by `web/dev/fake-state.mjs`:
+  a slow deploy, a failing one, a busy restart, deploy refused for its origin, see the top of that file).
 
 ## Install, run, uninstall
 
@@ -82,7 +83,7 @@ the page shows "Session ended"). Errors are `{"error":{"code","message"}}`, the 
 | GET | `/open?code=` | none | none | the one-time code (60 s, single use); sets the cookie, 303 to `/` |
 | GET | `/`, `/theme.js`, other files | none | `assets/*` immutable, others no-cache | none (no data) |
 | POST | `/api/newcode` | none | none | `X-Tando-Dash-Key` from dash.lock (a second tando-dash) |
-| GET | `/api/ping` | none | none | cookie |
+| GET | `/api/ping` | none (answers `{ok, client}`: this machine's `user@machine` as tando records deploys) | none | cookie |
 | GET | `/api/snapshot?host=&app=&range=&visible=` | `snapshot --json -H <host> [--app <app> [--range 1h\|24h\|7d]]` | 10 s per (host, app, range), single flight | cookie |
 | GET | `/api/overview?visible=` | the snapshot above, per host, in parallel | as snapshot | cookie |
 | GET | `/api/doctor?host=` | `doctor <host> --json` | 60 s per host (also failures) | cookie |

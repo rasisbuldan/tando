@@ -300,7 +300,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/api/ping":
-		writeJSON(w, 200, map[string]any{"ok": true})
+		// client: user@machine as tando records it (lib/deploy.sh client_name), so the page can
+		// say before a deploy that the app was last deployed from another machine
+		writeJSON(w, 200, map[string]any{"ok": true, "client": clientName()})
 	case "/api/snapshot":
 		s.snapshot(w, r)
 	case "/api/overview":

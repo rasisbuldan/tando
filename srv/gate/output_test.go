@@ -40,3 +40,26 @@ func TestOutputClean(t *testing.T) {
 		}
 	}
 }
+
+// The agent's releases verb ends with an origin row (user@machine:path of the last deployer,
+// for the dashboard). A deploy key gets the release rows only: never who deployed from where.
+// (An admin reads the agent directly, not through the gate: tando releases shows the row there.)
+func TestKeyReleasesNoOrigin(t *testing.T) {
+	agentOut := "rel\t20261113-170102\tverified\t1\t0\nrel\t20261112-090000\tverified\t0\t1\norigin\talice@laptop:/src/alpha\n"
+	for _, verb := range []string{"releases", "status"} {
+		g, f := deployGate(t, "")
+		f.out = func(argv []string) ([]byte, error) { return []byte(agentOut), nil }
+		g.Caller.SSHCommand = g.P.Agent + " " + verb + " alpha"
+		if err := g.Key([]string{dashC, g.P.Gate + " key 0123456789ab"}); err != nil {
+			t.Fatal(err)
+		}
+		g.Stdout.Seek(0, 0)
+		b, _ := io.ReadAll(g.Stdout)
+		if strings.Contains(string(b), "origin") || strings.Contains(string(b), "alice@laptop") {
+			t.Errorf("%s: a deploy key got the origin row: %q", verb, b)
+		}
+		if strings.Count(string(b), "rel\t") != 2 {
+			t.Errorf("%s: release rows lost: %q", verb, b)
+		}
+	}
+}

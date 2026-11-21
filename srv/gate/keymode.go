@@ -75,6 +75,7 @@ func (g *Gate) dispatchKey(app string, req Request) error {
 	case VDeployStatus:
 		return g.agentRO(func(f []string, l string) bool { return deployStatusKey(l) }, "deploy-status", app, req.ID)
 	case VReleases:
+		// (release rows only: never the origin row, user@machine:path of the last deployer)
 		return g.agentRO(func(f []string, l string) bool { return f[0] == "rel" }, "releases", app)
 	case VHistory:
 		return g.agentRO(func(f []string, l string) bool { return f[0] == "hist" && len(f) > 1 && f[1] == app },

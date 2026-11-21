@@ -11,6 +11,7 @@ import { Table, Td, Th, Tr } from "@/components/ui/table";
 import { cn } from "@/lib/cn";
 import { refreshAll, snapshotPoller, useNowMs, usePoller } from "@/lib/resources";
 import { appKind, chartDomain, cpuMax, deployMarkers, describe, memoryTicks, niceMax, RANGE_S, roundTicks, restartsTotal, stateWithReason, toPoints, uptimeCells, type RangeKey } from "@/lib/shape";
+import { AppActions, ProgressPanel, useRollbackTo, type AppCtx } from "@/components/actions";
 import { DASH, fmtAgo, fmtBytes, fmtDateTime, fmtDur, fmtMs, fmtPct, fmtTime, pctOf } from "@/lib/format";
 
 const LogsTab = lazy(() => import("./tab-logs"));
@@ -36,6 +37,10 @@ export default function AppPage() {
   const kind = status ? appKind(status) : null;
   const deployer = d?.history.find((h) => h.release === status?.release)?.deployer;
   const alerts = v?.data?.alerts;
+  const ctx = useMemo<AppCtx | null>(() => (status ? {
+    host, app, state: status.state_reason ?? null, reachable: !!v?.reachable, origin: d?.origin, releases: d?.releases ?? [], live: status.release ?? null,
+  } : null), [host, app, status, v?.reachable, d?.origin, d?.releases]);
+  const rb = useRollbackTo(ctx);
 
   return (
     <>
@@ -49,8 +54,10 @@ export default function AppPage() {
             {" · "}<Mono>{host}</Mono>
           </>
         ) : <Mono>{host}</Mono>}
+        actions={ctx ? <AppActions ctx={ctx} /> : undefined}
       />
       <Freshness st={st} />
+      <ProgressPanel host={host} app={app} />
       <div role="tablist" aria-label="App" className="mb-4 flex h-10 items-end gap-4 overflow-x-auto border-b border-border">
         {TABS.map(([k, label]) => (
           <NavLink key={k} to={`/s/${encodeURIComponent(host)}/${app}/${k}`} role="tab" aria-selected={tab === k}
@@ -66,7 +73,7 @@ export default function AppPage() {
         tab === "overview" ? <OverviewTab d={d} v={v.data} app={app} range={range} setRange={setRange} nowS={nowS} />
           : tab === "deploys" ? (
             <>
-              <Section title="Releases">{d ? <ReleasesTable rows={d.releases} /> : <Loading h="h-24" />}</Section>
+              <Section title="Releases">{d ? <ReleasesTable rows={d.releases} rollback={rb} /> : <Loading h="h-24" />}</Section>
               <Section title="History">{d ? <HistoryTable rows={d.history} /> : <Loading h="h-24" />}</Section>
             </>
           ) : (
@@ -74,7 +81,7 @@ export default function AppPage() {
               {tab === "logs" ? <LogsTab host={host} app={app} releases={(d?.releases ?? []).map((r) => r.id)} />
                 : tab === "traffic" ? <TrafficTab host={host} app={app} d={d} nowS={nowS} />
                 : tab === "jobs" ? <JobsTab host={host} app={app} d={d} nowS={nowS} />
-                : tab === "env" ? <EnvTab host={host} app={app} d={d} nowS={nowS} />
+                : tab === "env" ? <EnvTab host={host} app={app} d={d} nowS={nowS} ctx={ctx} />
                 : <ChangesTab host={host} app={app} d={d} nowS={nowS} />}
             </Suspense>
           )

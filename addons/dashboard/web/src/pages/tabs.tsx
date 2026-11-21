@@ -21,8 +21,10 @@ import {
 } from "@/lib/pages";
 import { DASH, fmtDateTime, fmtDurShort, fmtMs, fmtSecs, shortId } from "@/lib/format";
 import type { AppDetail } from "@/lib/types";
+import { Act, blocked, useSlot, type AppCtx } from "@/components/actions";
+import { actions } from "@/lib/actions";
 
-interface TabProps { host: string; app: string; d: AppDetail | undefined; nowS: number }
+interface TabProps { host: string; app: string; d: AppDetail | undefined; nowS: number; ctx?: AppCtx | null }
 
 // ---------------- Traffic ----------------
 const CLASS_FILL: Record<string, string> = { "1xx": "text-faint", "2xx": "text-chart-1", "3xx": "text-chart-3", "4xx": "text-chart-2", "5xx": "text-chart-6" };
@@ -198,12 +200,18 @@ function JobDetail({ job, zone }: { job: Job; zone: string | null }) {
 }
 
 // ---------------- Env ----------------
-export function EnvTab({ host, app, nowS }: TabProps) {
+function SetVariable({ ctx }: { ctx: AppCtx }) {
+  const slot = useSlot(ctx.host, ctx.app);
+  return <Act why={blocked(ctx, slot, "env-set", null)} variant="primary" onClick={() => actions().open(ctx.host, ctx.app, "env-set")}>Set variable</Act>;
+}
+
+export function EnvTab({ host, app, nowS, ctx }: TabProps) {
   const names = usePoller(extraPoller("envnames", host, app));
   const log = usePoller(extraPoller("envlog", host, app));
   const rows = useMemo(() => envRows(names.data?.names, log.data?.entries), [names.data, log.data]);
   return (
     <>
+      {ctx && <div className="mb-3"><SetVariable ctx={ctx} /></div>}
       <Section title="Names" aside={<span className="text-xs text-muted-foreground">values are never shown</span>}>
         <ExtraBody st={names} what="env names">{(n) => n.names.length === 0 ? <Empty>No variables. Set one with <Command cmd={`tando env set KEY -H ${host}`} /></Empty> : (
           <div className="overflow-x-auto rounded-lg border border-border bg-card">

@@ -2,6 +2,8 @@
 # A fake tando for developing the web app without a server (never touches a real host):
 #   TANDO_CONFIG_DIR=/tmp/x/cfg (with hosts/web-1 and hosts/web-2 files) tando-dash --no-open --tando dev/fake-tando.sh
 # web-1 answers from the fixtures; web-2 is unreachable. Uses the repo's test/fixtures/json.
+# snapshot and the writes go to dev/fake-state.mjs (state in $TMPDIR/tando-dash-dev/state; which
+# app does what is at the top of that file).
 F=$(cd "$(dirname "$0")/../../../.." && pwd -P)/test/fixtures/json
 host=""; app=""; i=0; args=("$@")
 sub=${2:-}
@@ -9,18 +11,15 @@ while [ $i -lt $# ]; do case ${args[$i]} in -H) host=${args[$((i+1))]};; --app) 
 case $1 in
   --version) echo "tando 0.2.2";;
   help) echo "tando snapshot --json";;
-  snapshot)
-    if [ "$host" = web-2 ]; then cat "$F/snapshot-unreachable.sample.json"
-    elif [ -n "$app" ]; then cat "$F/snapshot-app.sample.json"
-    else cat "$F/snapshot.sample.json"; fi;;
+  snapshot|deploy|rollback|stop|start|restart) exec node "$(dirname "$0")/fake-state.mjs" "$@";;
   doctor) cat "$F/doctor.sample.json";;
   host) cat "$F/host-status.sample.json";;
-  # reads the M5 pages need (tando-dash does not allow these argv shapes yet: see the M5 notes)
   jobs) cat "$F/jobs.sample.json";;
   requests) cat "$F/requests.sample.json";;
   errors) cat "$F/errors.sample.json";;
   alerts) cat "$F/alerts.sample.json";;
-  env) case $sub in ls) cat "$F/env-ls.sample.json";; log) cat "$F/env-log.sample.json";; *) exit 2;; esac;;
+  history) cat "$F/history.sample.json";;
+  env) case $sub in ls) cat "$F/env-ls.sample.json";; log) cat "$F/env-log.sample.json";; set) exec node "$(dirname "$0")/fake-state.mjs" "$@";; *) exit 2;; esac;;
   logs)
     follow=0; for a in "$@"; do [ "$a" = -f ] && follow=1; done
     line() { printf '{"time":"t","usec":%s,"src":"app","unit":"tando-%s%s.service","priority":%s,"level":"x","msg":"%s"}\n' "$(( $(date +%s) * 1000000 + $1 ))" "$2" "$3" "$4" "$5"; }

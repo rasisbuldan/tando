@@ -29,6 +29,7 @@ export interface Health {
 export interface AppDetail {
   name: string; status: AppRow; releases: Release[]; history: HistoryRow[]; metrics: Metrics | null;
   health: Health | null; database: { bytes: Num; connections: Num; connection_limit: Num } | null;
+  origin?: string | null; // user@machine:path of the last deploy (deploy runs there)
 }
 export interface Snapshot {
   host: string; reachable: boolean; error?: string; checked_at: number; server_version?: string | null; client_version?: string | null;

@@ -46,14 +46,14 @@ export function HistoryTable({ rows }: { rows: HistoryRow[] }) {
   );
 }
 
-/** releases: live and rollback target tagged; no action buttons until M4 */
-export function ReleasesTable({ rows }: { rows: Release[] }) {
+/** releases: live and rollback target tagged; "Roll back to this" on every release that is not live */
+export function ReleasesTable({ rows, rollback }: { rows: Release[]; rollback?: { why: (id: string) => string | null; go: (id: string) => void } | null }) {
   if (rows.length === 0) return <Empty>No releases yet. Deploy with <code>tando deploy</code>.</Empty>;
   const target = rollbackTarget(rows);
   return (
     <div className="overflow-x-auto rounded-lg border border-border bg-card">
       <Table className="min-w-[560px]">
-        <thead><tr><Th className="w-[180px]">Release</Th><Th className="w-[170px]">Deployed</Th><Th className="w-[120px]">Status</Th><Th>Tags</Th></tr></thead>
+        <thead><tr><Th className="w-[180px]">Release</Th><Th className="w-[170px]">Deployed</Th><Th className="w-[120px]">Status</Th><Th>Tags</Th>{rollback && <Th className="w-[150px]"><span className="sr-only">Actions</span></Th>}</tr></thead>
         <tbody>
           {rows.map((r) => {
             const k = resultKind(r.status);
@@ -63,6 +63,7 @@ export function ReleasesTable({ rows }: { rows: Release[] }) {
                 <Td>{fmtDateTime(r.deployed_at)}</Td>
                 <Td><Badge kind={k.kind}>{k.word}</Badge></Td>
                 <Td><span className="inline-flex gap-2">{r.current && <Tag>live</Tag>}{r.id === target && <Tag>rollback target</Tag>}</span></Td>
+                {rollback && <Td>{!r.current && <RowRollback id={r.id} why={rollback.why(r.id)} go={rollback.go} />}</Td>}
               </Tr>
             );
           })}
@@ -70,4 +71,9 @@ export function ReleasesTable({ rows }: { rows: Release[] }) {
       </Table>
     </div>
   );
+}
+
+function RowRollback({ id, why, go }: { id: string; why: string | null; go: (id: string) => void }) {
+  const b = <Button disabled={!!why} onClick={() => go(id)} aria-label={`Roll back to ${id}`}>Roll back to this</Button>;
+  return why ? <Tip text={why}><span tabIndex={0} className="inline-flex rounded-md">{b}</span></Tip> : b;
 }

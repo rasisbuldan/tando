@@ -8,7 +8,7 @@ import { Table, Td, Th, Tr } from "@/components/ui/table";
 import { Tip } from "@/components/ui/tooltip";
 import { Mono, Missing, PhaseBar, PhaseLegend } from "@/components/bits";
 import { Empty, Freshness, Loading, PageHeader, RefreshButton, Section, SectionError } from "@/components/panel";
-import { allHistoryPoller, reachableApps } from "@/lib/extra";
+import { allHistoryPoller, historyHosts, reachableApps } from "@/lib/extra";
 import { overviewPoller, refreshAll, usePoller } from "@/lib/resources";
 import { NO_TIMELINE_FILTER, timeline, timelineKey, timelineOptions, type TimelineFilter } from "@/lib/pages";
 import { phases, resultKind } from "@/lib/shape";
@@ -20,8 +20,8 @@ const all = (what: string): [string, string] => ["", what];
 export default function DeploysPage() {
   const ov = usePoller(overviewPoller());
   const pairs = useMemo(() => reachableApps(ov.data), [ov.data]);
-  const key = pairs.map((p) => `${p.host}/${p.app}`).join(",");
-  const st = usePoller(allHistoryPoller(pairs));
+  const hosts = useMemo(() => historyHosts(ov.data), [ov.data]);
+  const st = usePoller(allHistoryPoller(hosts));
   const [f, setF] = useState<TimelineFilter>(NO_TIMELINE_FILTER);
   const [n, setN] = useState(PAGE);
   const rows = st.data?.rows;
@@ -78,7 +78,6 @@ export default function DeploysPage() {
           </>
         )}
       </Section>
-      <p className="sr-only">{key}</p>
     </>
   );
 }

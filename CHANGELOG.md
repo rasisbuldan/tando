@@ -6,6 +6,18 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added (dashboard add-on): the web app's writes: Deploy, Roll back (to the target, or "Roll back to
+  this" per release), Restart, Stop/Start and Set variable (Env tab; the value in a password field,
+  sent once in the request body, never stored). A confirmation names the action, app and server and
+  shows the command; one Idempotency-Key per action (a retry after a network error reuses it, a
+  double click sends once); a progress panel streams the output (Last-Event-ID resume), shows the
+  server's outcome, 409 with what runs and since when, a replay, and reattaches after a reload
+  (sessionStorage holds the key and app only). Deploy is off with the reason when tando has no
+  record of the app's folder or another machine deployed it last (`/api/ping` says `client`). The
+  Deploys page reads `/api/history` per server instead of one snapshot per app.
+- Security: a deploy key's `releases` never carries the app's `origin` row (the gate keeps the
+  release rows only; now tested).
+
 - Added (dashboard add-on): writes in tando-dash: deploy (from the folder tando recorded as the
   app's last deploy origin; refused for another machine's, a missing or a foreign folder), rollback
   (to the target or a release), stop, start, restart and env set (the value on stdin only). Progress
