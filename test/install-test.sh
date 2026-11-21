@@ -79,6 +79,12 @@ check_tree() {
   check "$L.3 '<command> --help' works for every command from the install${bad:+ (failed:$bad)}" test -z "$bad"
   out=$(cd "$E" && TANDO_CONFIG_DIR=$E/cfg "$P/bin/tando" ci github --help 2>&1)
   check "$L.4 'ci github --help' from the install" test $? = 0 -a -n "$out"
+  # the menu bar app builds from the installed tree alone (its Swift source must ship)
+  if [ "$(uname)" = Darwin ] && command -v swiftc > /dev/null 2>&1; then
+    out=$(cd "$E" && HOME=$E/home-$L TANDO_CONFIG_DIR=$E/cfg "$P/bin/tando" menubar build --out "$E/mb-$L" 2>&1)
+    check "$L.7 'menubar build' compiles the app from the install" \
+      eval 'test -x "$E/mb-$L/tando.app/Contents/MacOS/tando-menubar" || { printf "%s\n" "$out" | tail -5 >&2; false; }'
+  else skip "$L.7 'menubar build' needs macOS and swiftc"; fi
   out=$(cd "$E" && TANDO_CONFIG_DIR=$E/cfg "$P/bin/tando" version 2>&1)
   check "$L.5 'version' reports $(cat VERSION) from the install ($out)" \
     eval 'printf "%s" "$out" | grep -qF "$(cat VERSION)"'

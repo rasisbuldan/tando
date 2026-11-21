@@ -385,6 +385,7 @@ others: tando needs only a URL, and none of them is required).
 | **Heartbeat**: the server calls a URL every `heartbeat_every` minutes | the server is down, frozen or cut off; the checks stopped; no notifier can deliver | `tando alerts heartbeat` |
 | **Backup ping**: the server calls a URL once after the daily backups, when all of them worked | a backup that failed, did not run, or did not reach the offsite bucket | `tando alerts backup-ping` |
 | **An HTTP monitor of your public link** | DNS, the firewall, the provider's network, an expired domain or certificate: what a visitor sees | at the outside service, nothing in tando |
+| **The menu bar app** (macOS): your laptop requests every link and reaches every server each minute | the same, plus a server ssh cannot reach; a badge and a notification on the laptop | `tando menubar install` (only while the laptop is on and online: an addition to the heartbeat, not a replacement; docs/COMMANDS.md, "menubar") |
 
 - **Heartbeat.** Until one is set on a server that has apps, `tando doctor` shows a warning row
   (`heartbeat`, not a failure) and `tando alerts` says so in its header. Create a check at the

@@ -6,6 +6,18 @@ first, grouped by area.
 
 ## Unreleased
 
+- New: `tando menubar install` (macOS): a menu bar icon for every registered server, built from
+  source with `swiftc` (Command Line Tools only), signed ad hoc, started at login by a LaunchAgent.
+  Every minute it runs `tando ls --all --json` and requests each running app's link from the
+  laptop: a red count of the problems (a server it cannot reach, an app down or failed, a link
+  failing two checks in a row, a firing alert), dimmed when nothing could be checked, a
+  notification once per new problem and once when it clears. The menu lists each server's apps
+  with their links, the firing alerts, Refresh now and `tando status` in Terminal. It works only
+  while the laptop is on and online: it adds to `tando alerts heartbeat`, it does not replace it.
+  `uninstall`, `status`, `install --dry-run`; docs/COMMANDS.md, "menubar".
+- `tando ls --json` (and `ls --all --json`) has the server's alerts (`alerts`: app, check, state,
+  since, detail), as `status --json` has for one app.
+
 - New: one package of a monorepo deploys from its own directory (`cd apps/api && tando up`) with
   no extra settings, for pnpm and npm workspaces. tando up installs the workspace at its root on a
   fresh clone, builds in the package, and ships the package with every package it uses at run time
