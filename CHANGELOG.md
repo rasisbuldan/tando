@@ -6,6 +6,12 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: `tando alerts --json`: every firing or pending alert (with `silenced`) and every
+  notifier (last delivery, failures in a row, queued, error), with `reachable` and `checked_at`.
+- Changed: `tando host status --watch N` repaints at most once a minute (each refresh runs a full
+  collection on the server: sshd -T, systemctl, journalctl). Docs: the `logs` header comment says
+  times are GMT (as they are parsed); docs/STATUS.md S-R2 (logs follow reconnects) is fixed;
+  docs/TOP.md says tandod runs the metrics sample.
 - Changed: `tando ls --all` is a one-screen morning check: one box for every server, first what
   needs attention (a server not answering, an app down, an alert firing, host care to do, clock
   or version skew) with the command to look closer, then every app of every server with those

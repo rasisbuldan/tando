@@ -5,7 +5,7 @@
 #              [--release ID | --deploy ID] [--worker NAME] [--json]
 #   tando logs pull <file> [--since T] [--until T] [--grep ...] [--level L] [--json]
 #
-# T is relative (30s, 15m, 2h, 7d, 1w), absolute in the laptop's time zone (2026-11-13,
+# T is relative (30s, 15m, 2h, 7d, 1w), absolute in GMT, as the lines are shown (2026-11-13,
 # "2026-11-13 14:30", 2026-11-13T14:30:05, 14:30 = today), or @<epoch>.
 # The query travels to the server as key=value lines on stdin (never in the ssh command line);
 # the server checks every key and value, builds the journalctl argv itself and hands the pattern

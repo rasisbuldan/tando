@@ -133,6 +133,9 @@ hc_json() {
 host_status() {
   hc_opts
   hc_host "${HC_POS[0]:-}"
+  # each refresh is a full collection on the server (sshd -T, systemctl, journalctl): at most one
+  # a minute (the facts change hourly)
+  if [ -n "$WATCH" ] && [ "$WATCH" -lt 60 ]; then WATCH=60; fi
   watch_loop hc_render hc_fetch
 }
 

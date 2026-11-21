@@ -75,7 +75,19 @@ fetch_alerts() {
   NOW=$(now)
 }
 
+# alerts --json: one object for scripts and the menu bar app: every firing or pending alert and
+# every notifier (last delivery, failures in a row, the error), with reachable and checked_at
+alerts_json() {
+  printf '{"host":%s,"reachable":true,"checked_at":%s,"alerts":' "$(json_str "$HOST")" "$NOW"
+  awk -F '\t' -v OFS='\t' '$1 == "alert" { print $2, $3, $4, $5, $6, $8 }' "$TMPD/al" |
+    to_json "app:s,check:s,state:s,since:n,detail:s,silenced:b"
+  printf ',"notifiers":'
+  awk -F '\t' -v OFS='\t' '$1 == "notifier" { print $2, $3, $5, $6, $7, $9 }' "$TMPD/al" |
+    to_json "name:s,type:s,last_ok:n,failures:n,queued:n,error:s"
+  printf '}\n'
+}
 render_alerts() {
+  [ -z "$JSON" ] || { alerts_json; return 0; }
   local r a b c d e f g h i j nf=0 np=0 nok=0 nbad=0 run_state="" run_detail="" sum="" hc hf hv
   # what the server's tando-watch would be after tando alerts enable: the script, or (a Go
   # program) the binary of either CPU

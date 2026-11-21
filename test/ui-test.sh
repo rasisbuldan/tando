@@ -739,6 +739,15 @@ out=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; CFG=$(mktemp -d); 
   printf "target=admin@192.0.2.1\nport=22\nkind=admin\n" > "$CFG/hosts/vps"; host_use vps; printf "%s\n" "${SSHO[@]}"; rm -rf "$CFG"' _ "$here" 2>&1)
 if grep -qx 'ControlPersist=600' <<< "$out" && grep -qx 'ControlMaster=auto' <<< "$out"; then ok
 else bad "host_use: the shared connection does not persist 10 minutes ($out)"; fi
+# alerts --json: the alerts (with silenced) and notifiers (with their failures) as one object
+printf 'alert\tapi\thttp\tfiring\t1795200000\t5xx 12%%\tok\t1\t0\t3\nnotifier\tphone\tntfy\tntfy.sh/x\t1795100000\t2\t1\t-\tHTTP 500\t0\n' > "$tmp/al"
+out=$(mon_run '. "$TANDO_HOME/lib/cmd-alerts.sh"; JSON=1; NOW=1795200100; cp "$2" "$TMPD/al"; render_alerts' "$tmp/al")
+if printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d["alerts"][0]; n=d["notifiers"][0]; assert d["reachable"] is True and d["checked_at"] == 1795200100 and a["check"] == "http" and a["state"] == "firing" and a["silenced"] is True and n["failures"] == 2 and n["error"] == "HTTP 500"' 2> /dev/null; then ok
+else bad "alerts --json: not one object with alerts and notifiers ($out)"; fi
+# host status --watch: at most one full collection a minute (it runs sshd -T, systemctl, journalctl)
+out=$(mon_run '. "$TANDO_HOME/lib/hostcare.sh"; hc_opts() { :; }; hc_host() { :; }; watch_loop() { echo "every $WATCH"; }
+  WATCH=5; host_status; WATCH=120; host_status')
+if [[ $out == *"every 60"*"every 120"* ]]; then ok; else bad "host status --watch 5 is not held to 60 s ($out)"; fi
 # tando top: the firing check after the app's state, the count in the host strip
 out=$("$BASH_BIN" -c '
     . "$1/lib/ui.sh"; . "$1/lib/common.sh"; set +u; TAB=$(printf "\t"); AGENT_BIN=/opt/tando/bin/tando-agent; . "$1/lib/cmd-top.sh"

@@ -410,17 +410,18 @@ an alert fires (with `--all`: also a server that did not answer), 0 when nothing
 Example: `tando ls --all`
 
 ### alerts
-`tando alerts [--watch N]` · `enable` · `disable` · `test [name]` · `history [app] [-n N]` ·
+`tando alerts [--watch N] [--json]` · `enable` · `disable` · `test [name]` · `history [app] [-n N]` ·
 `set [key=value ...]` · `silence <app|all> <30m|2h|1d|off>` ·
 `notifier add <name> webhook|slack|telegram|ntfy|email` · `notifier rm <name>` · `notifier ls` ·
-`heartbeat [off]`. Flags: `-a -H --watch -n`. Default subcommand: show.
+`heartbeat [off]`. Flags: `-a -H --watch -n --json`. Default subcommand: show.
 What is firing on the server and where alerts go; checks run every minute (docs/MONITORING.md):
 the apps (down, health, memory, disk, failed jobs as `job.<name>`, a worker that keeps exiting as
 `worker.<name>` (new restarts in two checks in a row; `worker=off` turns it off), database connections as
 `db_conns`, ...) and the host (disk, memory, Caddy, `postgres`, ...). `set` without arguments lists
-every setting; `job=off`, `db_conns=off`, `postgres=off` turn the newest checks off, `db_conn_pct`
+every setting; `--json` (show): every firing or pending alert (app, check, state, since, detail,
+silenced) and every notifier (last delivery, failures in a row, queued, error). `job=off`, `db_conns=off`, `postgres=off` turn the newest checks off, `db_conn_pct`
 (80) and `db_conn_for` (5) are the connection threshold and its samples.
-`heartbeat [off]` · `backup-ping [off]`. Flags: `-a -H --watch -n`. Default subcommand: show.
+`heartbeat [off]` · `backup-ping [off]`. Flags: `-a -H --watch -n --json`. Default subcommand: show.
 What is firing on the server and where alerts go; checks run every minute (docs/MONITORING.md).
 Secrets are read without echo. `notifiers` = `notifier` (docs/DEV-NOTES.md, mismatch 9).
 Example: `tando alerts notifier add phone ntfy`
@@ -485,7 +486,8 @@ Example: `tando host setup vps apps_domain=apps.example.com tls=auto`
 `tando host reboot [name] [--now] [--yes] [--even-with-other-sites]`.
 Subcommands: status (0-1), care (0-3), update (0-1), reboot (0-1). The name defaults to `-H`,
 tando.conf or the only host. `status`: the machine, updates, security and health findings and a
-to-do list (exit 1 when something fails); `care`: what tando may do by itself; `update`: install
+to-do list (exit 1 when something fails; `--watch N` repaints at most once a minute: each
+refresh is a full collection on the server); `care`: what tando may do by itself; `update`: install
 the pending security updates (`--all`: every update); `reboot`: the safe reboot (docs/HOSTCARE.md).
 Example: `tando host status vps`
 
