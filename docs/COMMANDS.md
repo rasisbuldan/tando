@@ -106,7 +106,10 @@ One app in detail: state, release, memory, cpu, last 16 minutes, logs, alerts, i
 against the role's limit, as the alert checks last read them), backups, releases,
 recent deploys. Each worker (`worker.<name>` in tando.conf) has a line: `worker  queue  running
 restarts 0  memory 41 MB of 256 MB`; `restarting` when it exited and waits to be started again.
-Outside a project without an app it shows `tando ls`. `--watch N` repaints.
+Outside a project without an app it shows `tando ls`. `--watch N` repaints; the footer says how
+old the data is (`updated 2s ago`), and a refresh that fails or gets no answer within 15 s marks
+the screen: a red `not answering: <why>` line and `STALE: data 40s old, reconnecting` (the same
+in `tando ls`, `tando alerts` and `tando host status` with `--watch`).
 Example: `tando status --watch 2`
 
 ### logs

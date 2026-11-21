@@ -216,6 +216,7 @@ render_ls() {
     done < "$TMPD/st"
   } > "$TMPD/rows"
   ui_box_open "tando ls" "$HOST"
+  watch_stale_line
   host_line
   grep -q "^check${TAB}fail${TAB}caddy" "$TMPD/st" 2> /dev/null &&
     ui_box_line "${UI_RED}caddy is not running: no app is reachable (tando doctor)${UI_NC}"
@@ -230,7 +231,7 @@ render_ls() {
   na=$(grep -c "^alert${TAB}[^${TAB}]*${TAB}[^${TAB}]*${TAB}firing" "$TMPD/st")
   foot="$(plural $n app)"
   [ "$na" -gt 0 ] && foot="$foot  ${UI_RED}$(plural "$na" alert) firing: tando alerts${UI_NC}"
-  [ $n -gt 0 ] && foot="$foot ${UI_G_MID} tando status <app> for details"
+  [ $n -gt 0 ] && [ -z "$WATCH" ] && foot="$foot ${UI_G_MID} tando status <app> for details"
   ui_box_close "$foot ${UI_G_MID} $(watch_note)"
 }
 # restore_cut_text: the restorecut row (app, backup to restore again, safety backup, what was being
@@ -259,7 +260,20 @@ hc_hint() {
   done < "$TMPD/st"
   return 0
 }
-watch_note() { if [ -n "$WATCH" ]; then printf 'every %ss %s Ctrl-C stops' "$WATCH" "$UI_G_MID"; else date -u '+%H:%M:%S GMT'; fi; }
+# watch_note: the footer's time. Under --watch the age of the data on screen ("updated 3s ago"),
+# or, when the last refresh failed or timed out, that the numbers are stale and since when.
+watch_note() {
+  if [ -z "$WATCH" ]; then date -u '+%H:%M:%S GMT'; return; fi
+  local age=$((SECONDS - ${WATCH_OK:-$SECONDS}))
+  if [ -n "${WATCH_FAIL:-}" ]; then
+    printf '%sSTALE: data %s old, reconnecting%s %s Ctrl-C stops' "$UI_RED" "$(ui_dur "$age")" "$UI_NC$UI_DIM" "$UI_G_MID"
+  else printf 'updated %s ago %s every %ss %s Ctrl-C stops' "$(ui_dur "$age")" "$UI_G_MID" "$WATCH" "$UI_G_MID"; fi
+}
+# watch_stale_line: under --watch after a failed refresh, one red line saying why (top of a view)
+watch_stale_line() {
+  [ -n "$WATCH" ] && [ -n "${WATCH_FAIL:-}" ] || return 0
+  ui_box_wrap "${UI_RED}not answering: ${WATCH_FAIL}; the numbers below are from $(ui_dur $((SECONDS - ${WATCH_OK:-$SECONDS}))) ago${UI_NC}"
+}
 # app names per host for shell completions (never read over the network)
 cache_apps() {
   mkdir -p "$CFG/cache" 2> /dev/null || return 0
@@ -313,6 +327,7 @@ render_status() {
   upt=-
   [ "$state" = running ] && upt=$(ui_dur "$up")
   ui_box_open "$a" "$HOST"
+  watch_stale_line
   if [ "$state" = down ]; then
     ui_kv state "$(state_badge down) (not stopped by you)   ${UI_DIM}recipe${UI_NC} $recipe"
     ui_kv next "tando logs -a $a; then tando start -a $a"
@@ -804,7 +819,10 @@ cmd_doctor() {
   [ $fail -eq 0 ]
 }
 
-# watch_loop render fetch args...: one view, or repaint every $WATCH seconds
+# watch_loop render fetch args...: one view, or repaint every $WATCH seconds. Each refresh has
+# WATCH_TIMEOUT seconds (15); one that fails or takes longer repaints the last data with its age
+# and "reconnecting" (watch_note), never the old numbers as if they were new.
+WATCH_TIMEOUT=15
 watch_loop() {
   local render=$1 fetch=$2
   shift 2
@@ -812,13 +830,32 @@ watch_loop() {
   if [ -z "$WATCH" ]; then $render; return; fi
   trap 'UI_WINCH=1' WINCH
   trap 'exit 0' INT              # Ctrl-C is how a watch ends: not an error
+  WATCH_OK=$SECONDS WATCH_FAIL=""
   while :; do
     ui_frame_begin
     $render
     ui_frame_end
     sleep "$WATCH"
-    $fetch "$@" || sleep "$WATCH"
+    if watch_fetch "$fetch" "$@"; then WATCH_OK=$SECONDS WATCH_FAIL=""; NOW=$(now); fi
   done
+}
+# watch_fetch fetch args...: the fetch in the background, killed after WATCH_TIMEOUT seconds of
+# wall clock (a hung ssh must not freeze the screen); on failure WATCH_FAIL says why
+watch_fetch() {
+  local pid end rc
+  rm -f "$TMPD/wf.rc"
+  ( "$@" 2> "$TMPD/wf.err"; echo $? > "$TMPD/wf.rc" ) &
+  pid=$! end=$((SECONDS + WATCH_TIMEOUT))
+  while [ ! -s "$TMPD/wf.rc" ] && [ $SECONDS -lt $end ]; do sleep 0.2; done
+  if [ ! -s "$TMPD/wf.rc" ]; then
+    pkill -P "$pid" 2> /dev/null; kill "$pid" 2> /dev/null; wait "$pid" 2> /dev/null
+    WATCH_FAIL="no answer within $WATCH_TIMEOUT s"; return 1
+  fi
+  wait "$pid" 2> /dev/null; read -r rc < "$TMPD/wf.rc"
+  [ "$rc" = 0 ] && return 0
+  WATCH_FAIL=$(strip < "$TMPD/wf.err" 2> /dev/null | grep . | tail -1)
+  WATCH_FAIL=${WATCH_FAIL:-the refresh failed}
+  return 1
 }
 
 cmd_backup_ls() {

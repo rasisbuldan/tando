@@ -116,6 +116,7 @@ render_alerts() {
   done < "$TMPD/al"
 
   ui_box_open "alerts" "$HOST"
+  watch_stale_line
   case $run_state in
     ok) ui_kv checks "$(ui_badge ok running)  $run_detail";;
     warn) ui_kv checks "$(ui_badge deploying warning)  $run_detail";;
@@ -168,7 +169,7 @@ render_alerts() {
   ui_box_sep "recent"
   if [ "$(wc -l < "$TMPD/hi.rows")" -gt 1 ]; then ui_table "l,l,l,l,l:8-!1" < "$TMPD/hi.rows"
   else ui_box_line "no alerts yet"; fi
-  ui_box_close "alerts history ${UI_G_MID} set ${UI_G_MID} silence ${UI_G_MID} test" "$(date -u '+%H:%M:%S GMT')"
+  ui_box_close "alerts history ${UI_G_MID} set ${UI_G_MID} silence ${UI_G_MID} test" "$(watch_note)"
 }
 
 # alerts_install: put tando-watch on the server and enable its timer (also used by host setup)

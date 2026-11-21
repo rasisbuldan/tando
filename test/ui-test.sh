@@ -610,5 +610,39 @@ r=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/views.sh";
   printf "%s|%s|%s|%s" "$(ago 1835481540)" "$(ago 1797000000)" "$(ago 1764000000)" "$(ago 1795198380)"' _ "$here" 2>&1)
 if [[ $r == "2028-02-29 23:59 GMT|12-11 14:40 GMT|2025-11-24 16:00 GMT|27m ago" ]]; then ok; else bad "ago with the year: $r"; fi
 
+# ---- monitoring views (lib/views.sh) on stub status rows: tando ls / status rendered from a file
+# the stub agent prints; $tmp/mon.st holds the rows (host, app, alert, server, ...)
+mon_rows() { # the default stub: one host, apps web (running) and api (running, an alert firing)
+    local n; n=$(date +%s)
+    printf 'host\tvps\t2\t0.40\t2000000000\t500000000\t40000000000\t10000000000\t86400\n'
+    printf 'app\tweb\tactive\t3001\t20261101-101010\tok\t52428800\t134217728\t9000000000\t0\t3600\thttp://web.example.test\tnode\toff\t-\t-\t1000\t2000\t10\t0\t-\t-\t1024\t256\t-\n'
+    printf 'app\tapi\tactive\t3002\t20261101-101010\tok\t52428800\t134217728\t9000000000\t0\t3600\thttp://api.example.test\tnode\tdaily\t%s\t-\t1000\t2000\t10\t0\t-\t-\t1024\t256\t-\n' $((n - 30 * 3600))
+    printf 'alert\tapi\thttp\tfiring\t%s\t5xx 12%% of 300 requests\n' $((n - 120))
+}
+mon_run() { # code: run with the views loaded, the stub agent answering from $tmp/mon.st
+    "$BASH_BIN" -c '
+        . "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/deploy.sh"; . "$1/lib/views.sh"
+        TMPD=$(mktemp -d); CFG=$TMPD; HOST=vps; APP=""; JSON=""; WATCH=""; ui_init 80
+        resolve() { :; }
+        agent_raw() { cat "$MON_ST"; }
+        eval "$2"; rc=$?; rm -rf "$TMPD"; exit $rc' _ "$here" "$1" 2>&1
+}
+export MON_ST=$tmp/mon.st
+mon_rows > "$MON_ST"
+# --watch: a refresh that hangs is cut after WATCH_TIMEOUT and the next frame says the data is
+# stale and why; one that fails says so too (it used to repaint the old numbers silently)
+out=$(mon_run 'WATCH=1 WATCH_TIMEOUT=2; n=0
+  fetch() { [ -f "$TMPD/calls" ] || { : > "$TMPD/calls"; fetch_status; return; }; sleep 30; }
+  rend() { n=$((n + 1)); [ $n -ge 3 ] && exit 0; render_ls; }
+  s=$SECONDS; n=0; watch_loop rend fetch' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if [[ $out == *"updated 0s ago"*"every 1s"*"not answering: no answer within 2 s"*"STALE: data "*" old, reconnecting"* ]]; then ok
+else bad "ls --watch: a hung refresh does not show as stale ($out)"; fi
+out=$(mon_run 'WATCH=1; n=0
+  fetch() { [ -f "$TMPD/calls" ] || { : > "$TMPD/calls"; fetch_status; return; }; echo "ssh: connect to host vps port 22: Connection refused" >&2; return 255; }
+  rend() { n=$((n + 1)); [ $n -ge 3 ] && exit 0; APP=web; render_status; }
+  watch_loop rend fetch' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if [[ $out == *"not answering: ssh: connect to host vps port 22: Connection refused"*"STALE: data "* ]]; then ok
+else bad "status --watch: a failed refresh does not show as stale ($out)"; fi
+
 echo "$checks checks, $fails failed"
 [[ $fails == 0 ]]

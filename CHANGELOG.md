@@ -6,6 +6,10 @@ first, grouped by area.
 
 ## Unreleased
 
+- Fixed: `--watch` (ls, status, alerts, host status) no longer repaints old numbers as if they
+  were new. The footer says how old the data is (`updated 2s ago`); a refresh that fails, or gets
+  no answer within 15 s (it is cut there: a hung ssh used to freeze the screen), shows a red
+  `not answering: <why>` line and `STALE: data 40s old, reconnecting` until the server answers.
 - New: one package of a monorepo deploys from its own directory (`cd apps/api && tando up`) with
   no extra settings, for pnpm and npm workspaces. tando up installs the workspace at its root on a
   fresh clone, builds in the package, and ships the package with every package it uses at run time
