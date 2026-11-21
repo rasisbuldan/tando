@@ -6,6 +6,10 @@ first, grouped by area.
 
 ## Unreleased
 
+- Changed: the client's shared ssh connection stays open 10 minutes after the last command
+  (`ControlPersist=600`, was 60 s), so a `tando ls` a few minutes after the last one does not pay
+  a new ssh handshake (test server: 0.37 s cold, 0.25 s after 75 s idle with the change; more on
+  a real VPS). As before, a server whose host key changed is noticed on the next new connection.
 - Added: `tando ls --check` and `tando status --check`: exit status 2 when an app is down or an
   alert fires (with `--all`, also when a server does not answer), 0 when nothing needs attention;
   for scripts and the menu bar app, which reads `tando ls --all --json --check`.

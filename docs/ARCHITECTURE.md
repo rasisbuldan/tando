@@ -56,7 +56,7 @@ removed on exit; `ui_init` has run. Stable helpers:
 | Helper | Use |
 |---|---|
 | `resolve <0/1>` | settle `APP`/`HOST` from flags, tando.conf or the only host; 1 = app required. Sets `TARGET`, `SSHO` |
-| `host_use <name>` | select a registered host: sets `HOST`, `TARGET`, `SSHO` (ssh options incl. ControlMaster) |
+| `host_use <name>` | select a registered host: sets `HOST`, `TARGET`, `SSHO` (ssh options incl. ControlMaster; the shared connection stays 10 minutes after the last use, `ControlPersist=600`) |
 | `host_get <name> <key>` | read `target`, `port`, `key`, `insecure` from the registry |
 | `conf_load [file]` | parse tando.conf into `C_app`, `C_host`, `C_recipe`, ... `C_jobs` |
 | `agent_raw [sudo] <verb> <args...>` | run an agent verb; output stripped of control characters; returns its status. Arguments must match `[A-Za-z0-9_.:=/@,+-]+` |

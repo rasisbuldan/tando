@@ -271,7 +271,7 @@ host_use() {
     cp="$CTL_DIR/%C-$tag"
   fi
   SSHO=(-p "$(host_get "$1" port)" -o BatchMode=yes -o ControlMaster=auto -o "ControlPath=$cp"
-        -o ControlPersist=60 -o ServerAliveInterval=10 -o ConnectTimeout=5)
+        -o ControlPersist=600 -o ServerAliveInterval=10 -o ConnectTimeout=5)
   [ -n "$key" ] && SSHO+=(-i "$key" -o IdentitiesOnly=yes)
   if [ "$(host_get "$1" kind)" = deploy ]; then   # a deploy key's host entry (tando ci)
     . "$TANDO_HOME/lib/cmd-ci.sh"; ci_key_ui
