@@ -14,6 +14,9 @@ first, grouped by area.
 - Fixed: two deploys started at once from one project directory whose deploy lock was left by a
   killed deploy could both take it over and build into the same `.tando/stage`; now one does and
   the other says another deploy is running.
+- Fixed: a laptop that slept (or a CI runner that stalled) through a deploy's activation woke up to
+  "the activation has not finished" and exit status 1, though the release had gone live: the client
+  now asks for the result before it gives up at its deadline.
 - Added: live views every 5 s. tandod keeps a second loop beside the minute's checks (srv/live):
   every 5 s each app's memory, CPU, tasks and unit state and the host's load, memory, CPU and disk,
   from the cgroup v2 files, /proc and the bus connection it already has; no program started, no file
