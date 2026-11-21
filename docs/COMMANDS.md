@@ -100,7 +100,7 @@ Example: `tando history -n 10`
 ## Run
 
 ### status
-`tando status [app] [--watch N] [-H host] [--json] [--check]`. Flags also `-a`. Arguments: 0-1.
+`tando status [app] [--watch N | --follow] [-H host] [--json] [--check]`. Flags also `-a`. Arguments: 0-1.
 One app in detail: state, release, memory, cpu (the last minute: `12%  last minute`), last 16 minutes, logs, alerts, its database
 (`database  postgres  412 MB, 3 of 10 connections`: the size and the connections of its role
 against the role's limit, as the alert checks last read them), backups, releases,
@@ -111,7 +111,12 @@ Outside a project without an app it shows `tando ls`. `--watch N` repaints; the 
 old the data is (`updated 2s ago`), and a refresh that fails or gets no answer within 15 s marks
 the screen: a red `not answering: <why>` line and `STALE: data 40s old, reconnecting` (the same
 in `tando ls`, `tando alerts` and `tando host status` with `--watch`).
-Example: `tando status --watch 2`
+`--follow`: live, every 5 s, over one ssh session that stays open: the server pushes a frame
+(tandod's 5 s loop: state, memory, cpu over the last 5 s, restarts, load; the whole status once a
+minute and at once when an app changes state; docs/MONITORING.md, "Live views"). The footer says
+`live · updated 2s ago`; the cpu line says `last 5 s`. A server that cannot push (an older one,
+tandod not running, no cgroup v2) is asked every 5 s instead, as `--watch 5`. Also `tando ls --follow`.
+Example: `tando status --watch 2`, `tando status web --follow`
 
 ### logs
 `tando logs [app] [-f] [-n N] [--since T] [--until T] [--grep TEXT [-i] [--regex|-E]] [--level L] [--worker NAME] [--json]`
@@ -139,7 +144,11 @@ Example: `tando restart -a shop`
 ### top
 `tando top [host] [--watch N] [--read-only]`. Flags: `-H --watch --read-only`. Arguments: 0-1.
 Full-screen dashboard of every registered server: apps, graphs, logs, history; start, stop,
-restart and rollback from the keyboard unless `--read-only`. `--watch N` refresh (default 2 s).
+restart and rollback from the keyboard unless `--read-only`. Live by default: one ssh session per
+server for the whole session, the server pushing the status every 5 s (`tando status --follow`);
+releases, history and metrics of the selected app are still asked for, at most every 10 s. A server
+that cannot push (older, no tandod, no cgroup v2) is asked every 2 s. `--watch N`: ask every N
+seconds instead of following (the previous behaviour).
 `-n` does not exist (docs/DEV-NOTES.md, mismatch 3).
 Example: `tando top --read-only`
 
@@ -402,7 +411,7 @@ Example: `tando restore --from-host 3f9a01c2b7de --all -H newvps`
 ## Observe
 
 ### ls
-`tando ls [-H host] [--all] [--watch N] [--json] [--check]`. Arguments: none. `-a` is refused.
+`tando ls [-H host] [--all] [--watch N | --follow] [--json] [--check]`. Arguments: none. `-a` is refused.
 The apps of a server: state, deploy age, memory, cpu over the last minute (`CPU 1M`), uptime, link (never cut: other columns are
 dropped first at 80 columns). While an alert fires for an app, an ALERT column names the checks
 (`http`, `slow`, ...) and the footer counts them; `--json` has `alerts_firing` and `firing` per
@@ -426,8 +435,13 @@ an alert fires (with `--all`: also a server that did not answer), 0 when nothing
 Example: `tando ls --all`
 
 ### snapshot
-`tando snapshot --json [-H host | --all] [--app A [--range 1h|24h|7d]]`. Flags: `-a -H --all
---app --range --json`. Arguments: none.
+`tando snapshot --json [-H host | --all] [--app A [--range 1h|24h|7d]]`,
+`tando snapshot --json --follow [-H host]`. Flags: `-a -H --all
+--app --range --json --follow`. Arguments: none.
+`--follow` (one host, no app): the same line as without `--app`, every 5 s, until killed, from the
+frames the server pushes over one ssh session (`tando status --follow`); exit status 3 at once,
+nothing printed, when the server has no live view (then poll without `--follow`). The dashboard
+uses it.
 Everything a dashboard shows of a server in ONE ssh exec per host (as `tando top` reads its
 data): one JSON document per host, one per line; `--all` asks every registered server in
 parallel, each with a timeout (`TANDO_SNAPSHOT_TIMEOUT`, 15 s); a server that did not answer is

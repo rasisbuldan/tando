@@ -97,6 +97,21 @@ func AskStatus(ctx context.Context, app string) ([]byte, bool) {
 	return a.Body, true
 }
 
+// AskLive asks tandod for `live [app]`, the fast loop's latest point (5 s). ok is true only for
+// an "ok" answer: an older daemon does not know the verb, and one on a host without cgroup v2
+// answers "err"; either way the caller has no live rows (tando-status follow: the client polls).
+func AskLive(ctx context.Context, app string) ([]byte, bool) {
+	var args []string
+	if app != "" {
+		args = []string{app}
+	}
+	a, ok := ask(ctx, delegated{"live", 5 * time.Second}, args)
+	if !ok || !a.OK {
+		return nil, false
+	}
+	return a.Body, true
+}
+
 func ask(ctx context.Context, d delegated, args []string) (Answer, bool) {
 	r, err := FromArgs(d.Verb, args)
 	if err != nil {

@@ -15,6 +15,11 @@
 #   long history list only while the history view is open. A fetch that runs longer than
 #   TOP_TIMEOUT seconds is killed and the host is shown as not answering, with its last data
 #   greyed and aged.
+# - Live (without --watch): one `tando-agent status-follow` per host for the whole session; the
+#   server pushes the status rows every 5 s (tandod's live view) into $TD/h<i>.L0/.L1 (top_follow),
+#   and the fetches above then run only for what the views add (releases, history, metrics),
+#   at most every 10 s. A host whose follow ends without a frame (an older server, no tandod, no
+#   cgroup v2) is polled as with --watch 2.
 # - Server output is read with `read` into whitelisted row types and only ever printed.
 # - The terminal is restored on every exit path (q, Ctrl-C, SIGTERM, SIGHUP, errors): the EXIT
 #   trap leaves the alternate screen, shows the cursor and restores the saved stty modes.
@@ -25,11 +30,11 @@ top_usage() { usage_err "usage: tando top [host] [--watch N] [--read-only]"; }
 
 cmd_top() {
   local h i
-  TOP_INT=2 TOP_RO=0 TOP_FIRST=""
+  TOP_INT=2 TOP_RO=0 TOP_FIRST="" TOP_LIVE=1
   while [ $# -gt 0 ]; do
     case $1 in
       top) shift;;
-      --watch) { is_num "${2:-}" && [ "$2" -ge 1 ]; } || top_usage; TOP_INT=$2; shift 2;;
+      --watch) { is_num "${2:-}" && [ "$2" -ge 1 ]; } || top_usage; TOP_INT=$2 TOP_LIVE=""; shift 2;;
       --read-only) TOP_RO=1; shift;;
       -H) TOP_FIRST=${2:-}; shift 2;;
       -*) top_usage;;
@@ -57,6 +62,8 @@ cmd_top() {
   for ((i = 0; i < ${#TH_NAME[@]}; i++)); do
     TH_ST[i]=new TH_ERR[i]="" TH_OKAT[i]=-1 TH_PID[i]="" TH_T0[i]=0 TH_DUE[i]=0 TH_CLK[i]=0
     TH_LOAD[i]=0 TH_CPUS[i]=1 TH_MT[i]=0 TH_MU[i]=0 TH_DT[i]=0 TH_DU[i]=0 TH_NAPPS[i]=0 TH_NBAD[i]=0 TH_NFIRE[i]=0 TH_FIRING[i]=""
+    TH_FPID[i]="" TH_LSEQ[i]=0 TH_LIVE[i]="" TH_FRETRY[i]=0
+    if [ -n "$TOP_LIVE" ]; then top_follow "$i" < /dev/null > /dev/null 2>&1 & TH_FPID[i]=$!; fi
   done
   TOP_KEYED=1 TOP_VIEW=main TOP_DETAIL=1 TOP_CDETAIL=0 TOP_MODAL="" SEL_APP="" SEL=0 TOP_DIRTY=1 AP_N=0
   D_APP="" D_NEED=1 D_DUE=0 D_REL=() D_HIST=() HV_ROWS=() HV_TOP=0 LOG_TOP=0 LOG_FOLLOW=1
@@ -78,7 +85,7 @@ cmd_top() {
 top_cleanup() {
   local p
   trap - EXIT INT TERM HUP WINCH
-  for p in "${TH_PID[@]}" $LOG_PID $TOP_ACT_PID; do
+  for p in "${TH_PID[@]}" "${TH_FPID[@]}" $LOG_PID $TOP_ACT_PID; do
     [ -n "$p" ] || continue
     pkill -P "$p" 2> /dev/null; kill "$p" 2> /dev/null
   done
@@ -123,8 +130,29 @@ top_ticking() {
 # ---- background jobs ------------------------------------------------------------------------
 
 top_poll() {
-  local i rc
+  local i rc sq every
   for ((i = 0; i < ${#TH_NAME[@]}; i++)); do
+    if [ -n "${TH_FPID[i]}" ]; then   # the live frames (top_follow)
+      sq=""
+      [ -f "$TD/h$i.Lseq" ] && read -r sq < "$TD/h$i.Lseq"
+      if ui_int "$sq" && [ "$sq" != "${TH_LSEQ[i]}" ]; then
+        TH_LSEQ[i]=$sq TH_LIVE[i]=1 TH_GOOD[i]="$TD/h$i.L$(((sq - 1) % 2))"
+        TH_ST[i]=ok TH_ERR[i]="" TH_OKAT[i]=$SECONDS
+        top_parse "$i" 1; TOP_DIRTY=1
+      elif ! kill -0 "${TH_FPID[i]}" 2> /dev/null; then
+        TH_FPID[i]="" TH_LIVE[i]="" TH_FRETRY[i]=$((SECONDS + 60))   # it ended: polled for now
+      elif [ "${TH_LIVE[i]}" = 1 ] && [ $((SECONDS - TH_OKAT[i])) -ge $TOP_TIMEOUT ]; then
+        # no frame for a while (a server gone without a word): polled, which says why
+        pkill -P "${TH_FPID[i]}" 2> /dev/null; kill "${TH_FPID[i]}" 2> /dev/null
+        TH_FPID[i]="" TH_LIVE[i]="" TH_FRETRY[i]=$((SECONDS + 60)) TH_DUE[i]=0
+      fi
+    elif [ -n "$TOP_LIVE" ] && [ "${TH_ST[i]}" = ok ] && [ "$SECONDS" -ge "${TH_FRETRY[i]}" ]; then
+      rm -f "$TD/h$i.Lseq"; TH_LSEQ[i]=0   # it answers again: follow again
+      top_follow "$i" < /dev/null > /dev/null 2>&1 &
+      TH_FPID[i]=$!
+    fi
+    every=$TOP_INT
+    [ "${TH_LIVE[i]}" = 1 ] && every=10
     if [ -n "${TH_PID[i]}" ]; then
       rc=""
       [ -f "$TD/h$i.rc" ] && read -r rc < "$TD/h$i.rc"
@@ -132,18 +160,43 @@ top_poll() {
         : > "$TD/h$i.rc"              # consumed (truncate: no fork)
         TH_PID[i]=""
         top_take "$i" "$rc"
-        TH_DUE[i]=$((SECONDS + TOP_INT)); TOP_DIRTY=1
+        TH_DUE[i]=$((SECONDS + every)); TOP_DIRTY=1
       elif [ $((SECONDS - TH_T0[i])) -ge $TOP_TIMEOUT ]; then
         pkill -P "${TH_PID[i]}" 2> /dev/null; kill "${TH_PID[i]}" 2> /dev/null
         TH_PID[i]="" TH_ST[i]=err TH_ERR[i]="no answer within $TOP_TIMEOUT s"
-        TH_DUE[i]=$((SECONDS + TOP_INT)); TOP_DIRTY=1
+        TH_DUE[i]=$((SECONDS + every)); TOP_DIRTY=1
       fi
     fi
-    if [ -z "${TH_PID[i]}" ] && [ "$SECONDS" -ge "${TH_DUE[i]}" ]; then top_fetch "$i"; fi
+    if [ -z "${TH_PID[i]}" ] && [ "$SECONDS" -ge "${TH_DUE[i]}" ] && top_wants "$i"; then top_fetch "$i"; fi
   done
   if [ -n "$TOP_ACT_PID" ] && [ -f "$TD/act.rc" ]; then top_act_done; fi
   if [ "$TOP_VIEW" = log ]; then top_log_read; fi
   return 0
+}
+
+# top_wants i: a fetch is needed: always without live frames; with them only on the selected host
+# while a view shows what status does not have (releases and history, metrics, the history list)
+top_wants() {
+  [ "${TH_LIVE[$1]}" = 1 ] || return 0
+  [ "$1" = "$TOP_H" ] && [ -n "$SEL_APP" ] || return 1
+  [ "$TOP_VIEW" != main ] || [ "$TOP_DETAIL" = 1 ] || [ "$TOP_CDETAIL" = 1 ]
+}
+
+# top_follow i: `tando-agent status-follow` on host i for the whole session: each frame (between
+# "@frame <epoch>" and "@end") goes to $TD/h<i>.L0 or .L1 in turn, with a clock row of the frame's
+# time, and its number to $TD/h<i>.Lseq once complete (top_poll reads the file it names; the
+# other one is written next, 5 s later). Builtins only per line: no fork.
+top_follow() {
+  local i=$1 n=0 l f=/dev/null
+  # lint: allow RL04 AGENT_BIN is a constant path
+  "${TH_SSH[i]}" -n "${TH_TARGET[i]}" "sudo -n $AGENT_BIN status-follow" 2> "$TD/h$i.Lerr" |
+  while IFS= read -r l; do
+    case $l in
+      "@frame "*) f="$TD/h$i.L$((n % 2))"; printf 'clock\t%s.000\n' "${l#@frame }" > "$f";;
+      @end) n=$((n + 1)); printf '%s\n' "$n" > "$TD/h$i.Lseq";;
+      *) printf '%s\n' "$l" >> "$f";;
+    esac
+  done
 }
 
 # The remote command for host i: status, plus what the visible views need.
@@ -812,10 +865,11 @@ top_keys_main() {
 }
 
 top_title_right() {
-  local i=$TOP_H
-  UI_RET="every ${TOP_INT}s"
+  local i=$TOP_H every="every ${TOP_INT}s"
+  [ "${TH_LIVE[i]}" = 1 ] && every=live
+  UI_RET=$every
   if [ "${TH_OKAT[i]}" -ge 0 ]; then
-    ui_dur_v $((SECONDS - TH_OKAT[i])); UI_RET="updated $UI_RET ago ${UI_G_MID} every ${TOP_INT}s"
+    ui_dur_v $((SECONDS - TH_OKAT[i])); UI_RET="updated $UI_RET ago ${UI_G_MID} $every"
   fi
 }
 

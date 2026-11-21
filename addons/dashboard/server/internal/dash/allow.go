@@ -51,6 +51,9 @@ var shapes = []shape{
 	{name: "snapshot", verb: []string{"snapshot"}, flags: map[string]flagRule{
 		"--json": {vNone, true}, "-H": {vHost, true}, "--app": {vApp, false}, "--range": {vRange, false}},
 		needs: map[string]string{"--range": "--app"}},
+	// the live view (live.go): one host, no app, a line every 5 s until it is stopped
+	{name: "snapshot-follow", verb: []string{"snapshot"}, flags: map[string]flagRule{
+		"--json": {vNone, true}, "-H": {vHost, true}, "--follow": {vNone, true}}},
 	{name: "doctor", verb: []string{"doctor"}, pos: []valueKind{vHost},
 		flags: map[string]flagRule{"--json": {vNone, true}}},
 	{name: "hoststatus", verb: []string{"host", "status"}, pos: []valueKind{vHost},
@@ -281,6 +284,10 @@ func argvSnapshot(host, app, rng string) []string {
 		}
 	}
 	return a
+}
+
+func argvSnapshotFollow(host string) []string {
+	return []string{"snapshot", "--json", "--follow", "-H", host}
 }
 
 func argvDoctor(host string) []string     { return []string{"doctor", host, "--json"} }
