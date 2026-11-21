@@ -192,17 +192,26 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         self.mode = mode
         super.init()
         guard mode == "auto", Bundle.main.bundleIdentifier != nil else { return }
+        waiting = []   // notes of the first check wait for the answer to the permission request
         let c = UNUserNotificationCenter.current()
         c.delegate = self
         c.requestAuthorization(options: [.alert, .sound]) { granted, error in
             // granted: the system's notifications. An error (e.g. a bundle the system will not
             // register) falls back to osascript; a "no" from the user is respected (nothing shown).
-            DispatchQueue.main.async { self.useCenter = granted; self.denied = !granted && error == nil }
+            DispatchQueue.main.async {
+                self.useCenter = granted
+                self.denied = !granted && error == nil
+                let w = self.waiting ?? []
+                self.waiting = nil
+                w.forEach(self.post)
+            }
         }
     }
     private var denied = false
+    private var waiting: [Note]? = nil
     func post(_ n: Note) {
         if mode == "off" || denied { return }
+        if waiting != nil { waiting?.append(n); return }
         if useCenter {
             let c = UNMutableNotificationContent()
             c.title = n.title

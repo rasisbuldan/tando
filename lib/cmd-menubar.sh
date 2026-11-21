@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# help: menubar install [--dry-run] | uninstall [--dry-run] | status | build --out DIR   macOS menu bar app
+# help: menubar install [--dry-run] | uninstall [--dry-run] | status | build --out DIR   menu bar icon with a problem badge (macOS)
 #
 # lib/cmd-menubar.sh: `tando menubar`, the macOS menu bar app (macos/menubar/*.swift). bash 3.2.
 # install compiles it with swiftc (Command Line Tools are enough), makes ~/Applications/tando.app
