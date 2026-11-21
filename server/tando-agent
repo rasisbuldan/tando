@@ -6375,7 +6375,8 @@ job_spread_for() {
   local o; o=$(systemd-analyze calendar --iterations=2 "$1" 2> /dev/null)
   # (the "(in UTC)" lines are there only when the server's zone is not UTC)
   t=$(sed -n 's/^ *(in UTC): //p' <<< "$o" | head -2)
-  [[ $t == ?*$'\n'?* ]] || t=$(sed -n 's/^ *Next elapse: //p; s/^ *Iter\. #2: //p' <<< "$o" | head -2)
+  # (the second time: "Iter. #2:" in older systemd, "Iteration #2:" in 259)
+  [[ $t == ?*$'\n'?* ]] || t=$(sed -n 's/^ *Next elapse: //p; s/^ *Iter\. #2: //p; s/^ *Iteration #2: //p' <<< "$o" | head -2)
   [[ $t == ?*$'\n'?* ]] || { echo "$JOB_SPREAD"; return 0; }
   t=$(( $(date -d "$(tail -1 <<< "$t")" +%s 2> /dev/null || echo 0) - $(date -d "$(head -1 <<< "$t")" +%s 2> /dev/null || echo 0) ))
   ((t > 0)) || { echo "$JOB_SPREAD"; return 0; }

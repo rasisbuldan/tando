@@ -266,6 +266,10 @@ check "U10c daily: still at most 10 minutes" eq "$(A1=86400 A2=172800 sf)" 600
 check "U10i a server in UTC (no \"(in UTC)\" lines): the same" eq "$("$BASH" -c 'eval "$1"; JOB_SPREAD=15 JOB_SPREAD_MAX=600
     systemd-analyze() { printf "  Next elapse: @900\n     From now: x\n     Iter. #2: @1800\n"; }
     date() { local x=$2; echo "${x#@}"; }; job_spread_for "*:0/15"' _ "$(agent_fn job_spread_for)")" 150
+# shellcheck disable=SC2016
+check "U10j ... and systemd 259's \"Iteration #2:\"" eq "$("$BASH" -c 'eval "$1"; JOB_SPREAD=15 JOB_SPREAD_MAX=600
+    systemd-analyze() { printf "    Next elapse: @900\n       From now: x\n   Iteration #2: @1800\n"; }
+    date() { local x=$2; echo "${x#@}"; }; job_spread_for "*:0/15"' _ "$(agent_fn job_spread_for)")" 150
 check "U10d timers get a fixed offset (FixedRandomDelay)" grep -q "RandomizedDelaySec=%s.nFixedRandomDelay=yes" "$ROOT/server/tando-agent"
 js() { # function args... (slots: $T/jobslots; units in $T/busy run)
   # shellcheck disable=SC2016
