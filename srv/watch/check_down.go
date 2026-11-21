@@ -114,6 +114,8 @@ func checkDown(t *tick, a *appTick) {
 		a.down = "nounit"
 	case a.hold:
 		a.down = "hold"
+	case a.idle && st == "inactive":
+		a.down = "idle" // (idle_stop) stopped for want of requests: started by the next one
 	case st == "active":
 		a.down = "ok"
 		if a.newRestarts >= 2 {
@@ -131,7 +133,7 @@ func checkDown(t *tick, a *appTick) {
 	}
 	k := a.key("down")
 	switch {
-	case a.down == "stopped":
+	case a.down == "stopped" || a.down == "idle":
 		if t.st.get(k+".st") != "" {
 			t.sample(k, a.name, "down", ok, "", 1)
 		}

@@ -797,6 +797,22 @@ the next deploy; per host with `tando host setup <host> key=value`.
 | host `conn_rate=` | 100 | new connections a second per client address, burst 3x | further SYNs are dropped: the client retries a second later |
 | host `rate_limit=` | auto | on, off, or auto: on only where tando owns Caddy (it installed it, or the Caddyfile has no other site) | `tando doctor` row "client limits" shows how often they tripped |
 
+### Scale to zero: idle_stop
+
+`idle_stop = 6h` (also `10m`, `30s`; `on` is 6h; default off) stops the app's web process after
+that long without a request and starts it again on the next one, so an app nobody uses holds
+no memory. Only the web process: the app's workers and scheduled jobs run as before. For node,
+next and python apps; not for static sites (they have no process) nor containers. How: Caddy proxies to the app's wake socket `/run/tando-wake/<app>.sock` (systemd's,
+group caddy) instead of its port. A connection there starts `tando-<app>_wake.service`
+(`systemd-socket-proxyd` as the app's user, `--exit-idle-time=<idle_stop>`), which needs
+`tando-<app>.service`; that unit is ready once its port answers and stops when the proxy exits
+(`StopWhenUnneeded`). The first request waits in the socket's queue while the app starts: about
+0.1-0.3 s for a small Node or Go app (docs/ARCHITECTURE.md has none of this yet; the numbers are
+in the squeeze audit). `tando ls` shows such an app as `idle`; the monitor asks its health on its
+port only while it runs (a probe through Caddy would keep it awake) and raises no down alert while
+it is idle; the per-minute recovery leaves it idle. A deploy of an idle app starts the new release
+(it goes idle again later). Caddy keeps no pooled connection to it (`keepalive off`), so the
+timer starts with the last request. A restart stops requests in flight.
 ### Database connections and pgbouncer
 
 Apps with `database = postgres` share one PostgreSQL. `tando host setup` sizes it from the

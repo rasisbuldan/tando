@@ -55,6 +55,9 @@ func AppRow(f AppFacts, host kv, uptime int64) []string {
 			state = "active"
 		}
 	}
+	if state == "inactive" && C.get("idle_stop") != "" && C.get("idle_stop") != "off" && C.get("recipe") != "static" {
+		state = "idle" // (idle_stop) waits for its next request
+	}
 	if S.get("down") != "" {
 		state = "failed"
 	}

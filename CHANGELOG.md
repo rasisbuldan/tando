@@ -6,6 +6,11 @@ first, grouped by area.
 
 ## Unreleased
 
+- New: `idle_stop = 6h` in tando.conf (scale to zero; `on` = 6h): the app's web process stops
+  after that long without a request and its next request starts it (workers and jobs run on) (systemd socket activation and systemd-socket-proxyd
+  behind Caddy; the first request waits about 0.1-0.3 s for a small app). `tando ls` says
+  `idle`; the monitor and the per-minute recovery do not wake it. Not for static sites,
+  containers (docs/COMMANDS.md, "Scale to zero").
 - Scale: a server holds 100 apps and more (tuned for 4 vCPU / 8 GB). Upgrade with
   `tando host setup <host>`; apps keep their ports, users and settings.
   - Ports: the app range is 4100-4999 (was 4100-4199: app 101 was refused), set with `port_min=`

@@ -52,6 +52,7 @@ type appTick struct {
 	unit          map[string]string // its systemctl show properties (nil for a static app)
 	hasUnit       bool              // not static (Caddy serves static apps' files)
 	stopped, hold bool
+	idle          bool   // idle_stop is set: inactive is the app waiting for its next request
 	down          string // ok, bad, hold, stopped, nounit
 	newRestarts   int64
 	exitInfo      string // how its main process last ended
@@ -241,6 +242,7 @@ func (t *tick) loadApp(a string) *appTick {
 	at := &appTick{name: a, conf: conf, state: state, hold: t.holdAll, down: "hold"}
 	at.hasUnit = conf["recipe"] != "static"
 	at.stopped = state["stopped"] != "" && state["stopped"] != "0"
+	at.idle = at.hasUnit && conf["recipe"] != "container" && conf["idle_stop"] != "" && conf["idle_stop"] != "off"
 	at.unit = t.units[a]
 	return at
 }
