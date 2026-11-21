@@ -450,7 +450,9 @@ func TestLogsHostCap(t *testing.T) {
 }
 
 func TestLogsSlowClientDropped(t *testing.T) {
-	e := logsEnv(t, func(c *LogsConfig) { c.ClientBuf = 16 })
+	// (the production buffer: with 16 lines a loaded machine let the flood outrun even the fast
+	// test reader, which was then dropped too; a client that never reads is dropped at any size)
+	e := logsEnv(t, func(c *LogsConfig) { c.ClientBuf = defClientBuf })
 	fast := e.watch("host=flood1&app=web")
 	fast.waitLines(10)
 	// a client that never reads: its TCP buffers fill, then its queue
