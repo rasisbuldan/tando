@@ -30,7 +30,7 @@ _tando_plugins() { # plugin commands next to the tando on PATH
 }
 _tando_commands="init up deploy rollback releases history status ls logs start stop restart top env jobs db 
   backup restore host domain doctor version destroy unlock recipes ci alerts health errors 
-  requests audit adopt help cheat go link next open ssh"
+  requests audit adopt help cheat go link menubar next open ssh"
 
 _tando() {
   local cur prev cmd w i
@@ -97,6 +97,7 @@ _tando() {
     cheat) subs="" flags="$flags " args="";;
     go) subs="" flags="$flags --port --key --domain --dns --yes --forget" args="";;
     link) subs="" flags="$flags " args="apps";;
+    menubar) subs="install uninstall status build" flags="$flags --dry-run --out" args="";;
     next) subs="" flags="$flags -H" args="apps";;
     open) subs="" flags="$flags " args="apps";;
     ssh) subs="" flags="$flags " args="apps";;

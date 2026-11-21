@@ -57,6 +57,7 @@ _tando() {
     'cheat:the commands that matter, on one screen'
     'go:the setup wizard (docs/EASE.md)'
     'link:print the apps address (its own domain, else its link), for scripts'
+    'menubar:menu bar icon with a problem badge (macOS)'
     'next:what you could do next on this app and server, with the command'
     'open:open the app in the browser (prints the address when there is none)'
     'ssh:a shell on the server; with an app, as the apps user in its sandbox'
@@ -114,6 +115,7 @@ _tando() {
         cheat) subs="" flags="" args="" ;;
         go) subs="" flags="--port --key --domain --dns --yes --forget" args="" ;;
         link) subs="" flags="" args="apps" ;;
+        menubar) subs="install uninstall status build" flags="--dry-run --out" args="" ;;
         next) subs="" flags="-H" args="apps" ;;
         open) subs="" flags="" args="apps" ;;
         ssh) subs="" flags="" args="apps" ;;

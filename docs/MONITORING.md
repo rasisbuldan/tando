@@ -398,10 +398,13 @@ does not answer, 1 when tando itself failed:
         osascript -e 'display notification "tando ls --all" with title "tando: something needs attention"'
     done
 
-A menu bar app for macOS is being built on the same outputs: it reads `tando ls --all --json
---check` (per server `reachable` and `checked_at`, per app `state`, `alerts_firing` and `firing`,
-every alert in `alerts`) and `tando alerts --json` (notifier failures), and shows a badge. Until
-it ships, the loop above or `tando ls --all --watch 60` in a terminal tab does the same job.
+**Laptop, the menu bar app** (macOS; new, still being finished): `tando menubar install` puts an
+icon in the menu bar that runs `tando ls --all --json` every minute and probes each app's link: a
+red count of the problems, a notification once per new problem and once when it clears
+(docs/COMMANDS.md, "menubar"). `ls --all --json` carries what such a badge needs: per server
+`reachable` and `checked_at`, per app `state`, `alerts_firing` and `firing`, every alert in
+`alerts`; `tando alerts --json` adds the notifiers' failures. Like the loop above, it works only
+while the laptop is on and online.
 
 ## What it cannot see (and the heartbeat)
 
@@ -426,6 +429,7 @@ others: tando needs only a URL, and none of them is required).
 | **Heartbeat**: the server calls a URL every `heartbeat_every` minutes | the server is down, frozen or cut off; the checks stopped; no notifier can deliver | `tando alerts heartbeat` |
 | **Backup ping**: the server calls a URL once after the daily backups, when all of them worked | a backup that failed, did not run, or did not reach the offsite bucket | `tando alerts backup-ping` |
 | **An HTTP monitor of your public link** | DNS, the firewall, the provider's network, an expired domain or certificate: what a visitor sees | at the outside service, nothing in tando |
+| **The menu bar app** (macOS): your laptop requests every link and reaches every server each minute | the same, plus a server ssh cannot reach; a badge and a notification on the laptop | `tando menubar install` (only while the laptop is on and online: an addition to the heartbeat, not a replacement; docs/COMMANDS.md, "menubar") |
 
 - **Heartbeat.** Until one is set on a server that has apps, `tando doctor` shows a warning row
   (`heartbeat`, not a failure) and `tando alerts` says so in its header. Create a check at the

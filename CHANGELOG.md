@@ -8,8 +8,7 @@ first, grouped by area.
 
 - Docs: docs/MONITORING.md, "Recipe: alerts on your phone and on your laptop": ntfy on the phone
   (exact commands), the same topic on the laptop (browser or `ntfy subscribe` with a macOS
-  notification), a polling loop with `tando ls --all --check`, and what the coming menu bar app
-  reads.
+  notification), a polling loop with `tando ls --all --check`, and `tando menubar install`.
 - Added: `tando alerts --json`: every firing or pending alert (with `silenced`) and every
   notifier (last delivery, failures in a row, queued, error), with `reachable` and `checked_at`.
 - Changed: `tando host status --watch N` repaints at most once a minute (each refresh runs a full
@@ -60,6 +59,18 @@ first, grouped by area.
   were new. The footer says how old the data is (`updated 2s ago`); a refresh that fails, or gets
   no answer within 15 s (it is cut there: a hung ssh used to freeze the screen), shows a red
   `not answering: <why>` line and `STALE: data 40s old, reconnecting` until the server answers.
+- New: `tando menubar install` (macOS): a menu bar icon for every registered server, built from
+  source with `swiftc` (Command Line Tools only), signed ad hoc, started at login by a LaunchAgent.
+  Every minute it runs `tando ls --all --json` and requests each running app's link from the
+  laptop: a red count of the problems (a server it cannot reach, an app down or failed, a link
+  failing two checks in a row, a firing alert), dimmed when nothing could be checked, a
+  notification once per new problem and once when it clears. The menu lists each server's apps
+  with their links, the firing alerts, Refresh now and `tando status` in Terminal. It works only
+  while the laptop is on and online: it adds to `tando alerts heartbeat`, it does not replace it.
+  `uninstall`, `status`, `install --dry-run`; docs/COMMANDS.md, "menubar".
+- `tando ls --json` (and `ls --all --json`) has the server's alerts (`alerts`: app, check, state,
+  since, detail), as `status --json` has for one app.
+
 - New: one package of a monorepo deploys from its own directory (`cd apps/api && tando up`) with
   no extra settings, for pnpm and npm workspaces. tando up installs the workspace at its root on a
   fresh clone, builds in the package, and ships the package with every package it uses at run time

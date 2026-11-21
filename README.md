@@ -53,7 +53,8 @@ runs on one server. tando does not do clusters or load balancing across servers.
   you. Python and container apps work too (`tando recipes`).
 - **Monitoring built in.** Checks every minute for app down, failing health, error spikes, new
   error types after a release, memory, disk and certificates. Alerts go to ntfy, Slack, Telegram,
-  e-mail or a webhook. A hung app is restarted for you.
+  e-mail or a webhook. A hung app is restarted for you. On a Mac, `tando menubar install` adds a
+  menu bar icon with a problem badge that also watches your servers from the laptop.
 - **Logs, requests and metrics without extra services.** `tando logs`, `tando errors`,
   `tando requests` and a live `tando top`.
 - **Backups you can restore from.** PostgreSQL or SQLite per app, daily backups, and encrypted

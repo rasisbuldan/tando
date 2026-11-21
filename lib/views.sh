@@ -228,11 +228,6 @@ json_meta() {
     "$NOW" "$( [ -n "$SRV_VER" ] && json_str "$SRV_VER" || printf null)" \
     "$( [ -n "$CLI_VER" ] && json_str "$CLI_VER" || printf null)" "${SKEW:-null}"
 }
-# json_alerts: ,"alerts":[...] every alert row (firing and pending, apps and the host)
-json_alerts() {
-  printf ',"alerts":'
-  awk -F '\t' -v OFS='\t' '$1 == "alert" { print $2, $3, $4, $5, $6 }' "$TMPD/st" | to_json "app:s,check:s,state:s,since:n,detail:s"
-}
 # firing_load: FIRING = " app:check ..." for every firing alert in $TMPD/st (no fork)
 firing_load() {
   local r fa fc fs _x
@@ -257,7 +252,8 @@ render_ls() {
   local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx n=0 upt dep
   if [ -n "$JSON" ]; then
     printf '{"host":%s' "$(json_str "$HOST")"; json_meta
-    printf ',"apps":'; app_json_rows | to_json "$APP_JSON"; json_alerts; printf '}\n'
+    printf ',"apps":'; app_json_rows | to_json "$APP_JSON"
+    printf ',"alerts":'; alerts_json; printf '}\n'
     return
   fi
   firing_load
@@ -516,13 +512,17 @@ HIST_JSON="at:n,app:s,release:s,kind:s,result:s,total_s:n,build_s:n,upload_s:n,c
 # (release_s: the seconds of the release command, null for a deploy without one)
 hist_json() { grep "^hist$TAB" "$TMPD/st" | sort -t "$TAB" -k3,3nr | cut -f2-15 |
   awk -F '\t' -v OFS='\t' '{ print $2, $1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14 }' | to_json "$HIST_JSON"; }
+# the alert rows of $TMPD/st (firing and pending; host checks have app "host") as a JSON array
+alerts_json() {
+  awk -F '\t' -v OFS='\t' '$1 == "alert" { print $2, $3, $4, $5, $6 }' "$TMPD/st" | to_json "app:s,check:s,state:s,since:n,detail:s"
+}
 status_json() {
   printf '{"host":%s' "$(json_str "$HOST")"; json_meta
   printf ',"app":'
   app_json_rows | to_json "$APP_JSON" | sed 's/^\[//; s/\]$//'
   printf ',"releases":'; rel_json
   printf ',"history":'; hist_json
-  json_alerts
+  printf ',"alerts":'; alerts_json
   pg_json "$TMPD/st" "$APP"
   printf '}\n'
 }
