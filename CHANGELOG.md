@@ -27,6 +27,12 @@ first, grouped by area.
   and a Next.js package are still refused, with what to do (docs/RECIPES.md, "One package of a
   monorepo"). A Next.js package used to get a tando.conf from init and be refused only at
   deploy; init refuses it now.
+- Faster on a slow disk: the copy of a deploy no longer runs `chown -R` and `chmod -R` over the
+  whole new release. It sets owner and mode only on the files that are not root's with the app's
+  group and mode 640 or 750 already, so a file the release shares with the live one (most files
+  of a warm deploy) is not written again, and the live release's files keep their change time.
+  Same result as before (a check compares the two on every kind of file). Measured on a disk
+  throttled to 10 MB/s with another app writing: bench/RESULTS.md, "Slow disk".
 - Added: HTTP compression. Every site now has Caddy's `encode zstd gzip` (stock Caddy 2.6.2): text
   answers of 512 bytes or more go out zstd or gzip compressed with `Vary: Accept-Encoding`; an
   answer the app compressed itself is not compressed again, and event streams and websockets pass

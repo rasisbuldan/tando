@@ -695,3 +695,56 @@ Notes on the method:
   holds both kinds (the soak adds about 0.8 s).
 - `deploy --dry-run` does not exist in v0.1.1 (it exits 2 in 0.4 s).
 - Not measured: backups (no data in the app), the full tier, more than 3 apps, a quiet laptop.
+
+## Slow disk: the copy phase, 21 Nov 2026
+
+The owner's server (1 CPU, 2 GB, a slow disk, five other apps) showed a Next.js deploy's copy phase at 2.0 s
+under 0.1.1 and 17.4 s under 0.2.1, and a request to the app over 5 s during it. Script: `run-slowdisk.sh <tree>
+<label> <app dir> [runs]`: a fresh test server (2 GB / 1 CPU pinned), `/opt/tando` on an ext4 loop disk, the
+loop device throttled by `io.max` on the container's cgroup (written from the Docker host's side: the
+container's own root cgroup refuses it), a background writer on the same disk (64 KB appended and flushed every
+0.1 s), the bench Next.js app prebuilt once (36 MB, 1,407 files, `recipe = node`, `out = dist`), one cold `tando
+up`, then 3 warm deploys (one small file changed each) under `reqloop.py` against the app being deployed. copy
+and total are `tando history --json`; the request columns cover the whole deploy (2 s before and after), not
+only the copy. Raw output in `raw/slowdisk/` (not committed). Trees: v0.1.1 (tag), main `ec4a3e3`, and the
+branch `perf-sync` (main plus `release_own`). One server at a time; another agent's tests shared the laptop.
+
+Throttle A: 10 MB/s read and write, 600 read / 300 write IOPS. Throttle B: the same bandwidth, 150 read / 60
+write IOPS.
+
+| Warm deploy, 3 runs each | v0.1.1 | main | perf-sync |
+|---|---|---|---|
+| A: copy phase, s | 5.4, 6.4, 6.5 | 6.5, 5.0, 4.7 (*) | 6.9, 4.9, 5.3 |
+| A: worst request during the deploy, ms | 369, 396, 413 | 418, 544, 444 (*) | 408, 467, 424 |
+| B: copy phase, s | 23.6, 21.4, 21.4 | 33.6, 16.0, 17.0 | 29.1, 15.4, 15.4 |
+| B: total (history total_s, incl. the 30 s soak), s | 67.3, 72.0, 68.8 | 74.3, 62.5, 65.7 | 66.5, 59.5, 62.4 |
+| B: worst request during the deploy, ms | 366, 331, 254 | 384, 409, 365 | 316, 405, 393 |
+| failed requests (all runs) | 0 | 0 | 0 |
+
+(*) main under throttle A ran with an xtrace of the copy (timestamps per command, written to `/run`); main with
+`assets = .next/static, /_next/static` gave 7.3, 5.2, 6.1 s. The first warm deploy under B is the first
+`--link-dest` copy after the cold one (its slow reads of the previous release are not in the cache yet).
+
+Where the copy's seconds go (main, throttle A, the xtrace): the `rsync -c --link-dest` 3.9-5.1 s of 4.7-6.2 s;
+the flush of the state file right after it (`sync state.tmp`, waiting for the journal commit that carries the
+copy's metadata) 0.4-1.1 s (6.2-6.8 s after the cold copy, which wrote all 37 MB); `chown -R`, `chmod -R`, the
+finds and the other flushes 0.01-0.07 s each with a warm cache; unshare_release copied 9 files with `assets`.
+By hand, caches dropped (`steps.txt`, throttle A / B): `cp -a` of the upload 4.2 / 12.2 s, `rsync -c
+--link-dest` 8.5 / 23-24 s, `rsync --size-only --link-dest` 0.9-1.7 / 3.7-7.0 s, `chown -R` + `chmod -R`
+0.3-0.6 / 1.3-2.8 s, a global `sync` 0.1-0.3 / 1.6 s, `sync <file> <dir>` 0.02-0.06 / 0.08-0.16 s.
+
+What this says:
+- No global `sync` runs in the copy phase: the flushes counted in the v2 comparison are `sync <file>` (fsync of
+  one file) and `sync <dir>`, as the comments at each ask. Each one costs what the journal commit costs; the
+  one after the copy carries the copy's own metadata. Not changed.
+- The cost of 0.2 over 0.1.1 is the `rsync -c`: it reads the upload and every same-size file of the live
+  release (twice the reads of `cp -a`, which writes instead, and the writes go to the page cache and are
+  flushed later). With the upload still in the page cache (it was just received) the second read dominates.
+  On this harness main's copy is not slower than 0.1.1's (A: about the same; B: faster in runs 2 and 3, as
+  the hard links write almost nothing); the 17.4 s on the owner's server is not reproduced here.
+- `release_own` (this branch) sets owner and mode only where they differ: 0.5-2 s less copy under B (15.4
+  against 16.0-17.0; within the noise under A) and no write to the live release's inodes.
+- The live app never answered slower than 0.55 s, on any tree: the 5 s request on the owner's server is not
+  reproduced either (one CPU here is not shared with five apps; the writer is steady, not bursty).
+- `ionice`: the loop device's scheduler is `none` (no BFQ) and `io.max` throttles above the scheduler, so an
+  I/O priority cannot be measured on this harness; not changed.
