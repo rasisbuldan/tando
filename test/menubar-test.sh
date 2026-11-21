@@ -8,6 +8,12 @@
 # - `ls --all --json` lists the alerts (a stub ssh answers the agent's status with canned rows)
 # - the app compiles with swiftc, is a signed LSUIElement bundle (tando menubar build)
 # - the badge and notification logic on canned JSON (test/menubar-model.swift, test/fixtures/menubar)
+# - the dashboard window's logic (test/menubar-dash-model.swift): dash.lock, stale lock, the launch
+#   decision tree, the address policy, the shared cache's freshness
+# - tando-dash's ls-all.json cache is used when fresh, not when old (--once "source:" line)
+# - "Open dashboard" without the window (--dash-url): not installed; starts the real tando-dash,
+#   gets a one-time link that works once; reuses the running one (new link, same pid); a crashed
+#   one (stale lock) is replaced
 # - the app's --once mode against the real CLI and the stub ssh: badge, rows, link probes
 # - install --dry-run changes nothing; install, status, uninstall in the temp HOME
 # One line per check (PASS/FAIL/SKIP); the last line is "menubar: <n> checks, <m> failed".
@@ -17,7 +23,11 @@ here=$(cd "$(dirname "$0")/.." && pwd -P)
 R=${1:-$here}
 T=$(mktemp -d "${TMPDIR:-/tmp}/menubar-test.XXXXXX") || exit 2
 SRVPID=""
-trap '[ -z "$SRVPID" ] || { kill "$SRVPID"; wait "$SRVPID"; } 2> /dev/null; rm -rf "$T"' EXIT
+dashkill() { # stop a tando-dash this test started (its pid is in the temp dash.lock)
+  local p; p=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$T/cfg/dash.lock" 2> /dev/null | head -1)
+  [ -z "$p" ] || kill "$p" 2> /dev/null
+}
+trap 'dashkill; [ -z "$SRVPID" ] || { kill "$SRVPID"; wait "$SRVPID"; } 2> /dev/null; rm -rf "$T"' EXIT
 n=0 nf=0
 ok() { n=$((n + 1)); echo "PASS menubar $1"; }
 bad() { n=$((n + 1)); nf=$((nf + 1)); echo "FAIL menubar $1"; }
@@ -80,6 +90,18 @@ else
   bad "M0 the model test does not compile"; sed 's/^/    /' "$T/mt/err" | head -20
 fi
 
+mkdir -p "$T/dm"
+cp "$here/test/menubar-dash-model.swift" "$T/dm/main.swift"
+if swiftc -swift-version 5 -o "$T/dm/dash-model-test" "$R/macos/menubar/DashModel.swift" "$T/dm/main.swift" > "$T/dm/err" 2>&1; then
+  "$T/dm/dash-model-test" > "$T/dm/out" 2>&1
+  while IFS= read -r l; do
+    case $l in PASS\ *) ok "${l#PASS }";; FAIL\ *) bad "${l#FAIL }";; esac
+  done < "$T/dm/out"
+  grep -q '^dash model: 0 failed$' "$T/dm/out" || grep -q '^FAIL' "$T/dm/out" || bad "M0d the dashboard model test did not finish: $(tail -2 "$T/dm/out")"
+else
+  bad "M0d the dashboard model test does not compile"; sed 's/^/    /' "$T/dm/err" | head -20
+fi
+
 # a local web server for the link that answers (the others point at a closed port)
 if command -v python3 > /dev/null 2>&1; then
   mkdir -p "$T/www" && echo hi > "$T/www/index.html"
@@ -117,6 +139,62 @@ s0=$SECONDS
 grey=$("$BIN" --once --tando "$T/slow" --timeout 5 2>&1); rc=$?
 check "O8 a tando that hangs is stopped at the timeout: grey (took $((SECONDS - s0)) s)" \
   eval 'test $rc = 1 && test $((SECONDS - s0)) -lt 15 && printf "%s" "$grey" | grep -q "did not answer within 5 s"'
+
+# ---- the shared cache: fresh is used, old is not -------------------------------------------------
+mkdir -p "$TANDO_CONFIG_DIR/cache"
+printf '{"hosts":[{"host":"cachehost","apps":[{"app":"cachedapp","state":"running","link":null}],"alerts":[]}],"source":"tando-dash"}\n' > "$TANDO_CONFIG_DIR/cache/ls-all.json"
+c1=$(PATH=$T/bin:/usr/bin:/bin "$BIN" --once --interval 60 --tando "$R/bin/tando" 2>&1)
+check "C1 a fresh ls-all.json is used instead of tando ls: source cache, its host and app listed" \
+  eval 'printf "%s" "$c1" | grep -qx "source: cache" && printf "%s" "$c1" | grep -q "^host cachehost$" && printf "%s" "$c1" | grep -q "^  cachedapp  running" && ! printf "%s" "$c1" | grep -q "^host vps$"'
+touch -t 202001010000 "$TANDO_CONFIG_DIR/cache/ls-all.json"
+c2=$(PATH=$T/bin:/usr/bin:/bin "$BIN" --once --interval 60 --tando "$R/bin/tando" 2>&1)
+check "C2 an old ls-all.json is not used: tando ls runs (source tando, host vps)" \
+  eval 'printf "%s" "$c2" | grep -qx "source: tando" && printf "%s" "$c2" | grep -q "^host vps$"'
+printf 'not json' > "$TANDO_CONFIG_DIR/cache/ls-all.json"
+c3=$(PATH=$T/bin:/usr/bin:/bin "$BIN" --once --interval 60 --tando "$R/bin/tando" 2>&1)
+check "C3 a fresh but broken ls-all.json falls back to tando ls" eval 'printf "%s" "$c3" | grep -q "^host vps$"'
+rm -f "$TANDO_CONFIG_DIR/cache/ls-all.json"
+
+# ---- Open dashboard without the window (--dash-url) ------------------------------------------------
+if [ -e /usr/local/bin/tando-dash ] || [ -e /opt/homebrew/bin/tando-dash ]; then
+  echo "SKIP menubar W1 a tando-dash is installed in /usr/local/bin or /opt/homebrew/bin"
+else
+  w=$(PATH=/usr/bin:/bin "$BIN" --dash-url --tando "$R/bin/tando" 2>&1); rc=$?
+  check "W1 add-on not installed: says so with the one command, exit 1" \
+    eval 'test $rc = 1 && printf "%s" "$w" | grep -qx "dash: not installed (tando addon install dashboard)"'
+fi
+if ! command -v go > /dev/null 2>&1; then echo "SKIP menubar W2 Go is not installed: no tando-dash to start"
+else
+  mkdir -p "$HOME/.local/bin"
+  (cd "$R/addons/dashboard/server" && GOTOOLCHAIN=local go build -trimpath -o "$HOME/.local/bin/tando-dash" . ) > "$T/godash.log" 2>&1
+  if [ ! -x "$HOME/.local/bin/tando-dash" ]; then bad "W2 tando-dash did not build"; sed 's/^/    /' "$T/godash.log" | head
+  else
+    w1=$(PATH=/usr/bin:/bin "$BIN" --dash-url --tando "$R/bin/tando" 2>&1); rc=$?
+    u1=$(printf '%s\n' "$w1" | sed -n 's/^dash: open //p')
+    p1=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$TANDO_CONFIG_DIR/dash.lock" | head -1)
+    check "W2 no tando-dash running: it is started and a one-time link is printed (rc=$rc)" \
+      eval 'test $rc = 0 && case $u1 in http://127.0.0.1:*/open\?code=*) true;; *) false;; esac && test -n "$p1" && kill -0 "$p1"'
+    code1=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$u1")
+    code1b=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$u1")
+    check "W3 the link works once: 303 the first time, refused the second ($code1, $code1b)" eval 'test "$code1" = 303 && test "$code1b" != 303'
+    w2=$(PATH=/usr/bin:/bin "$BIN" --dash-url --tando "$R/bin/tando" 2>&1)
+    u2=$(printf '%s\n' "$w2" | sed -n 's/^dash: open //p')
+    p2=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$TANDO_CONFIG_DIR/dash.lock" | head -1)
+    code2=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$u2")
+    check "W4 one runs: it is asked for a fresh link (same pid, new link that works: $code2)" \
+      eval 'test -n "$u2" && test "$p2" = "$p1" && test "$u2" != "$u1" && test "$code2" = 303'
+    kill -9 "$p1" 2> /dev/null
+    t_wait=0; while kill -0 "$p1" 2> /dev/null && [ $t_wait -lt 50 ]; do sleep 0.1; t_wait=$((t_wait + 1)); done
+    check "W5 the crashed tando-dash left its lock behind (a stale lock)" test -s "$TANDO_CONFIG_DIR/dash.lock"
+    w3=$(PATH=/usr/bin:/bin "$BIN" --dash-url --tando "$R/bin/tando" 2>&1)
+    u3=$(printf '%s\n' "$w3" | sed -n 's/^dash: open //p')
+    p3=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$TANDO_CONFIG_DIR/dash.lock" | head -1)
+    code3=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$u3")
+    check "W6 a stale lock (dead pid) is not asked: a new tando-dash starts (pid $p1 -> $p3) and its link works ($code3)" \
+      eval 'test -n "$u3" && test -n "$p3" && test "$p3" != "$p1" && kill -0 "$p3" && test "$code3" = 303'
+    dashkill
+  fi
+fi
 
 # ---- install, status, uninstall in the temp HOME (launchctl not called) -------------------------
 dry=$("$R/bin/tando" menubar install --dry-run 2>&1); rc=$?

@@ -54,12 +54,12 @@ mb_build() {
   local app=$1 new src
   mb_darwin; mb_swiftc
   src=$TANDO_HOME/macos/menubar
-  [ -f "$src/main.swift" ] && [ -f "$src/Model.swift" ] || die "menubar: $src is missing (reinstall tando)"
+  [ -f "$src/main.swift" ] && [ -f "$src/Model.swift" ] && [ -f "$src/DashModel.swift" ] && [ -f "$src/DashWindow.swift" ] || die "menubar: $src is missing (reinstall tando)"
   mkdir -p "$(dirname "$app")" || die "menubar: cannot create $(dirname "$app")"
   new=$(dirname "$app")/.tando-app.$$
   rm -rf "$new"; mkdir -p "$new/Contents/MacOS" "$new/Contents/Resources" || die "menubar: cannot write $new"
   if ! swiftc -swift-version 5 -O -module-name TandoMenubar -o "$new/Contents/MacOS/tando-menubar" \
-       "$src/Model.swift" "$src/main.swift" > "$TMPD/mb.err" 2>&1; then
+       "$src"/*.swift > "$TMPD/mb.err" 2>&1; then
     rm -rf "$new"; sed 's/^/  /' "$TMPD/mb.err" | tail -20 >&2
     die "menubar: the app did not compile (swiftc above)"
   fi

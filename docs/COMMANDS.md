@@ -860,6 +860,33 @@ Example: `tando ssh shop -- node scripts/migrate.js`
 `tando cheat`. The commands that matter on one screen. No server call.
 Example: `tando cheat`
 
+### addon
+`tando addon install dashboard [--version V] [--from PATH|URL] [--sha256 HEX] [--insecure]` ·
+`tando addon uninstall dashboard` · `tando addon status`. The dashboard (`addons/dashboard`) is not in
+the main archive: it ships as its own release asset, `tando-dash-<v>-<darwin-universal|linux-amd64|
+linux-arm64>.tar.gz` with a `.sha256`, built by `scripts/release-dashboard.sh`.
+- `install` downloads the asset of this client's version (or `--version V`) for this OS and CPU from
+  the GitHub release of the same repository as `install.sh`, or takes `--from` (a path, `file://` or
+  `https://`; plain `http://` only with `--insecure`). It refuses to go on when the checksum does not
+  match, or when there is none: the `.sha256` next to the archive, or `--sha256 HEX` (which wins).
+  Nothing is unpacked before the checksum is right; names outside the archive's directory and links
+  are refused; the new `tando-dash` must run (`--version`) before anything is put in place.
+  It installs `~/.local/lib/tando-dash/<v>/` with a `current` link, links `~/.local/bin/tando-dash`
+  (a file of your own there is not overwritten), and on macOS removes the quarantine attribute from
+  the files of the verified archive and from nothing else. Older version directories are removed.
+- `uninstall` stops a running `tando-dash`, removes the binary, its links, `dash.lock` and the
+  dashboard's cache files (`ls-all.json`, sessions, idempotency records, last port). Settings, hosts
+  and everything else in `~/.config/tando` stay.
+- `status`: the installed version against this client's, and whether `tando-dash` runs (pid, port).
+Example: `tando addon install dashboard`
+
+### dashboard
+`tando dashboard [--no-open] [--idle 30m] [--port N]`: runs `tando-dash` (the add-on) with these
+arguments and this tando. It prints a one-time link and opens it in the browser; when one is already
+running it asks that one for a fresh link instead of starting another. Without the add-on it says
+`tando addon install dashboard`. The flags are `tando-dash`'s (`tando-dash --help`).
+Example: `tando dashboard`
+
 ### menubar
 `tando menubar install [--dry-run]` · `uninstall [--dry-run]` · `status` · `build --out DIR`. macOS
 only. A menu bar icon for every registered server, and an outside heartbeat from the laptop.
@@ -884,8 +911,21 @@ only. A menu bar icon for every registered server, and an outside heartbeat from
   Pending alerts and apps you stopped are not problems.
 - **The menu.** The last check time; per server its apps with a coloured dot and their state (each
   with "Open <link>" and "Open status in Terminal", which runs `tando status <app> -H <server>`); a
-  server it cannot reach, with the reason; the firing alerts; Refresh now (⌘R); Open status in
-  Terminal (`tando ls --all`); Quit.
+  server it cannot reach, with the reason; the firing alerts; Open dashboard (⌘D, below); Refresh now
+  (⌘R); Open status in Terminal (`tando ls --all`); Quit.
+- **Open dashboard** (⌘D) opens the dashboard add-on in a window of its own (a WKWebView; one window,
+  reused; native title bar; at least 900x600, its size and place are remembered; ⌘R reloads, ⌘W closes
+  the window and not the app; links to other sites open in your default browser, and the window never
+  shows anything but `127.0.0.1:<port>`). It finds `tando-dash` (`~/.local/lib/tando-dash/current`,
+  `~/.local/bin`, `PATH`), starts it (`--no-open`) when `~/.config/tando/dash.lock` names no running
+  process (a lock left by a crash is told by its dead pid), and asks it for a fresh one-time link
+  (`POST /api/newcode` with the lock's key). Without the add-on the row reads "Install dashboard…" and
+  shows the one command, `tando addon install dashboard`. Closing the window ends the page; the idle
+  `tando-dash` stops by itself. `tando-menubar --dash-url` does all of this but the window and prints the link.
+- **The cache.** While `tando-dash` runs it writes `~/.config/tando/cache/ls-all.json` (the shape of
+  `tando ls --all --json`). A check that finds it younger than `interval` reads it instead of running
+  `tando ls --all --json` (no second set of ssh connections); an older or unreadable file is ignored.
+  `--once` prints `source: cache` or `source: tando`.
 - **Notifications.** Once per new problem (more than 3 at once: one summary) and once when it is
   resolved. A server that cannot be reached hides its other problems until it answers again (they
   are not reported as resolved). Delivered through macOS notifications (allow them when asked;
