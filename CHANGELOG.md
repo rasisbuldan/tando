@@ -6,6 +6,10 @@ first, grouped by area.
 
 ## Unreleased
 
+- Docs: docs/MONITORING.md, "Recipe: alerts on your phone and on your laptop": ntfy on the phone
+  (exact commands), the same topic on the laptop (browser or `ntfy subscribe` with a macOS
+  notification), a polling loop with `tando ls --all --check`, and what the coming menu bar app
+  reads.
 - Added: `tando alerts --json`: every firing or pending alert (with `silenced`) and every
   notifier (last delivery, failures in a row, queued, error), with `reachable` and `checked_at`.
 - Changed: `tando host status --watch N` repaints at most once a minute (each refresh runs a full
