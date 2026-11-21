@@ -559,7 +559,7 @@ grep -qE "^\{\"url\":\"http://127\.0\.0\.1:([0-9]+)/#c=[A-Za-z0-9_-]+\",\"port\"
 check "S7k --json prints one line {url, port, sid} and no box, the session runs ($(head -c 40 "$E/s7i.out"))" eval '[ $s7k = 1 ]'
 exec 5>&-
 s7l=0; T_UNTIL_STEP=0.2 t_until 20 eval '! kill -0 $ST_PID 2> /dev/null' && s7l=1
-kill -INT "$ST_PID" 2> /dev/null; wait "$ST_PID" 2> /dev/null   # (when it did not end: not left running)
+kill -TERM "$ST_PID" 2> /dev/null; wait "$ST_PID" 2> /dev/null   # (when it did not end: not left running; a background job ignores SIGINT)
 check "S7l --json: the end of stdin (the program that started it is gone) ends it; nothing left ($(grep -o 'studio stopped[^;]*' "$E/s7i.err" | head -1))" \
   eval '[ $s7k = 1 ] && [ $s7l = 1 ] && nothing_left'
 
