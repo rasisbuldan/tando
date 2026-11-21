@@ -6,6 +6,23 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: `tando snapshot --json [-H host | --all] [--app A --range 1h|24h|7d]`, everything a
+  dashboard shows of a server in one ssh exec per host: apps with `state_reason`, the `system`
+  object (load 1/5/15, memory, disk, cpus, uptime), the server's clock and skew, versions, alerts;
+  with `--app` its releases, history with the deployer (the audit log's who), metrics over the
+  range (every bucket present, null where no sample, restarts as per-bucket deltas) and health.
+  Servers in parallel, each with a timeout; one that did not answer is `reachable: false`.
+- Added: the agent verb `env-names` (key names only, not audited as a reveal, refused to a deploy
+  key); `tando env ls --names`, and `env ls --json`, use it, so no value leaves the server.
+- Added: `--json` for `doctor`, `jobs`, `requests` (with a series per bucket: requests and 5xx)
+  and `backup ls`; `series` per hour in `errors --json` (tando-logs sends each group's hourly
+  counts) and `health --json`; `history` (the last 8 events) in `alerts --json`; `state_reason`
+  and `system` in `ls` and `status --json`.
+- Fixed: `tando alerts --json` and `tando requests --json` stopped with "unknown argument" (the
+  flag reached the subcommand).
+- Tests: test/json-contract.sh (run by ui-test) checks every `--json` against a key:type schema
+  in test/fixtures/json on a stub ssh, with samples for the dashboard's own tests.
+
 ## 0.2.2 - 2026-11-21
 
 - `tando menubar`: a server the laptop cannot reach counts as a problem from the second check in a

@@ -146,10 +146,13 @@ Example: `tando top --read-only`
 ## Configure
 
 ### env
-`tando env ls [app] [--show]` · `tando env set KEY=VALUE ...` · `tando env set KEY` · `tando env unset KEY ...` ·
+`tando env ls [app] [--show | --names] [--json]` · `tando env set KEY=VALUE ...` · `tando env set KEY` · `tando env unset KEY ...` ·
 `tando env import [.env]` · `tando env log [n]`; `--note "text"` on set, unset and import. Flags:
-`-a -H --show --note --json`. Subcommands: ls (default, 0-1: the app), set (1+), unset (1+),
+`-a -H --show --names --note --json`. Subcommands: ls (default, 0-1: the app), set (1+), unset (1+),
 import (0-1), log (0-1). `ls` hides the values (`******** (N characters)`); `--show` prints them.
+`ls --names`, and `ls --json` always, read the names only through the agent's `env-names` (no
+value leaves the server; not audited as a reveal, as `env-ls` is; a deploy key is refused it):
+`{"host", "app", "names": ["KEY", ...]}`.
 Stored on the server (root, 640), never in the release. Before the first `tando up` the values are
 staged on the server and applied when the app is created ("staged for <app>"). After a change the
 app restarts once; a stopped app gets them at `tando start`, an app with nothing deployed at the
@@ -182,7 +185,7 @@ tando env log
 Example: `tando env set STRIPE_KEY`
 
 ### jobs
-`tando jobs [ls [app]] [-H host]` · `tando jobs run <name> [-a app]` · `tando jobs log <name> [-n N]` ·
+`tando jobs [ls [app]] [-H host] [--json]` · `tando jobs run <name> [-a app]` · `tando jobs log <name> [-n N]` ·
 `tando jobs pause <name>` · `tando jobs resume <name>`. Subcommands: ls (default, 0-1: the app),
 run, log, pause, resume (1: the job; the app with `-a`).
 The app's scheduled jobs (`job.<name> = <schedule> | <command>` in tando.conf). `ls` shows per job
@@ -190,6 +193,9 @@ the schedule (as written), the next run, the last run and how it ended (`ok`, `e
 out`, `killed (memory)`, `killed (SEGV)`), how long it took, and the command; under the table the
 next three run times of each job by the server's clock, with its time zone, so a wrong schedule
 shows before it has missed anything. A paused job shows `paused`. Not retried (see below).
+`--json`: `{"host", "app", "zone", "zone_name", "jobs": [{"name", "schedule", "state" (on, paused,
+running), "next_run", "last_run" (epoch), "result", "exit_code", "duration_s", "command",
+"next_runs" (the next three, server time, "2026-11-21 09:00")}]}`.
 `run` runs one now, as the app's user: its output, then `job <name>: ok in Ns` or `failed
 (<result>, exit N)`; tando exits with the job's status (124 when it timed out).
 `log` shows the output of the last N runs (default 3, at most 50), each under its time, result and
@@ -352,12 +358,15 @@ statement, the error's position selected in the editor, notices, CSV download). 
 Example: `tando db studio shop`
 
 ### backup
-`tando backup ls [app]` · `tando backup now [app]` · `tando backup restore <id> [--yes]` ·
+`tando backup ls [app] [--json]` · `tando backup now [app]` · `tando backup restore <id> [--yes]` ·
 `tando backup pull <id> <file>`. Flags: `-a -H --yes`. Subcommands: ls (default, 0-1), now (0-1), restore (1),
 pull (2).
 Backups of the data directory and database. `restore` asks first and keeps a safety backup. `ls`
 and `pull` work for a destroyed app's final backup. `pull` creates the file mode 600 (it holds the
 data and a database dump) and refuses an existing file. `ls` heads its time column `TIME (GMT)`.
+`ls --json`: `{"host", "app", "backups": [{"id", "kind", "created", "size_bytes", "holds",
+"where"}], "offsite_error"}` (`where`: local, both, offsite, local+pending, local+uploading,
+local+failed; null without offsite).
 A restore of an app stopped with `tando stop` leaves it stopped (the data restored; `tando start`
 starts it). A restore cut off by a kill or a reboot is ended by the server's recovery: the app runs
 its release again (a stopped app stays stopped). When the database (or an adopted app's data directory) was being replaced at that moment,
@@ -396,7 +405,7 @@ dropped first at 80 columns). While an alert fires for an app, an ALERT column n
 app. When the server's clock is more than 30 s off this laptop's (every age on screen is off by
 as much), or its tando is not this client's version, one yellow line says so (also in `tando
 status`); `--json` has `reachable`, `checked_at`, `server_version`, `client_version`,
-`clock_skew_s` and `alerts`. `--all`: every registered server in one box, the morning check: first
+`clock_skew_s`, `alerts`, each app's `state_reason` and `system` (see `snapshot`). `--all`: every registered server in one box, the morning check: first
 what needs attention (a server not answering, an app down, an alert firing, host care to do,
 clock or version skew), one line each with the command to look closer, then every app of every
 server (HOST APP STATE ALERT MEMORY CPU 1M UP) with those needing attention on top; with
@@ -412,6 +421,32 @@ an alert fires (with `--all`: also a server that did not answer), 0 when nothing
 `alerts_firing` and `firing`, and every alert in `alerts`.
 Example: `tando ls --all`
 
+### snapshot
+`tando snapshot --json [-H host | --all] [--app A [--range 1h|24h|7d]]`. Flags: `-a -H --all
+--app --range --json`. Arguments: none.
+Everything a dashboard shows of a server in ONE ssh exec per host (as `tando top` reads its
+data): one JSON document per host, one per line; `--all` asks every registered server in
+parallel, each with a timeout (`TANDO_SNAPSHOT_TIMEOUT`, 15 s); a server that did not answer is
+`{"host", "reachable": false, "error", "checked_at"}`. Without `--app` it is the cheap call
+(status, the load averages, the server clock: no releases, history, metrics or health):
+`host`, `reachable`, `checked_at` (this laptop's clock), `server_now` (the server's), `clock_skew_s`,
+`server_version`, `client_version`, `system` (`hostname`, `cpus`, `load_1`, `load_5`, `load_15`,
+`memory_used_bytes`, `memory_total_bytes`, `disk_used_bytes`, `disk_total_bytes` (the file system
+of /, which holds /opt/tando), `uptime_s`), `apps` (as `ls --json`, with `state_reason`: running,
+static, deploying, stopped (`tando stop`), down (it died: not running, or stopped with a down
+alert, the rule `ls` uses), failed (tando gave up on it), not_deployed) and `alerts` (firing and
+pending). `--app A` (one host) adds `app`: `name`, `status` (its `ls --json` object), `releases`,
+`history` (as `history --json`, plus `deployer`: the audit log's who of that deploy or rollback,
+null once the audit log has rotated past it), `metrics` (`range`, `bucket_s`, `points`, `from`,
+`to`, `data_since`, `series`: every bucket of the range present, oldest first, `t` its start in
+server epoch seconds, `memory_bytes`, `cpu_percent`, `restarts` (new restarts in that bucket,
+clamped at 0 when the counter reset), `state`; null where there was no sample, never
+interpolated; 1h = 60 x 60 s, 24h = 144 x 600 s (the default), 7d = 168 x 3600 s; metrics keep 3.5
+to 7 days), `health` (as `health --json` for the app, plus `last_ms`, `series` (the average probe
+time of each of the last 24 hours, `t` from the server's clock) and `incidents`; null without
+alerts) and `database` (when the app has one).
+Example: `tando snapshot --json -H vps --app shop --range 24h`
+
 ### alerts
 `tando alerts [--watch N] [--json]` · `enable` · `disable` · `test [name]` · `history [app] [-n N]` ·
 `set [key=value ...]` · `silence <app|all> <30m|2h|1d|off>` ·
@@ -422,7 +457,8 @@ the apps (down, health, memory, disk, failed jobs as `job.<name>`, a worker that
 `worker.<name>` (new restarts in two checks in a row; `worker=off` turns it off), database connections as
 `db_conns`, ...) and the host (disk, memory, Caddy, `postgres`, ...). `set` without arguments lists
 every setting; `--json` (show): every firing or pending alert (app, check, state, since, detail,
-silenced) and every notifier (last delivery, failures in a row, queued, error). `job=off`, `db_conns=off`, `postgres=off` turn the newest checks off, `db_conn_pct`
+silenced), every notifier (last delivery, failures in a row, queued, error) and `history`, the
+last 8 events (`at`, `event`: fire, resolve, flap, restart, ...; `app`, `check`, `detail`), newest first. `job=off`, `db_conns=off`, `postgres=off` turn the newest checks off, `db_conn_pct`
 (80) and `db_conn_for` (5) are the connection threshold and its samples.
 `heartbeat [off]` · `backup-ping [off]`. Flags: `-a -H --watch -n --json`. Default subcommand: show.
 What is firing on the server and where alerts go; checks run every minute (docs/MONITORING.md).
@@ -437,21 +473,29 @@ size and connections of its PostgreSQL database (as `tando status` shows them) a
 last lines it wrote before its last crash. Recorded once a minute by tando-watch (docs/MONITORING.md).
 `--forget N` drops incident N of the app's list (1 is the newest) when it was a false alarm: the
 line goes and its minutes are no longer counted in the uptime. An incident that is still open is refused.
+`--json` has per app `series`: the average probe time of each of the last 24 hours (`t`, `avg_ms`,
+null where no probe ran).
 Example: `tando health shop`
 
 ### errors
 `tando errors [app] [--since 24h] [-n N] [--json]`. Flags: `-a -H --since --last -n --json`.
 The app's error lines and stack traces (Node, Python, Go) grouped by type and first app frame: count,
 last and first seen (GMT), the release it appeared in, one sample each (docs/MONITORING.md).
+`--json` has per group `series`: its errors in each hour of the window (`t` the hour's start,
+`count`), oldest first; null from a server older than this client.
 Example: `tando errors shop --since 6h`
 
 ### requests
-`tando requests [summary [app]] [--since 15m|1h|24h]` · `tando requests tail [app] [-n N] [-f]` ·
+`tando requests [summary [app]] [--since 15m|1h|24h] [--json]` · `tando requests tail [app] [-n N] [-f]` ·
 `tando requests errors [app] [--since W] [--4xx]` (the app after the subcommand). Flags: `-a -H --last --since -n -f --4xx`.
 Subcommands: summary (default), tail, errors.
 The app's Caddy request log: counts, status codes, latency percentiles of the real requests in
 the window (`real requests, 1h`), slowest paths. `--last` =
-`--since`.
+`--since`. `--json` (summary): `window_s`, `from`, `to`, `bucket_s` (60 up to a window of an hour,
+else the window in 60), `total`, `status_classes` (1xx to 5xx), `p50_ms`, `p95_ms`, `p99_ms`,
+`max_ms`, `avg_ms`, `unparsed`, `oldest`, `files`, `series` (per bucket: `t`, `requests`, `c5xx`;
+the server counts no other class per bucket), `codes` and `paths` (`path`, `count`, `mean_ms`,
+`max_ms`, `count_5xx`).
 Example: `tando requests errors --since 1h --4xx`
 
 ### audit
@@ -506,11 +550,13 @@ lists it).
 Example: `tando domain add example.com`
 
 ### doctor
-`tando doctor [host] [--verbose]`. Flags: `-H`, `--verbose`. Arguments: 0-1.
+`tando doctor [host] [--verbose] [--json]`. Flags: `-H`, `--verbose`, `--json`. Arguments: 0-1.
 Checks a server end to end (connection, sudo, tando pieces and versions, Caddy, DNS, disk, memory,
 timers, apps) and names the fix. Works on a server that is not set up yet. When the server's
 programs differ from the client's (after a client upgrade) they are one row, "N of M programs ...
-differ ...: tando host setup <host>"; `--verbose` lists each program. doctor has no `--json`.
+differ ...: tando host setup <host>"; `--verbose` lists each program. `--json`: `{"host",
+"checks": [{"name", "state" (ok, warn, fail), "detail"}], "failed", "warnings"}`, every program
+on its own row; exit status 1 when a check failed.
 Example: `tando doctor vps`
 
 ### version

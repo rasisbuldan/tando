@@ -373,7 +373,8 @@ minutes count at all (after a monitor stopped for an hour, the hour is not this 
 events, lines journald dropped, requests, 5xx answers, p95 latency and the top failing paths;
 tando-watch turns those into the `http`, `slow`, `errors` and `logs` alerts
 (docs/MONITORING.md). `tando-logs errors <app> <seconds> <n>` prints the error groups seen in the
-window with one sample each, for `tando errors`, folding in what the journal has since the
+window with one sample each (and an `hours <id> <hour start:count,...>` row per group: its errors
+per hour of the window, for `tando errors --json`'s series), for `tando errors`, folding in what the journal has since the
 monitor's last scan in memory: it writes nothing, so the monitor still reports a new error the
 operator happened to look at first. `watch-scan` itself is the consumer: run by hand it takes
 the minute's events from the monitor (they are printed to whoever ran it, not alerted on); it is
@@ -447,7 +448,8 @@ reveals a secret, appended under `flock`, written when the verb exits:
 - Audited verbs: setup, configure, deploy (activate + run-activation), rollback, recover,
   env-set, env-unset, env-ls (shows secrets), start, stop, restart, unlock, destroy, backup-run,
   backup-restore, backup-cat (exports data), db-url, db-psql. Not audited: begin/end (the upload
-  lease of a deploy), read-only views, exec-app, run-job, recover-all at boot.
+  lease of a deploy), read-only views, env-names (key names only, never a value), exec-app,
+  run-job, recover-all at boot.
 - Each line is also sent to the main journal (`logger -t tando-audit`), a second copy that a plain
   edit of the file does not change.
 - Rotated by the writer at 4 MB to `audit.log.1` .. `.4` (20 MB at most, about 130,000 actions).
