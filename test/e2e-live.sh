@@ -73,7 +73,7 @@ if ! "$SSH" 'test -f /sys/fs/cgroup/cgroup.controllers'; then
 fi
 
 # ---- the fast loop on the socket ----------------------------------------------------------------
-points() { ask "ring web" | grep -c '^rhost'; }
+points() { ask "ring web" | grep -c '^rapp	web	'; }   # (the points that have web)
 check "L1 tandod keeps a point every 5 s (two within 12 s)" t_until 12 eval '[ "$(points)" -ge 2 ]'
 ask live > "$E/live.rows"
 check "L2 live: a host row and the 25 app rows (web active and running, a CPU per mille)" eval '
@@ -89,9 +89,17 @@ check "L3 tando-agent status-follow web: a frame every 5 s, status rows with the
 # ---- the laptop: tando status --follow, tando ls --follow ---------------------------------------
 follow_run "$E/st.out" status -a web
 check "L4 tando status -a web --follow paints a live frame every 5 s" t_until 30 eval '[ "$(frames_in "$E/st.out" "live . updated")" -ge 3 ]'
+n0=$(sessions)
+pkill -x ssh -P "$FPID"   # (the session ends under it: a new one, frames again, no busy loop)
+# shellcheck disable=SC2034 # (read in the eval below)
+f0=$(frames_in "$E/st.out" "live . updated")
+check "L4a ... a session that ends is opened again and the frames go on" \
+  t_until 30 eval '[ "$(sessions)" -gt "$n0" ] && [ "$(frames_in "$E/st.out" "live . updated")" -ge $((f0 + 2)) ]'
+cpu=$(ps -o time= -p "$FPID" | awk -F '[:.]' '{ print $1 * 60 + $2 }')
+check "L4c ... and the client stays idle between frames (${cpu}s of CPU so far)" test "${cpu:-99}" -lt 5
 follow_stop
-check "L4b ... each frame the one app once (no frame left in the next)" eval '[ "$(grep -c "^. release  " "$E/st.out")" = "$(frames_in "$E/st.out" "live . updated")" ]'
-check "L5 ... over one ssh session ($(sessions) for 3 frames)" t_eq "$(sessions)" 1
+check "L4b ... each frame the one app once (no frame left in the next)" eval '[ "$(grep -c "^. release  " "$E/st.out")" = "$(frames_in "$E/st.out" "Ctrl-C stops")" ]'
+check "L5 ... over one ssh session until it ended ($n0 for the first 3 frames)" t_eq "$n0" 1
 grep -q 'cpu .*last 5 s' "$E/st.out"; check "L6 status --follow says the cpu is over the last 5 s" test $? = 0
 
 follow_run "$E/ls.out" ls

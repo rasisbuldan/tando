@@ -104,8 +104,13 @@ minute samples above, unchanged.
   silent server shows as stale after 15 s, an ended session is opened again. A server that sends no
   first frame (no `status-follow`, no tandod, no cgroup v2) is polled every 5 s as `--watch 5` does.
 
-Cost, measured by `test/e2e-live.sh` on the arm64 Docker test server with 25 app units: see the
-numbers under "Cost" below.
+Cost, measured by `test/e2e-live.sh` on the arm64 Docker test server with 25 app units (one
+deployed, 24 that only sleep), apps idle: tandod with the fast loop and its minute ticks about
+0.1-0.2% of a core averaged over the window (about 110 ms of CPU a minute), the fast loop alone about
+4 ms per point; systemd's own CPU (init.scope, the Gets) under 0.1%; tandod's anonymous memory
+about 5 MB with the hour's ring; no program started by the fast loop (tandod's reaped-children
+counters unchanged over 30 s with the minute ticks paused). A follower costs one process per
+viewer reading tandod's socket every 5 s; the whole status once a minute.
 
 ## What is checked
 

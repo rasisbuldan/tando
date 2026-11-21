@@ -167,7 +167,9 @@ top_poll() {
         TH_DUE[i]=$((SECONDS + every)); TOP_DIRTY=1
       fi
     fi
-    if [ -z "${TH_PID[i]}" ] && [ "$SECONDS" -ge "${TH_DUE[i]}" ] && top_wants "$i"; then top_fetch "$i"; fi
+    if [ -z "${TH_PID[i]}" ] && top_wants "$i" && { [ "$SECONDS" -ge "${TH_DUE[i]}" ] || top_new_sel "$i"; }; then
+      top_fetch "$i"
+    fi
   done
   if [ -n "$TOP_ACT_PID" ] && [ -f "$TD/act.rc" ]; then top_act_done; fi
   if [ "$TOP_VIEW" = log ]; then top_log_read; fi
@@ -180,6 +182,12 @@ top_wants() {
   [ "${TH_LIVE[$1]}" = 1 ] || return 0
   [ "$1" = "$TOP_H" ] && [ -n "$SEL_APP" ] || return 1
   [ "$TOP_VIEW" != main ] || [ "$TOP_DETAIL" = 1 ] || [ "$TOP_CDETAIL" = 1 ]
+}
+
+# top_new_sel i: with live frames, the releases, history and graphs of a new selection are
+# fetched at once, not at the next 10 s
+top_new_sel() {
+  [ "${TH_LIVE[$1]}" = 1 ] && [ "$1" = "$TOP_H" ] && { [ "$D_NEED" = 1 ] || [ "$G_NEED" = 1 ]; }
 }
 
 # top_follow i: `tando-agent status-follow` on host i for the whole session: each frame (between
