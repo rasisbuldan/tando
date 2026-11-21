@@ -10,6 +10,7 @@ umask 022
 
 R=/opt/tando
 AGENT=$R/bin/tando-agent
+PROXYD=/usr/lib/systemd/systemd-socket-proxyd   # (idle_stop: in the systemd package)
 LOGS=$R/bin/tando-logs      # logging helper (server/tando-logs)
 KEEP=5                 # releases kept per app (current and last_good are always kept too)
 SOAK=30                # seconds a new release must stay up after the check through Caddy (soak =)
@@ -484,6 +485,25 @@ health_path() { # under path; "/" with a path is the path itself (Next redirects
 # Static sites have no process: Caddy serves their current release. Every other app has a unit.
 has_unit() { [[ ${C[recipe]:-} != static ]]; }
 app_unit() { if has_unit; then echo "tando-$A.service"; fi; }
+# idle_stop = <n>s|<n>m|<n>h (tando.conf): scale to zero. The app stops after that long without a
+# connection and the next request starts it. Caddy proxies to the app's wake socket
+# (/run/tando-wake/<app>.sock, systemd's, group caddy) instead of its port; a connection there
+# starts tando-<app>_wake.service, systemd-socket-proxyd as the app's user, which needs
+# tando-<app>.service (StopWhenUnneeded: it stops when the proxy, idle for idle_stop, exits).
+# Requests wait in the socket's queue while the app starts (ExecStartPost: until its port answers).
+# Only the web process scales down: workers and scheduled jobs are units of their own and run on.
+idle_app() { [[ -n ${C[idle_stop]:-} && ${C[idle_stop]} != off ]] && has_unit && [[ ${C[recipe]:-} != container ]]; }
+wake_sock() { echo "/run/tando-wake/$A.sock"; }
+# svc_restart: restart the app's process (an idle app: stop the proxy and the app, then start the
+# proxy, which starts the app and returns once its port answers)
+svc_restart() {
+  if idle_app; then
+    systemctl stop "tando-${A}_wake.service" "tando-$A.service" &&
+      systemctl start "tando-${A}_wake.socket" "tando-${A}_wake.service"
+  else
+    systemctl restart "tando-$A"
+  fi
+}
 
 # hold_secs: how long Caddy holds a request of the app while it restarts (lb_try_duration): HOLD, or
 # the health timeout when longer. hold = (tando.conf) sets it: an app that starts in a second or two
@@ -503,7 +523,7 @@ restart_app() {
   if [[ -n ${S[stopped]:-}${S[down]:-} ]]; then
     if has_unit; then
       systemctl reset-failed "tando-$A" 2> /dev/null
-      fp ra.restart && systemctl restart "tando-$A" || return 1
+      fp ra.restart && svc_restart || return 1
     fi
     local was_s=${S[stopped]:-} was_d=${S[down]:-}
     unset "S[stopped]" "S[down]"
@@ -521,7 +541,7 @@ restart_app() {
   # no Caddy reload while requests wait for the app (hold_window_start says why)
   local rc=0
   hold_window_start
-  { fp ra.restart && systemctl restart "tando-$A"; } || rc=1
+  { fp ra.restart && svc_restart; } || rc=1
   # the wait runs beside the caller, which goes on (its health check) without waiting for it; it
   # keeps only the Caddy lock (not the app's lock or any other the caller holds)
   ( exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- 10>&-
@@ -534,6 +554,9 @@ restart_app() {
 stop_app() {
   write_caddy || return 1
   has_unit || return 0
+  # (an idle app's wake socket first: no request may start it again)
+  [[ -f /etc/systemd/system/tando-${A}_wake.socket ]] &&
+    systemctl disable -q --now "tando-${A}_wake.socket" "tando-${A}_wake.service" 2> /dev/null
   fp svc.disable && systemctl disable -q --now "tando-$A" && workers_follow
 }
 # lock [secs]: the app's lock (fd 9). While it waits, $D/lock.wait.<pid> says so; once it holds
@@ -699,12 +722,22 @@ write_unit() {
   write_slice   # (jobs of a static site run in it too)
   local f=/etc/systemd/system/tando-$A.service
   if ! has_unit; then   # a static site (also when an app changed recipe): no process
+    write_wake
     if [[ -f $f ]]; then systemctl disable -q --now "tando-$A"; rm -f "$f"; WU_CHANGED=1; fi
     return 0
   fi
+  write_wake || return 1
+  local inst='WantedBy=multi-user.target'
+  # an idle app is started by its wake socket, never at boot: enabling it enables the socket
+  idle_app && inst="Also=tando-${A}_wake.socket"
   {
-    printf '[Unit]\nDescription=tando app %s\nAfter=network.target\n\n[Service]\n' "$A"
+    printf '[Unit]\nDescription=tando app %s\nAfter=network.target\n' "$A"
+    idle_app && printf 'StopWhenUnneeded=yes\n'
+    printf '\n[Service]\n'
     printf 'ExecStart=%s exec-app %s\n' "$AGENT" "$A"
+    # ready once its port answers (the proxy is ordered after it): up to health_timeout
+    idle_app && printf 'ExecStartPost=/bin/bash -c '"'"'for i in {1..%s}; do (exec 3<>/dev/tcp/127.0.0.1/%s) 2> /dev/null && exit 0; sleep 0.1; done; exit 1'"'"'\n' \
+      $(( ${C[health_timeout]:-60} * 10 )) "${C[port]}"
     printf 'WorkingDirectory=%s/current\nRestart=on-failure\nRestartSec=2\n' "$D"
     # stop_timeout (default 10 s): how long a stopping process may finish its requests before it
     # is killed; Caddy holds new requests meanwhile (an app that waits for every keep-alive
@@ -713,16 +746,41 @@ write_unit() {
     local stop=10; [[ ${C[recipe]:-} == next ]] && stop=5
     printf 'SyslogIdentifier=tando-%s\nTimeoutStopSec=%s\n' "$A" "${C[stop_timeout]:-$stop}"
     props "${C[port]}"
-    printf '\n[Install]\nWantedBy=multi-user.target\n'
+    printf '\n[Install]\n%s\n' "$inst"
   } > "$f.tmp" || { rm -f "$f.tmp"; echo "tando-agent: could not write $f (disk full?)" >&2; return 1; }
   # when the unit gives up (start limit), tando-down@ shows a 503 page instead of holding requests
   # (gives up = 5 starts within 60 s, so a crash loop ends in "failed" after about 10 s)
   # (a file cut short by a full disk is never installed: it must end with its [Install] line)
   sed -i "1a OnFailure=tando-down@tando-$A.service\nStartLimitIntervalSec=60\nStartLimitBurst=5" "$f.tmp" &&
-    [[ $(tail -1 "$f.tmp") == WantedBy=multi-user.target ]] ||
+    [[ $(tail -1 "$f.tmp") == "$inst" ]] ||
     { rm -f "$f.tmp"; echo "tando-agent: could not write $f (disk full?)" >&2; return 1; }
   if cmp -s "$f.tmp" "$f"; then rm -f "$f.tmp"   # unchanged: untouched
   else sync "$f.tmp" && mv -f "$f.tmp" "$f" && WU_CHANGED=1; fi
+  # (an app that became idle: its link from multi-user.target would keep it needed, never stopped)
+  idle_app && rm -f "/etc/systemd/system/multi-user.target.wants/tando-$A.service"
+  return 0
+}
+# write_wake: the wake socket and proxy of an idle app (idle_app), or none: an app whose idle_stop
+# went away gets its unit enabled again (configure) and Caddy proxies to its port again
+write_wake() {
+  local s=/etc/systemd/system/tando-${A}_wake.socket v=/etc/systemd/system/tando-${A}_wake.service t
+  if ! idle_app; then
+    [[ -f $s || -f $v ]] || return 0
+    systemctl disable -q --now "tando-${A}_wake.socket" "tando-${A}_wake.service" 2> /dev/null
+    rm -f "$s" "$v"; WU_CHANGED=1
+    return 0
+  fi
+  t=${C[idle_stop]}; [[ $t == on ]] && t=6h; t=${t/%m/min}
+  printf '%s\n' '[Unit]' "Description=tando app $A: its wake socket (idle_stop)" '' '[Socket]' \
+    "ListenStream=$(wake_sock)" SocketUser=root SocketGroup=caddy SocketMode=0660 DirectoryMode=0755 RemoveOnStop=yes \
+    '' '[Install]' WantedBy=sockets.target | write_if_changed "$s" && WU_CHANGED=1
+  # the proxy runs as the app's user: the loopback rules let it reach the app's port only
+  printf '%s\n' '[Unit]' "Description=tando app $A: the proxy to it while it runs (idle_stop)" \
+    "Requires=tando-$A.service" "After=tando-$A.service" '' '[Service]' \
+    "ExecStart=$PROXYD --exit-idle-time=$t 127.0.0.1:${C[port]}" "User=$AU" "Group=$AU" \
+    "Slice=$(app_slice)" NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes PrivateTmp=yes \
+    PrivateDevices=yes OOMScoreAdjust=500 | write_if_changed "$v" && WU_CHANGED=1
+  return 0
 }
 
 # Caddy site for the app; validated before reload, the previous file restored on failure.
@@ -867,7 +925,8 @@ write_caddy() {
     else
       [[ -n ${C[path]:-} ]] && echo "	redir / ${C[path]}"
       # hold requests while the app restarts (at most HOLD each), so a deploy drops none
-      echo "	reverse_proxy 127.0.0.1:${C[port]} {"
+      if idle_app; then echo "	reverse_proxy unix/$(wake_sock) {"   # (idle_stop: its wake socket)
+      else echo "	reverse_proxy 127.0.0.1:${C[port]} {"; fi
       echo "		lb_try_duration $(hold_secs)s"
       echo "		lb_try_interval 100ms"
       # the probe secret (skips the request log) is Caddy's and root's: never handed to an app
@@ -879,6 +938,8 @@ write_caddy() {
       local mc=${C[max_conns]:-256}; [[ $mc =~ ^[1-9][0-9]{0,4}$ ]] || mc=256
       echo "		transport http {"
       echo "			max_conns_per_host $mc"
+      # (idle_stop: no pooled connection keeps the proxy busy, so it exits idle_stop after the last request)
+      idle_app && echo "			keepalive off"
       echo "		}"
       # load shedding, when max_requests is set: with that many in flight the app counts as full;
       # a request beyond it waits at most lb_try_duration (the hold) and then gets the 503 "busy"
@@ -2655,7 +2716,7 @@ cmd_configure() {
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" \
-    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]"
+    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]" "C[idle_stop]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -2675,6 +2736,7 @@ cmd_configure() {
       path) [[ $v =~ ^(/[A-Za-z0-9._~-]+)+$ ]] || die "bad path: $v (like /shop)";;
       spa) [[ $v =~ ^(true|false)$ ]] || die "spa must be true or false";;
       compress) [[ $v =~ ^(on|off)$ ]] || die "compress must be on or off";;
+      idle_stop) [[ $v =~ ^(on|off)$ || $v =~ ^[1-9][0-9]{0,3}[smh]$ ]] || die "bad idle_stop: $v (like 6h, 10m, 30s; on = 6h; off)";;
       data) if [[ ${C[recipe]:-} == container ]]; then   # the volume's path inside the container
               [[ $v =~ ^(/[A-Za-z0-9_.-]+)+$ && $v != */../* ]] || die "bad data path: $v (like /data)"
             else
@@ -2767,6 +2829,12 @@ cmd_configure() {
     [[ $k == worker.*.* && " ${workers[*]} " != *" worker.$x "* ]] && die "$k is set but there is no worker.$x = <command>"
     [[ " ${jobs[*]} " == *" job.$x "* ]] && die "worker $x has the name of a job: give one of them another name"
   done
+  if [[ -n ${C[idle_stop]:-} && ${C[idle_stop]} != off ]]; then
+    case ${C[recipe]:-node} in
+      static) die "idle_stop is not for a static site: it has no process (Caddy serves it)";;
+      container) die "idle_stop is not supported for recipe = container yet";;
+    esac
+  fi
   if ((${#workers[@]})); then
     case ${C[recipe]:-node} in
       static) die "workers are not supported for a static site: it has no process (recipe = static)";;
@@ -2950,7 +3018,7 @@ cmd_activate() {
         -z ${S[stopped]:-}${S[down]:-} && ${C[recipe]:-node} != container && -n ${S[applied]:-} &&
         -z ${C[release]:-} &&
         ${S[inc_applied]:-} == "${conf:-${S[staged]:-}} ${S[applied]}" && $(cur_link) == "$cur" && $(inc_sum) == "${S[inc_sum]:-}" ]] &&
-     { ! has_unit || systemctl -q is-active "tando-$A"; }; then
+     { ! has_unit || idle_app || systemctl -q is-active "tando-$A"; }; then
     rm -f "$D/upload"
     AUDIT_NOTE="unchanged: release $cur stays live"
     echo "id=$cur"; echo "same=1"
@@ -3800,7 +3868,9 @@ rec_service() {
   else
     case $as in
       failed) S[down]=1; save "$D/state" S; write_caddy;;    # systemd gave up; app-down did not get to it
-      inactive) restart_app || true;;                        # a start or restart cut short
+      # an idle app (idle_stop) waits for its next request: its socket listens, Caddy proxies to it
+      inactive) if idle_app; then systemctl start "tando-${A}_wake.socket"; write_caddy
+                else restart_app || true; fi;;                # a start or restart cut short
       *) write_caddy
          systemctl -q is-enabled "tando-$A" 2> /dev/null || systemctl enable -q "tando-$A";;
     esac
@@ -4988,7 +5058,7 @@ destroy_finish() {
   local units=() u
   while IFS= read -r u; do units+=("$u"); done < <(app_units)
   # (timers and workers are enabled: their links in *.wants go with them)
-  for u in "${units[@]}"; do [[ $u == *.timer || $u == tando-"$A"_worker-*.service ]] && systemctl disable -q --now "$u" 2> /dev/null; done
+  for u in "${units[@]}"; do [[ $u == *.timer || $u == *.socket || $u == tando-"$A"_worker-*.service ]] && systemctl disable -q --now "$u" 2> /dev/null; done
   systemctl disable -q --now "tando-$A.service" 2> /dev/null
   # every unit of the app, running jobs and transients included, then every process of its user
   ((${#units[@]})) && { systemctl stop "${units[@]}" 2> /dev/null; systemctl kill -s KILL "${units[@]}" 2> /dev/null; }
@@ -5738,10 +5808,10 @@ CONF_KEYS_A=(recipe image container_port build_memory start start_shell release 
   health path data writable backup database db_statement_timeout db_idle_tx_timeout db_temp_limit
   memory health_timeout soak cpu tasks max_conns max_requests stop_timeout hold log_max log_keep
   log_rate access_log request_log_max health_expect health_fails health_recover job_timeout job_spread
-  job_missed assets compress)
+  job_missed assets compress idle_stop)
 CONF_KEYS=" ${CONF_KEYS_A[*]} "
 # what a record of the first agent that recorded every setting knew (conf=1 without keys=)
-CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress } job.* "
+CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress idle_stop } job.* "
 conf_key() {
   case $1 in job.*|worker.*) return 0;; *[[:space:]]*|'') return 1;; esac
   [[ $CONF_KEYS == *" $1 "* ]]

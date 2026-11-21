@@ -400,6 +400,7 @@ C_job_spread="" C_job_missed=""   # the spread of a job's start (default 15 s), 
 C_workers=""       # worker.<name> = <command> and their .memory, .stop_timeout as key=value lines
 C_release="" C_release_shell="" C_release_timeout=""   # the release command (lib/deploy.sh; checked by the server too)
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
+C_idle_stop=""     # scale to zero: stop after this long without a connection (10m, 30s, 2h, off)
 
 # trim_v text -> TRIM: without leading and trailing white space (no fork; conf_load runs it per line)
 trim_v() { TRIM=${1#"${1%%[![:space:]]*}"}; TRIM=${TRIM%"${TRIM##*[![:space:]]}"}; }
@@ -649,6 +650,9 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 99999 ] || die "$f:$n: max_conns is 1 to 99999 connections (got \"$v\")";;
       max_requests) C_max_requests=$v
         ui_int "$v" && [ "$v" -ge 1 ] || die "$f:$n: max_requests is a number of requests in flight (got \"$v\")";;
+      idle_stop) C_idle_stop=$v
+        case $v in on|off|[1-9]s|[1-9]m|[1-9]h|[1-9][0-9]s|[1-9][0-9]m|[1-9][0-9]h|[1-9][0-9][0-9]s|[1-9][0-9][0-9]m|[1-9][0-9][0-9]h) ;;
+          *) die "$f:$n: idle_stop is a time like 6h, 10m or 30s, on (6h) or off (got \"$v\")";; esac;;
       hold) C_hold=$v
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 999 ] || die "$f:$n: hold is 1 to 999 seconds (got \"$v\")";;
       stop_timeout) C_stop_timeout=$v

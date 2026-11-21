@@ -15,6 +15,12 @@ func queueProbe(t *tick, a *appTick) {
 	if !t.cfg.on("health", a.name) || a.hold || !t.caddyUp {
 		return // (held: the state is left alone)
 	}
+	if a.idle { // (idle_stop) asked on its port: a probe through Caddy would keep it from going idle
+		if port := a.conf["port"]; decimal.IsDigits(port) && a.unit["ActiveState"] == "active" {
+			a.probeURL = "http://127.0.0.1:" + port + a.conf["path"] + or(a.conf["health"], "/")
+		}
+		return
+	}
 	if cu := a.conf["check_url"]; cu != "" { // adopted app behind a hand-written Caddy site: its own address
 		a.probeURL = cu + a.conf["path"] + or(a.conf["health"], "/")
 		return

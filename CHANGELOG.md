@@ -6,6 +6,11 @@ first, grouped by area.
 
 ## Unreleased
 
+- New: `idle_stop = 6h` in tando.conf (scale to zero; `on` = 6h): the app's web process stops
+  after that long without a request and its next request starts it (workers and jobs run on) (systemd socket activation and systemd-socket-proxyd
+  behind Caddy; the first request waits about 0.1-0.3 s for a small app). `tando ls` says
+  `idle`; the monitor and the per-minute recovery do not wake it. Not for static sites,
+  containers (docs/COMMANDS.md, "Scale to zero").
 - Fixed: a new app could get another app's pre-flight port (its port + 100) as its own port once
   the port range was widened past 100 ports (what the docs advise when it is used up): that app's
   every deploy and env change then failed with "pre-flight port in use", and the loopback rules let
