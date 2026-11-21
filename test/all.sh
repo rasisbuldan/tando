@@ -136,7 +136,7 @@ fi
 # pinned (hard-codes another server: skipped, it would reset a server all.sh does not own)
 suite_kind() {
   case ${1##*/} in
-    ui-test.sh|lint.sh|go.sh|install-test.sh|portability.sh) echo local; return;;
+    ui-test.sh|lint.sh|go.sh|install-test.sh|portability.sh|dashboard-test.sh) echo local; return;;
   esac
   # param: reads the server from the environment with a default (or uses test/lib.sh)
   local code
@@ -150,7 +150,7 @@ suite_kind() {
 # every suite there is, in a fixed order: a server suite's number n is its place among the server
 # suites of this list, so it is the same whatever --only/--skip select
 ALL=()
-for f in test/ui-test.sh test/lint.sh test/go.sh test/install-test.sh test/e2e.sh test/e2e-next.sh test/e2e-*.sh test/portability.sh; do
+for f in test/ui-test.sh test/lint.sh test/go.sh test/install-test.sh test/dashboard-test.sh test/e2e.sh test/e2e-next.sh test/e2e-*.sh test/portability.sh; do
   [ -f "$f" ] || continue
   n=${f##*/}; n=${n%.sh}
   case " ${ALL[*]+${ALL[*]}} " in *" $n "*) continue;; esac
