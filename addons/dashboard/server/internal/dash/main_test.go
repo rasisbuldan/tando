@@ -77,6 +77,9 @@ func fakeTando(args []string) int {
 		host = args[len(args)-2] // doctor <host> --json, host status <host> --json
 	}
 	mode := strings.TrimRight(host, "0123456789")
+	if args[0] == "logs" {
+		return fakeLogs(dir, host, mode, args)
+	}
 	switch mode {
 	case "slow":
 		time.Sleep(1500 * time.Millisecond)
@@ -111,6 +114,88 @@ func fakeTando(args []string) int {
 	return 0
 }
 
+// fakeLogs: `tando logs <app> ... --json`. A journal of lines 4 per second (usec T0 + i*250 ms);
+// a tail prints min(n, 3) of them. A follow (-f) leaves a grandchild that holds stdout (like
+// ssh), prints the lines from --since @S (or the last n before the head), then one new line
+// every 20 ms (FAKE_TANDO_DIR/logs-every), moving the head (head-<app>). Modes by host:
+// drop* exits (255, like ssh) after 6 lines; flood* writes as fast as it can; fail* refuses.
+// Every pid goes to logs.pids, the grandchild's to gpid-<pid>.
+const fakeT0 = int64(1_800_000_000_000_000)
+
+func fakeLine(app string, i int) string {
+	u := fakeT0 + int64(i)*250_000
+	return fmt.Sprintf(`{"time":"t","usec":%d,"src":"app","unit":"tando-%s.service","priority":6,"level":"info","msg":"%s line %d"}`, u, app, app, i)
+}
+
+func fakeLogs(dir, host, mode string, args []string) int {
+	app, follow, n, since := args[1], false, 100, ""
+	for i, a := range args {
+		switch a {
+		case "-f":
+			follow = true
+		case "-n":
+			n, _ = strconv.Atoi(args[i+1])
+		case "--since":
+			since = args[i+1]
+		}
+	}
+	if f, err := os.OpenFile(filepath.Join(dir, "logs.pids"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600); err == nil {
+		fmt.Fprintln(f, os.Getpid())
+		f.Close()
+	}
+	if mode == "fail" {
+		fmt.Fprintln(os.Stderr, "tando: ssh: connect to host "+host+" port 22: Connection refused")
+		return 1
+	}
+	if !follow {
+		if mode == "garbage" {
+			fmt.Println("# release 20261113-120000 was never live")
+		}
+		for i := 0; i < n && i < 3; i++ {
+			fmt.Println(fakeLine(app, i))
+		}
+		return 0
+	}
+	self, _ := os.Executable()
+	c := exec.Command(self)
+	c.Stdout = os.Stdout
+	c.Env = append(os.Environ(), "FAKE_TANDO=sleep", "FAKE_PIDFILE="+filepath.Join(dir, "gpid-"+strconv.Itoa(os.Getpid())))
+	_ = c.Start()
+	every := 20 * time.Millisecond
+	if b, err := os.ReadFile(filepath.Join(dir, "logs-every")); err == nil {
+		every, _ = time.ParseDuration(strings.TrimSpace(string(b)))
+	}
+	hf := filepath.Join(dir, "head-"+host+"-"+app)
+	head := readPid(hf)
+	start := head - n
+	if since != "" {
+		s, _ := strconv.ParseInt(strings.TrimPrefix(since, "@"), 10, 64)
+		start = int((s*1_000_000 - fakeT0 + 249_999) / 250_000)
+	}
+	if start < 0 {
+		start = 0
+	}
+	for i, k := start, 0; ; i, k = i+1, k+1 {
+		if i >= head {
+			if mode == "flood" {
+				if k%50 == 0 {
+					time.Sleep(time.Millisecond)
+				}
+			} else {
+				time.Sleep(every)
+			}
+			head = i + 1
+			_ = os.WriteFile(hf, []byte(strconv.Itoa(head)), 0o600)
+		}
+		if _, err := fmt.Println(fakeLine(app, i)); err != nil {
+			return 1
+		}
+		if mode == "drop" && k >= 5 {
+			return 255
+		}
+	}
+}
+
 // ---- test server ----
 
 type env struct {
@@ -141,7 +226,7 @@ func newEnv(t *testing.T, runner Runner, mod func(*Config)) *env {
 	if err := os.MkdirAll(filepath.Join(e.dir, "hosts"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, h := range []string{"a", "b", "c", "ok1", "slow1", "hang1", "garbage1", "fail1", "midkill1", "big1"} {
+	for _, h := range []string{"a", "b", "c", "ok1", "drop1", "flood1", "slow1", "hang1", "garbage1", "fail1", "midkill1", "big1"} {
 		os.WriteFile(filepath.Join(e.dir, "hosts", h), []byte("x"), 0o600)
 	}
 	if runner == nil {
@@ -165,7 +250,7 @@ func newEnv(t *testing.T, runner Runner, mod func(*Config)) *env {
 	e.ts = httptest.NewUnstartedServer(e.srv)
 	e.ts.Listener = ln
 	e.ts.Start()
-	t.Cleanup(func() { e.ts.Close(); e.srv.Close(); e.srv.wg.Wait() })
+	t.Cleanup(func() { e.srv.Close(); e.ts.Close(); e.srv.wg.Wait(); e.srv.hub.wg.Wait() })
 	return e
 }
 

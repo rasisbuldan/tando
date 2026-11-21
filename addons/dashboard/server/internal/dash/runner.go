@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -21,6 +22,8 @@ type Req struct {
 	Out     *os.File // writes: the child's stdout and stderr go to this file (it survives tando-dash)
 	Stdin   []byte   // M4 env set: the value, never in argv
 	OnStart func(pid int)
+	// streams: how long to wait for a free ssh slot of Host before giving up with ErrNoSlot
+	SlotWait time.Duration
 }
 
 // Result of a run that ended
@@ -236,4 +239,137 @@ func (l *Limiter) Running() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.total
+}
+
+// Streamer: a Runner that also hands out the child's stdout line by line, while it runs
+// (`tando logs -f`). line gets a slice it must copy to keep; it is never called after Stream
+// returns.
+type Streamer interface {
+	Stream(ctx context.Context, r Req, line func([]byte)) (Result, error)
+}
+
+// ErrNoSlot: every ssh session tando-dash may use on that host is taken
+var ErrNoSlot = errors.New("all 3 ssh sessions tando-dash may use on this server are busy (other log streams or reads)")
+
+// MaxLine: a longer stdout line is cut there (and is then not JSON: the stream drops it)
+const MaxLine = 64 << 10
+
+// Stream: like Run, but stdout goes to line as it comes. The child's slot is held until it
+// ends. Ends when the child exits (its process group is then killed too: an ssh it left behind
+// would keep the pipe open) or when ctx ends (the group is killed).
+func (x *ExecRunner) Stream(ctx context.Context, r Req, line func([]byte)) (Result, error) {
+	if _, err := Allowed(r.Argv); err != nil {
+		return Result{}, err
+	}
+	path := x.Path()
+	if path == "" {
+		return Result{}, &CLIError{Code: "start", Msg: "tando not found (install tando, or start tando-dash with --tando PATH)"}
+	}
+	if x.Lim != nil {
+		actx, cancel := ctx, context.CancelFunc(func() {})
+		if r.SlotWait > 0 {
+			actx, cancel = context.WithTimeout(ctx, r.SlotWait)
+		}
+		rel, err := x.Lim.Acquire(actx, r.Host)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return Result{}, ctx.Err()
+			}
+			return Result{}, ErrNoSlot
+		}
+		defer rel()
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		return Result{}, &CLIError{Code: "start", Msg: "could not run tando: " + err.Error()}
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		outR.Close()
+		outW.Close()
+		return Result{}, &CLIError{Code: "start", Msg: "could not run tando: " + err.Error()}
+	}
+	cmd := exec.Command(path, r.Argv...)
+	cmd.Env = append(os.Environ(), x.Env...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout, cmd.Stderr = outW, errW // files: Wait has no copying of its own to wait for
+	err = cmd.Start()
+	outW.Close()
+	errW.Close()
+	if err != nil {
+		outR.Close()
+		errR.Close()
+		return Result{}, &CLIError{Code: "start", Msg: "could not run " + path + ": " + err.Error()}
+	}
+	pid := cmd.Process.Pid
+	res := Result{Pid: pid}
+	if r.OnStart != nil {
+		r.OnStart(pid)
+	}
+	outDone, errDone := make(chan struct{}), make(chan struct{})
+	errw := &capWriter{max: stderrKeep}
+	go func() { defer close(outDone); readLines(outR, line) }()
+	go func() { defer close(errDone); _, _ = io.Copy(errw, errR) }()
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+	var werr error
+	select {
+	case werr = <-waited:
+	case <-ctx.Done():
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		werr = <-waited
+	}
+	// what the CLI left in its group (an ssh) holds the pipes: the group goes too
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	for _, c := range []struct {
+		done chan struct{}
+		f    *os.File
+	}{{outDone, outR}, {errDone, errR}} {
+		select {
+		case <-c.done:
+		case <-time.After(2 * time.Second):
+			c.f.Close() // a child that left the group: stop reading what it writes
+			<-c.done
+		}
+		c.f.Close()
+	}
+	res.Stderr = firstLines(errw.b.String(), 5)
+	if cmd.ProcessState != nil {
+		res.Exit = cmd.ProcessState.ExitCode()
+	}
+	switch {
+	case ctx.Err() != nil:
+		return res, &CLIError{Code: "cancelled", Exit: res.Exit, Msg: "cancelled"}
+	case werr != nil:
+		msg := firstLine(res.Stderr)
+		if msg == "" {
+			msg = fmt.Sprintf("tando %s ended with status %d", r.Argv[0], res.Exit)
+		}
+		return res, &CLIError{Code: "cli", Exit: res.Exit, Msg: msg}
+	}
+	return res, &CLIError{Code: "ended", Msg: "the log stream ended"}
+}
+
+// readLines: r's lines to line, without the newline; a line longer than MaxLine is cut there
+func readLines(r io.Reader, line func([]byte)) {
+	br := bufio.NewReaderSize(r, MaxLine)
+	long := false
+	for {
+		b, err := br.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			if !long {
+				line(b)
+			}
+			long = true
+			continue
+		}
+		if len(b) > 0 && !long {
+			line(bytes.TrimRight(b, "\r\n"))
+		}
+		long = false
+		if err != nil {
+			return
+		}
+	}
 }

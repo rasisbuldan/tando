@@ -44,6 +44,7 @@ type Config struct {
 	MaxIdem      int           // idempotency records: 500
 	MaxInflight  int           // /api/ requests at once: 64
 	MaxHosts     int           // hosts in the overview: 64
+	Logs         LogsConfig    // log streams (logs.go)
 }
 
 func (c *Config) defaults() {
@@ -96,6 +97,7 @@ type Server struct {
 	inflight atomic.Int64
 	lastUse  atomic.Int64
 	static   http.Handler
+	hub      *hub
 	wg       sync.WaitGroup // running writes
 }
 
@@ -116,12 +118,23 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 		return nil, err
 	}
 	s.writes = newWriteLocks()
+	s.hub = newHub(s, cfg.Logs)
 	s.lastUse.Store(cfg.Now().UnixNano())
 	return s, nil
 }
 
 // Close: the reads' children are killed; running writes are left alone (tando owns them)
 func (s *Server) Close() { s.stop() }
+
+// WaitStreams: after Close, wait (up to d) for the log streams' children to be killed and reaped
+func (s *Server) WaitStreams(d time.Duration) {
+	done := make(chan struct{})
+	go func() { s.hub.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(d):
+	}
+}
 
 // LastUse: when the last request came
 func (s *Server) LastUse() time.Time { return time.Unix(0, s.lastUse.Load()) }
@@ -274,6 +287,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.hostcare(w, r, "doctor")
 	case "/api/hoststatus":
 		s.hostcare(w, r, "hoststatus")
+	case "/api/logs":
+		s.logsTail(w, r)
+	case "/api/logs/stream":
+		s.logsStream(w, r)
 	case "/api/confirm":
 		s.confirm(w, r)
 	case "/api/action":
