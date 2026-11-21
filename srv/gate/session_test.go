@@ -146,6 +146,7 @@ func TestKeyModeArgv(t *testing.T) {
 		{"sudo -n AGENT activate alpha " + tTok + " 1.5 2", "sudo -n -- GATE root alpha activate", "token=" + tTok + "\nbuild=1.5\nupload=2\n"},
 		{"rsync --server -ltprcze.iLsfxCIvu --delete . INC/", "sudo -n -- GATE root alpha receive", ""},
 		{"AGENT deploy-status alpha 20261113-170102", "AGENT deploy-status alpha 20261113-170102", ""},
+		{"AGENT deploy-status alpha 20261113-170102 wait=preflight", "AGENT deploy-status alpha 20261113-170102 wait=preflight", ""},
 		{"AGENT history alpha 5", "AGENT history alpha 5", ""},
 		{"AGENT history alpha", "AGENT history alpha 20", ""},
 		{"AGENT status alpha", "AGENT status alpha", ""},
@@ -262,13 +263,13 @@ func TestRxFree(t *testing.T) {
 // lines: they can carry customer data), with control characters cleaned; info reports the CPU.
 func TestReadVerbsFilter(t *testing.T) {
 	agentOut := map[string]string{
-		"deploy-status": "id=1\nphase=done\nlog=CUSTOMER DATA\nresult=ok\nmessage=a\x1b[31mb\nsecret=x\n",
+		"deploy-status": "id=1\nphase=done\nlog=CUSTOMER DATA\nresult=ok\nmessage=a\x1b[31mb\nsecret=x\nwaited=1\n",
 		"status":        "host\th\napp\talpha\t1\napp\tbravo\t2\nrel\tr1\nhist\tbravo\tx\nhist\talpha\ty\nother\tz\n",
 		"history":       "hist\talpha\t1\nhist\tbravo\t2\n",
 		"releases":      "rel\t1\t\tv\nx\t2\n",
 	}
 	want := map[string]string{
-		"deploy-status": "id=1\nphase=done\nresult=ok\nmessage=a?[31mb\n",
+		"deploy-status": "id=1\nphase=done\nresult=ok\nmessage=a?[31mb\nwaited=1\n",
 		"status":        "host\th\napp\talpha\t1\nrel\tr1\nhist\talpha\ty\n",
 		"history":       "hist\talpha\t1\n",
 		"releases":      "rel\t1\t\tv\n",
@@ -294,7 +295,7 @@ func TestReadVerbsFilter(t *testing.T) {
 	g.Stdout.Seek(0, 0)
 	b := make([]byte, 100)
 	n, _ := g.Stdout.Read(b)
-	if string(b[:n]) != "proto="+buildinfo.Proto+"\narch=aarch64\nlibc=glibc\n" {
+	if string(b[:n]) != "proto="+buildinfo.Proto+"\narch=aarch64\nlibc=glibc\ndswait=1\n" {
 		t.Errorf("info %q", b[:n])
 	}
 	// the agent fails: its status is ours, at most 2000 bytes of its stderr pass

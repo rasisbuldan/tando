@@ -12,7 +12,7 @@ import (
 // argv shapes key mode may run, whatever the request: sudo of the exact root-mode argvs, or a
 // read-only agent verb with checked words. (GATE and AGENT are the test's paths.)
 var keyArgvRe = regexp.MustCompile(`^(sudo -n -- GATE root alpha (begin|end|activate|receive)|` +
-	`AGENT (deploy-status alpha [0-9]{8}-[0-9]{6}(-[0-9]{1,3})?|releases alpha|history alpha [0-9]{1,3}|status alpha)|` +
+	`AGENT (deploy-status alpha [0-9]{8}-[0-9]{6}(-[0-9]{1,3})?( wait=[a-z]{1,16})?|releases alpha|history alpha [0-9]{1,3}|status alpha)|` +
 	`uname -m|logger -p auth\.notice -t tando-gate -- .*)$`)
 
 var paramsRe = regexp.MustCompile(`^token=[0-9a-f-]{36}\n(build=[0-9.]{1,8}\nupload=[0-9.]{1,8}\n)?$`)
@@ -23,6 +23,7 @@ func requestSeeds(f *testing.F) {
 		"sudo -n " + tAgent + " end alpha " + tTok,
 		"sudo -n " + tAgent + " activate alpha 1.5 2",
 		tAgent + " deploy-status alpha 20261113-170102-1",
+		tAgent + " deploy-status alpha 20261113-170102 wait=preflight",
 		tAgent + " history alpha 9",
 		tAgent + " info",
 		"rsync --server -ltprcze.iLsfxCIvu --delete . " + tInc + "/",
@@ -54,7 +55,7 @@ func FuzzParseRequest(f *testing.F) {
 			}
 		}
 		if (r.Token != "" && !validToken(r.Token)) || (r.Verb == VActivate && (!validSecs(r.Build) || !validSecs(r.Upload))) ||
-			(r.Verb == VDeployStatus && !releaseIDRe.MatchString(r.ID)) || (r.Verb == VHistory && !historyNRe.MatchString(r.HistoryN)) {
+			(r.Verb == VDeployStatus && (!releaseIDRe.MatchString(r.ID) || (r.Wait != "" && !waitRe.MatchString(r.Wait)))) || (r.Verb == VHistory && !historyNRe.MatchString(r.HistoryN)) {
 			t.Fatalf("unchecked value in %+v", r)
 		}
 	})

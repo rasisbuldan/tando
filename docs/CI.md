@@ -122,6 +122,8 @@ branch). The key cannot reach other apps' files, root, or tando' configuration.
 - **Refusals are logged** to the journal (`journalctl -t tando-gate`, facility auth).
 - **Read verbs** (`deploy-status`, `status`, `releases`, `history`) run `tando-agent` as the deploy
   user, never as root; only whitelisted keys and this app's rows pass, `log=` lines are dropped.
+  `deploy-status` takes `wait=<phase>` (a-z only); the gate's `info` says `dswait=1`, and a client
+  sends it only to a gate that says so.
 
 ### Activation: root never trusts the upload
 

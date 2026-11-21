@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"tando/srv/internal/bashread"
@@ -187,3 +190,73 @@ func actLog(path string) []string {
 // lockHeld: another process holds the app's lock exclusively (busy_info's lock_busy: a shared try,
 // so probes never see each other; lock.Held).
 func lockHeld(p string) bool { return lock.Held(p) }
+
+// dsPoll is how often DeployStatusWait looks at the app's activation and state files; dsRecheck
+// how often it asks DeployStatus again although neither changed (a dead activation unit changes
+// no file: DeployStatus notices it and recovers). Variables for the tests.
+var dsPoll, dsRecheck = 100 * time.Millisecond, 2 * time.Second
+
+// DeployStatusMax bounds one DeployStatusWait call (the ssh session stays well under ssh's
+// ServerAliveInterval and the client's deadline checks).
+const DeployStatusMax = 10 * time.Second
+
+// DeployStatusWait is `deploy-status <app> <id> wait=<phase>`: DeployStatus, answered once it
+// differs from what the client saw last (a phase other than <phase>, or a result other than
+// running) or after max, with waited=1 so the client asks again at once instead of sleeping. One
+// call replaces the client's polls every 0.5 s (each an ssh exec): the activation and state files
+// are compared every dsPoll in this process (stat, no fork), and DeployStatus runs again only
+// when one of them changed, or every dsRecheck. An agent without it ignores the argument and
+// answers at once without waited=1: the client sleeps as before.
+func (c *Collector) DeployStatusWait(ctx context.Context, w io.Writer, name, id, phase string, max time.Duration) error {
+	ctx = ctxOr(ctx)
+	end := time.Now().Add(max)
+	for {
+		var b bytes.Buffer
+		if err := c.DeployStatus(ctx, &b, name, id); err != nil {
+			return err
+		}
+		ph, res := kvField(b.Bytes(), "phase"), kvField(b.Bytes(), "result")
+		if ph != phase || (res != "running" && res != "") || !time.Now().Before(end) {
+			b.WriteString("waited=1\n")
+			_, err := w.Write(b.Bytes())
+			return err
+		}
+		dir := c.appDir(name)
+		sig := fileSig(filepath.Join(dir, "activation")) + fileSig(filepath.Join(dir, "state"))
+		asked := time.Now()
+		for time.Now().Before(end) && time.Since(asked) < dsRecheck {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(dsPoll):
+			}
+			if fileSig(filepath.Join(dir, "activation"))+fileSig(filepath.Join(dir, "state")) != sig {
+				break
+			}
+		}
+	}
+}
+
+// fileSig: the identity of a file (inode, size, modification time); "-" when it cannot be read.
+// The agent replaces these files by rename, so a new inode shows every write.
+func fileSig(p string) string {
+	fi, err := os.Stat(p)
+	if err != nil {
+		return "-;"
+	}
+	ino := uint64(0)
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		ino = uint64(st.Ino)
+	}
+	return strconv.FormatUint(ino, 10) + "," + strconv.FormatInt(fi.Size(), 10) + "," + strconv.FormatInt(fi.ModTime().UnixNano(), 10) + ";"
+}
+
+// kvField: the value of the first key=value line for k in b ("" when there is none).
+func kvField(b []byte, k string) string {
+	for _, l := range bashread.Lines(b) {
+		if v, ok := strings.CutPrefix(l, k+"="); ok {
+			return v
+		}
+	}
+	return ""
+}

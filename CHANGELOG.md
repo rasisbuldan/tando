@@ -6,6 +6,13 @@ first, grouped by area.
 
 ## Unreleased
 
+- Faster: a deploy follows its activation with one `deploy-status` call per phase (the server
+  answers when the phase changes: `deploy-status <app> <id> wait=<phase>`, in tando-status and the
+  deploy key's gate) instead of a poll every 0.5 s. The client sees "live" when it happens, not up
+  to half a second later, and makes fewer ssh calls: 17 to 11 for a 5 s activation, 29 to 12 for
+  `deploy --wait` with a 10 s soak (about 70 to 13 with the default 30 s). An older server is
+  polled as before. `tando restart`, `start`, `stop`, `rollback`, `env set` return when the
+  server answers instead of at the next quarter-second tick (0.1-0.25 s each).
 - Added: live views every 5 s. tandod keeps a second loop beside the minute's checks (srv/live):
   every 5 s each app's memory, CPU, tasks and unit state and the host's load, memory, CPU and disk,
   from the cgroup v2 files, /proc and the bus connection it already has; no program started, no file

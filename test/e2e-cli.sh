@@ -505,4 +505,57 @@ out=$(dry --dry-run); rc=$?
 check "B4c the dry run lists the largest directories with their sizes (rc=$rc)" \
   eval 'test $rc = 0 && printf "%s" "$out" | grep -qE " 5[0-9.]* MB  big "'
 rm -rf "${E:?}/w/hello/big" "${E:?}/w/hello/small" "${E:?}/w/hello/.tando"
+
+# ---- RT. round trips: a deploy follows its activation with deploy-status wait=<phase> (the server
+# answers when the phase changes, waited=1), not a poll every 0.5 s; an older server is polled as
+# before; a deploy key's gate gets it only when its info says dswait=1. restart/rollback/env set
+# return when the agent answers, not at the next 0.25 s tick of a loop (lib/deploy.sh agent_wait)
+mkdir -p "$E/rtbin"
+cat > "$E/rtbin/ssh" <<'STUB'
+#!/bin/bash
+c=${*: -1}; c=${c##*tando-agent }
+case $c in "deploy-status "*) echo "$c" >> "$RTCALLS";; esac
+case "$*" in
+  *" info") printf 'version=0.0.0\nproto=2\narch=aarch64\nlibc=glibc\n'; [ -n "${RT_DSWAIT:-}" ] && echo dswait=1; true;;
+  *" configure "*) cat > /dev/null; printf 'exists=1\ncurrent=20261120-000000\nneeds=\nnode=24.1.0\ndomains=\nport=3100\ncreated=0\nconf=ab12\nlink=http://hello.localhost\n';;
+  *" begin "*) printf 'token=%s\n' "$STUB_TOKEN";;
+  *" activate "*) cat > /dev/null; printf 'id=20261121-101010\nsame=0\n';;
+  *" deploy-status "*" wait="*) [ -n "${RT_OLD:-}" ] || { printf 'phase=soak\nresult=running\nt_copy=0.1\nt_preflight=0.3\nt_switch=0.1\nsoak=30\nlink=http://hello.localhost\nwaited=1\n'; exit 0; }
+    n=$(grep -c . "$RTCALLS"); if [ "$n" -lt 3 ]; then printf 'phase=preflight\nresult=running\n'; else printf 'phase=soak\nresult=running\nsoak=30\nlink=http://hello.localhost\n'; fi;;
+  *" deploy-status "*) n=$(grep -c . "$RTCALLS"); if [ "$n" -lt 3 ]; then printf 'phase=preflight\nresult=running\n'
+    else printf 'phase=soak\nresult=running\nsoak=30\nlink=http://hello.localhost\n'; fi;;
+  *" restart "*|*" unlock "*) case "$*" in *restart*) sleep 0.3;; esac; printf 'healthy=1\nheld=0\n';;
+  *" busy "*) printf 'busy=\n';;
+  *) echo "ssh: connect to host 127.0.0.1 port 9: Connection refused" >&2; exit 255;;
+esac
+STUB
+printf '#!/bin/sh\ncase " $* " in *" -e "*) printf "Number of files transferred: 1\\nTotal bytes sent: 10\\n";; *) exec %s "$@";; esac\n' \
+  "$(PATH=${PATH#"$E/bin:"} command -v rsync)" > "$E/rtbin/rsync"
+chmod +x "$E/rtbin/ssh" "$E/rtbin/rsync"
+export RTCALLS=$E/rtcalls
+rt() { : > "$RTCALLS"; (cd "$E/w/hello" && TANDO_WAIT="" PATH="$E/rtbin:$PATH" "$R" "$@" < /dev/null 2>&1); }
+out=$(rt deploy); rc=$?
+check "RT1 deploy: one deploy-status call, wait=copy, until live (rc=$rc; calls: $(tr '\n' ',' < "$RTCALLS"))" \
+  eval 'test $rc = 0 && printf "%s" "$out" | grep -q "live in" && test "$(grep -c . "$RTCALLS")" = 1 &&
+        grep -qx "deploy-status hello 20261121-101010 wait=copy" "$RTCALLS"'
+out=$(RT_OLD=1 rt deploy); rc=$?
+check "RT2 ... an older server (no waited=1): polled until live, as before (rc=$rc; $(grep -c . "$RTCALLS") calls)" \
+  eval 'test $rc = 0 && printf "%s" "$out" | grep -q "live in" && test "$(grep -c . "$RTCALLS")" -ge 2'
+cp "$TANDO_CONFIG_DIR/hosts/vps" "$E/vps.keep"
+sed 's/^kind=.*/kind=deploy/' "$E/vps.keep" > "$TANDO_CONFIG_DIR/hosts/vps"
+out=$(rt deploy); rc=$?
+check "RT3 ... a deploy key whose gate does not say dswait=1: no wait= (rc=$rc; $(tr '\n' ',' < "$RTCALLS"))" \
+  eval 'test $rc = 0 && test "$(grep -c . "$RTCALLS")" -ge 2 && ! grep -q wait= "$RTCALLS"'
+out=$(RT_DSWAIT=1 rt deploy); rc=$?
+check "RT4 ... one whose gate does: wait=copy, one call (rc=$rc; $(tr '\n' ',' < "$RTCALLS"))" \
+  eval 'test $rc = 0 && test "$(grep -c . "$RTCALLS")" = 1 && grep -q " wait=copy$" "$RTCALLS"'
+cp "$E/vps.keep" "$TANDO_CONFIG_DIR/hosts/vps"
+# the agent's restart takes 0.3 s; unlock (a plain call) is the baseline: restart may not add more
+# than 0.12 s to its 0.3 s (the loop it replaced woke every 0.25 s: 0.5 s); best of three each
+ms() { local a b; a=$(perl -MTime::HiRes=time -e 'printf "%d", time * 1000'); rt "$@" > /dev/null; b=$(perl -MTime::HiRes=time -e 'printf "%d", time * 1000'); echo $((b - a)); }
+best() { local m x i; m=99999; for i in 1 2 3; do x=$(ms "$@"); [ "$x" -lt "$m" ] && m=$x; done; echo "$m"; }
+tr_=$(best restart); tu=$(best unlock)
+check "RT5 restart returns when the agent answers (restart ${tr_} ms, a plain call ${tu} ms, the agent 300 ms)" \
+  test $((tr_ - tu - 300)) -lt 120
+rm -rf "${E:?}/w/hello/.tando"
 t_done

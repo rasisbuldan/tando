@@ -6,7 +6,7 @@
 //	tando-status status [app]           host row, app rows; with an app its releases, history, domains, metrics
 //	tando-status follow [app]           status as frames every 5 s with tandod's live rows (root; status.Follow)
 //	tando-status live|ring [app]        tandod's fast loop: the latest point, the last hour (root; tests, debugging)
-//	tando-status deploy-status <app> <id>
+//	tando-status deploy-status <app> <id> [wait=<phase>]
 //	tando-status releases <app>
 //	tando-status history [app] [n]
 //	tando-status busy <app>             (root)
@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,7 +33,7 @@ import (
 	"tando/srv/status"
 )
 
-var errUsage = errors.New("usage: tando-status status [app] | follow [app] | deploy-status <app> <id> | releases <app> | history [app] [n] | busy <app> | info | version")
+var errUsage = errors.New("usage: tando-status status [app] | follow [app] | deploy-status <app> <id> [wait=<phase>] | releases <app> | history [app] [n] | busy <app> | info | version")
 
 func main() {
 	syscall.Umask(0o022) // (a recreated releases/ is 755 whatever umask sudo passed on)
@@ -96,6 +97,10 @@ func run(args []string) error {
 		_, err = w.Write(ans.Body)
 		return err
 	case "deploy-status":
+		// wait=<phase> (a client that knows it): answer once the activation is past that phase
+		if ph, ok := strings.CutPrefix(arg(args, 2), "wait="); ok && validPhase(ph) {
+			return c.DeployStatusWait(ctx, w, arg(args, 0), arg(args, 1), ph, status.DeployStatusMax)
+		}
 		return c.DeployStatus(ctx, w, arg(args, 0), arg(args, 1))
 	case "releases":
 		return c.Releases(ctx, w, arg(args, 0))
@@ -110,4 +115,17 @@ func run(args []string) error {
 		return err
 	}
 	return errUsage
+}
+
+// validPhase: a phase word as the activation writes them (a-z, at most 16)
+func validPhase(p string) bool {
+	if p == "" || len(p) > 16 {
+		return false
+	}
+	for _, r := range p {
+		if r < 'a' || r > 'z' {
+			return false
+		}
+	}
+	return true
 }

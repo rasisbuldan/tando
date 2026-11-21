@@ -76,7 +76,9 @@ commands, settings) travels to the agent on stdin, never in the remote command l
 
 ## Agent verbs
 Read-only (no sudo): `info`, `status [app]`, `releases`, `history [app] [n]`, `deploy-status <app>
-<id>`, `jobs`, `logs`, `doctor <client cksums> <client version>`. Root: `setup` (prints `step=<name> run|ok <detail>`
+<id> [wait=<phase>]` (with `wait=`: answered once the activation is past that phase or has a
+result, at most 10 s later, with `waited=1`; the client's one call per phase instead of a poll every
+0.5 s, an agent without it answers at once), `jobs`, `logs`, `doctor <client cksums> <client version>`. Root: `setup` (prints `step=<name> run|ok <detail>`
 lines as it goes), `runtime <node [major]|python|podman|postgres>`, `configure` (stdin settings;
 `check=1` only validates and prints `exists`, `current`, `needs` (missing runtimes), `domains`;
 `origin=` refuses a deploy from another directory unless `force=1`; an unchanged app.conf with

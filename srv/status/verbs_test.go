@@ -155,6 +155,73 @@ func TestDeployStatus(t *testing.T) {
 	})
 }
 
+// deploy-status wait=<phase>: one call that answers when the phase changes (or a result comes),
+// instead of the client's polls every 0.5 s; waited=1 tells the client not to sleep
+func TestDeployStatusWait(t *testing.T) {
+	const id = "20261114-170102"
+	defer func(p, r time.Duration) { dsPoll, dsRecheck = p, r }(dsPoll, dsRecheck)
+	dsPoll, dsRecheck = 10*time.Millisecond, time.Second
+	setup := func(t *testing.T) *host {
+		h := newHost(t)
+		h.euid = 0
+		h.app("web", "port=4100\n", "phase=preflight\ntarget="+id+"\n")
+		h.write("root/apps/web/activation", "id="+id+"\nphase=preflight\nresult=running\n")
+		h.write("cgroup/system.slice/tando-web-act-"+id+".service/cgroup.events", "populated 1\n")
+		return h
+	}
+	wait := func(h *host, phase string, max time.Duration) (string, time.Duration, error) {
+		t0 := time.Now()
+		got, err := h.out(func(c *Collector, b *bytes.Buffer) error {
+			return c.DeployStatusWait(context.Background(), b, "web", id, phase, max)
+		})
+		return got, time.Since(t0), err
+	}
+	t.Run("another phase answers at once", func(t *testing.T) {
+		h := setup(t)
+		got, d, err := wait(h, "copy", 5*time.Second)
+		if err != nil || d > time.Second || !strings.Contains(got, "phase=preflight\n") || !strings.HasSuffix(got, "waited=1\n") {
+			t.Fatalf("%v %v %q", err, d, got)
+		}
+	})
+	t.Run("the same phase waits for the change", func(t *testing.T) {
+		h := setup(t)
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			p := h.path("root/apps/web/activation")
+			os.WriteFile(p+".tmp", []byte("id="+id+"\nphase=soak\nresult=running\nt_preflight=0.3\n"), 0o644)
+			os.Rename(p+".tmp", p)
+		}()
+		got, d, err := wait(h, "preflight", 5*time.Second)
+		if err != nil || d < 250*time.Millisecond || d > 2*time.Second || !strings.Contains(got, "phase=soak\n") ||
+			!strings.HasSuffix(got, "waited=1\n") {
+			t.Fatalf("%v %v %q", err, d, got)
+		}
+	})
+	t.Run("a result ends the wait", func(t *testing.T) {
+		h := setup(t)
+		h.write("root/apps/web/activation", "id="+id+"\nphase=preflight\nresult=failed\n")
+		got, d, _ := wait(h, "preflight", 5*time.Second)
+		if d > time.Second || !strings.Contains(got, "result=failed\n") {
+			t.Fatalf("%v %q", d, got)
+		}
+	})
+	t.Run("nothing changes: the answer after max", func(t *testing.T) {
+		h := setup(t)
+		got, d, _ := wait(h, "preflight", 300*time.Millisecond)
+		if d < 300*time.Millisecond || d > 2*time.Second || !strings.Contains(got, "phase=preflight\n") || !strings.HasSuffix(got, "waited=1\n") {
+			t.Fatalf("%v %q", d, got)
+		}
+	})
+	t.Run("errors as DeployStatus", func(t *testing.T) {
+		h := setup(t)
+		if _, err := h.out(func(c *Collector, b *bytes.Buffer) error {
+			return c.DeployStatusWait(context.Background(), b, "nope", id, "copy", time.Second)
+		}); err == nil || err.Error() != "no such app: nope" {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestBusy(t *testing.T) {
 	busy := func(h *host) (string, error) {
 		return h.out(func(c *Collector, b *bytes.Buffer) error { return c.Busy(context.Background(), b, "web") })
