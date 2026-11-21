@@ -673,7 +673,7 @@ check "S15a no app named, no tando.conf, not a terminal: the list with the comma
 pk=$!
 fwd() { pgrep -f 'ControlPath=none.*127.0.0.1:[0-9]*:/run/tando-studio/u/' > /dev/null; }   # a client's forward
 T_UNTIL_STEP=0.2 t_until 30 fwd   # (script(1) may write its file only at the end)
-fport=$(pgrep -af 'ControlPath=none.*127.0.0.1:[0-9]*:/run/tando-studio/u/' | sed -n 's/.*127\.0\.0\.1:\([0-9]*\):.*/\1/p' | head -1)
+fport=$(ps -axo args= | sed -n 's/.*ControlPath=none.* -L 127\.0\.0\.1:\([0-9]*\):\/run\/tando-studio\/u\/.*/\1/p' | head -1)   # (macOS pgrep prints no arguments)
 T_UNTIL_STEP=0.2 t_until 15 eval 'curl -s -m 2 "http://127.0.0.1:$fport/healthz" | grep -q tando-studio'   # (the forward to shop's studio answers)
 pkill -f 'ControlPath=none.*127.0.0.1:[0-9]*:/run/tando-studio/u/'   # (the forward ends: so does the client)
 wait $pk 2> /dev/null
