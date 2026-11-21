@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // The allowlist: the only argv shapes tando-dash ever gives the tando CLI. Every run goes
@@ -15,10 +17,16 @@ import (
 type valueKind int
 
 const (
-	vNone  valueKind = iota // a boolean flag
-	vHost                   // a host name, tando's rule (lib/common.sh valid_host), stricter
-	vApp                    // an app name, tando's rule (lib/common.sh valid_app)
-	vRange                  // 1h | 24h | 7d
+	vNone    valueKind = iota // a boolean flag
+	vHost                     // a host name, tando's rule (lib/common.sh valid_host), stricter
+	vApp                      // an app name, tando's rule (lib/common.sh valid_app)
+	vRange                    // 1h | 24h | 7d
+	vCount                    // -n: 1 to 5000 lines
+	vSince                    // --since: 15m, @epoch, 2026-11-13, "2026-11-13 14:30", 14:30 (lib/cmd-logx.sh lx_time)
+	vLevel                    // --level: err, warning, notice, info, debug (and their aliases)
+	vGrep                     // --grep: a fixed text, 1-256 characters, no control characters, no leading '-'
+	vWorker                   // --worker: a-z first, then a-z 0-9 -
+	vRelease                  // --release: a release id, YYYYMMDD-HHMMSS[-N]
 )
 
 type flagRule struct {
@@ -49,6 +57,14 @@ var shapes = []shape{
 	// exactly `health <app> --json -H <host>`: `health --forget` is a write hidden in a read verb
 	{name: "health", verb: []string{"health"}, pos: []valueKind{vApp},
 		flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}}},
+	// logs: a one-shot tail and a follow (-f), JSON lines; no --regex, --until, --deploy or pull
+	{name: "logs", verb: []string{"logs"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"-H": {vHost, true}, "--json": {vNone, true}, "-n": {vCount, true},
+			"--since": {vSince, false}, "--level": {vLevel, false}, "--grep": {vGrep, false},
+			"--worker": {vWorker, false}, "--release": {vRelease, false}}},
+	{name: "logs-follow", verb: []string{"logs"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"-H": {vHost, true}, "--json": {vNone, true}, "-f": {vNone, true},
+			"-n": {vCount, true}, "--since": {vSince, false}, "--level": {vLevel, false}, "--worker": {vWorker, false}}},
 	{name: "restart", verb: []string{"restart"}, pos: []valueKind{vApp},
 		flags: map[string]flagRule{"-H": {vHost, true}}, write: true},
 }
@@ -79,8 +95,63 @@ func ValidHost(s string) bool {
 // ValidRange: the metric windows snapshot knows
 func ValidRange(s string) bool { return s == "1h" || s == "24h" || s == "7d" }
 
+var (
+	sinceRe   = regexp.MustCompile(`^([0-9]{1,7}[smhdw]|@[0-9]{1,11}|now|[0-9]{4}-[0-9]{2}-[0-9]{2}([ T][0-9]{2}:[0-9]{2}(:[0-9]{2})?)?|[0-9]{2}:[0-9]{2}(:[0-9]{2})?)$`)
+	workerRe  = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+	releaseRe = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}(-[0-9]{1,2})?$`)
+	levels    = map[string]bool{"emerg": true, "alert": true, "crit": true, "fatal": true, "err": true, "error": true,
+		"warning": true, "warn": true, "notice": true, "info": true, "debug": true}
+)
+
+// MaxLogLines: the most lines a tail asks for (-n)
+const MaxLogLines = 5000
+
+// ValidSince: the --since forms of tando logs (lib/cmd-logx.sh lx_time)
+func ValidSince(s string) bool { return sinceRe.MatchString(s) }
+
+// ValidLevel: the --level names tando logs knows
+func ValidLevel(s string) bool { return levels[s] }
+
+// ValidWorker: tando's worker names (--worker)
+func ValidWorker(s string) bool { return workerRe.MatchString(s) }
+
+// ValidRelease: a release id (lib/common.sh valid_id)
+func ValidRelease(s string) bool { return releaseRe.MatchString(s) }
+
+// ValidGrep: the CLI's own rule (1-256 characters, no control characters, valid UTF-8), and no
+// leading '-': tando's flag parser reads every token, so "--grep -f" would turn into a follow.
+func ValidGrep(s string) bool {
+	if s == "" || len(s) > 1024 || !utf8.ValidString(s) || utf8.RuneCountInString(s) > 256 || s[0] == '-' {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || r >= 0x80 && r < 0xa0 {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidCount: -n of a tail
+func ValidCount(s string) bool {
+	n, err := strconv.Atoi(s)
+	return err == nil && n >= 1 && n <= MaxLogLines && strconv.Itoa(n) == s
+}
+
 func validValue(k valueKind, v string) bool {
 	switch k {
+	case vCount:
+		return ValidCount(v)
+	case vSince:
+		return ValidSince(v)
+	case vLevel:
+		return ValidLevel(v)
+	case vGrep:
+		return ValidGrep(v)
+	case vWorker:
+		return ValidWorker(v)
+	case vRelease:
+		return ValidRelease(v)
 	case vHost:
 		return ValidHost(v)
 	case vApp:
@@ -178,3 +249,27 @@ func argvSnapshot(host, app, rng string) []string {
 
 func argvDoctor(host string) []string     { return []string{"doctor", host, "--json"} }
 func argvHostStatus(host string) []string { return []string{"host", "status", host, "--json"} }
+
+// logFilter: the filters of a tail or a follow, each checked by its Valid* rule
+type logFilter struct {
+	Since, Level, Grep, Worker, Release string
+}
+
+func argvLogs(host, app string, n int, f logFilter) []string {
+	a := []string{"logs", app, "-H", host, "--json", "-n", strconv.Itoa(n)}
+	return appendFilter(a, f)
+}
+
+func argvLogsFollow(host, app string, n int, f logFilter) []string {
+	a := []string{"logs", app, "-H", host, "--json", "-f", "-n", strconv.Itoa(n)}
+	return appendFilter(a, f)
+}
+
+func appendFilter(a []string, f logFilter) []string {
+	for _, kv := range [][2]string{{"--since", f.Since}, {"--level", f.Level}, {"--grep", f.Grep}, {"--worker", f.Worker}, {"--release", f.Release}} {
+		if kv[1] != "" {
+			a = append(a, kv[0], kv[1])
+		}
+	}
+	return a
+}

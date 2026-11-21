@@ -153,6 +153,7 @@ loop:
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv.Close()
+	srv.WaitStreams(3 * time.Second) // log followers: their process groups killed and reaped
 	_ = hs.Shutdown(ctx)
 	if n := srv.WritesRunning(); n > 0 {
 		fmt.Printf("tando-dash: %d write(s) still running; tando finishes them (tando status shows the outcome)\n", n)

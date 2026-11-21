@@ -59,6 +59,8 @@ the page shows "Session ended"). Errors are `{"error":{"code","message"}}`, the 
 | GET | `/api/overview?visible=` | the snapshot above, per host, in parallel | as snapshot | cookie |
 | GET | `/api/doctor?host=` | `doctor <host> --json` | 60 s per host (also failures) | cookie |
 | GET | `/api/hoststatus?host=` | `host status <host> --json` | 60 s per host (also failures) | cookie |
+| GET | `/api/logs?host=&app=&n=&since=&level=&grep=&worker=&release=` | `logs <app> -H <host> --json -n <n> [--since T] [--level L] [--grep TEXT] [--worker W] [--release ID]` | none | cookie |
+| GET | `/api/logs/stream?host=&app=&level=&worker=` | `logs <app> -H <host> --json -f -n 200 [--level L] [--worker W]` (a restart: `-n 1000 --since @<epoch>`) | one child per (host, app, level, worker), shared | cookie |
 | POST | `/api/confirm` `{action,host,app}` | none | token 60 s, single use | cookie |
 | POST | `/api/action` `{action,host,app,confirm,params?}` | the action's argv (M1b: `noop` = `--version`) | idempotency record 24 h | cookie + confirm token + `Idempotency-Key` |
 | GET | `/api/action?key=` | none | the record | cookie |
@@ -72,9 +74,31 @@ returns that record (`replay: true`, 200 once ended); the same key with another 
 write of the same app while one runs 409 `{"error":{"code":"running","running":{action,since,key}}}`.
 `GET /api/action?key=` adds `output` (the last 8 KB) and, once ended, `ended_at` and `exit`.
 
+Logs: a tail answers `{host, app, ran_at, lines: [...], notes: [...]}`: `lines` are the CLI's JSON
+lines as they are (`{time, usec, src, unit, priority, level, msg}`), `notes` its other lines.
+`n` is 1-5000 (default 200); `since` takes the CLI's forms (`15m`, `2h`, `7d`, `2026-11-13`,
+`2026-11-13 14:30`, `14:30`, `@epoch`; GMT); `level` `err`, `warning`, `notice`, `info`, `debug`;
+`grep` is a fixed text of 1-256 characters without control characters and not starting with `-`
+(one argv element, never a shell); `worker` and `release` follow tando's names. Anything else is
+400, nothing run.
+
+The stream is Server-Sent Events (`text/event-stream`). Events: `hello` (`{host, app, level,
+worker, buffered}`), `line` (one JSON line; `id:` its number), `reconnecting` (`{attempt,
+retry_in_ms, message}`), `reconnected`, `error` (`{code, message}`, the last event: `busy` when the
+server's ssh sessions are taken, `ended` when the child failed 5 times in a row), `dropped` (the
+last event: this tab could not keep up). A comment every 15 s keeps it open. Every tab watching
+the same (host, app, level, worker) shares one `tando logs -f` child; a tab that joins later
+first gets the last 500 lines (or, with `Last-Event-ID`, only those it missed). The child is
+stopped 30 s after its last tab leaves; when it dies while tabs remain it is started again with
+backoff (1 s doubling to 30 s) from the second of the last line, the lines already sent skipped.
+Bounds: 2 streams per host (the third ssh session stays for reads: at most 3 tando children per
+host in all, reads included), 16 streams, 32 tabs, 256 events queued per tab. The page should
+close its EventSource on `error` and `dropped` (otherwise the browser reconnects by itself).
+
 The allowlist (`server/internal/dash/allow.go`) is the only list of what tando-dash may run:
-`--version`, `help snapshot`, `snapshot`, `doctor`, `host status`, `health <app> --json -H <host>`
-and `restart <app> -H <host>` (for M4), each with an exact set of flags and positionals. Names
+`--version`, `help snapshot`, `snapshot`, `doctor`, `host status`, `health <app> --json -H <host>`,
+`logs <app> -H <host> --json -n N` with the filters above (and `-f` with `--level` and `--worker`
+only) and `restart <app> -H <host>` (for M4), each with an exact set of flags and positionals. Names
 follow tando's rules (app `^[a-z][a-z0-9-]{1,23}$`; host: letters, digits, `.`, `_`, `-`, and
 here also no leading `-` or `.` and no `..`) and the host must be one of `~/.config/tando/hosts`.
 
@@ -85,4 +109,7 @@ budgets and the design rules (SKIP without node); then gofmt, `go vet`, `go test
 soak; the quick tier skips it with `-short`; `TANDO_DASH_SOAK=30m` for the long one), the main
 release archive holding nothing of `addons/`, the stripped build, and the VERSION match. The Go
 tests run a fake tando CLI (the test binary itself) with fault injection chosen by host name:
-slow, hang (with a grandchild), garbage, a non-zero exit, killed mid-output, too large.
+slow, hang (with a grandchild), garbage, a non-zero exit, killed mid-output, too large. For logs it
+keeps a fake journal (4 lines a second) and leaves a grandchild holding stdout like ssh;
+`drop*` hosts exit after 6 lines, `flood*` hosts write as fast as they can. A second 2-minute soak
+has viewers joining and leaving streams.
