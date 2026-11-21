@@ -35,6 +35,7 @@ Limits
   hold            seconds Caddy holds requests at a restart (default 15)
   stop_timeout    seconds a stopping process may finish (default 10)
 Assets
+  compress        off: send answers as they are (default on: text is gzip or zstd compressed)
   assets          off, or <dir>[, <url prefix>]: hashed files kept across releases (next and static: found by themselves)
 Data
   data            directory that survives deploys ($TANDO_DATA_DIR)

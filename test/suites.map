@@ -124,3 +124,4 @@ test/sec2/*              e2e-sec2 lint
 test/sec3/*              e2e-sec2 lint
 test/load/*              lint
 test/race/*              lint
+test/fixtures/compress-server.js  e2e

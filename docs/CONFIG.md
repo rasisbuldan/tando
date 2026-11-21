@@ -81,6 +81,7 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 | Key | Type | Default | Unit | Meaning | Example |
 |---|---|---|---|---|---|
 | `assets` | `off`, or a directory and optionally a URL prefix | found by tando for `next` (`.next/static`) and `static` (the first of `assets`, `_astro`, `static`, `_next/static` whose files all have a hash in their name); nothing for other recipes and containers | | The release's fingerprinted files (names that carry their content: `index-DiwrgTda.js`), which stay reachable after a newer release goes live and are sent with `Cache-Control: public, max-age=31536000, immutable`. `<dir>` is inside the release; the prefix is the URL they are served under, with the app's `path` if it has one (default `/<dir>/`). `off` turns it off. Name only files whose names change with their content. | `assets = public/build, /build/` |
+| `compress` | `on` or `off` | `on` | | Caddy compresses text answers (HTML, CSS, JS, JSON, SVG, plain text; zstd or gzip, what the visitor accepts) of 512 bytes or more. An answer the app already compressed, an event stream and a websocket are sent as they are. For the fingerprinted files (`assets`) of text types, tando also keeps a gzip copy made once at deploy time, so they cost no CPU per request. `off` sends everything as it is and makes no copies. | `compress = off` |
 
 ## Data and database
 
