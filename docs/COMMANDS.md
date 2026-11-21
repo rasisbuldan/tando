@@ -436,7 +436,8 @@ of /, which holds /opt/tando), `uptime_s`), `apps` (as `ls --json`, with `state_
 static, deploying, stopped (`tando stop`), down (it died: not running, or stopped with a down
 alert, the rule `ls` uses), failed (tando gave up on it), not_deployed) and `alerts` (firing and
 pending). `--app A` (one host) adds `app`: `name`, `status` (its `ls --json` object), `releases`,
-`history` (as `history --json`, plus `deployer`: the audit log's who of that deploy or rollback,
+`origin` (where the app was last deployed from, `user@machine:path`, as the server recorded it; null
+before the first deploy or from an older server), `history` (as `history --json`, plus `deployer`: the audit log's who of that deploy or rollback,
 null once the audit log has rotated past it), `metrics` (`range`, `bucket_s`, `points`, `from`,
 `to`, `data_since`, `series`: every bucket of the range present, oldest first, `t` its start in
 server epoch seconds, `memory_bytes`, `cpu_percent`, `restarts` (new restarts in that bucket,
@@ -501,6 +502,9 @@ Example: `tando requests errors --since 1h --4xx`
 ### audit
 `tando audit [app] [-n N] [-H host]`. Flags also `-a`. Arguments: 0-1.
 Who changed what on the server: one row per mutating action, with the sudo login and address.
+A change made from the tando dashboard says `dashboard` instead of the address: tando-dash runs the
+CLI with `TANDO_FROM=dashboard` (that value only), and the CLI puts it in front of `sudo` in its ssh
+command; a deploy key's gate refuses such a command.
 Example: `tando audit -n 20`
 
 ## Servers

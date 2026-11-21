@@ -5104,6 +5104,13 @@ cmd_releases() {
     row rel "$i" "${S[status_$i]:-pending}" "$cur" "$last"
   done
 }
+# the verb releases: its rows, then where the app was last deployed from (user@machine:path;
+# tando-dash deploys from that folder). Not in status (cmd_status lists the releases too).
+cmd_releases_verb() {
+  cmd_releases "$@"
+  [[ -n ${C[origin]:-} ]] && row origin "${C[origin]}"
+  return 0
+}
 
 cmd_history() { # [app] [n]
   local n=${2:-20} f
@@ -6362,7 +6369,7 @@ case $verb in
   rollback) cmd_rollback "$@";;
   deploy-status) cmd_deploy_status "$@";;
   status) cmd_status "$@";;
-  releases) cmd_releases "$@";;
+  releases) cmd_releases_verb "$@";;
   history) cmd_history "$@";;
   env-set) cmd_env set "$@";;
   env-unset) cmd_env unset "$@";;

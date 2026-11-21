@@ -27,6 +27,9 @@ import (
 //	garbage*       not JSON          fail*   "ssh: ... refused" on stderr, exit 1
 //	midkill*       half a JSON document, then SIGKILL itself     big*   4 MB of JSON
 //
+// The writes (deploy, rollback, stop, start, restart, env set) keep an app's state and history
+// in FAKE_TANDO_DIR (actions_test.go, fakeWrite); snapshot shows them (apps, app).
+//
 // Every run appends its argv to FAKE_TANDO_DIR/runs.log. Files in FAKE_TANDO_DIR change
 // --version: version (its text), noop-sleep (a duration), no-snapshot (help snapshot fails).
 func TestMain(m *testing.M) {
@@ -80,6 +83,9 @@ func fakeTando(args []string) int {
 	if args[0] == "logs" {
 		return fakeLogs(dir, host, mode, args)
 	}
+	if rc, ok := fakeWrite(dir, host, mode, args); ok {
+		return rc
+	}
 	switch mode {
 	case "slow":
 		time.Sleep(1500 * time.Millisecond)
@@ -109,8 +115,8 @@ func fakeTando(args []string) int {
 		fmt.Printf(`{"host":%q,"checks":[{"name":"ssh","ok":true}]}`+"\n", host)
 		return 0
 	}
-	fmt.Printf(`{"host":%q,"future_field":{"x":1},"status":{"apps":[{"app":"web","state":"running","link":"http://web.example.test","cpu":1.5},{"name":"api","state":"down"}],"alerts":[{"app":"api","check":"down","state":"firing"}]},"argv":%q}`+"\n",
-		host, strings.Join(args, " "))
+	fmt.Printf(`{"host":%q,"future_field":{"x":1},"status":{"apps":[{"app":"web","state":"running","link":"http://web.example.test","cpu":1.5},{"name":"api","state":"down"}],"alerts":[{"app":"api","check":"down","state":"firing"}]},"argv":%q%s}`+"\n",
+		host, strings.Join(args, " "), fakeSnapApps(dir, host, args))
 	return 0
 }
 
@@ -226,7 +232,7 @@ func newEnv(t *testing.T, runner Runner, mod func(*Config)) *env {
 	if err := os.MkdirAll(filepath.Join(e.dir, "hosts"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, h := range []string{"a", "b", "c", "ok1", "drop1", "flood1", "slow1", "hang1", "garbage1", "fail1", "midkill1", "big1"} {
+	for _, h := range []string{"a", "b", "c", "ok1", "drop1", "flood1", "slow1", "hang1", "garbage1", "fail1", "midkill1", "big1", "busy1", "soak1", "cut1", "flop1"} {
 		os.WriteFile(filepath.Join(e.dir, "hosts", h), []byte("x"), 0o600)
 	}
 	if runner == nil {

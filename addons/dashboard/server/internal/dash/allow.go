@@ -27,6 +27,7 @@ const (
 	vGrep                     // --grep: a fixed text, 1-256 characters, no control characters, no leading '-'
 	vWorker                   // --worker: a-z first, then a-z 0-9 -
 	vRelease                  // --release: a release id, YYYYMMDD-HHMMSS[-N]
+	vEnvKey                   // env set KEY: tando's key rule (bin/tando cmd_env), at most 128
 )
 
 type flagRule struct {
@@ -65,8 +66,34 @@ var shapes = []shape{
 	{name: "logs-follow", verb: []string{"logs"}, pos: []valueKind{vApp},
 		flags: map[string]flagRule{"-H": {vHost, true}, "--json": {vNone, true}, "-f": {vNone, true},
 			"-n": {vCount, true}, "--since": {vSince, false}, "--level": {vLevel, false}, "--worker": {vWorker, false}}},
+	// the app pages' reads (M5): exact shapes; `env ls` only with --names (never a value)
+	{name: "jobs", verb: []string{"jobs", "ls"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}}},
+	{name: "requests", verb: []string{"requests", "summary"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}, "--since": {vRange, true}}},
+	{name: "errors", verb: []string{"errors"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}}},
+	{name: "envnames", verb: []string{"env", "ls"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"--names": {vNone, true}, "--json": {vNone, true}, "-H": {vHost, true}}},
+	{name: "envlog", verb: []string{"env", "log"},
+		flags: map[string]flagRule{"-a": {vApp, true}, "--json": {vNone, true}, "-H": {vHost, true}}},
+	{name: "alerts", verb: []string{"alerts"}, flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}}},
+	{name: "history", verb: []string{"history"}, flags: map[string]flagRule{"--json": {vNone, true}, "-H": {vHost, true}}},
+	// writes (M4). Never --force or --yes: deploy runs in the app's recorded folder and stops
+	// where the CLI would ask; env set takes the value on stdin, never in argv.
+	{name: "deploy", verb: []string{"deploy"}, flags: map[string]flagRule{"-a": {vApp, true}, "-H": {vHost, true}}, write: true},
+	{name: "rollback", verb: []string{"rollback"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"-H": {vHost, true}}, write: true},
+	{name: "rollback-id", verb: []string{"rollback"}, pos: []valueKind{vApp, vRelease},
+		flags: map[string]flagRule{"-H": {vHost, true}}, write: true},
+	{name: "stop", verb: []string{"stop"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"-H": {vHost, true}}, write: true},
+	{name: "start", verb: []string{"start"}, pos: []valueKind{vApp},
+		flags: map[string]flagRule{"-H": {vHost, true}}, write: true},
 	{name: "restart", verb: []string{"restart"}, pos: []valueKind{vApp},
 		flags: map[string]flagRule{"-H": {vHost, true}}, write: true},
+	{name: "env-set", verb: []string{"env", "set"}, pos: []valueKind{vEnvKey},
+		flags: map[string]flagRule{"-a": {vApp, true}, "-H": {vHost, true}}, write: true},
 }
 
 // ErrRefused: an argv that matches no shape of the table
@@ -99,6 +126,7 @@ var (
 	sinceRe   = regexp.MustCompile(`^([0-9]{1,7}[smhdw]|@[0-9]{1,11}|now|[0-9]{4}-[0-9]{2}-[0-9]{2}([ T][0-9]{2}:[0-9]{2}(:[0-9]{2})?)?|[0-9]{2}:[0-9]{2}(:[0-9]{2})?)$`)
 	workerRe  = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 	releaseRe = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}(-[0-9]{1,2})?$`)
+	envKeyRe  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 	levels    = map[string]bool{"emerg": true, "alert": true, "crit": true, "fatal": true, "err": true, "error": true,
 		"warning": true, "warn": true, "notice": true, "info": true, "debug": true}
 )
@@ -117,6 +145,9 @@ func ValidWorker(s string) bool { return workerRe.MatchString(s) }
 
 // ValidRelease: a release id (lib/common.sh valid_id)
 func ValidRelease(s string) bool { return releaseRe.MatchString(s) }
+
+// ValidEnvKey: a key of env set (bin/tando: a letter or _, then letters, digits, _)
+func ValidEnvKey(s string) bool { return envKeyRe.MatchString(s) }
 
 // ValidGrep: the CLI's own rule (1-256 characters, no control characters, valid UTF-8), and no
 // leading '-': tando's flag parser reads every token, so "--grep -f" would turn into a follow.
@@ -158,6 +189,8 @@ func validValue(k valueKind, v string) bool {
 		return ValidApp(v)
 	case vRange:
 		return ValidRange(v)
+	case vEnvKey:
+		return ValidEnvKey(v)
 	}
 	return false
 }

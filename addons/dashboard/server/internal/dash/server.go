@@ -29,22 +29,27 @@ type Config struct {
 	CtlKey    string // the key of dash.lock: a second tando-dash asks for a new code with it
 	Version   *Guard // the tando CLI version check; nil: none (tests)
 
-	CodeTTL      time.Duration // one-time code of the opening link: 60 s
-	SessionTTL   time.Duration // cookie: 30 days
-	ConfirmTTL   time.Duration // confirm token: 60 s
-	CacheTTL     time.Duration // snapshot cache: 10 s
-	HostCareTTL  time.Duration // doctor, host status: 60 s
-	ReadTimeout  time.Duration // one read run: 30 s
-	WriteTimeout time.Duration // one write run: 30 min
-	IdemTTL      time.Duration // idempotency records: 24 h
-	PollVisible  int           // next_poll_s while visible: 15
-	PollHidden   int           // next_poll_s off-screen: 60
-	MaxBody      int64         // request body: 64 KB
-	MaxCache     int           // cache entries: 256
-	MaxIdem      int           // idempotency records: 500
-	MaxInflight  int           // /api/ requests at once: 64
-	MaxHosts     int           // hosts in the overview: 64
-	Logs         LogsConfig    // log streams (logs.go)
+	CodeTTL          time.Duration // one-time code of the opening link: 60 s
+	SessionTTL       time.Duration // cookie: 30 days
+	ConfirmTTL       time.Duration // confirm token: 60 s
+	CacheTTL         time.Duration // snapshot cache: 10 s
+	HostCareTTL      time.Duration // doctor, host status: 60 s
+	AppReadTTL       time.Duration // jobs, requests, errors, env names and log, alerts, history: 60 s
+	ReadTimeout      time.Duration // one read run: 30 s
+	WriteTimeout     time.Duration // one write run: 30 min
+	IdemTTL          time.Duration // idempotency records: 24 h
+	PollVisible      int           // next_poll_s while visible: 15
+	PollHidden       int           // next_poll_s off-screen: 60
+	MaxBody          int64         // request body: 64 KB
+	MaxCache         int           // cache entries: 256
+	MaxIdem          int           // idempotency records: 500
+	MaxInflight      int           // /api/ requests at once: 64
+	MaxHosts         int           // hosts in the overview: 64
+	OutcomeWait      time.Duration // a write's outcome: how long to wait out a soak (state deploying): 15 min
+	OutcomePoll      time.Duration // and how often to ask: 5 s (also: is a reattached write's CLI gone)
+	ActionPoll       time.Duration // a progress stream reads the output file this often: 250 ms
+	MaxActionStreams int           // progress streams open at once: 32
+	Logs             LogsConfig    // log streams (logs.go)
 }
 
 func (c *Config) defaults() {
@@ -58,9 +63,13 @@ func (c *Config) defaults() {
 	d(&c.ConfirmTTL, 60*time.Second)
 	d(&c.CacheTTL, 10*time.Second)
 	d(&c.HostCareTTL, 60*time.Second)
+	d(&c.AppReadTTL, 60*time.Second)
 	d(&c.ReadTimeout, 30*time.Second)
 	d(&c.WriteTimeout, 30*time.Minute)
 	d(&c.IdemTTL, 24*time.Hour)
+	d(&c.OutcomeWait, 15*time.Minute)
+	d(&c.OutcomePoll, 5*time.Second)
+	d(&c.ActionPoll, 250*time.Millisecond)
 	i := func(p *int, v int) {
 		if *p == 0 {
 			*p = v
@@ -72,6 +81,7 @@ func (c *Config) defaults() {
 	i(&c.MaxIdem, 500)
 	i(&c.MaxInflight, 64)
 	i(&c.MaxHosts, 64)
+	i(&c.MaxActionStreams, 32)
 	if c.MaxBody == 0 {
 		c.MaxBody = 64 << 10
 	}
@@ -85,20 +95,22 @@ func (c *Config) defaults() {
 
 // Server: the HTTP handler of tando-dash
 type Server struct {
-	cfg      Config
-	base     context.Context // reads; cancelled by Close (writes have their own)
-	stop     context.CancelFunc
-	sess     *sessions
-	snaps    *cache
-	care     *cache
-	confirms *confirms
-	idem     *idemStore
-	writes   *writeLocks
-	inflight atomic.Int64
-	lastUse  atomic.Int64
-	static   http.Handler
-	hub      *hub
-	wg       sync.WaitGroup // running writes
+	cfg        Config
+	base       context.Context // reads; cancelled by Close (writes have their own)
+	stop       context.CancelFunc
+	sess       *sessions
+	snaps      *cache
+	care       *cache
+	more       *cache // appreads.go
+	confirms   *confirms
+	idem       *idemStore
+	writes     *writeLocks
+	inflight   atomic.Int64
+	lastUse    atomic.Int64
+	static     http.Handler
+	hub        *hub
+	wg         sync.WaitGroup // running writes
+	actStreams atomic.Int64   // open progress streams
 }
 
 // New: a server; it loads the sessions and the idempotency records from ConfigDir
@@ -109,7 +121,8 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 	s.sess = newSessions(filepath.Join(cfg.ConfigDir, "cache", "dash-sessions.json"), cfg.Now)
 	s.snaps = newCache(cfg.MaxCache, false)
 	s.care = newCache(cfg.MaxCache, true)
-	s.snaps.logw, s.care.logw = cfg.Log, cfg.Log
+	s.more = newCache(cfg.MaxCache, false)
+	s.snaps.logw, s.care.logw, s.more.logw = cfg.Log, cfg.Log, cfg.Log
 	s.confirms = newConfirms(cfg.Now)
 	var err error
 	s.idem, err = openIdem(filepath.Join(cfg.ConfigDir, "cache", "dash-idem.json"), filepath.Join(cfg.ConfigDir, "cache", "dash-ops"), cfg.MaxIdem, cfg.IdemTTL, cfg.Now)
@@ -120,6 +133,15 @@ func New(cfg Config, static http.Handler) (*Server, error) {
 	s.writes = newWriteLocks()
 	s.hub = newHub(s, cfg.Logs)
 	s.lastUse.Store(cfg.Now().UnixNano())
+	// writes that ran when tando-dash stopped: their app stays taken until tando says how they ended
+	for _, r := range s.idem.reattach {
+		k := r.Host + "/" + r.App
+		if _, ok := s.writes.tryLock(k, r.Action, r.Key, r.Started); ok {
+			s.wg.Add(1)
+			go s.reattach(r, k)
+		}
+	}
+	s.idem.reattach = nil
 	return s, nil
 }
 
@@ -293,6 +315,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.logsStream(w, r)
 	case "/api/confirm":
 		s.confirm(w, r)
+	case "/api/action/stream":
+		s.actionStream(w, r)
 	case "/api/action":
 		if r.Method == http.MethodGet {
 			s.actionStatus(w, r)
@@ -300,6 +324,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.action(w, r)
 		}
 	default:
+		if d, ok := appReads[r.URL.Path]; ok && r.Method == http.MethodGet {
+			s.appRead(w, r, d)
+			return
+		}
 		apiErr(w, 404, "not_found", "no such endpoint")
 	}
 }

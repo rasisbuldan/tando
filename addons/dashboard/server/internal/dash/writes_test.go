@@ -61,7 +61,7 @@ func TestConfirmToken(t *testing.T) {
 	e := newEnv(t, br, func(c *Config) { c.Now = clock })
 	e.login()
 
-	if st, _ := e.post("/api/confirm", map[string]string{"action": "deploy", "host": "a", "app": "web"}); st != 400 {
+	if st, _ := e.post("/api/confirm", map[string]string{"action": "format-disk", "host": "a", "app": "web"}); st != 400 {
 		t.Fatal("unknown action got a token")
 	}
 	if st, _ := e.post("/api/confirm", map[string]string{"action": "noop", "host": "a", "app": "../x"}); st != 400 {

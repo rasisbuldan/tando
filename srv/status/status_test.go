@@ -397,3 +397,19 @@ func TestStatusServerRow(t *testing.T) {
 		t.Errorf("no server row with the version: %q", got)
 	}
 }
+
+// releases ends with the app's origin (where it was last deployed from), when app.conf has one
+func TestReleasesOrigin(t *testing.T) {
+	h := newHost(t)
+	h.euid = 0
+	h.app("web", "port=4100\norigin=me@mac:/src/web app\n", "current=20261101-000001\nseq_20261101-000001=1\n")
+	os.MkdirAll(h.path("root/apps/web/releases/20261101-000001"), 0o755)
+	o, err := h.out(func(c *Collector, b *bytes.Buffer) error { return c.Releases(context.Background(), b, "web") })
+	if err != nil || o != "rel\t20261101-000001\tpending\t1\t0\norigin\tme@mac:/src/web app\n" {
+		t.Fatalf("%q %v", o, err)
+	}
+	h.app("api", "port=4101\n", "")
+	if o, _ = h.out(func(c *Collector, b *bytes.Buffer) error { return c.Releases(context.Background(), b, "api") }); strings.Contains(o, "origin") {
+		t.Fatalf("no origin: %q", o)
+	}
+}

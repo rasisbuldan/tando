@@ -21,6 +21,8 @@ type Req struct {
 	Host    string   // for the per-host cap (ssh sessions); "" for laptop-only runs
 	Out     *os.File // writes: the child's stdout and stderr go to this file (it survives tando-dash)
 	Stdin   []byte   // M4 env set: the value, never in argv
+	Dir     string   // M4 deploy: the project folder it runs in ("" : tando-dash's own)
+	Env     []string // added to the environment of this run (writes: TANDO_FROM=dashboard)
 	OnStart func(pid int)
 	// streams: how long to wait for a free ssh slot of Host before giving up with ErrNoSlot
 	SlotWait time.Duration
@@ -86,7 +88,11 @@ func (x *ExecRunner) Run(ctx context.Context, r Req) (Result, error) {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, path, r.Argv...)
-	cmd.Env = append(os.Environ(), x.Env...)
+	cmd.Env = append(append(os.Environ(), x.Env...), r.Env...)
+	if r.Dir != "" {
+		cmd.Dir = r.Dir
+		cmd.Env = append(cmd.Env, "PWD="+r.Dir) // (bash's $PWD: the deploy's origin is user@machine:$PWD)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 2 * time.Second

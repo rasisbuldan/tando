@@ -13,7 +13,8 @@ import (
 	"tando/srv/internal/valid"
 )
 
-// Releases is the verb `releases <app>`: one row per release, newest first.
+// Releases is the verb `releases <app>`: one row per release, newest first, then an origin row
+// (app.conf's origin) when the app has one.
 func (c *Collector) Releases(ctx context.Context, w io.Writer, name string) error {
 	a, err := c.selectApp(name)
 	if err != nil {
@@ -22,6 +23,10 @@ func (c *Collector) Releases(ctx context.Context, w io.Writer, name string) erro
 	s := newSink()
 	for _, r := range ReleaseRows(a.state, c.releaseIDs(a.dir)) {
 		s.row(r...)
+	}
+	// where it was last deployed from (user@machine:path; tando-dash deploys from that folder)
+	if o := a.conf.get("origin"); o != "" {
+		s.row("origin", o)
 	}
 	return s.to(w)
 }
