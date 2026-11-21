@@ -6,6 +6,19 @@ first, grouped by area.
 
 ## Unreleased
 
+- Database studio: one always-on service per server instead of a program per ssh session
+  (docs/STUDIO.md). `tando host setup` installs `tando-studio.service` (a front as root with
+  CAP_SETUID/CAP_SETGID only, unix sockets only, MemoryMax 128M; idle it holds no database
+  connection) and removes what the per-session studios left. Each app is served by its own helper
+  process as the app's user with the app's role, started on the first request and ended after 2
+  minutes unused; the guarantees are the same code as before (read-only, scope guard, limits).
+  `tando db studio [app]` now mints a one-time link and forwards a port; Ctrl-C ends the forward,
+  not the studio. The page has a switcher for the server's apps with a database, and the link can
+  name the app (`#c=<code>&app=<app>`). `--stop` ends every session of the server (a restart).
+  A new client against an older server uses the old per-session studio; an older client against a
+  new server is told to update. Not yet: the dashboard still opens the studio through
+  `tando db studio --json` with its confirm dialog.
+
 - Monitoring, lighter (slice 1): tandod's `MemoryMax` is 160M instead of 64M. At 64M its cgroup
   evicted the page cache of the journals and programs it reads every minute and read them again
   (on a real server: about 300 MB a minute of re-reads); its own memory still stays under 20 MB.

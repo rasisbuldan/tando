@@ -190,6 +190,12 @@ cmd_db_studio() {
   resolve 1
   [ -z "${DEPLOY_KEY:-}" ] || die "tando db studio needs the admin's login, not a deploy key"
   if [ -n "$stop" ]; then
+    agent sudo db-studio-ls > "$TMPD/sls"; kv_read "$TMPD/sls" service
+    if [ "$K_service" = 1 ]; then   # the always-on studio: every token of the server is revoked
+      agent sudo db-studio-stop > "$TMPD/o"; kv_read "$TMPD/o" stopped
+      note "every studio session on $HOST ended; the service restarted (${K_stopped:-0} app database(s) were open)"
+      return 0
+    fi
     agent sudo db-studio-stop "$APP" > "$TMPD/o"; kv_read "$TMPD/o" stopped
     note "stopped ${K_stopped:-0} studio session(s) of $APP on $HOST"
     return 0

@@ -408,6 +408,9 @@ func TestParseEnvCred(t *testing.T) {
 	if err != nil || !a.FD || a.Env != "/opt/tando/apps/shop/env" || a.Cfg.Heartbeat != 0 {
 		t.Fatalf("%v %+v", err, a)
 	}
+	if a, err := ParseArgs([]string{"--fd", "--app", "shop", "--host", "prod", "--admin", "ad", "--port", "47200", "--timeout", "4", "--idle-s", "3"}); err != nil || !a.FD || a.Cfg.App != "shop" || a.Cfg.StmtLimit != 4*time.Second {
+		t.Fatalf("--fd first (as the front starts it): %v %+v", err, a)
+	}
 	if _, err := ParseArgs([]string{"--app", "shop", "--host", "prod", "--admin", "ad", "--port", "47200", "--idle-s", "120", "--fd", "--sock", "/run/tando-studio/x/s"}); err == nil {
 		t.Fatal("--fd and --sock")
 	}

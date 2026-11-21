@@ -112,6 +112,7 @@ func (s *Studio) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.life.touch(s.cfg.Now())
+	defer func() { s.life.touch(s.cfg.Now()) }() // (a long request is not idle time)
 	switch path {
 	case "/api/info":
 		s.info(w)

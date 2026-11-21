@@ -146,7 +146,7 @@ func service(args []string) error {
 		return err
 	}
 	os.Chmod(runDir, 0o711)
-	sp := &Spawner{Bin: bin, Run: runDir, Lower: LowerFile(runDir)}
+	sp := &Spawner{Bin: bin, Run: runDir, Root: "/opt/tando", Lower: LowerFile(runDir)}
 	svc := studio.NewService(studio.SvcConfig{Root: "/opt/tando", Run: runDir, Log: os.Stderr, Spawn: func(h *studio.Helper) error { return sp.Spawn(h) }})
 	sp.Svc = svc
 	ctl := runDir + "/ctl"

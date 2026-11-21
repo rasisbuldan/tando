@@ -280,14 +280,17 @@ NULL and `''` told apart, a long or JSON or bytea value opens in a side panel) a
 statement at the cursor, Shift added runs everything, Cmd/Ctrl+. cancels; one result tab per
 statement, the error's position selected in the editor, notices, CSV download). Light and dark.
 
-- **One app.** A studio shows one app's database and nothing of any other: the app is the one
-  named (`tando db studio shop`, `-a shop`), else the project's (tando.conf), else you pick it:
+- **Always on, one per server** (docs/STUDIO.md). Host setup installs `tando-studio.service`; it
+  holds nothing while nobody uses it (no database connection, a few MB). The command mints a link
+  for you and forwards a port to the service; Ctrl-C ends the forward, never the studio. The page
+  has a list of the server's apps with a database: picking one opens it (each request names its
+  app; each app is served by its own process, as that app's user, with that app's role).
+- **Which app the link opens.** The app named
+  (`tando db studio shop`, `-a shop`), else the project's (tando.conf), else you pick it:
   outside a project the command lists the apps of the server that have a database (size, state;
   the others dimmed as "no database") and asks for a number; with exactly one it opens that one and
   says which; without a terminal it prints the list with the command for each and exits 2. The page
-  names the app, its database and the server in its top bar and title; there is no switch to
-  another app in it (a studio holds one app's credentials): run `tando db studio <other app>`.
-  The sidebar lists this database's own schemas, never PostgreSQL's (pg_catalog,
+  names the app, its database and the server in its top bar and title. The sidebar lists this database's own schemas, never PostgreSQL's (pg_catalog,
   information_schema, pg_toast). The app's role can connect to no database but its own (no CONNECT
   for PUBLIC on any app database, set again at every deploy and host setup).
 - **Only the app's own tables.** A statement that reads a system table or view (`pg_class`,
@@ -334,30 +337,34 @@ statement, the error's position selected in the editor, notices, CSV download). 
   for up to 30 s per statement; hold a lock that delays the app's migration for that long; take an
   advisory lock (released when the run ends); call the app's own functions, whatever they do
   inside. None of this is beyond `tando db psql`.
-- **How it is reached.** The server listens on no network port: the studio is a unix socket in
-  `/run/tando-studio/<session>/`, a directory only your login and the app's group can enter, and
-  this command's own ssh connection forwards `127.0.0.1:<port>` on your computer to it (a stable
-  port per app between 47100 and 47409; the next free one when it is taken). The link it prints
-  works once: the page trades its code for a key it keeps for the tab (one tab per session; a
-  reload keeps working). The database password never leaves the server.
-- **When it stops.** Ctrl-C in the terminal, Stop in the page, `--idle` minutes without the page
-  being looked at (30; 5 to 240), the computer asleep or offline for 45 s, or
-  `tando db studio --stop [app]` from another terminal. Then nothing of it is left on the server;
-  the command checks and says so. The page shows "This studio session ended" with the command to
-  run again; your editor text is kept.
-- **For programs: `--json`.** No browser and no box: one line `{"url":"http://127.0.0.1:<port>/#c=<code>","port":<port>,"sid":"<12 hex>"}`
-  on stdout when the studio answers, and the session ends when the command's stdin reaches EOF
+- **How it is reached.** The server listens on no network port: each admin login has its own
+  unix socket, `/run/tando-studio/u/<login>/s` (0600, that login's), and this command's own ssh
+  connection forwards `127.0.0.1:<port>` on your computer to it (a stable port per server between
+  47100 and 47409; the next free one when it is taken). The link it prints works once, within a
+  minute, on that port only: the page trades its code for a key it keeps for the tab (a reload
+  keeps working). The database password never leaves the server.
+- **When it stops.** The forward: Ctrl-C in the terminal. A session (the page's key): Stop in the
+  page, 12 hours unused, `tando db studio --stop` (it restarts the service: every key of every
+  admin ends), a host setup. An app's process in the studio ends after 2 minutes without a request,
+  its database connection after 60 s. The page shows "This studio session ended"; your editor
+  text is kept.
+- **For programs: `--json`.** No browser and no box: one line `{"url":"http://127.0.0.1:<port>/#c=<code>&app=<app>","port":<port>,"sid":"<word>"}`
+  on stdout when the forward answers, and the forward ends when the command's stdin reaches EOF
   (the program that started it closed the pipe or died), as Ctrl-C would. The dashboard add-on
   runs it so (addons/dashboard/docs/SPEC.md "Database studio").
+- **Older servers.** Against a server set up by an older tando the command starts that server's
+  per-session studio as before (`--idle M`, one app per studio). An older tando against a newer
+  server is told to update.
 - **History** of your queries (the last 100) and the editor's text stay in the browser, encrypted
   (AES-GCM with a key the studio derives from the role's password: nothing else on the computer
   can read them, not even a later page on the same port). They are per app and port, so a second
   studio of the same app at the same time has its own.
 - **sshd** must allow forwarding to a unix socket for your login (the default:
   `AllowStreamLocalForwarding yes`). When it does not, the command says so and what to add.
-- At most 2 studios run on a server at once. CI deploy keys cannot open one (the client, the gate,
-  sudo and sshd each refuse). The audit log (`tando audit`) has each session's start and end with
-  the number of statements, never their text.
+- At most 2 processes per app and 4 in all serve the studio at once (one per page and app; the
+  one unused longest gives way). CI deploy keys cannot open it (the client, the gate, sudo and
+  sshd each refuse). The audit log (`tando audit`) has every link minted (who, which app and
+  port), never a statement.
 
 Example: `tando db studio shop`
 

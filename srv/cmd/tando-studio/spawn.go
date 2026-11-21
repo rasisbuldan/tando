@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	// lint: allow RL15 the front starts its own binary as a helper, as another uid with a passed listener (run.Cmd has neither); srv/studio's AST test holds it to that one call
 	"os/exec"
 	"os/user"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 type Spawner struct {
 	Svc   *studio.Service
 	Run   string
+	Root  string
 	Bin   string
 	Lower func(app string, pid int)
 }
@@ -52,6 +54,29 @@ func (sp *Spawner) appUser(app string) (uint32, uint32, error) {
 		return 0, 0, errors.New("the user of " + app + " is root or unreadable: the studio does not run as root")
 	}
 	return uint32(uid), uint32(gid), nil
+}
+
+// knobs: the helper's idle time (HelperIdle), and for test/e2e-studio.sh shorter limits from
+// root's file <Root>/studio.test ("timeout=4 conn-idle=2 idle-s=3": the helper's flags,
+// which ParseArgs bounds; they only shorten)
+func (sp *Spawner) knobs() []string {
+	idle := strconv.Itoa(int(studio.HelperIdle / time.Second))
+	var r []string
+	if b, err := os.ReadFile(filepath.Join(sp.Root, "studio.test")); err == nil {
+		for _, w := range strings.Fields(string(b)) {
+			k, v, _ := strings.Cut(w, "=")
+			if n, err := strconv.Atoi(v); err != nil || n < 1 || n > 9999 {
+				continue
+			}
+			switch k {
+			case "timeout", "conn-idle":
+				r = append(r, "--"+k, v)
+			case "idle-s":
+				idle = v
+			}
+		}
+	}
+	return append(r, "--idle-s", idle)
 }
 
 // capBuf keeps the last 4 KB written (a helper's stderr: why it did not start)
@@ -100,8 +125,10 @@ func (sp *Spawner) Spawn(h *studio.Helper) error {
 		os.Remove(path)
 		return err
 	}
-	cmd := exec.Command(sp.Bin, "serve", "--app", h.App, "--host", h.Host, "--admin", h.Admin,
-		"--port", strconv.Itoa(h.Port), "--idle-s", strconv.Itoa(int(studio.HelperIdle/time.Second)), "--fd")
+	args := []string{"--app", h.App, "--host", h.Host, "--admin", h.Admin, "--port", strconv.Itoa(h.Port)}
+	args = append(args, sp.knobs()...)
+	cmd := exec.Command(sp.Bin, "serve", "--fd")
+	cmd.Args = append(cmd.Args, args...)
 	cmd.ExtraFiles = []*os.File{f}
 	cmd.Env = []string{"GOMAXPROCS=1", "GOMEMLIMIT=24MiB", "PATH=/usr/bin:/bin"}
 	cmd.Dir = "/"
