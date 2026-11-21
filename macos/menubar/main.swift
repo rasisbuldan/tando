@@ -410,7 +410,7 @@ final class Controller: NSObject, NSMenuDelegate {
                     sub.addItem(o)
                 }
                 let st = NSMenuItem(title: "Open status in Terminal", action: #selector(openStatus(_:)), keyEquivalent: "")
-                st.target = self; st.representedObject = ["status", a.name, "-H", h.name]
+                st.target = self; st.representedObject = ["status", a.name, "-H", h.name, "--watch", "5"]
                 sub.addItem(st)
                 i.submenu = sub
                 menu.addItem(i)
@@ -430,7 +430,7 @@ final class Controller: NSObject, NSMenuDelegate {
         r.target = self; r.isEnabled = !running
         menu.addItem(r)
         let st = NSMenuItem(title: "Open status in Terminal", action: #selector(openStatus(_:)), keyEquivalent: "t")
-        st.target = self; st.representedObject = ["ls", "--all"]
+        st.target = self; st.representedObject = ["ls", "--all", "--watch", "5"]
         menu.addItem(st)
         menu.addItem(.separator())
         let q = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -445,6 +445,8 @@ final class Controller: NSObject, NSMenuDelegate {
     }
 
     /// Opens Terminal on `tando <args>` through a .command file (no Apple Events permission needed).
+    /// The menu's commands carry `--watch 5`: a live view that refreshes until Ctrl-C, like `top`,
+    /// not one print that goes stale while the window stays open.
     @objc func openStatus(_ sender: NSMenuItem) {
         guard let args = sender.representedObject as? [String] else { return }
         let q = { (t: String) in "'" + t.replacingOccurrences(of: "'", with: "'\\''") + "'" }

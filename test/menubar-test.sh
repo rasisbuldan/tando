@@ -73,6 +73,10 @@ if ! command -v swiftc > /dev/null 2>&1; then echo "SKIP menubar swiftc not foun
 "$R/bin/tando" menubar build --out "$T/out" > "$T/build.log" 2>&1
 APP=$T/out/tando.app BIN=$T/out/tando.app/Contents/MacOS/tando-menubar
 check "B1 tando menubar build compiles the app with swiftc" test -x "$BIN"
+# (the Terminal items open a live view: a one-shot print went stale while the window stayed open)
+check "B1b the menu's Terminal commands are live views (ls --all and status with --watch)" eval \
+  'grep -q "\"ls\", \"--all\", \"--watch\", \"5\"" "$R/macos/menubar/main.swift" &&
+   grep -q "\"status\", a.name, \"-H\", h.name, \"--watch\", \"5\"" "$R/macos/menubar/main.swift"'
 [ -x "$BIN" ] || sed 's/^/    /' "$T/build.log"
 check "B2 the bundle is a menu bar app (LSUIElement, no Dock icon) with a valid Info.plist" \
   eval 'plutil -lint "$APP/Contents/Info.plist" > /dev/null && grep -A0 "<key>LSUIElement</key><true/>" "$APP/Contents/Info.plist" > /dev/null'

@@ -6,6 +6,8 @@ first, grouped by area.
 
 ## Unreleased
 
+- `tando menubar`: "Open status in Terminal" opens the live view (`--watch 5`, refreshing until
+  Ctrl-C) instead of printing once.
 - Added (dashboard add-on): the web app's writes: Deploy, Roll back (to the target, or "Roll back to
   this" per release), Restart, Stop/Start and Set variable (Env tab; the value in a password field,
   sent once in the request body, never stored). A confirmation names the action, app and server and
