@@ -74,6 +74,7 @@ let probedStates: Set<String> = ["running", "static"]
 final class Monitor {
     var failsToAlert = 2                    // a link that fails this many checks in a row is a problem
     private(set) var linkFails: [String: Int] = [:]
+    private(set) var hostFails: [String: Int] = [:]   // checks in a row a host did not answer
     private var known: [String: Issue] = [:]  // issues already notified, by key
     private(set) var last = Snapshot()
 
@@ -100,7 +101,15 @@ final class Monitor {
 
         for h in ls.hosts {
             if let err = h.error {
-                issues.append(Issue(key: "host:\(h.host)", subject: "host:\(h.host)", text: "\(h.host): cannot reach the server (\(err))"))
+                // like a link: a problem from the second check in a row (a single slow or dropped
+                // ssh answer is not an outage, and turned the badge red once in a real use); the
+                // menu shows the error at once
+                hostFails[h.host, default: 0] += 1
+                if hostFails[h.host, default: 0] >= failsToAlert {
+                    issues.append(Issue(key: "host:\(h.host)", subject: "host:\(h.host)", text: "\(h.host): cannot reach the server (\(err))"))
+                } else if known["host:\(h.host)"] != nil {
+                    carried.insert("host:\(h.host)")
+                }
                 for k in known.keys where k.hasPrefix("link:\(h.host)/") || k.hasPrefix("alert:\(h.host)/") || k.hasPrefix("app:\(h.host)/") {
                     carried.insert(k)
                 }
@@ -108,6 +117,7 @@ final class Monitor {
                 snap.hosts.append(HostView(name: h.host, error: err, apps: []))
                 continue
             }
+            hostFails[h.host] = nil
             let firing = (h.alerts ?? []).filter { $0.state == "firing" }
             var apps: [AppView] = []
             for a in h.apps ?? [] {

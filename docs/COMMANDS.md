@@ -828,7 +828,7 @@ only. A menu bar icon for every registered server, and an outside heartbeat from
   the laptop (8 s limit; any answer below 500 counts as up). Also at once after the Mac wakes or
   comes back online.
 - **The icon.** Plain: all is well. A red count: the problems now, where each is one of a server the
-  laptop cannot reach, an app with something wrong (down or failed, a link that failed two checks in
+  laptop could not reach two checks in a row (the menu shows the error from the first), an app with something wrong (down or failed, a link that failed two checks in
   a row, or a firing alert: an app counts once), and a firing host check (disk, memory, ...). Dimmed:
   nothing could be checked (the laptop is offline, or tando failed or timed out); the last menu stays.
   Pending alerts and apps you stopped are not problems.

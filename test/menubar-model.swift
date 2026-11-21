@@ -69,13 +69,19 @@ do {
     check("M3d", "fail, answer, fail is not twice in a row", s4.badge == 0 && m.last.badge == 0, "\(m.last.badge)")
 }
 
-// M4 a host the laptop cannot reach: counted, notified once, shown with the reason
+// M4 a host the laptop cannot reach: shown at once, counted and notified from the second check in a
+// row (like a link: one slow or dropped ssh answer is not an outage), resolved once
 do {
     let m = Monitor()
     _ = m.apply(ok, probes: probes(m, ok))
+    let (s0, n0) = m.apply(unreach, probes: probes(m, unreach))
+    check("M4e", "unreachable once: shown in the menu, no badge, no notification", s0.hosts[0].error == "no answer" && s0.badge == 0 && n0.isEmpty, "\(s0.badge) \(n0)")
+    let (sb, nb) = m.apply(ok, probes: probes(m, ok))
+    check("M4f", "a single miss, then an answer: nothing was raised, nothing resolved", sb.badge == 0 && nb.isEmpty, "\(nb)")
+    _ = m.apply(unreach, probes: probes(m, unreach))
     let (s, n) = m.apply(unreach, probes: probes(m, unreach))
-    check("M4a", "unreachable host: badge 1 (not grey: the other host answered)", s.look == .problems(1), "\(s.look)")
-    check("M4b", "unreachable host: one notification with the reason", n.count == 1 && n[0].body.contains("vps") && n[0].body.contains("no answer"), "\(n)")
+    check("M4a", "unreachable twice in a row: badge 1 (not grey: the other host answered)", s.look == .problems(1), "\(s.look)")
+    check("M4b", "unreachable twice in a row: one notification with the reason", n.count == 1 && n[0].body.contains("vps") && n[0].body.contains("no answer"), "\(n)")
     check("M4c", "the menu shows the host as unreachable", s.hosts[0].error == "no answer", describe(s))
     let (s2, n2) = m.apply(ok, probes: probes(m, ok))
     check("M4d", "reachable again: resolved once", s2.badge == 0 && n2.count == 1 && n2[0].body.contains("cannot reach"), "\(n2)")
@@ -109,6 +115,8 @@ do {
 do {
     let m = Monitor()
     _ = m.apply(firing, probes: probes(m, firing))
+    let (_, n1) = m.apply(unreach, probes: probes(m, unreach))
+    check("M7d", "host unreachable once during an alert: the alert is not reported resolved", n1.isEmpty, "\(n1)")
     let (s, n) = m.apply(unreach, probes: probes(m, unreach))
     check("M7a", "host unreachable during an alert: only the host is notified", n.count == 1 && n[0].body.contains("cannot reach"), "\(n)")
     check("M7b", "host unreachable: badge counts the host only", s.badge == 1, "\(s.badge)")

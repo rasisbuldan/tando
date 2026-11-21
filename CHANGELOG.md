@@ -6,6 +6,9 @@ first, grouped by area.
 
 ## Unreleased
 
+- `tando menubar`: a server the laptop cannot reach counts as a problem from the second check in a
+  row, like an app's link (one slow or dropped ssh answer turned the badge red in a real use); the
+  menu shows the error from the first.
 - Docs: docs/MONITORING.md, "Recipe: alerts on your phone and on your laptop": ntfy on the phone
   (exact commands), the same topic on the laptop (browser or `ntfy subscribe` with a macOS
   notification), a polling loop with `tando ls --all --check`, and `tando menubar install`.
