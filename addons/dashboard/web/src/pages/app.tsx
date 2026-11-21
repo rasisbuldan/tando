@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { NavLink, useParams } from "react-router";
 import { Badge } from "@/components/ui/badge";
 import { RangeTabs } from "@/components/ui/tabs";
@@ -6,13 +6,19 @@ import { Card } from "@/components/ui/card";
 import { ChartCard, prefetchCharts } from "@/components/chart-card";
 import { HistoryTable, ReleasesTable } from "@/components/history-table";
 import { Age, Mono, MetricCard, Sparkline } from "@/components/bits";
-import { Empty, Freshness, Loading, PageHeader, Placeholder, Section, SectionError } from "@/components/panel";
+import { Empty, Freshness, Loading, PageHeader, Section, SectionError } from "@/components/panel";
 import { Table, Td, Th, Tr } from "@/components/ui/table";
 import { cn } from "@/lib/cn";
 import { refreshAll, snapshotPoller, useNowMs, usePoller } from "@/lib/resources";
-import { appKind, chartDomain, deployMarkers, describe, niceMax, RANGE_S, restartsTotal, stateWithReason, toPoints, uptimeCells, type RangeKey } from "@/lib/shape";
+import { appKind, chartDomain, cpuMax, deployMarkers, describe, memoryTicks, niceMax, RANGE_S, roundTicks, restartsTotal, stateWithReason, toPoints, uptimeCells, type RangeKey } from "@/lib/shape";
 import { DASH, fmtAgo, fmtBytes, fmtDateTime, fmtDur, fmtMs, fmtPct, fmtTime, pctOf } from "@/lib/format";
 
+const LogsTab = lazy(() => import("./tab-logs"));
+const tabs = () => import("./tabs");
+const TrafficTab = lazy(() => tabs().then((m) => ({ default: m.TrafficTab })));
+const JobsTab = lazy(() => tabs().then((m) => ({ default: m.JobsTab })));
+const EnvTab = lazy(() => tabs().then((m) => ({ default: m.EnvTab })));
+const ChangesTab = lazy(() => tabs().then((m) => ({ default: m.ChangesTab })));
 const TABS = [["overview", "Overview"], ["deploys", "Deploys"], ["logs", "Logs"], ["traffic", "Traffic"], ["jobs", "Jobs"], ["env", "Env"], ["changes", "What changed"]] as const;
 const KNOWN = TABS.map((t) => t[0]) as string[];
 
@@ -63,7 +69,15 @@ export default function AppPage() {
               <Section title="Releases">{d ? <ReleasesTable rows={d.releases} /> : <Loading h="h-24" />}</Section>
               <Section title="History">{d ? <HistoryTable rows={d.history} /> : <Loading h="h-24" />}</Section>
             </>
-          ) : <Placeholder name={TABS.find((t) => t[0] === tab)![1]} />
+          ) : (
+            <Suspense fallback={<Loading h="h-96" />}>
+              {tab === "logs" ? <LogsTab host={host} app={app} releases={(d?.releases ?? []).map((r) => r.id)} />
+                : tab === "traffic" ? <TrafficTab host={host} app={app} d={d} nowS={nowS} />
+                : tab === "jobs" ? <JobsTab host={host} app={app} d={d} nowS={nowS} />
+                : tab === "env" ? <EnvTab host={host} app={app} d={d} nowS={nowS} />
+                : <ChangesTab host={host} app={app} d={d} nowS={nowS} />}
+            </Suspense>
+          )
       )}
     </>
   );
@@ -82,6 +96,12 @@ function OverviewTab({ d, v, app, range, setRange, nowS }: {
   const markers = useMemo(() => deployMarkers(d?.history, domain), [d?.history, domain]);
   const cap = status.memory_max_bytes && status.memory_max_bytes > 0 ? status.memory_max_bytes : null;
   const memYMax = cap ?? niceMax(describe(mem).max);
+  const memTicks = useMemo(() => memoryTicks(memYMax), [memYMax]);
+  const cpuY = cpuMax(describe(cpu).max);
+  const cpuTicks = useMemo(() => roundTicks(cpuY), [cpuY]);
+  const rstY = Math.max(4, niceMax(describe(rst).max));
+  const rstTicks = useMemo(() => roundTicks(rstY), [rstY]);
+  const rangeWord = range === "1h" ? "1 h" : range === "24h" ? "24 h" : "7 d";
   const incidents = useMemo(() => (d?.health?.incidents ?? []).map((i) => ({ start: i.start, end: i.end ?? domain.to })), [d?.health, domain.to]);
   const probe = d?.health?.series.points ?? [];
   const probeVals = probe.map((p) => p.avg_ms);
@@ -108,9 +128,9 @@ function OverviewTab({ d, v, app, range, setRange, nowS }: {
         <Section title="Charts"><Empty>No metrics yet. They appear a few minutes after the first deploy.</Empty></Section>
       ) : (
         <div className="mb-4 grid grid-cols-1 gap-3 min-[1280px]:grid-cols-2">
-          <ChartCard title="Memory" name="Memory" range={range} span={RANGE_S[range]} metrics={m} deploys={markers.length} kind="area" points={mem} domain={domain} yMax={memYMax} color="var(--chart-1)" fmt={fmtBytes} limit={cap} markers={markers} incidents={incidents} syncId="m" />
-          <ChartCard title="CPU" name="CPU" range={range} span={RANGE_S[range]} metrics={m} deploys={markers.length} kind="area" points={cpu} domain={domain} yMax={100} color="var(--chart-2)" fmt={fmtPct} markers={markers} syncId="m" />
-          <ChartCard title="Restarts" name="Restarts" range={range} span={RANGE_S[range]} metrics={m} deploys={markers.length} kind="bar" points={rst} domain={domain} yMax={Math.max(4, niceMax(describe(rst).max))} color="var(--chart-6)" fmt={(n) => String(Math.round(n))} markers={markers} syncId="m" />
+          <ChartCard title="Memory" name="Memory" range={range} span={RANGE_S[range]} metrics={m} deploys={markers.length} kind="area" points={mem} domain={domain} yMax={memYMax} yTicks={memTicks} color="var(--chart-1)" fmt={fmtBytes} limit={cap} markers={markers} incidents={incidents} syncId="m" />
+          <ChartCard title="CPU" name="CPU" range={range} span={RANGE_S[range]} metrics={m} deploys={markers.length} kind="area" points={cpu} domain={domain} yMax={cpuY} yTicks={cpuTicks} color="var(--chart-2)" fmt={fmtPct} markers={markers} syncId="m" />
+          <ChartCard title="Restarts" name="Restarts" range={range} span={RANGE_S[range]} metrics={m} deploys={markers.length} kind="bar" zeroText={`No restarts in ${rangeWord}`} points={rst} domain={domain} yMax={rstY} yTicks={rstTicks} color="var(--chart-6)" fmt={(n) => String(Math.round(n))} markers={markers} syncId="m" />
           <ChartCard title="Avg probe time" name="Avg probe time" range="24h" span={RANGE_S["24h"]} metrics={null} deploys={0} kind="area" points={probePoints} domain={probeDomain} yMax={niceMax(Math.max(...probeNums, 0))} color="var(--chart-3)" fmt={fmtMs} />
         </div>
       )}

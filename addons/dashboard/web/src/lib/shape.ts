@@ -1,5 +1,5 @@
 // Data shaping: everything the pages derive from tando's JSON, pure and tested against the fixtures.
-import type { Alert, AppRow, HistoryRow, HostView, Metrics, Snapshot, ApiErrorBody, MetricPoint } from "./types";
+import type { Alert, AppRow, HistoryRow, HostView, Metrics, Release, Snapshot, ApiErrorBody, MetricPoint } from "./types";
 import { share } from "./share";
 
 export type Kind = "ok" | "warn" | "fail" | "stale" | "info" | "neutral";
@@ -189,7 +189,7 @@ export function chartDomain(range: RangeKey, serverNow: number | null | undefine
 }
 
 export type SeriesKey = "memory_bytes" | "cpu_percent" | "restarts";
-export interface ChartPoint { t: number; v: number | null }
+export interface ChartPoint { t: number; v: number | null; w?: number | null } // w: an optional second series (5xx)
 /** buckets as points; null stays null (a gap), never zero and never interpolated */
 export function toPoints(series: MetricPoint[] | undefined, key: SeriesKey): ChartPoint[] {
   return (series ?? []).map((p) => ({ t: p.t, v: p[key] ?? null }));
@@ -221,9 +221,39 @@ export function niceMax(v: number | null): number {
   return 10 * e;
 }
 /** buckets that are within the data window and in the deploys' times: deploy markers inside the domain */
-export function deployMarkers(history: HistoryRow[] | undefined, d: ChartDomain): { t: number; release: string }[] {
-  return (history ?? []).filter((h) => h.at >= d.from && h.at <= d.to).map((h) => ({ t: h.at, release: h.release }));
+export interface Marker { t: number; release: string; kind: string; result: string }
+export function deployMarkers(history: HistoryRow[] | undefined, d: ChartDomain): Marker[] {
+  return (history ?? []).filter((h) => h.at >= d.from && h.at <= d.to).map((h) => ({ t: h.at, release: h.release, kind: h.kind, result: resultKind(h.result).word }));
 }
+/** the hover text of a deploy marker: "r 20261117-101010 · deploy · verified" */
+export function markerText(m: Marker): string { return `r ${m.release} · ${m.kind || "deploy"} · ${m.result}`; }
+/** the markers within `within` seconds of a time (a chart hover shows these) */
+export function markersNear(markers: Marker[] | undefined, t: number, within: number): Marker[] {
+  return (markers ?? []).filter((m) => Math.abs(m.t - t) <= within);
+}
+
+/** round y ticks: 0 and equal steps of 1, 2, 2.5 or 5 x 10^n up to `max`, at most `n` of them (memory: bytes in MB, GB when large) */
+export function roundTicks(max: number, n = 4, unit = 1): number[] {
+  if (!(max > 0)) return [0];
+  const top = max / unit;
+  const e = Math.pow(10, Math.floor(Math.log10(top / n)));
+  const step = ([1, 2, 2.5, 5, 10].map((m) => m * e).find((s) => top / s <= n) ?? 10 * e) * unit;
+  const out: number[] = [];
+  for (let v = 0; v <= max + step * 1e-9; v += step) out.push(Math.round(v / unit * 1e6) / 1e6 * unit);
+  return out;
+}
+const MB = 1024 * 1024;
+/** memory y ticks in whole MB steps (0, 200, 400, 600 MB), or GB steps when the axis is large */
+export function memoryTicks(maxBytes: number): number[] { return roundTicks(maxBytes, 4, maxBytes >= 2048 * MB ? 1024 * MB : MB); }
+/** CPU axis scaled to the data: at least 10 %, at most 100 %, a round number above the data */
+export function cpuMax(dataMax: number | null): number { return Math.min(100, Math.max(10, niceMax(dataMax))); }
+/** the previous verified release: the newest one that is not live and was verified */
+export function rollbackTarget(releases: Release[]): string | null {
+  const t = [...releases].filter((r) => !r.current && (r.status === "verified" || r.status === "ok")).sort((a, b) => (b.deployed_at ?? 0) - (a.deployed_at ?? 0))[0];
+  return t?.id ?? null;
+}
+/** the "No restarts in 24 h" state: data present and all zero */
+export function allZero(points: ChartPoint[]): boolean { const v = points.filter((p) => p.v != null); return v.length > 0 && v.every((p) => p.v === 0); }
 /** screen-reader summary: "Memory, last 24 h: 380 to 430 MB, now 412 MB, 2 deploys" */
 export function chartSummary(name: string, range: RangeKey, g: Gaps, fmt: (n: number) => string, deploys: number): string {
   if (g.last == null) return `${name}, last ${range.replace("h", " h")}: no data in this range yet`;
