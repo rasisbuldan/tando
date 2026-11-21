@@ -1,0 +1,16 @@
+:object
+app:string
+errors:array
+errors[].count:number
+errors[].first_seen:null-or-number
+errors[].id:string
+errors[].kind:null-or-string
+errors[].label:null-or-string
+errors[].last_seen:null-or-number
+errors[].release:null-or-string
+errors[].series:array
+errors[].series[].count:number
+errors[].series[].t:number
+errors[].title:null-or-string
+errors[].total:null-or-number
+host:string

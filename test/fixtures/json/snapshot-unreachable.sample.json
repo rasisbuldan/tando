@@ -1,0 +1,6 @@
+{
+ "host": "web-2",
+ "reachable": false,
+ "error": "connection refused",
+ "checked_at": 1795247327
+}

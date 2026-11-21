@@ -1,0 +1,10 @@
+{
+ "hosts": [
+  {
+   "host": "web-2",
+   "error": "connection refused",
+   "reachable": false,
+   "checked_at": 1795247325
+  }
+ ]
+}

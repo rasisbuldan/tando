@@ -1,0 +1,8 @@
+:object
+checks:array
+checks[].detail:null-or-string
+checks[].name:string
+checks[].state:null-or-string
+failed:null-or-number
+host:string
+warnings:null-or-number

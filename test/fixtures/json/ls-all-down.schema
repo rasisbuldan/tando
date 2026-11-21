@@ -1,0 +1,6 @@
+:object
+hosts:array
+hosts[].host:string
+hosts[].reachable:bool
+hosts[].error:string
+hosts[].checked_at:number

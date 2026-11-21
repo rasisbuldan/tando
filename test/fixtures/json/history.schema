@@ -1,0 +1,17 @@
+:object
+history:array
+history[].app:string
+history[].at:null-or-number
+history[].build_s:null-or-number
+history[].copy_s:null-or-number
+history[].kind:null-or-string
+history[].note:null-or-string
+history[].preflight_s:null-or-number
+history[].release:null-or-string
+history[].release_s:null-or-number
+history[].result:null-or-string
+history[].switch_s:null-or-number
+history[].total_s:null-or-number
+history[].upload_s:null-or-number
+history[].verify_s:null-or-number
+host:string

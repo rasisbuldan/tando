@@ -1,0 +1,142 @@
+{
+ "host": "web-1",
+ "app": "shop",
+ "window_s": 900,
+ "from": 1795246430,
+ "to": 1795247330,
+ "bucket_s": 60,
+ "total": 120,
+ "status_classes": {
+  "1xx": 0,
+  "2xx": 100,
+  "3xx": 5,
+  "4xx": 10,
+  "5xx": 5
+ },
+ "p50_ms": 12.5,
+ "p95_ms": 80,
+ "p99_ms": 200,
+ "max_ms": 900,
+ "avg_ms": 20.1,
+ "unparsed": 0,
+ "oldest": 1795160930,
+ "files": 2,
+ "series": [
+  {
+   "t": 1795246430,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795246490,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795246550,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795246610,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795246670,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795246730,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795246790,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795246850,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795246910,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795246970,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795247030,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795247090,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795247150,
+   "requests": 8,
+   "c5xx": 0
+  },
+  {
+   "t": 1795247210,
+   "requests": 8,
+   "c5xx": 2
+  },
+  {
+   "t": 1795247270,
+   "requests": 8,
+   "c5xx": 3
+  }
+ ],
+ "codes": [
+  {
+   "code": 200,
+   "count": 100
+  },
+  {
+   "code": 304,
+   "count": 5
+  },
+  {
+   "code": 404,
+   "count": 10
+  },
+  {
+   "code": 502,
+   "count": 5
+  }
+ ],
+ "paths": [
+  {
+   "path": "GET /",
+   "count": 60,
+   "mean_ms": 10,
+   "max_ms": 50,
+   "count_5xx": 0
+  },
+  {
+   "path": "GET /api/items/:n",
+   "count": 40,
+   "mean_ms": 30,
+   "max_ms": 900,
+   "count_5xx": 5
+  },
+  {
+   "path": "POST /cart \"x\"",
+   "count": 20,
+   "mean_ms": 15,
+   "max_ms": 40,
+   "count_5xx": 0
+  }
+ ]
+}

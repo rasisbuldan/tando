@@ -1,0 +1,36 @@
+{
+ "host": "web-1",
+ "app": "shop",
+ "zone": "UTC",
+ "zone_name": "Etc/UTC",
+ "jobs": [
+  {
+   "name": "nightly",
+   "schedule": "daily",
+   "state": "on",
+   "next_run": 1795250928,
+   "last_run": 1795164528,
+   "result": "success",
+   "exit_code": 0,
+   "duration_s": 12.5,
+   "command": "node scripts/nightly.js",
+   "next_runs": [
+    "2026-11-19 00:00",
+    "2026-11-20 00:00",
+    "2026-11-21 00:00"
+   ]
+  },
+  {
+   "name": "sync",
+   "schedule": "*/15 * * * *",
+   "state": "paused",
+   "next_run": null,
+   "last_run": 1795246728,
+   "result": "failed",
+   "exit_code": 2,
+   "duration_s": 3.0,
+   "command": "node scripts/sync.js",
+   "next_runs": []
+  }
+ ]
+}

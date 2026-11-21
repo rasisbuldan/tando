@@ -37,6 +37,43 @@ case $cmd in
     tab rel 20261116-101010 verified 0 0
     tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1
     exit 0;;
+  *"tando-agent status"*)
+    status_rows
+    case $cmd in *loadavg*) tab loadavg 0.42 0.37 0.30;; esac
+    case $cmd in *"@releases"*)
+      echo '@releases'
+      tab rel 20261117-101010 verified 1 1
+      tab rel 20261116-101010 verified 0 0
+      tab rel 20261115-101010 failed 0 0
+      echo '@history'
+      # hist app at release kind result total build upload copy preflight switch verify note release_s
+      tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1
+      tab hist shop $((T - 90000)) 20261116-101010 rollback verified 6.0 - - - - 0.5 5.5 - -
+      tab hist shop $((T - 180000)) 20261115-101010 deploy failed 20.0 12.0 3.0 1.0 2.0 - - "start test failed" -
+      echo '@metrics'
+      # read <app> <points> <bucket>: mx then m rows (a gap in the middle, a counter reset)
+      case $cmd in
+        *"read shop 60 60"*) b=60;; *"read shop 144 600"*) b=600;; *) b=3600;;
+      esac
+      now=$((T + 3)); s=$((now / b * b))
+      tab mx $b $now
+      tab m $((s - 5 * b)) 100000000 120 1 a
+      tab m $((s - 4 * b)) 101000000 130 2 a
+      tab m $((s - 2 * b)) 102000000 140 0 a
+      tab m $((s - 1 * b)) 103000000 150 1 a
+      tab m $s 104857600 34 1 a
+      echo '@health'
+      tab up shop 9993 9987 1430 9980 2 12 85 40,42,-,38,39,41,40,40,39,38,37,36,40,41,42,43,44,40,39,38,37,36,35,34 ok 33 -
+      tab inc shop $((T - 50000)) $((T - 49700)) down "exited with status 1"
+      tab pg shop 12582912 3 20
+      echo '@audit'
+      # audit time who from verb app result note
+      tab audit $((T - 7300)) ci-bot 198.51.100.7 deploy shop ok "release 20261117-101010"
+      tab audit $((T - 90100)) alice 203.0.113.5 rollback shop ok "from 20261117-000000 to 20261116-101010"
+      ;;
+    esac
+    printf 'clock\t%s.123456\n' $((T + 3))
+    exit 0;;
   *"tando-agent history"*)
     tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1
     tab hist api $((T - 9000)) 20261117-090909 deploy verified 30.0 20.0 3.0 1.0 2.0 0.4 3.6 "first try" -
@@ -104,43 +141,6 @@ case $cmd in
     tab finding updates apt warn $((T - 7200)) 1 2 "3 security updates" "openssl, libc6, curl" "tando host update web-1"
     tab upgraded $((T - 604800)) tando 12 "openssl libc6"
     tab check ok agent 0.2.2
-    exit 0;;
-  *"tando-agent status"*)
-    status_rows
-    case $cmd in *loadavg*) tab loadavg 0.42 0.37 0.30;; esac
-    case $cmd in *"@releases"*)
-      echo '@releases'
-      tab rel 20261117-101010 verified 1 1
-      tab rel 20261116-101010 verified 0 0
-      tab rel 20261115-101010 failed 0 0
-      echo '@history'
-      # hist app at release kind result total build upload copy preflight switch verify note release_s
-      tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1
-      tab hist shop $((T - 90000)) 20261116-101010 rollback verified 6.0 - - - - 0.5 5.5 - -
-      tab hist shop $((T - 180000)) 20261115-101010 deploy failed 20.0 12.0 3.0 1.0 2.0 - - "start test failed" -
-      echo '@metrics'
-      # read <app> <points> <bucket>: mx then m rows (a gap in the middle, a counter reset)
-      case $cmd in
-        *"read shop 60 60"*) b=60;; *"read shop 144 600"*) b=600;; *) b=3600;;
-      esac
-      now=$((T + 3)); s=$((now / b * b))
-      tab mx $b $now
-      tab m $((s - 5 * b)) 100000000 120 1 a
-      tab m $((s - 4 * b)) 101000000 130 2 a
-      tab m $((s - 2 * b)) 102000000 140 0 a
-      tab m $((s - 1 * b)) 103000000 150 1 a
-      tab m $s 104857600 34 1 a
-      echo '@health'
-      tab up shop 9993 9987 1430 9980 2 12 85 40,42,-,38,39,41,40,40,39,38,37,36,40,41,42,43,44,40,39,38,37,36,35,34 ok 33 -
-      tab inc shop $((T - 50000)) $((T - 49700)) down "exited with status 1"
-      tab pg shop 12582912 3 20
-      echo '@audit'
-      # audit time who from verb app result note
-      tab audit $((T - 7300)) ci-bot 198.51.100.7 deploy shop ok "release 20261117-101010"
-      tab audit $((T - 90100)) alice 203.0.113.5 rollback shop ok "from 20261117-000000 to 20261116-101010"
-      ;;
-    esac
-    printf 'clock\t%s.123456\n' $((T + 3))
     exit 0;;
   *"tando-agent env-names"*)
     tab env DATABASE_URL; tab env SESSION_SECRET; tab env PUBLIC_BASE_URL; exit 0;;

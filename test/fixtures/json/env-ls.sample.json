@@ -1,0 +1,9 @@
+{
+ "host": "web-1",
+ "app": "shop",
+ "names": [
+  "DATABASE_URL",
+  "SESSION_SECRET",
+  "PUBLIC_BASE_URL"
+ ]
+}

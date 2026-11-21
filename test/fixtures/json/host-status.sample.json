@@ -1,0 +1,61 @@
+{
+ "host": "web-1",
+ "machine": {
+  "hostname": "web-1",
+  "os": "Ubuntu 24.04",
+  "kernel": "6.8.0",
+  "arch": "arm64",
+  "virt": "kvm",
+  "uptime_s": 864000,
+  "cpus": 2,
+  "load5": "0.37",
+  "mem_total_bytes": 2048000000,
+  "mem_used_bytes": 1024000000,
+  "disk_total_bytes": 40000000000,
+  "disk_used_bytes": 12000000000,
+  "swap_total_bytes": 0,
+  "swap_used_bytes": 0,
+  "checked_at": 1795247270,
+  "apt_checked_at": 1795243730,
+  "caddy_ours": true
+ },
+ "care": {
+  "updates": "security",
+  "reboot": "on",
+  "window": "Sun 03:00",
+  "zone": "UTC",
+  "lead_min": 10,
+  "other_sites": null,
+  "proven": true,
+  "skip": false,
+  "next_window": 1795333730
+ },
+ "findings": [
+  {
+   "section": "updates",
+   "id": "apt",
+   "state": "warn",
+   "since": 1795240130,
+   "auto": true,
+   "rank": 2,
+   "title": "3 security updates",
+   "detail": "openssl, libc6, curl",
+   "fix": "tando host update web-1"
+  }
+ ],
+ "upgraded": [
+  {
+   "at": 1794642530,
+   "by": "tando",
+   "count": 12,
+   "packages": "openssl libc6"
+  }
+ ],
+ "tando": [
+  {
+   "state": "ok",
+   "name": "agent",
+   "detail": "0.2.2"
+  }
+ ]
+}

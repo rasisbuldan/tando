@@ -1,0 +1,20 @@
+{
+ "host": "web-1",
+ "app": "shop",
+ "releases": [
+  {
+   "id": "20261117-101010",
+   "deployed_at": 1794910210,
+   "status": "verified",
+   "current": true,
+   "last_good": true
+  },
+  {
+   "id": "20261116-101010",
+   "deployed_at": 1794823810,
+   "status": "verified",
+   "current": false,
+   "last_good": false
+  }
+ ]
+}
