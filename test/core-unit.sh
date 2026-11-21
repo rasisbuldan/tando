@@ -351,5 +351,44 @@ check "U12h an app whose pool does not grow deploys on a server already over" \
 check "U12i ... and one that grows it is refused" \
   eval 'pgpool 21 30 database=postgres,db_pool=20 database=postgres database=postgres | grep -q "over the 22"'
 
+# ---- U13 runtimes: node_lite (a `node` that adds V8's --lite-mode, first in the app's PATH: V8
+# options such as --lite-mode are not allowed in NODE_OPTIONS) and workerd (the capnp config of
+# one worker: its modules, compatibility settings, env as bindings)
+lite() { # args -> what a (stub) node got through the shim
+  rm -rf "${T:?}/lite"; mkdir -p "$T/lite/real" "$T/lite/etc"
+  printf '#!/bin/sh\necho "$*"\n' > "$T/lite/real/node"; chmod +x "$T/lite/real/node"
+  # shellcheck disable=SC2016
+  "$BASH" -c 'eval "$1"; R=$2/etc; lite_shim && PATH=$R/lite:$3 && shift 3 && node "$@"' _ \
+    "$(agent_fn lite_shim)" "$T/lite" "$T/lite/real:/usr/bin:/bin" "$@"
+}
+check "U13a node_lite: the shim runs node with --lite-mode first, then the app's arguments" \
+  eq "$(lite server.js a)" "--lite-mode server.js a"
+check "U13b node_lite: the shim is executable and written once (a second write leaves it as it is)" \
+  eval 'lite x > /dev/null; test -x "$T/lite/etc/lite/node" && m=$(cksum < "$T/lite/etc/lite/node") &&
+        "$BASH" -c "eval \"\$1\"; R=\$2/etc; lite_shim" _ "$(agent_fn lite_shim)" "$T/lite" && test "$m" = "$(cksum < "$T/lite/etc/lite/node")"'
+wc_() { # dir port entry [name=value lines on stdin] -> the capnp config
+  # shellcheck disable=SC2016
+  "$BASH" -c 'eval "$1"; shift; workerd_capnp "$@"' _ "$(agent_fn workerd_capnp)" "$@"
+}
+mkdir -p "$T/w1/src/lib"
+printf 'name = "x"\nmain = "src/index.js"\ncompatibility_date = "2025-06-01"\ncompatibility_flags = ["nodejs_compat", "global_navigator"]\n' > "$T/w1/wrangler.toml"
+: > "$T/w1/src/index.js"; : > "$T/w1/src/util.js"; : > "$T/w1/src/lib/more.mjs"
+mkdir -p "$T/w1/node_modules/x"; : > "$T/w1/node_modules/x/skip.js"
+check "U13c workerd config: the entry is the first module, its siblings follow, node_modules is left out" \
+  eval 'c=$(wc_ "$T/w1" 9100 src/index.js < /dev/null); printf "%s\n" "$c" | grep -n "esModule" | head -1 | grep -q "\"index.js\"" &&
+        echo "$c" | grep -q "name = \"util.js\"" && echo "$c" | grep -q "name = \"lib/more.mjs\"" && ! echo "$c" | grep -q skip.js'
+check "U13d workerd config: listens on 127.0.0.1:<port> only" \
+  eval 'wc_ "$T/w1" 9100 src/index.js < /dev/null | grep -q "address = \"127.0.0.1:9100\""'
+check "U13e workerd config: compatibility date and flags from wrangler.toml" \
+  eval 'c=$(wc_ "$T/w1" 9100 src/index.js < /dev/null); echo "$c" | grep -q "compatibilityDate = \"2025-06-01\"" &&
+        echo "$c" | grep -q "compatibilityFlags = \[\"nodejs_compat\", \"global_navigator\"\]"'
+check "U13f workerd config: a date newer than the pinned workerd knows is lowered to what it knows" \
+  eval 'sed -i.bak "s/2025-06-01/2031-01-01/" "$T/w1/wrangler.toml"; wc_ "$T/w1" 9100 src/index.js < /dev/null | grep -q "compatibilityDate = \"2025-10-01\""'
+check "U13g workerd config: env vars are text bindings, quotes and backslashes escaped" \
+  eval 'c=$(printf "%s\n" "GREETING=hi \"you\" \\\\ ok" "N=1" | wc_ "$T/w1" 9100 src/index.js); echo "$c" | grep -qF "(name = \"GREETING\", text = \"hi \\\"you\\\" \\\\\\\\ ok\")" &&
+        echo "$c" | grep -qF "(name = \"N\", text = \"1\")"'
+check "U13h workerd config: no wrangler.toml: today-ish default date, no flags" \
+  eval 'mkdir -p "$T/w2"; : > "$T/w2/a.js"; c=$(wc_ "$T/w2" 9101 a.js < /dev/null); echo "$c" | grep -q "compatibilityDate = \"2025-09-01\"" && ! echo "$c" | grep -q compatibilityFlags'
+
 echo "core-unit: $n checks, $nf failed"
 [ "$nf" = 0 ]

@@ -793,6 +793,17 @@ props() { # port [kind]
   return 0
 }
 
+# node_lite = true: V8's --lite-mode (no optimizing JIT: about 10 MB less warm, about half the
+# speed). V8 options like it are refused in NODE_OPTIONS, so the app's PATH gets a `node` that adds
+# the flag (exec-app puts it first); the same for `node server.js`, npm scripts and start_shell.
+lite_shim() {
+  local f=$R/lite/node t
+  install -d -m 755 "$R/lite" || return 1
+  t=$(mktemp "$R/lite/.node.XXXXXX") || return 1
+  printf '#!/bin/sh\n# written by tando-agent: node_lite = true\nPATH=${PATH#%s:}\nexec node --lite-mode "$@"\n' "$R/lite" > "$t" &&
+    chmod 755 "$t" || { rm -f "$t"; return 1; }
+  if cmp -s "$t" "$f"; then rm -f "$t"; else mv -f "$t" "$f"; fi
+}
 write_unit() {
   write_slice   # (jobs of a static site run in it too)
   local f=/etc/systemd/system/tando-$A.service
@@ -802,6 +813,7 @@ write_unit() {
     return 0
   fi
   write_wake || return 1
+  [[ ${C[node_lite]:-} == true ]] && { lite_shim || return 1; }
   local inst='WantedBy=multi-user.target'
   # an idle app is started by its wake socket, never at boot: enabling it enables the socket
   idle_app && inst="Also=tando-${A}_wake.socket"
@@ -2516,7 +2528,7 @@ dreload() { if [[ -n ${DR_FLAG:-} ]]; then : > "$DR_FLAG"; else systemctl daemon
 # runtimes, installed when the first app needs one (tando up), or by host setup node=yes ...
 # RT_DETAIL says what is there afterwards.
 NODE_LTS=24
-runtime_install() { # node [major] | python | podman | postgres
+runtime_install() { # node [major] | python | podman | postgres | workerd
   case $1 in
     node) node_install "${2:-}";;
     python) apt_install python3 python3-venv; H[python]=yes; save "$R/host.conf" H
@@ -2525,6 +2537,7 @@ runtime_install() { # node [major] | python | podman | postgres
       RT_DETAIL="podman $(podman --version 2> /dev/null | awk '{ print $3 }')";;
     postgres) pg_setup; H[postgres]=yes; save "$R/host.conf" H
       RT_DETAIL="postgresql ${H[postgres_version]}";;
+    workerd) workerd_install;;
     *) die "unknown runtime: $1";;
   esac
   chmod 644 "$R/host.conf"
@@ -2557,6 +2570,90 @@ node_install() {
   have=$(node --version) || die "node does not run after installing it"
   RT_DETAIL="node ${have#v} (installed now)"
 }
+# ---- workerd (recipe = workerd): the Workers runtime, one process per app ----
+# A pinned build of Cloudflare's open-source workerd, from the npm package that carries its Linux
+# binary (the tarball's sha256 is pinned here: a changed or tampered download is refused). One
+# process per app, never a shared group: workerd has no CPU or memory limit per worker, so a
+# runaway worker would freeze or kill every worker in its process (here the app's own unit limits
+# apply, as for any app). Not a hardened sandbox either: the app's user and unit are the walls.
+WORKERD_VERSION=1.20251001.0
+WORKERD_MAX_DATE=2025-10-01   # the newest compatibility date this build knows
+WORKERD_SHA_64=3b70a52f8c3a4514ce707194dbdbda76585f22474d6e3b426ad78d64edce2a44
+WORKERD_SHA_ARM64=0de6e617b966d7607af96bf8bfb31bcaba4f2b089173066b1bb20c7c2c140bc5
+WORKERD=$R/workerd/workerd
+workerd_ok() { [[ -x $WORKERD && $(cat "$R/workerd/version" 2> /dev/null) == "$WORKERD_VERSION" ]]; }
+workerd_install() {
+  local a want t f
+  workerd_ok && { RT_DETAIL="workerd $WORKERD_VERSION"; return 0; }
+  case $(uname -m) in x86_64) a=64 want=$WORKERD_SHA_64;; aarch64) a=arm64 want=$WORKERD_SHA_ARM64;;
+    *) die "no workerd build for $(uname -m)";; esac
+  f=workerd-linux-$a-$WORKERD_VERSION.tgz
+  t=$(mktemp -d) || die "no temp dir"
+  curl -fsS -m 300 -o "$t/$f" "https://registry.npmjs.org/@cloudflare/workerd-linux-$a/-/$f" ||
+    { rm -rf "$t"; die "could not download $f from registry.npmjs.org to install workerd (is the server online?)"; }
+  [[ $(sha256sum < "$t/$f" | cut -d' ' -f1) == "$want" ]] ||
+    { rm -rf "$t"; die "the checksum of $f is not the one tando expects: workerd was not installed"; }
+  tar -xzf "$t/$f" -C "$t" package/bin/workerd || { rm -rf "$t"; die "could not unpack $f"; }
+  install -d -m 755 "$R/workerd" && install -m 755 "$t/package/bin/workerd" "$WORKERD.new" &&
+    mv -f "$WORKERD.new" "$WORKERD" && echo "$WORKERD_VERSION" > "$R/workerd/version" ||
+    { rm -rf "$t"; die "could not install workerd in $R/workerd"; }
+  rm -rf "$t"
+  RT_DETAIL="workerd $WORKERD_VERSION (installed now)"
+}
+# workerd_capnp dir port entry: the config of the app's one worker, on stdout. dir is the release
+# (the caller links it as app/ beside the config: embed paths are relative to the config file);
+# entry is its main module (the first), the other .js/.mjs files beside it follow under their
+# paths relative to it; compatibility date and flags come from wrangler.toml/json when there are
+# any; stdin holds the app's environment, name=value lines, which become text bindings (env.NAME).
+workerd_capnp() {
+  local dir=$1 port=$2 entry=$3 edir=${3%/*} date=2025-09-01 flags="" w="" f line k v
+  local pre=${edir}/
+  [[ $entry == */* ]] || { edir=.; pre=""; }
+  for f in wrangler.toml wrangler.json wrangler.jsonc; do [[ -f $dir/$f ]] && { w=$dir/$f; break; }; done
+  if [[ -n $w ]]; then
+    f=$(grep -m1 -o 'compatibility_date"\{0,1\}[[:space:]]*[=:][[:space:]]*"[0-9]\{4\}-[0-9][0-9]-[0-9][0-9]"' "$w" |
+      grep -o '[0-9]\{4\}-[0-9][0-9]-[0-9][0-9]')
+    [[ -n $f ]] && date=$f
+    f=$(tr -d '\n\r' < "$w" | sed -n 's/.*compatibility_flags[^[]*\[\([^]]*\)\].*/\1/p' | grep -o '"[A-Za-z0-9_]*"' | paste -sd, - | sed 's/,/, /g')
+    [[ -n $f ]] && flags="[$f]"
+  fi
+  [[ $date > ${WORKERD_MAX_DATE:-2025-10-01} ]] && date=${WORKERD_MAX_DATE:-2025-10-01}
+  printf 'using Workerd = import "/workerd/workerd.capnp";\n\n'
+  printf 'const config :Workerd.Config = (\n  services = [ (name = "app", worker = .app) ],\n'
+  printf '  sockets = [ (name = "http", address = "127.0.0.1:%s", http = (), service = "app") ]\n);\n\n' "$port"
+  printf 'const app :Workerd.Worker = (\n  modules = [\n'
+  printf '    (name = "%s", esModule = embed "app/%s"),\n' "${entry##*/}" "$entry"
+  while IFS= read -r f; do
+    f=${f#./}
+    [[ $f =~ ^[A-Za-z0-9._/@-]+$ && $f != "${entry##*/}" ]] || continue
+    printf '    (name = "%s", esModule = embed "app/%s%s"),\n' "$f" "$pre" "$f"
+  done < <(cd "$dir/$edir" 2> /dev/null && find . -maxdepth 3 -name node_modules -prune -o -type f \( -name '*.js' -o -name '*.mjs' \) -print | LC_ALL=C sort)
+  printf '  ],\n  compatibilityDate = "%s",\n' "$date"
+  [[ -n $flags ]] && printf '  compatibilityFlags = %s,\n' "$flags"
+  printf '  bindings = [\n'
+  while IFS= read -r line; do
+    k=${line%%=*} v=${line#*=}
+    [[ $k =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    v=${v//\\/\\\\}; v=${v//\"/\\\"}; v=${v//$'\t'/\\t}
+    printf '    (name = "%s", text = "%s"),\n' "$k" "$v"
+  done
+  printf '  ],\n);\n'
+}
+# exec_workerd dir: as the app user: the config in the unit's private /tmp, then workerd itself
+exec_workerd() {
+  local dir=$1 t k
+  workerd_ok || die "workerd is not installed on this server: tando up installs it"
+  [[ ${C[start]:-} =~ ^[A-Za-z0-9._/@-]+$ && ${C[start]} != *..* && ${C[start]} != /* && -f $dir/${C[start]} ]] ||
+    die "start = ${C[start]:-} is not a file of the release (recipe = workerd: start is the Workers module, like src/index.js)"
+  t=$(mktemp -d) || die "no temp dir"
+  ln -s "$dir" "$t/app" || die "could not write the workerd config"
+  local -A E
+  env_load E
+  { for k in "${!E[@]}"; do printf '%s=%s\n' "$k" "${E[$k]}"; done; } |
+    workerd_capnp "$dir" "$PORT" "${C[start]}" > "$t/config.capnp" || die "could not write the workerd config"
+  exec "$WORKERD" serve --verbose "$t/config.capnp"
+}
+
 cmd_runtime() { # runtime [version]: install a runtime an app needs (tando up asks for it)
   need_root
   host_lock
@@ -2907,13 +3004,14 @@ cmd_configure() {
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" "C[priority]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" "C[db_pool]" "C[db_direct]" \
-    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]" "C[idle_stop]"
+    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]" "C[idle_stop]" "C[node_lite]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
     no_ctrl "$v" || die "control characters in $k"
     case $k in
-      recipe) [[ $v =~ ^(node|static|next|python|container)$ ]] || die "bad recipe: $v";;
+      node_lite) [[ $v =~ ^(true|false)$ ]] || die "node_lite must be true or false";;
+      recipe) [[ $v =~ ^(node|static|next|python|container|workerd)$ ]] || die "bad recipe: $v";;
       image) [[ $v =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]] || die "bad image: $v";;
       container_port) [[ $v =~ ^[0-9]{1,5}$ ]] || die "bad container_port: $v";;
       build_memory) [[ $v =~ ^[0-9]+[KMG]$ ]] || die "bad build_memory: $v";;
@@ -3026,6 +3124,13 @@ cmd_configure() {
     [[ $k == worker.*.* && " ${workers[*]} " != *" worker.$x "* ]] && die "$k is set but there is no worker.$x = <command>"
     [[ " ${jobs[*]} " == *" job.$x "* ]] && die "worker $x has the name of a job: give one of them another name"
   done
+  if [[ ${C[node_lite]:-} == true && ${C[recipe]:-node} != node && ${C[recipe]:-} != next ]]; then
+    die "node_lite is for recipe = node or next (this app is ${C[recipe]:-node})"
+  fi
+  if [[ ${C[recipe]:-} == workerd ]]; then
+    [[ ${C[start]:-} =~ ^[A-Za-z0-9._/@-]+$ && ${C[start]} != *..* && ${C[start]} != /* ]] ||
+      die "recipe = workerd: start is the Workers module in the release, like src/index.js (got \"${C[start]:-}\")"
+  fi
   if [[ -n ${C[idle_stop]:-} && ${C[idle_stop]} != off ]]; then
     case ${C[recipe]:-node} in
       static) die "idle_stop is not for a static site: it has no process (Caddy serves it)";;
@@ -3053,6 +3158,7 @@ cmd_configure() {
     node|next) command -v node > /dev/null || needs+=" node";;
     python) python3 -c 'import venv, ensurepip' 2> /dev/null || needs+=" python";;
     container) [[ ${H[podman]:-} == yes ]] && command -v podman > /dev/null || needs+=" podman";;
+    workerd) workerd_ok || needs+=" workerd";;
   esac
   [[ ${C[database]:-} == postgres && ${H[postgres]:-} != yes ]] && needs+=" postgres"
   if ((check)); then
@@ -3591,6 +3697,7 @@ release_ok() {
   case ${C[recipe]:-node} in
     static) die "release is not supported for a static site: it has no process to run a command as (a build step belongs in build =)";;
     container) die "release is not supported for recipe = container: run the migration in the image's entrypoint, before the server starts";;
+    workerd) die "release is not supported for recipe = workerd: a Workers app has no Node to run a command with";;
   esac
   [[ ${C[release_shell]:-} == true || ${C[release]} != *[\|\&\;\<\>\$\`\"\'\\\(\)\*\?\~\{\}\#]* ]] ||
     die "release has shell syntax (quotes, &&, |, \$VAR ...) but runs without a shell: set release_shell = true to run it with sh -c, or put it in a script"
@@ -6228,8 +6335,11 @@ cmd_exec_app() {
   case ${C[recipe]:-node} in
     container) exec_container "$dir";;
     next) export HOSTNAME=127.0.0.1;;      # Next standalone binds to $HOSTNAME
+    workerd) exec_workerd "$dir";;
     python) [[ -d $dir/.venv ]] && export VIRTUAL_ENV=$dir/.venv PATH="$dir/.venv/bin:$PATH";;
   esac
+  [[ ${C[node_lite]:-} == true && ( ${C[recipe]:-node} == node || ${C[recipe]:-} == next ) && -x $R/lite/node ]] &&
+    export PATH="$R/lite:$PATH"
   if [[ ${C[start_shell]:-} == true ]]; then exec /bin/sh -c "${C[start]}"; fi
   read -ra argv <<< "${C[start]}"
   exec "${argv[@]}"
@@ -6339,10 +6449,10 @@ CONF_KEYS_A=(recipe image container_port build_memory start start_shell release 
   health path data writable backup database db_statement_timeout db_idle_tx_timeout db_temp_limit
   memory health_timeout soak cpu tasks max_conns max_requests stop_timeout hold log_max log_keep
   log_rate access_log request_log_max health_expect health_fails health_recover job_timeout job_spread
-  job_missed assets compress priority db_pool db_direct idle_stop)
+  job_missed assets compress priority db_pool db_direct idle_stop node_lite)
 CONF_KEYS=" ${CONF_KEYS_A[*]} "
 # what a record of the first agent that recorded every setting knew (conf=1 without keys=)
-CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority db_pool db_direct idle_stop } job.* "
+CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority db_pool db_direct idle_stop node_lite } job.* "
 conf_key() {
   case $1 in job.*|worker.*) return 0;; *[[:space:]]*|'') return 1;; esac
   [[ $CONF_KEYS == *" $1 "* ]]

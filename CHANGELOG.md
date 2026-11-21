@@ -6,6 +6,14 @@ first, grouped by area.
 
 ## Unreleased
 
+- New: `node_lite = true` in tando.conf (node and next recipes, opt-in, never written by
+  `tando init`): V8's `--lite-mode`, warm memory 24 MB down to 13 MB at about half the peak
+  throughput (docs/COMMANDS.md, "node_lite").
+- New: `recipe = workerd`, opt-in, for apps written for the Workers API (a `fetch` handler).
+  One workerd process per app under the app's unit and limits, a pinned workerd installed by
+  `tando up` (checksum-verified), env variables as bindings. `tando init` suggests it for a
+  `wrangler.toml` project. No Node APIs beyond nodejs_compat, no file system (docs/COMMANDS.md,
+  "Workers apps").
 - New: `idle_stop = 6h` in tando.conf (scale to zero; `on` = 6h): the app's web process stops
   after that long without a request and its next request starts it (workers and jobs run on) (systemd socket activation and systemd-socket-proxyd
   behind Caddy; the first request waits about 0.1-0.3 s for a small app). `tando ls` says

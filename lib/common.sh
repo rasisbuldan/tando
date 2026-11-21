@@ -400,6 +400,7 @@ C_job_spread="" C_job_missed=""   # the spread of a job's start (default: a sixt
 C_workers=""       # worker.<name> = <command> and their .memory, .stop_timeout as key=value lines
 C_release="" C_release_shell="" C_release_timeout=""   # the release command (lib/deploy.sh; checked by the server too)
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
+C_node_lite=""    # true: Node runs with V8 --lite-mode (less memory, about half the speed; node and next apps)
 C_idle_stop=""     # scale to zero: stop after this long without a connection (10m, 30s, 2h, off)
 C_priority=""   # high or low: who the OOM killer takes last or first (checked by the server too)
 
@@ -629,8 +630,8 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       app) C_app=$v;;
       host) C_host=$v;;
       recipe) C_recipe=$v
-        case $v in node|next|static|python|container) ;;
-          *) die "$f:$n: recipe must be node, next, static, python or container (got \"$v\")";; esac;;
+        case $v in node|next|static|python|container|workerd) ;;
+          *) die "$f:$n: recipe must be node, next, static, python, container or workerd (got \"$v\")";; esac;;
       build) C_build=$v;;
       out) C_out=$v   # inside the project: a tando.conf cannot publish files from elsewhere
         case /$v/ in //*|*/../*) die "$f:$n: out must be a directory inside the project (got \"$v\")";; esac;;
@@ -655,6 +656,8 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 99999 ] || die "$f:$n: max_conns is 1 to 99999 connections (got \"$v\")";;
       max_requests) C_max_requests=$v
         ui_int "$v" && [ "$v" -ge 1 ] || die "$f:$n: max_requests is a number of requests in flight (got \"$v\")";;
+      node_lite) C_node_lite=$v
+        case $v in true|false) ;; *) die "$f:$n: node_lite must be true or false (got \"$v\")";; esac;;
       idle_stop) C_idle_stop=$v
         case $v in on|off|[1-9]s|[1-9]m|[1-9]h|[1-9][0-9]s|[1-9][0-9]m|[1-9][0-9]h|[1-9][0-9][0-9]s|[1-9][0-9][0-9]m|[1-9][0-9][0-9]h) ;;
           *) die "$f:$n: idle_stop is a time like 6h, 10m or 30s, on (6h) or off (got \"$v\")";; esac;;
@@ -742,6 +745,7 @@ ${JOB_CRON:+$k.cron=$JOB_CRON
     case $C_recipe in
       static) die "$f: release is not supported for a static site: it has no process to run a command as (a build step belongs in build =)";;
       container) die "$f: release is not supported for recipe = container: run the migration in the image's entrypoint, before the server starts";;
+      workerd) die "$f: release is not supported for recipe = workerd: a Workers app has no Node to run a command with";;
     esac
     [ "$C_release_shell" = true ] || case $C_release in
       *['|&;<>$`"()*?~{}#'\'\\]*) die "$f: release has shell syntax (quotes, &&, |, \$VAR ...) but runs without a shell:" \
@@ -767,6 +771,10 @@ ${JOB_CRON:+$k.cron=$JOB_CRON
     for jt in $(printf '%s' "$C_workers" | sed -n 's/^worker\.\([^.=]*\)=.*/\1/p'); do
       printf '%s' "$C_jobs" | grepq "^job\.$jt=" && die "$f: worker $jt has the name of a job: give one of them another name"
     done
+  fi
+  if [ "$C_node_lite" = true ]; then
+    case ${C_recipe:-node} in node|next) ;;
+      *) die "$f: node_lite is for recipe = node or next (got ${C_recipe:-node})";; esac
   fi
   CONF_LOADED=$f
   return 0

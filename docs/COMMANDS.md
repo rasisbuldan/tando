@@ -34,7 +34,7 @@ Conventions that apply to every command:
 
 ### init
 `tando init [-H host] [--yes]`. Flags: `-H`, `--yes`. Arguments: none.
-Writes `tando.conf` for the project here: detects the recipe (next, node, python, container,
+Writes `tando.conf` for the project here: detects the recipe (workerd, next, node, python, container,
 static), start command and health path (`/api/health` or `/health` when the project defines that
 route), and suggests `database = postgres` when `pg`/`postgres`/psycopg is a dependency. With one
 server registered (or `-H`) it writes `host = <name>`. For Next.js it offers to add
@@ -796,6 +796,48 @@ the next deploy; per host with `tando host setup <host> key=value`.
 | host `conn_limit=` | 200 | connections at once per client address (IPv6: per /64) on ports 80/443 | further connections are reset |
 | host `conn_rate=` | 100 | new connections a second per client address, burst 3x | further SYNs are dropped: the client retries a second later |
 | host `rate_limit=` | auto | on, off, or auto: on only where tando owns Caddy (it installed it, or the Caddyfile has no other site) | `tando doctor` row "client limits" shows how often they tripped |
+
+### Lower memory for Node: node_lite
+
+`node_lite = true` (node and next recipes; default false, `tando init` never writes it) runs the
+app's `node` with V8's `--lite-mode`: no optimizing JIT. Measured on a small Express app: warm
+memory 24 MB down to 13 MB, at about half the peak throughput (squeeze audit). Right for small,
+low-traffic apps where memory is what you pay for; wrong for an app that is CPU-bound or must
+answer fast under load. V8 options like it are refused in `NODE_OPTIONS`, so tando puts a `node`
+shim (`/opt/tando/lite/node`) first in the app's PATH: it works for `node server.js`, npm
+scripts and `start_shell`, not for a start command that names node by its full path. `memory` and
+the heap cap stay as they are.
+
+### Workers apps: recipe = workerd
+
+`recipe = workerd` runs an app written for the Workers API (an ES module that exports
+`default { fetch(request, env) }`) on workerd, Cloudflare's open-source runtime. Opt-in, for small
+stateless apps: idle it holds about 9-16 MB PSS, against 47-72 MB for plain Node (spike measured in
+Docker; the numbers for this implementation are in the report of the change).
+`tando init` suggests it when it finds `wrangler.toml` (or `wrangler.json`), or an entry file that
+exports a fetch handler and starts no server. `start` is the module in the release, like
+`src/index.js` (from wrangler's `main`). To use it: `build`/`out` produce the JavaScript (bundle
+TypeScript with your tool), `tando up` installs a pinned workerd on the server once (downloaded from
+the npm registry's package for it, the tarball's sha256 pinned in tando-agent: a mismatch installs
+nothing).
+
+How it runs: one workerd process per app, never a shared group (workerd has no CPU or memory limit
+per worker: one runaway worker would freeze or kill every other in its process). It is under the
+app's own unit like any app: same user, `memory`, `cpu`, `tasks`, hardening, `idle_stop`, health
+check, zero-downtime deploy. At every start tando writes the worker's config (a private file in
+the unit's `/tmp`): the socket on the app's port (127.0.0.1), the entry module first and the other
+`.js`/`.mjs` files beside it (so `import "./util.js"` works), `compatibility_date` and
+`compatibility_flags` from `wrangler.toml` (a date newer than the pinned workerd knows is lowered
+to its newest, 2025-10-01), and each `tando env set` variable as a text binding (`env.NAME`).
+`[vars]` in `wrangler.toml` are not read: use `tando env`. workerd is not a hardened sandbox (its
+authors say so); the unit's user and limits are the walls.
+
+Not supported: Node APIs beyond what workerd's `nodejs_compat` provides (no `child_process`,
+`worker_threads`, native modules), no file system (no `data =` directory inside the worker),
+`release =`, workers and jobs that run Node commands (a job runs whatever command you give it, as
+for any app), KV/D1/R2/Durable Object bindings (only text bindings from env), `wrangler.toml`
+routes and cron triggers, and multi-line arrays of a module graph that needs a bundler: bundle first.
+Next.js on workerd needs an adapter and is not covered.
 
 ### Scale to zero: idle_stop
 

@@ -4,7 +4,7 @@ deploy; a line you remove is cleared. Full reference: docs/CONFIG.md
 App
   app             name on the server (lower case, digits, -)
   host            server to deploy to (tando host ls)
-  recipe          node | next | static | python | container
+  recipe          node | next | static | python | container | workerd
   node            Node.js major version, like 24
 Build
   build           command run here before the upload
@@ -34,6 +34,7 @@ Limits
   max_requests    requests in flight, over it a 503 (default off)
   hold            seconds Caddy holds requests at a restart (default 15)
   stop_timeout    seconds a stopping process may finish (default 10)
+  node_lite       true: Node runs with V8 --lite-mode, about 10 MB less memory warm, about half the speed (node, next; default false)
   idle_stop       6h, 10m, 30s, on (6h): stop the web process after that long without a request, start it on the next one (default off)
   priority        high or low: killed last or first when memory runs out
 Assets
