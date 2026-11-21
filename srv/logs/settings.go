@@ -6,15 +6,23 @@ import (
 	"strings"
 )
 
-// Built-in defaults. log_max 2G is only the upper bound of the default: an app without its own
-// log_max (and no host default) gets min(2G, 5% of the log file system), so the defaults of many
+// Built-in defaults. log_max 256M is only the upper bound of the default: an app without its own
+// log_max (and no host default) gets min(256M, 5% of the log file system), so the defaults of many
 // apps cannot fill a small disk (fairShare). The request log's budget (request_log_max) defaults
-// to min(log_max / 4, 256M); its retention follows log_keep (access_keep_for at the host
-// overrides).
-var defaults = map[string]string{"journal_max": "200M", "log_max": "2G", "log_keep": "30d", "log_rate": "5000/30s",
+// to min(log_max / 4, 256M), with log_max's own default counted as min(2G, 5%) there (the budget
+// it had before the journal's default came down); its retention follows log_keep (access_keep_for
+// at the host overrides).
+var defaults = map[string]string{"journal_max": "200M", "log_max": "256M", "log_keep": "30d", "log_rate": "5000/30s",
 	"access_log": "on", "request_log_max": "auto"}
 
-const fairPct = 5
+// The default journal cap was min(2G, 5%) up to 0.2: 2G on a disk of 40 GB or more, held by
+// journald, and one chatty app's journal filled it (2.1 GB beside others' 8-16 MB). Every
+// scan and log query of that app maps its files, inside tandod's memory cap too.
+const (
+	fairPct      = 5
+	journalCapMB = 256  // the default log_max's upper bound
+	reqBaseMB    = 2048 // what request_log_max's default is computed from when log_max is the default
+)
 
 var (
 	reSize  = regexp.MustCompile(`^[0-9]{1,6}[KMG]$`)
@@ -118,9 +126,13 @@ func (a *app) setting(k string) string {
 	}
 	switch k {
 	case "log_max":
-		return a.l.fairShare()
+		return a.l.fairShare(journalCapMB)
 	case "request_log_max":
-		v := sizeBytes(a.setting("log_max")) / 4 / 1048576
+		lm := a.setting("log_max")
+		if a.settingSrc("log_max") == "auto" {
+			lm = a.l.fairShare(reqBaseMB)
+		}
+		v := sizeBytes(lm) / 4 / 1048576
 		v = min(max(v, 4), 256)
 		return strconv.FormatInt(v, 10) + "M"
 	case "access_keep_for":
@@ -148,15 +160,15 @@ func hostSetting(h map[string]string, k string) string {
 	return defaults[k]
 }
 
-// fairShare is the default journal cap: min(2G, fairPct % of the file system that holds the
-// journals), in MB.
-func (l *Logs) fairShare() string {
+// fairShare is the default journal cap: min(capMB, fairPct % of the file system that holds the
+// journals), at least 16M.
+func (l *Logs) fairShare(capMB int64) string {
 	tot, _, err := diskKB(l.P.VarLog)
 	if err != nil {
-		return "256M"
+		return strconv.FormatInt(min(256, capMB), 10) + "M"
 	}
 	m := tot * fairPct / 100 / 1024
-	m = min(max(m, 16), 2048)
+	m = min(max(m, 16), capMB)
 	if m == 2048 {
 		return "2G"
 	}

@@ -327,6 +327,15 @@ LogLevelMax=notice
 	if len(f.called("systemctl try-restart")) != 0 || len(f.called("systemctl start tandod")) != 0 {
 		t.Errorf("restarted a daemon that runs the installed binary: %v", f.calls)
 	}
+	// an older tando's unit (MemoryMax=64M: its page cache re-read the journals every minute):
+	// rewritten with 160M, systemd reloaded, tandod restarted
+	f.write("units/tandod.service", strings.Replace(daemonUnit(f.path("opt")), "\nMemoryMax=160M\n", "\nMemoryMax=64M\n", 1))
+	f.reset()
+	do(func(o *out.Writer) error { return w.Install(context.Background(), o) })
+	if b, _ := os.ReadFile(f.path("units/tandod.service")); !strings.Contains(string(b), "\nMemoryMax=160M\n") ||
+		len(f.called("systemctl daemon-reload")) != 1 || len(f.called("systemctl try-restart tandod.service")) != 1 {
+		t.Errorf("an old unit with 64M: %v\n%s", f.calls, b)
+	}
 	// a new binary installed (another file): try-restart, and the new process runs it
 	os.Remove(f.path("opt/bin/tandod"))
 	f.write("opt/bin/tandod", "y")

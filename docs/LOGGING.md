@@ -66,7 +66,7 @@ lives in the namespace config (`RateLimitIntervalSec=`/`RateLimitBurst=`), where
 
 | Where | Key | Default | Meaning |
 |---|---|---|---|
-| tando.conf | `log_max` | host default, else min(2G, 5% of the disk) | journal size cap of the app (`SystemMaxUse=`), at least 4M. Circular: at the cap journald deletes the oldest entries to make room for new ones |
+| tando.conf | `log_max` | host default, else min(256M, 5% of the disk) | journal size cap of the app (`SystemMaxUse=`), at least 4M. Circular: at the cap journald deletes the oldest entries to make room for new ones |
 | tando.conf | `log_keep` | host default, else 30d | journal retention, `Nh` or `Nd` (`Nw` too): `MaxRetentionSec=`; journal files are closed after a quarter of it (15 min to 1 day, `MaxFileSec=`) because retention removes whole files |
 | tando.conf | `log_rate` | host default, 5000/30s | `<burst>/<interval>s` per service in the app's namespace, or `off` |
 | tando.conf | `request_log_max` | host default, else min(log_max / 4, 256M) | disk budget of the request log (below) |
@@ -80,9 +80,14 @@ Host defaults live in `/opt/tando/logs.conf`; app settings in the app's `app.con
 `tando up`, validated by `tando-logs valid`). journald's own `SystemKeepFree=` (15% of the file
 system) still applies to every namespace, so even a misconfigured cap cannot fill the disk.
 
-**Defaults that cannot fill a small disk.** The built-in `log_max` is 2G, but an app without its
-own (and without a host default) gets min(2G, 5% of the file system that holds the journals): 2G
-on a 40 GB disk or larger, 500 MB on a 10 GB one. An explicit `log_max` is used as written.
+**Defaults that cannot fill a small disk.** The built-in `log_max` is 256M, but an app without its
+own (and without a host default) gets min(256M, 5% of the file system that holds the journals):
+256 MB on a 5 GB disk or larger, about 100 MB on a 2 GB one. An explicit `log_max` is used as written.
+Up to 0.2 the default was min(2G, 5%): 2G on a 40 GB disk, and journald held one chatty app's
+journal at that cap (2.1 GB beside other apps' 8-16 MB), which every scan and query of that app
+then mapped. The next `tando host setup` (or deploy) writes the new cap and trims such a journal
+to it, oldest files first. The request log's default budget did not change (it is still computed
+from min(2G, 5%)).
 `tando doctor` ("log caps") adds up every app's journal cap and request log budget, subtracts what
 they already hold, and warns when they could still grow by more than the free space. `tando status
 -a <app>` shows it as `logs 6.4 MB of 2.0 GB, keeps 30 d` (disk use of journal and request log, the
@@ -94,7 +99,10 @@ namespace config and restarts that app's journald instance only, never the app: 
 app's stdout/stderr streams in systemd's file descriptor store across its restart (measured: 13 of
 13 once-a-second lines across two restarts, same PID). It then rotates and vacuums the namespace
 (`journalctl --namespace=tando-<app> --vacuum-size=<log_max> --vacuum-time=<log_keep>`), so a
-lowered cap or retention applies at once instead of at the next rotation.
+lowered cap or retention applies at once instead of at the next rotation. A journal over its cap
+with its config unchanged (a vacuum that met a stopped instance, whose namespace journald stops
+when idle, or one that failed) is trimmed the same way at the next host setup or deploy; a vacuum
+that fails is a warning.
 
 ## 2. `tando logs`
 

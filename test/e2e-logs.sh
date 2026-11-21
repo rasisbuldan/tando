@@ -503,12 +503,12 @@ log "retention and limits"
 "$SSH" "sudo sed -i -e '/^access_/d' -e '/^log_keep/d' /opt/tando/logs.conf"   # back to the defaults
 "$R" host setup t > /dev/null 2>&1
 nsconf() { root cat "/etc/systemd/journald@tando-$1.conf"; }
-fair() { # min(2G, 5% of the file system of /var/log), as tando-logs renders it
+fair() { # min(256M, 5% of the file system of /var/log), as tando-logs renders it
   local k; k=$("$SSH" "df -Pk /var/log | tail -1" | awk '{ print int($2 * 5 / 100 / 1024) }')
-  [ "$k" -ge 2048 ] && { echo 2G; return; }; [ "$k" -lt 16 ] && k=16; echo "${k}M"
+  [ "$k" -ge 256 ] && k=256; [ "$k" -lt 16 ] && k=16; echo "${k}M"
 }
 nsconf hello > "$E/ns.hello"
-check "15a default journal cap is min(2G, 5% of the disk) ($(fair))" grep -qx "SystemMaxUse=$(fair)" "$E/ns.hello"
+check "15a default journal cap is min(256M, 5% of the disk) ($(fair))" grep -qx "SystemMaxUse=$(fair)" "$E/ns.hello"
 check "15b default retention 30 days, journal files closed daily" \
   sh -c "grep -qx 'MaxRetentionSec=720h' '$E/ns.hello' && grep -qx 'MaxFileSec=1440min' '$E/ns.hello'"
 "$R" status -a hello > "$E/st.hello" 2>&1
@@ -567,6 +567,23 @@ up keep
 kb=$(root du -sB1 "/var/log/journal/\$(cat /etc/machine-id).tando-keep" | cut -f1)
 check "15k shrinking log_max to 8M cuts the journal at once ($kb bytes)" test "$kb" -le $((8 * 1048576 + 1048576))
 check "15l ... and keeps the newest lines" has_line keep 'flood 199999 '
+# a namespace past its cap with its config unchanged (a vacuum that met a stopped instance or
+# failed was never tried again): copies of an archived file, named older, push it past 8M; the
+# next host setup trims it
+nsd="/var/log/journal/\$(cat /etc/machine-id).tando-keep"
+srv 'sudo bash -s' <<'EOF'
+d=/var/log/journal/$(cat /etc/machine-id).tando-keep
+f=$(ls "$d"/system@*.journal | tail -1) i=1
+while [ "$(du -sB1 "$d" | cut -f1)" -le $((20 * 1048576)) ] && [ $i -le 200 ]; do
+  cp "$f" "$d/system@00000000000000000000000000000000-$(printf %016x $i)-$(printf %016x $i).journal"; i=$((i + 1))
+done
+EOF
+kb0=$(root du -sB1 "$nsd" | cut -f1)
+"$R" host setup t > "$E/setup15s" 2>&1 || cat "$E/setup15s" >&2
+kb=$(root du -sB1 "$nsd" | cut -f1)
+check "15s a journal past its cap, config unchanged: host setup trims it ($kb0 -> $kb bytes, cap 8M)" \
+  test "$kb0" -gt $((20 * 1048576)) -a "$kb" -le $((8 * 1048576 + 1048576))
+check "15t ... and keeps the newest lines" has_line keep 'flood 199999 '
 # request log history: a burst of 20,000 requests (about 6.5 MB of lines) rolls the 1 MiB files,
 # gzip'd, and every request is still read back (the old 4 MiB x 4 default kept seconds of a burst)
 for _ in 1 2 3 4 5 6 7 8 9 10; do

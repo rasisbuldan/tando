@@ -75,6 +75,10 @@ WantedBy=timers.target
 // daemonUnit runs tandod. It writes only the state of the checks, the metrics and the log scan
 // (and the audit log, through tando-logs, after restoring the firewall rules); the agent, which
 // rewrites links, units and Caddy's config, runs outside it in units of its own (systemd-run).
+// MemoryMax is not its budget (anon memory stays under GOMEMLIMIT, about 6-20 MB) but room for
+// the page cache of what it reads each minute: at 64M the cgroup evicted the journal and its
+// children's libraries every tick and read them again. An older unit is rewritten by `install`
+// (host setup), which reloads systemd and restarts tandod.
 func daemonUnit(root string) string {
 	return `[Unit]
 Description=tando: monitoring daemon (checks, metrics and the log scan once a minute)
@@ -96,7 +100,7 @@ Environment=GOMAXPROCS=1 GOGC=50 GOMEMLIMIT=20MiB
 Nice=5
 CPUWeight=20
 OOMScoreAdjust=-200
-MemoryMax=64M
+MemoryMax=160M
 UMask=0022
 ProtectSystem=strict
 ReadWritePaths=/var/lib/tando -/run/tando-watch -/var/log/tando -/var/cache/tando-logs

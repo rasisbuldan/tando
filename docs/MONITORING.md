@@ -25,9 +25,12 @@ tando alerts backup-ping                     # a URL called after each whole run
   the alert state is read from disk every tick and written as before, so killing it at any point
   loses and repeats nothing. It sleeps between ticks (one timer; a watchdog ping every 150 s).
   Sandboxed: `ProtectSystem=strict` with `/var/lib/tando`, `/run/tando-watch`, `/var/log/tando`
-  and `/var/cache/tando-logs` writable, `NoNewPrivileges`, `MemoryMax=64M`, `GOMEMLIMIT=20MiB`,
+  and `/var/cache/tando-logs` writable, `NoNewPrivileges`, `MemoryMax=160M`, `GOMEMLIMIT=20MiB`,
   `GOGC=50`, `GOMAXPROCS=1`, `Nice=5`, `CPUWeight=20`, `OOMScoreAdjust=-200`; what writes elsewhere
-  (the agent's recover-all and stop, sendmail) runs in transient units of its own.
+  (the agent's recover-all and stop, sendmail) runs in transient units of its own. Its own memory
+  stays under `GOMEMLIMIT` (6-20 MB); `MemoryMax` leaves room for the page cache of the journals
+  and programs it reads each minute. At 64M (up to 0.2) that cache was evicted every tick and read
+  again from disk; `tando host setup` rewrites an older unit, reloads systemd and restarts tandod.
 - **The switch and the fallback**: `tando-watch.timer` still fires every minute, but starts
   `tando-watch-fallback.service`, which systemd skips (`ConditionPathExists=!/run/tandod/active`)
   while tandod runs the checks well. tandod keeps `/run/tandod/active` (its own RuntimeDirectory,
@@ -68,6 +71,11 @@ tando alerts backup-ping                     # a URL called after each whole run
 - **Installing**: `tando host setup` (or `tando alerts enable`) installs `tandod`, writes the units
   and (re)starts it; a host that had only the timer keeps its state, history, silences, notifiers
   and queued messages. `tando alerts disable` removes tandod's unit with the timer's.
+- **How an app last ended** (`last: exit status 3` in `down` and `restarts`): systemd's line about
+  it is read from the system journal (one `journalctl -u`, which opens every file of that journal)
+  only when the app restarted or its unit's state changed since the last read, never for a stopped
+  or static app. The result is kept in `/run/tando-watch/vstate` (`xi.<app>`), so an app that stays
+  failed costs one read, not one a minute.
 - **Journals**: the scan reads an app's journal with one `journalctl --after-cursor` in a minute in
   which the app wrote something (an unchanged journal starts nothing). A follower per app
   (`journalctl -f`) was measured at 7.6 MB each: 760 MB at 100 apps.
@@ -498,7 +506,7 @@ traffic. "shell" is what the shell version's tando-watch.service ran every minut
 
 Per day at 3 apps: about 8.5 s of CPU for tandod's ticks against about 156 s for the shell
 units; between ticks tandod uses no CPU and is not woken (0 wakeups in a 40 s window measured with
-/proc/<pid>/task/*/schedstat). Memory: 9-11 MB RSS at 3 and 20 apps (`MemoryMax=64M`,
+/proc/<pid>/task/*/schedstat). Memory: 9-11 MB RSS at 3 and 20 apps (`MemoryMax=64M` then, 160M now,
 `GOMEMLIMIT=20MiB`); a 65-minute soak with 20 apps and about 240 requests a minute stayed between
 8.1 and 10.2 MB, 6 goroutines, 8 open files, no restart, and cost 117 ms a minute with that
 traffic (the request-log scan of srv/logs). What is left per tick: the request-log index and

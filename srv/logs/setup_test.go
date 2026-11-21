@@ -2,8 +2,10 @@ package logs
 
 import (
 	"context"
+	"errors"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -63,7 +65,10 @@ func TestSettingAndRoll(t *testing.T) {
 	if r := b.roll(); r != (roll{1, 2, 3 << 20}) {
 		t.Fatalf("host access_size/access_keep win: %+v", r)
 	}
-	if fs := h.l.fairShare(); !regexp.MustCompile(`^([0-9]+M|2G)$`).MatchString(fs) {
+	if fs := h.l.fairShare(journalCapMB); !regexp.MustCompile(`^[0-9]+M$`).MatchString(fs) || sizeBytes(fs) > 256<<20 {
+		t.Fatal(fs)
+	}
+	if fs := h.l.fairShare(reqBaseMB); !regexp.MustCompile(`^([0-9]+M|2G)$`).MatchString(fs) {
 		t.Fatal(fs)
 	}
 	_, err = h.l.app("../x")
@@ -209,4 +214,57 @@ func TestAppRemoveAndUnitProps(t *testing.T) {
 	}
 	_, err = h.rows(func(w *out.Writer) error { return h.l.AppRemove(context.Background(), "a;b", w) })
 	wantErr(t, err, "invalid app name")
+}
+
+// A namespace over its cap is trimmed at the next setup (host setup, deploy) although its config
+// is unchanged: the vacuum of an earlier change may have met a stopped instance or failed. Under
+// the cap nothing runs; a failed vacuum is a warning.
+func TestSetupTrimsAJournalOverItsCap(t *testing.T) {
+	h := newHost(t)
+	h.app("big", "log_max=4M", "log_keep=30d")
+	active := true
+	var vacuumErr error
+	h.cmd = func(argv []string) (string, error) {
+		switch {
+		case argv[0] == "systemctl" && argv[2] == "is-active" && !active:
+			return "", errors.New("inactive")
+		case argv[0] == "journalctl" && strings.HasPrefix(argv[3], "--vacuum-size="):
+			return "", vacuumErr
+		}
+		return "", nil
+	}
+	setup := func() []string {
+		h.calls = nil
+		h.stderr.Reset()
+		if _, err := h.rows(func(w *out.Writer) error { return h.l.AppSetup(context.Background(), "big", w) }); err != nil {
+			t.Fatal(err)
+		}
+		var r []string
+		for _, c := range h.calls {
+			r = append(r, strings.Join(c, " "))
+		}
+		return r
+	}
+	setup() // the config written
+	ns := "log/journal/" + machineID + ".tando-big/"
+	h.write(ns+"system.journal", strings.Repeat("x", 1<<20))
+	if c := setup(); len(c) != 0 {
+		t.Fatalf("under the cap: %v", c)
+	}
+	h.write(ns+"archived-1.journal", strings.Repeat("x", 4<<20))
+	want := []string{"systemctl -q is-active systemd-journald@tando-big.service", "journalctl -q --namespace=tando-big --rotate",
+		"journalctl -q --namespace=tando-big --vacuum-size=4M --vacuum-time=720h"}
+	if c := setup(); !slices.Equal(c, want) {
+		t.Fatalf("over the cap, config unchanged:\n%s", strings.Join(c, "\n"))
+	}
+	// its journald stopped (idle): the vacuum still runs, on the files
+	active = false
+	if c := setup(); !slices.Equal(c, []string{want[0], want[2]}) {
+		t.Fatalf("instance stopped:\n%s", strings.Join(c, "\n"))
+	}
+	vacuumErr = errors.New("Failed to vacuum: Permission denied\nmore")
+	setup()
+	if got := h.stderr.String(); got != "warning=could not trim the journal of big to 4M: Failed to vacuum: Permission denied\n" {
+		t.Fatalf("stderr %q", got)
+	}
 }
