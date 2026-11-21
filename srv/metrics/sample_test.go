@@ -18,7 +18,7 @@ import (
 // host is a fake machine in a temp directory: /opt/tando, /sys/fs/cgroup, /proc and the
 // metrics directory, a settable clock and a fake systemctl.
 type host struct {
-	t        *testing.T
+	t        testing.TB
 	m        Metrics
 	now      int64
 	systemd  string // systemctl's answer
@@ -26,7 +26,7 @@ type host struct {
 	lastArgv []string
 }
 
-func newHost(t *testing.T) *host {
+func newHost(t testing.TB) *host {
 	h := &host{t: t, now: 1_800_000_000}
 	root := t.TempDir()
 	e := env.Env{
@@ -95,10 +95,10 @@ func TestSample(t *testing.T) {
 			t.Errorf("%s:\n got %q\nwant %q", name, got, want)
 		}
 	}
-	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\n")
-	check("web.tsv", "1800000000\t1000\t0\t3\tf\n")
+	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\t-\t-\t-\t-\t-\n")
+	check("web.tsv", "1800000000\t1000\t0\t3\tf\t-\t-\t-\t-\t-\n")
 	check("host.tsv", "1800000000\t52\t1536000000\t2048000000\t-\t4000\t10000\n")
-	check(".state", "api-2 9000000 1800000000 1 1800000000\nweb 5000000 1800000000 1 1800000000\n.host 0 1800000000 1 0\n")
+	check(".state", "api-2 9000000 1800000000 1 1800000000 -1 -1 -1\nweb 5000000 1800000000 1 1800000000 -1 -1 -1\n.host 0 1800000000 1 0\n")
 	// root's alone: an app must not read another app's samples (tando top reads through sudo);
 	// the directory is made 700 although it existed with 755 (an older version's)
 	for f, want := range map[string]os.FileMode{"": 0o700, "web.tsv": 0o600, "host.tsv": 0o600, ".state": 0o600} {
@@ -116,10 +116,10 @@ func TestSample(t *testing.T) {
 	if err := h.m.Sample(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	check("web.tsv", "1800000000\t1000\t0\t3\tf\n1800000060\t1100\t1200000\t0\ts\n")
-	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\n1800000060\t2000\t400000\t2\ta\n")
+	check("web.tsv", "1800000000\t1000\t0\t3\tf\t-\t-\t-\t-\t-\n1800000060\t1100\t1200000\t0\ts\t-\t-\t-\t-\t-\n")
+	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\t-\t-\t-\t-\t-\n1800000060\t2000\t400000\t2\ta\t-\t-\t-\t-\t-\n")
 	check("host.tsv", "1800000000\t52\t1536000000\t2048000000\t-\t4000\t10000\n1800000060\t1234\t1536000000\t2048000000\t-\t4000\t10000\n")
-	check(".state", "api-2 400000 1800000000 2 1800000000\nweb 6200000 1800000000 2 1800000000\n.host 0 1800000000 2 0\n")
+	check(".state", "api-2 400000 1800000000 2 1800000000 -1 -1 -1\nweb 6200000 1800000000 2 1800000000 -1 -1 -1\n.host 0 1800000000 2 0\n")
 
 	// web is destroyed: its line leaves .state; a unit without a cgroup samples zeros
 	os.RemoveAll(filepath.Join(h.m.Env.Root, "apps", "web"))
@@ -129,8 +129,8 @@ func TestSample(t *testing.T) {
 	if err := h.m.Sample(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	check(".state", "api-2 0 1800000000 3 1800000000\n.host 0 1800000000 3 0\n")
-	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\n1800000060\t2000\t400000\t2\ta\n1800000120\t0\t0\t0\ts\n")
+	check(".state", "api-2 0 1800000000 3 1800000000 -1 -1 -1\n.host 0 1800000000 3 0\n")
+	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\t-\t-\t-\t-\t-\n1800000060\t2000\t400000\t2\ta\t-\t-\t-\t-\t-\n1800000120\t0\t0\t0\ts\t-\t-\t-\t-\t-\n")
 }
 
 func TestSampleRotates(t *testing.T) {
@@ -161,7 +161,7 @@ func TestSampleRotates(t *testing.T) {
 		t.Errorf("fresh rotated too early")
 	}
 	n := decimal.Itoa(now)
-	want := "fresh 100 " + decimal.Itoa(now-302399) + " 5100 " + n + "\nfull 100 " + n + " 1 " + n + "\nold 100 " + n + " 1 " + n + "\n.host 0 " + n + " 2 0\n"
+	want := "fresh 100 " + decimal.Itoa(now-302399) + " 5100 " + n + " -1 -1 -1\nfull 100 " + n + " 1 " + n + " -1 -1 -1\nold 100 " + n + " 1 " + n + " -1 -1 -1\n.host 0 " + n + " 2 0\n"
 	if got := h.read(".state"); got != want {
 		t.Errorf(".state:\n got %q\nwant %q", got, want)
 	}
@@ -180,7 +180,7 @@ func TestSampleSystemdDown(t *testing.T) {
 		t.Error("an app line was written without systemd's answer")
 	}
 	// the host was sampled, and web's file keeps its count and start
-	if got := h.read(".state"); got != "web 50 1799990000 7 1800000000\n.host 0 1799990000 8 0\n" {
+	if got := h.read(".state"); got != "web 50 1799990000 7 1800000000 -1 -1 -1\n.host 0 1799990000 8 0\n" {
 		t.Errorf(".state = %q", got)
 	}
 }

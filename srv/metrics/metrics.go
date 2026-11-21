@@ -7,12 +7,19 @@
 // and restarts), read through sudo by `tando top`:
 //
 //	<app>.tsv, <app>.tsv.1   time  mem_bytes  cpu_usec_since_last_sample  restarts  state(r|s|f|a)
+//	                         then (since 2026-11) the slice's: throttled_permille  oom_kills  tasks
+//	                         tasks_max  memory_psi_x100 ("-": not known; sample.go readSlice)
 //	host.tsv, host.tsv.1     time  load1x100  mem_used_bytes  mem_total_bytes  cpu_permille_all_cores
 //	                         disk_used_bytes  disk_total_bytes  (the last three since 2026-11; "-":
 //	                         not known; the disk is the file system holding Dir)
 //	<app>.disk, .disk.1      time  bytes: the app's tree, walked at most every 15 min (disk.go)
-//	.state                   "<app> <cpu usage_usec> <file start time> <lines> <last disk walk>" per
-//	                         app, and ".host <busy jiffies> <start> <lines> <total jiffies>"
+//	host.x, tandod.x (.1)    the host's extended line and what the monitoring costs, a minute at a
+//	                         time (hostx.go, self.go; named columns: readx.go)
+//	.state                   "<app> <cpu usage_usec> <file start time> <lines> <last disk walk>
+//	                         <nr_periods> <nr_throttled> <oom_kill>" per app, and ".host <busy
+//	                         jiffies> <start> <lines> <total jiffies>"
+//	.x.state                 "<key> <value>": the raw counters host.x and tandod.x were last
+//	                         computed from, and their files' start and line count
 //
 // Columns are only ever added at the end of a line, and a reader takes the fields it knows.
 //
@@ -43,6 +50,8 @@ type Metrics struct {
 	Dir        string
 	Journal    string        // /var/log/journal: the apps' journal namespaces, counted in their disk
 	DiskBudget time.Duration // walking time one sample may spend (0: diskBudget)
+	Sys        string        // /sys ("": /sys): the main disk's name (host.x)
+	Self       SelfCounters  // tandod's own counters (tandod.x); nil: not known (a one-shot)
 }
 
 // New uses dir, or Env.Lib/metrics when dir is "" (the shell's TANDO_METRICS_DIR override).

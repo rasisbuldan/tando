@@ -78,6 +78,10 @@ func TestTickAndVerbs(t *testing.T) {
 	if err := d.handle(context.Background(), proto.Request{Verb: "status"}, &b); err == nil {
 		t.Errorf("status without a collector")
 	}
+	// the readers' requests are counted for what the monitoring costs (tandod.x), the tick not
+	if pid, _, rq := d.selfCounters(); rq != 4 || pid != int64(os.Getpid()) {
+		t.Errorf("selfCounters: pid %d requests %d, want 4 (history, ping, health, status)", pid, rq)
+	}
 }
 
 // Ticks never overlap: two requested at once run one after the other.

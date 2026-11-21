@@ -79,15 +79,46 @@ Deploying needs a project directory, so the dashboard has no deploy key.
   sample (`/proc/stat`'s busy and total jiffies, kept in `.state`; `-` on the first sample) and the
   used and total bytes of the file system holding /var/lib/tando (statfs; `-` if it failed).
   Columns are only added at the end: an older reader takes the first four, a newer one reads an
-  older line's missing ones as gaps.
+  older line's missing ones as gaps. Since 2026-11 an app line also has five columns from the
+  app's slice (`tando-<app>.slice`, where tando sets its memory, task and CPU limits; the unit's
+  own cgroup never sees them): CPU throttled (per mille of the scheduler periods; `-` without a
+  CPU limit), OOM kills since the last sample (`memory.events`), tasks (`pids.current`), the task
+  limit (`-`: none) and the slice's memory pressure (PSI "some" avg60 × 100). An app set up before
+  the per-app slices (still under system.slice) has `-` in all five. Per-app IO is not sampled:
+  IO accounting is off for the apps.
+- **The host, extended (`host.x`).** One wide line a minute beside `host.tsv` (which stays as it
+  was), like a cloud console's VM page. The writer turns counters into per-minute values,
+  keeping the previous raw counters in `.x.state`; the first sample, a counter that went back, a
+  reboot (uptime went back) or more than 10 minutes since the last sample is `-`, as is a source
+  the kernel does not have. Columns: CPU user (with nice), system (with irq and softirq), iowait
+  and steal in per mille of all cores; memory available and cached, swap used and total (bytes);
+  swap in and out (pages a minute); PSI "some" avg60 × 100 of cpu, memory and io (`-` when the
+  kernel has no PSI); reads and writes a minute, bytes read and written a minute, the average
+  time of a request (µs) and the busy share (per mille; overstated on NVMe, virtio and dm, which
+  serve requests in parallel) of the block device holding /var/lib/tando (from its device number
+  through `/sys/dev/block`: a partition counts as its disk, an LVM or crypt volume as itself;
+  btrfs, ZFS and loop devices: `-`); bytes in and out, errors and drops a minute of the default
+  route's interfaces (a container bridge or veth would count the same bytes twice; loopback is
+  never counted); TCP connections established and segments retransmitted a minute; OOM kills a
+  minute (`/proc/vmstat`); inodes used (per mille, the file system holding /var/lib/tando); uptime
+  (s). On an LXC or OpenVZ container the CPU and disk numbers are the host machine's. The name
+  holds a dot, so no app can collide with it.
+- **What the monitoring costs (`tandod.x`).** A line a minute: tandod's cgroup CPU (ms, with the
+  programs it started), its anon memory and page cache (bytes), major faults and refaults (page
+  cache read again; the sign of a cgroup too small for its working set) a minute, and two counters
+  only tandod has: the programs it started and the requests readers sent to its socket (tando
+  status, top, the dashboard) a minute. The readers' requests are shown apart: they are what
+  looking costs, not the monitor. A sample by the timer's fallback (tandod not running the checks)
+  writes `-` for the two counters; no tandod: no line. The `monitor_cost` alert reads it
+  (docs/MONITORING.md).
 - **App disk.** Every 15 minutes at most, the sample walks each app's tree in-process (no `du`):
   `/opt/tando/apps/<app>` (releases, shared data, incoming, home), its `data_dir` when that is
   outside, and its journal namespace (`/var/log/journal/<id>.tando-<app>`); allocated blocks, a hard
   link once, symlinks not followed. Not its PostgreSQL database nor its backups. The result goes to
   its own small file, `<app>.disk` (`time bytes`, at most one line per 15 minutes; `.disk.1` past
   24 KB), not into the per-minute line: a column there would cost 1440 numbers a day per app for a
-  value that changes every 15 minutes, and would break older readers of the app line (its last
-  field takes the rest of the line). The walks of one sample share a 500 ms budget, oldest walk
+  value that changes every 15 minutes (and readers before 2026-11 took the app line's last field
+  as the rest of the line). The walks of one sample share a 500 ms budget, oldest walk
   first; a walk that runs out is dropped (a gap) and waits its 15 minutes, so one huge tree cannot
   take every minute. A walk of 50,000 files takes about 170 ms (BenchmarkWalk50k, macOS APFS on an
   M1 laptop; ext4 is usually faster). `read` carries the newest walk into the buckets after it, up
@@ -101,7 +132,20 @@ Deploying needs a project directory, so the dashboard has no deploy key.
 - **Reading.** `tando-metrics read <app|host> <points> <bucket seconds>` returns the last `points`
   buckets, averaged (`m` rows: start, memory, cpu per mille of a core, restarts, state, disk bytes;
   `h` rows: start, load × 100, memory used, memory total, cpu per mille of all cores, disk used,
-  disk total; `-` where not known). It needs root (the directory is 700).
+  disk total; `-` where not known; since 2026-11 `m` rows go on with throttled per mille
+  (average), OOM kills (sum), tasks and the task limit (maximum), memory pressure × 100
+  (average)). `read host.x|tandod.x <points> <bucket>` returns an `xc` row naming the columns
+  (`name:aggregation:scale`: `a` average, `s` sum, `m` maximum over the bucket's minutes; scale 10
+  or 100 is a value shown divided by it) and an `x` row per bucket, `-` where no minute had a
+  value: a column added later reaches `tando snapshot` without a change there. It needs root (the
+  directory is 700).
+- **Cost of the extended sample.** BenchmarkSampleMinute (25 apps, a whole fake /proc and /sys,
+  `go test -run - -bench SampleMinute ./metrics`): 3.4–4.3 ms of CPU per sample on Linux (the
+  arm64 test container, overlayfs; 3 runs), about 7–8 ms on macOS APFS, whose open(2) is slower;
+  the same sample without host.x, tandod.x and the slice columns took 3.4 ms on macOS. Budget: 5 ms
+  on Linux. Per app it reads 5 small files more (the slice's `cpu.stat`, `memory.events`,
+  `pids.current`, `pids.max`, `memory.pressure`), for the host about 12 files under /proc and
+  /sys, and writes two lines and `.x.state`.
 - **Live samples.** While the dashboard is open, its own 2-second samples fill the newest bucket.
 
 `tando status` can use the same data for its sparkline: add

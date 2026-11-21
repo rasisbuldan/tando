@@ -149,6 +149,7 @@ viewer reading tandod's socket every 5 s; the whole status once a minute.
 | host `postgres` | only while an app has `database = postgres`: PostgreSQL does not answer (stopped, failed, still starting, refusing): `PostgreSQL does not answer (connection to server on socket ... failed: No such file or directory); used by shop, notes: sudo systemctl status postgresql`; or its usable slots (`max_connections` less the reserved ones: 17 of 20 as tando sets it) are 80% taken (`db_conn_pct`), all apps together | 2 samples (`down_after`) for no answer; 5 (`db_conn_for`) for the slots |
 | host `caddy` | caddy.service is not active (a restart in progress is not counted): every app is unreachable | 1 sample |
 | host `monitor` | tandod does not run the checks: it handed them to the timer (a panic, failed runs, runs it did not survive; the reason is in the detail), its unit failed or keeps restarting, or it restarted twice since the last run. The timer runs the checks meanwhile | 1 sample |
+| host `monitor_cost` | what the monitoring costs (tandod and the programs it starts, from its cgroup: `tandod.x`, docs/TOP.md) averaged over the last hour is over 2× its normal (`monitor_cost_x`), and always over 600 ms of CPU a minute (`monitor_cost_cap_ms`: 1% of one core). Silent until there are 7 days of data (`monitor_cost_days`); the normal is the median of those minutes, worked out again once a day. Only minutes without a reader's request count: what the dashboard, `tando status` or `top` ask of tandod is the readers' cost, shown apart. An hour with fewer than 10 such minutes is not judged. Steal and swap-in are shown (`tando snapshot`), never alerted: the inode, memory pressure, swap, OOM and connection alerts above already cover the harm | 1 sample |
 | host `caddy_config` | `caddy validate` rejects the config on disk (a hand edit that would break the next reload or restart); run only when a file under /etc/caddy changed, at most every 5 min | 1 sample |
 | `restart` | tando-watch's liveness check restarted an app that runs but stopped answering (see `liveness`): sent once as `RESTARTED <app>: unhealthy: ... restarted by tando-watch (1 of at most 3 this hour)`; in the history and in `tando health <app>` as an incident | an event |
 | `rollback` | a release was rolled back by itself (it fell over in its soak, or failed after the switch): sent once, as `ROLLED BACK <app>: release <id> rolled back to <prev>: <reason>`; `tando history` and `tando status` show the same reason | fires at once (an event, nothing to resolve) |
@@ -254,6 +255,7 @@ app with `job=off` (or `<app>.job=off`).
 | `flap_max`, `flap_window` | 3, 60 | firings within that many minutes that count as flapping |
 | `deploy_grace` | 120 | seconds after an activation in which the app is not checked |
 | `boot_grace` | 180 | seconds after the host started in which apps, memory and load are not checked |
+| `monitor_cost_days`, `monitor_cost_x`, `monitor_cost_cap_ms` | 7, 2, 600 | days of data before `monitor_cost` judges; times its normal CPU a minute; and the ceiling in ms a minute (1% of one core) |
 | `heartbeat_every` | 5 | minutes between heartbeat pings |
 | `notify_reboot` | yes | one notification when the host has restarted |
 | `name` | hostname | host name in messages |
@@ -573,6 +575,13 @@ CPU. A run with the question took 51 ms of wall time. The call cannot hold a run
 connecting after 3 s, the server ends a statement after 4 s, and the program is killed after 8 s.
 Speaking the protocol from tandod itself would save the 15 ms but needs a password login for a
 monitoring role; not done.
+
+**What the monitoring costs, recorded.** Since 2026-11 every minute's sample also writes
+`tandod.x`: tandod's CPU (its cgroup, with the programs it starts), anon memory, page cache,
+major faults, refaults, the programs it started and the readers' requests (docs/TOP.md). `tando
+snapshot --json --range R` returns it as `host_metrics.monitoring`, and `monitor_cost` alerts on
+it after a week. The extended host sample itself (host.x, the slice columns, tandod.x) costs
+3.4–4.3 ms of CPU a minute at 25 apps on Linux (BenchmarkSampleMinute, fake /proc and /sys).
 
 **The Go tando-watch.** `tando-watch run` alone, in a transient unit (systemd's CPU accounting of
 its cgroup, children included), shell and Go interleaved, 20 runs each, median [min-max], on the

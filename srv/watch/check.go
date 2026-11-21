@@ -79,5 +79,6 @@ func lastChecks() []hostCheck {
 		hostFunc{"host oom", checkHostOOM},
 		hostFunc{"hostcare", checkHostcare}, // tando-host's findings (updates, reboot, exposed ports, ...)
 		hostFunc{"monitor", checkMonitor},   // tandod itself
+		hostFunc{"monitor cost", checkMonitorCost},
 	}
 }

@@ -50,6 +50,9 @@ var defaults = []struct{ key, def, desc string }{
 	{"flap_window", "60", "minutes"},
 	{"deploy_grace", "120", "seconds after an activation during which the app is not checked"},
 	{"boot_grace", "180", "seconds after the host (systemd) started during which apps are not checked"},
+	{"monitor_cost_days", "7", "days of data on what the monitoring costs before monitor_cost judges it"},
+	{"monitor_cost_x", "2", "monitor_cost fires above this many times the monitoring's normal CPU a minute"},
+	{"monitor_cost_cap_ms", "600", "and always above this many ms of CPU a minute (600: 1% of one core)"},
 	{"heartbeat_every", "5", "minutes between heartbeat pings (the URL is set with tando alerts heartbeat)"},
 	{"notify_reboot", "yes", "yes: one notification when the host has restarted"},
 	{"name", "-", "host name used in messages (default: the hostname)"},
@@ -59,7 +62,7 @@ var defaults = []struct{ key, def, desc string }{
 // severity: no high priority in ntfy, "(low)" in the text.
 var (
 	appChecks  = []string{"down", "health", "memory", "oom", "restarts", "tls", "backup", "stuck", "disk", "http", "slow", "errors", "logs", "job", "worker", "db_conns"}
-	hostChecks = []string{"disk", "inodes", "host_memory", "swap", "load", "host_oom", "caddy", "caddy_config", "firewall", "monitor", "postgres"}
+	hostChecks = []string{"disk", "inodes", "host_memory", "swap", "load", "host_oom", "caddy", "caddy_config", "firewall", "monitor", "monitor_cost", "postgres"}
 )
 
 func lowSeverity(check string) bool { return check == "logs" || check == "ssh" }

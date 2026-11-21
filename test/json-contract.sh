@@ -154,6 +154,12 @@ check "N18 snapshot --range without --app: one exec, the host's series (tando-me
   eval 'test "$(grep -c . "$T/log")" = 1 && grep -q "tando-metrics read host 60 60" "$T/log" && ! grep -qE "@releases|tando-watch|audit-read" "$T/log"'
 check "N19 host_metrics 1h: 60 buckets, gaps null; load, cpu %, memory and disk used/total; data_since" \
   q "$SH" '(m := d["host_metrics"]) and (s := m["series"]) and len(s) == 60 and [p["load"] for p in s[-4:]] == [0.42, None, 1.05, 0.5] and [p["cpu_percent"] for p in s[-4:]] == [None, None, 12.5, 3.0] and s[-1]["memory_used_bytes"] == 1024000000 and s[-1]["memory_total_bytes"] == 2048000000 and s[-1]["disk_used_bytes"] == 12000000000 and s[-1]["disk_total_bytes"] == 40000000000 and s[-4]["disk_used_bytes"] is None and m["data_since"] == s[-4]["t"] and "app" not in d'
+check "N21 host_metrics.extended: one array per host.x column, a value per bucket (as series' t), scaled (per mille, x100), null in gaps; in the same exec" \
+  eval 'grep -q "tando-metrics read host.x 60 60" "$T/log" && grep -q "tando-metrics read tandod.x 60 60" "$T/log" && q "$SH" "(x := d[\"host_metrics\"][\"extended\"]) and len(x[\"cpu_user_pct\"]) == 60 and x[\"cpu_user_pct\"][-3:] == [None, 12.5, None] and x[\"psi_memory_pct\"][-2] == 12.34 and x[\"inodes_pct\"][-2:] == [12.5, 12.5] and x[\"oom_kills\"][-2:] == [0, 1] and x[\"disk_latency_us\"][-2] == 850 and len(x) == 28"'
+check "N22 host_metrics.monitoring: what the monitoring costs (cpu ms, memory, faults, programs, readers' requests), null where no sample" \
+  q "$SH" '(m := d["host_metrics"]["monitoring"]) and m["cpu_ms"][-2:] == [None, 450] and m["requests"][-1] == 12 and m["children"][-1] == 3 and m["anon_bytes"][-1] == 9000000 and len(m["refaults"]) == 60'
+check "N23 app metrics carry the slice's throttled %, OOM kills, tasks and their limit, memory pressure; null where not known" \
+  q "$SA" '(s := d["app"]["metrics"]["series"][-3:]) and [p["throttled_pct"] for p in s] == [None, 12.5, 0] and [p["oom_kills"] for p in s] == [None, 2, 0] and [p["tasks"] for p in s] == [None, 17, 18] and [p["tasks_max"] for p in s] == [None, 512, 512] and [p["memory_pressure_pct"] for p in s] == [None, 2.5, 0.05] and d["app"]["metrics"]["series"][-6]["oom_kills"] is None'
 out=$(tando snapshot --json --all --range 1h 2>&1); check "N20 --range goes with one host: --all --range is refused" eval 'printf "%s" "$out" | grep -q "goes with one host"'
 
 # ---- names only, and the series ------------------------------------------------------------------

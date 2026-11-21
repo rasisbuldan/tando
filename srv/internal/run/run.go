@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -68,6 +69,13 @@ type Func func(ctx context.Context, c Cmd) ([]byte, error)
 
 // Output calls f.
 func (f Func) Output(ctx context.Context, c Cmd) ([]byte, error) { return f(ctx, c) }
+
+// started counts the programs Exec has started in this process (tandod's "children a minute",
+// srv/metrics tandod.x).
+var started atomic.Int64
+
+// Started is how many programs Exec has started in this process.
+func Started() int64 { return started.Load() }
 
 // Exec runs commands with os/exec.
 type Exec struct{}
@@ -125,6 +133,7 @@ func (Exec) Output(ctx context.Context, c Cmd) ([]byte, error) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
 	}
 
+	started.Add(1)
 	err = cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("%s: timed out after %s", name, timeout)

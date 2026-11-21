@@ -37,6 +37,19 @@ first, grouped by area.
   new server is told to update. Not yet: the dashboard still opens the studio through
   `tando db studio --json` with its confirm dialog.
 
+- Added: cloud-style host and app series, and what the monitoring costs. Each minute's sample
+  also writes `host.x` (CPU user/system/iowait/steal, memory available and cached, swap used and
+  in/out, PSI cpu/memory/io, IOPS, throughput, latency and busy share of the disk holding
+  /var/lib/tando, network bytes/errors/drops of the default route, TCP established and
+  retransmits, OOM kills, inodes, uptime) and `tandod.x` (tandod's CPU, memory, faults,
+  refaults, programs started, readers' requests), and an app's line gains its slice's CPU
+  throttling, OOM kills, tasks and task limit, memory pressure. `tando-metrics read host.x` and
+  `read tandod.x` return them; `tando snapshot --json --range R` returns
+  `host_metrics.extended` and `host_metrics.monitoring` (one array per series) and an app's
+  series gains `throttled_pct`, `oom_kills`, `tasks`, `tasks_max`, `memory_pressure_pct`. New
+  alert `monitor_cost`: silent for the first 7 days of data, then over 2x the monitoring's normal
+  CPU a minute (minutes without readers), never above 1% of a core. Steal and swap-in are shown
+  only; the existing inode, memory pressure, swap, OOM and connection alerts are unchanged.
 - Added: live views every 5 s. tandod keeps a second loop beside the minute's checks (srv/live):
   every 5 s each app's memory, CPU, tasks and unit state and the host's load, memory, CPU and disk,
   from the cgroup v2 files, /proc and the bus connection it already has; no program started, no file
