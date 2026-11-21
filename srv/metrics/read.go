@@ -161,7 +161,7 @@ func (b *bucket) flush(w *out.Writer, host bool) {
 		w.Row("h", decimal.Itoa(b.start), decimal.Itoa(b.s1/b.n), decimal.Itoa(b.s2/b.n), decimal.Itoa(b.total),
 			avgOrDash(b.cS, b.cN), avgOrDash(b.dS, b.dN), avgOrDash(b.dTotal, 1))
 	} else {
-		w.Row(append([]string{"m", decimal.Itoa(b.start), decimal.Itoa(b.s2/b.n), decimal.Itoa(b.s1/b.n), decimal.Itoa(b.mx), b.last, avgOrDash(b.disk, 1)},
+		w.Row(append([]string{"m", decimal.Itoa(b.start), decimal.Itoa(b.s2 / b.n), decimal.Itoa(b.s1 / b.n), decimal.Itoa(b.mx), b.last, avgOrDash(b.disk, 1)},
 			b.sl.values(appCols)...)...)
 	}
 }

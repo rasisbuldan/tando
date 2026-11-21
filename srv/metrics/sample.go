@@ -118,7 +118,7 @@ func (m Metrics) sampleApps(ctx context.Context, now int64, names []string, prev
 // limit ("-": none) and the slice's memory pressure (PSI some avg60 x 100). The raw counters go
 // to .state for the next sample.
 type slice struct {
-	line                      string
+	line                     string
 	periods, throttled, ooms int64
 }
 
