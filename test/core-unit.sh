@@ -210,5 +210,29 @@ check "U8c only retired ones left: the oldest is used again" eq "$(nu 30003 3000
 printf 'root:x:0:\ng:x:30001:\nh:x:30003:\n' > "$T/group"
 check "U8d none at all: fails" eq "$(nu 30003 30003)" none
 
+# ---- U9 admission: a deploy that raises an app's memory caps is refused when every app's caps
+# together would be over RAM x mem_overcommit (1.5); caps that do not grow always pass (a host
+# that is over already still deploys); --force skips the check in configure. priority = high|low
+# sets the OOM score. (/proc/meminfo: $T/meminfo; apps in $T/apps)
+ma() { # this-app-MB [ram-MB] -> ok, or the reason
+  echo "MemTotal: $((${2:-1000} * 1024)) kB" > "$T/meminfo"
+  # shellcheck disable=SC2016
+  R=$T D=$T/apps/a1 "$BASH" -c 'eval "$1"; MEM_OVERCOMMIT=1.5; A=a1; if mem_admit "$2"; then echo ok; else echo "$ADMIT_WHY"; fi' _ \
+    "$(agent_fn mem_caps_mb mem_admit | sed "s#/proc/meminfo#$T/meminfo#g")" "$1"
+}
+rm -rf "${T:?}/apps"; mkdir -p "$T/apps/a1" "$T/apps/a2" "$T/apps/a3"
+printf 'memory=256M\n' > "$T/apps/a1/app.conf"
+printf 'memory=1G\nworker.q=x\nworker.r=y\nworker.r.memory=128M\n' > "$T/apps/a2/app.conf"   # 1024 + 1024 + 128
+printf 'port=1\n' > "$T/apps/a3/app.conf"                                                 # 256 (the default)
+check "U9a caps: memory, each worker's (or the app's), 256M by default" eq \
+  "$("$BASH" -c 'eval "$1"; mem_caps_mb "$2"/apps/a*/app.conf' _ "$(agent_fn mem_caps_mb)" "$T" | sed "s#$T/apps/##; s#/app.conf##" | tr '\n' ' ')" "a1 256 a2 2176 a3 256 "
+check "U9b within RAM x 1.5: taken" eq "$(ma 512 2000)" ok
+check "U9c over it: refused, and says how much" eval 'ma 1024 2000 | grep -q "3456 MB with a1 at 1024 MB, over 3000 MB"'
+check "U9d not raised (the host is over already): taken" eq "$(ma 256 500)" ok
+check "U9e configure refuses unless --force" eval 'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "((!force)) && ! mem_admit"'
+# shellcheck disable=SC2016
+oa() { "$BASH" -c 'eval "$1"; C_priority=$2; oom_adj' _ "$(agent_fn oom_adj | sed 's/\${C\[priority\]:-}/${C_priority:-}/')" "$1"; }
+check "U9f priority: high 100, default 500, low 900" eq "$(oa high) $(oa '') $(oa low)" "100 500 900"
+
 echo "core-unit: $n checks, $nf failed"
 [ "$nf" = 0 ]

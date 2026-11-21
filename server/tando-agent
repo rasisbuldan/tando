@@ -637,6 +637,58 @@ size_mb() {
   case ${BASH_REMATCH[2]} in K) echo $((10#${BASH_REMATCH[1]} / 1024));; M) echo $((10#${BASH_REMATCH[1]}));; G) echo $((10#${BASH_REMATCH[1]} * 1024));; esac
 }
 app_slice() { echo "tando-${A//-/\\x2d}.slice"; }   # (systemd-escape of a name like hello-2)
+# priority = high | low (tando.conf): which app the kernel kills first when the host runs out of
+# memory (OOMScoreAdjust: high 100, default 500, low 900; Caddy -500, PostgreSQL -900), and for
+# high, memory up to its cap that reclaim leaves alone while others have more (MemoryLow on its
+# slice; tando.slice gets the sum of them: prio_sync)
+oom_adj() { case ${C[priority]:-} in high) echo 100;; low) echo 900;; *) echo 500;; esac; }
+# mem_caps_mb file...: per app.conf, "<file> <MB>": its memory cap (default 256M) plus each
+# worker's (worker.<name>.memory, else the app's), in one awk over all of them
+mem_caps_mb() {
+  awk -F= 'function mb(v) { if (v ~ /^[0-9]+G$/) return v * 1024; if (v ~ /^[0-9]+M$/) return v + 0
+                             if (v ~ /^[0-9]+K$/) return int(v / 1024); return 256 }
+    function flush() { if (f == "") return; t = mb(m); for (k in w) t += (k in x) ? mb(x[k]) : mb(m)
+                       print f, t; delete w; delete x }
+    FNR == 1 { flush(); f = FILENAME; m = "256M" }
+    $1 == "memory" { m = $2 }
+    $1 ~ /^worker\.[^.]+$/ { w[$1] = 1 }
+    $1 ~ /^worker\.[^.]+\.memory$/ { k = $1; sub(/\.memory$/, "", k); x[k] = $2 }
+    END { flush() }' "$@" 2> /dev/null
+}
+# mem_admit MB: may this app's memory caps (MB, from its new settings) be what they are now asked to be?
+# Refused (ADMIT_WHY) when they grow and every app's caps together would be over RAM x
+# mem_overcommit (host.conf, default 1.5; 0 = no check). Caps that do not grow always pass, so a
+# host that is over already still deploys. Slices allow 3x (pre-flight, jobs): not counted.
+MEM_OVERCOMMIT=1.5
+mem_admit() {
+  local f others=0 mine=$1 old=0 total ram oc=${H[mem_overcommit]:-$MEM_OVERCOMMIT} limit x
+  ADMIT_WHY=""
+  [[ $oc =~ ^[0-9]{1,2}(\.[0-9]{1,2})?$ ]] || oc=$MEM_OVERCOMMIT
+  [[ $oc =~ ^0+(\.0+)?$ ]] && return 0
+  while read -r f x; do
+    if [[ $f == "$D/app.conf" ]]; then old=$x; else others=$((others + x)); fi
+  done < <(mem_caps_mb "$R"/apps/*/app.conf)
+  ((mine > old)) || return 0
+  ram=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+  [[ $ram =~ ^[0-9]+$ ]] && ((ram > 0)) || return 0
+  limit=$(awk -v r="$ram" -v o="$oc" 'BEGIN { print int(r * o) }')
+  total=$((others + mine))
+  ((total > limit)) || return 0
+  ADMIT_WHY="the memory caps of all apps would be $total MB with $A at $mine MB, over $limit MB ($ram MB RAM x $oc, mem_overcommit): lower memory = in tando.conf, remove an app, or deploy anyway with --force"
+  return 1
+}
+# prio_sync: tando.slice's MemoryLow is the sum of the high-priority apps' (a child's protection
+# counts only up to what its parent has), in a drop-in written only when it changes
+prio_sync() {
+  local f sum=0 x d=/etc/systemd/system/tando.slice.d
+  while read -r f x; do grepq -x 'priority=high' "$f" && sum=$((sum + x)); done < <(mem_caps_mb "$R"/apps/*/app.conf)
+  if ((sum == 0)); then [[ -f $d/low.conf ]] && rm -f "$d/low.conf" && dreload; return 0; fi
+  mkdir -p "$d"; WIC_CHANGED=0
+  printf '# written by tando: the sum of the high-priority apps'"'"' memory caps\n[Slice]\nMemoryLow=%sM\n' "$sum" |
+    write_if_changed "$d/low.conf"
+  ((WIC_CHANGED)) && dreload
+  return 0
+}
 write_slice() {
   local mem=${C[memory]:-256M} mb cpu=${C[cpu]:-}
   [[ $mem =~ ^([0-9]+)([KMG])$ ]] || mem=256M
@@ -651,6 +703,7 @@ write_slice() {
   { printf '[Unit]\nDescription=tando app %s: all its units together\n\n[Slice]\n' "$A"
     printf 'MemoryMax=%sM\nTasksMax=%s\nCPUWeight=100\n' $((mb * 3 + wmb)) "${C[tasks]:-1024}"
     [[ -n $cpu ]] && printf 'CPUQuota=%s\n' "$cpu"
+    [[ ${C[priority]:-} == high ]] && printf 'MemoryLow=%sM\n' "$mb"
   } > "/etc/systemd/system/.$(app_slice).new" || return 1
   WIC_CHANGED=0
   write_if_changed "/etc/systemd/system/$(app_slice)" < "/etc/systemd/system/.$(app_slice).new"
@@ -698,7 +751,7 @@ props() { # port [kind]
     # namespace options: podman's network namespaces must stay visible to later podman calls
     printf '%s\n' Type=notify NotifyAccess=all Delegate=yes KillMode=mixed \
       "ExecStop=$AGENT container-stop $A" "MemoryMax=${C[memory]:-256M}" SuccessExitStatus=143 \
-      "Environment=PORT=$p" "Slice=$(app_slice)" OOMScoreAdjust=500
+      "Environment=PORT=$p" "Slice=$(app_slice)" "OOMScoreAdjust=$(oom_adj)"
     [[ -x $LOGS ]] && "$LOGS" unit-props "$A"   # conmon passes the container's output to it
     return
   fi
@@ -708,7 +761,7 @@ props() { # port [kind]
       "${sock[@]}" "MemoryMax=${C[memory]:-256M}" MemorySwapMax=0 \
       ${C[memory_high]:+"MemoryHigh=${C[memory_high]}"} \
       SuccessExitStatus=143 "${ef[@]}" "EnvironmentFile=$D/env" "Environment=$envs" \
-      "Slice=$(app_slice)" OOMScoreAdjust=500 "${SD_HARD[@]}"; do
+      "Slice=$(app_slice)" "OOMScoreAdjust=$(oom_adj)" "${SD_HARD[@]}"; do
     [[ ",${H[unit_drop]:-}," == *",${x%%=*},"* ]] || echo "$x"
   done
   [[ -x $LOGS ]] && "$LOGS" unit-props "$A"   # LogNamespace=tando-<app>: its own capped journal
@@ -2178,6 +2231,7 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
     case $kv in
       port_min=*|port_max=*|preflight_min=*|preflight_max=*)
         [[ ${kv#*=} =~ ^[0-9]{4,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
+      mem_overcommit=*) [[ ${kv#*=} =~ ^[0-9]{1,2}(\.[0-9]{1,2})?$ ]] || die "bad mem_overcommit: like 1.5 (0: no check)"; H[mem_overcommit]=${kv#*=};;
       uid_min=*|uid_max=*)   # the band of new app users' ids (new_uid); apps made before keep theirs
         [[ ${kv#*=} =~ ^[1-9][0-9]{3,4}$ ]] && ((${kv#*=} >= 1000 && ${kv#*=} <= 59999)) || die "bad ${kv%%=*}: 1000 to 59999"
         H[${kv%%=*}]=${kv#*=};;
@@ -2355,6 +2409,7 @@ EOF
       ((WU_CHANGED)) && dreload; jobs_follow; write_caddy || exit 1; journal_dir ) ||
       die "could not update the units and Caddy site of ${a##*/}"
   done
+  DR_FLAG=$drf prio_sync
   [[ -f $drf ]] && { rm -f "$drf"; systemctl daemon-reload; }
   caddy_install_staged || die "$WC_WHY; the sites are as they were: run tando host setup again once that is fixed"
   fw_sync || die "the per-app loopback rules could not be loaded (above); run tando host setup again"
@@ -2657,8 +2712,12 @@ cmd_doctor() {
   local pn=$((PR_HI - PR_LO + 1))
   if ((n * 10 >= pn * 9)); then row check warn apps "$n apps, ports used $n of $pn ($PR_LO-$PR_HI): widen the range before it is full (tando host setup <host> port_max=<port>)"
   else row check ok apps "$n apps, ports used $n of $pn ($PR_LO-$PR_HI)"; fi
-  if ((mt > 0 && caps > mt)); then
-    row check warn "memory caps" "$((caps / 1048576)) MB of caps over $((mt / 1048576)) MB RAM"
+  local oc=${H[mem_overcommit]:-$MEM_OVERCOMMIT} lim
+  lim=$(awk -v r="$((mt / 1048576))" -v o="$oc" 'BEGIN { print int(r * o) }')
+  if ((mt > 0 && lim > 0 && caps / 1048576 > lim)); then
+    row check warn "memory caps" "$((caps / 1048576)) MB of caps over $lim MB ($((mt / 1048576)) MB RAM x $oc, mem_overcommit): a deploy that raises a cap is refused without --force; lower memory = of some apps"
+  elif ((mt > 0 && caps > mt)); then
+    row check ok "memory caps" "$((caps / 1048576)) MB of caps, $((mt / 1048576)) MB RAM (overcommitted, within x $oc)"
   else row check ok "memory caps" "$((caps / 1048576)) MB of caps, $((mt / 1048576)) MB RAM"; fi
   [[ -x $LOGS ]] && "$LOGS" log-doctor
   return 0
@@ -2765,7 +2824,7 @@ cmd_configure() {
   unset "C[path]" "C[data]" "C[start_shell]" "C[writable]" "C[backup]" "C[database]" "C[image]" "C[soak]" \
     "C[container_port]" "C[build_memory]" "C[log_max]" "C[log_keep]" "C[log_rate]" "C[access_log]" \
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
-    "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" \
+    "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" "C[priority]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" \
     "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]"
   local line
@@ -2810,6 +2869,7 @@ cmd_configure() {
       tasks) [[ $v =~ ^[1-9][0-9]{1,5}$ ]] || die "bad tasks: $v (processes and threads, like 512)";;
       max_conns|max_requests) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] || die "bad $k: $v";;
       stop_timeout) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || die "bad stop_timeout: $v (seconds)";;
+      priority) [[ $v == high || $v == low || $v == normal ]] || die "bad priority: $v (high, normal or low)";;
       # the fingerprinted files of the release (assets_spec): off, a directory in the release and
       # optionally the URL prefix they are served under
       assets) [[ $v == off || $v =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*(\ *,\ *(/[A-Za-z0-9_.~-]+)+/?)?$ && /$v/ != */../* && /$v/ != */./* ]] ||
@@ -2889,6 +2949,10 @@ cmd_configure() {
   fi
   if [[ -n $origin && -n ${C[origin]:-} && ${C[origin]} != "$origin" ]] && ((!force)); then
     die "$A on <host> was last deployed from ${C[origin]}, not from here ($origin). Deploy from here anyway: tando deploy --force (or tando up --force)"
+  fi
+  # admission: the memory caps of every app against RAM (--force: deploy anyway)
+  if ((!force)) && ! mem_admit "$(mem_caps_mb <(for x in "${!C[@]}"; do printf '%s=%s\n' "$x" "${C[$x]}"; done) | awk '{ print $2 }')"; then
+    die "$ADMIT_WHY"
   fi
   # runtimes this app needs and the server lacks: the client installs them (tando-agent runtime)
   local needs=""
@@ -5852,10 +5916,10 @@ CONF_KEYS_A=(recipe image container_port build_memory start start_shell release 
   health path data writable backup database db_statement_timeout db_idle_tx_timeout db_temp_limit
   memory health_timeout soak cpu tasks max_conns max_requests stop_timeout hold log_max log_keep
   log_rate access_log request_log_max health_expect health_fails health_recover job_timeout job_spread
-  job_missed assets compress)
+  job_missed assets compress priority)
 CONF_KEYS=" ${CONF_KEYS_A[*]} "
 # what a record of the first agent that recorded every setting knew (conf=1 without keys=)
-CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress } job.* "
+CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority } job.* "
 conf_key() {
   case $1 in job.*|worker.*) return 0;; *[[:space:]]*|'') return 1;; esac
   [[ $CONF_KEYS == *" $1 "* ]]
@@ -5908,11 +5972,13 @@ conf_stage() {
 # when the unit file changed
 conf_put() {
   local bk
+  local pr; pr=$(sed -n 's/^priority=//p' "$D/app.conf" 2> /dev/null)
   bk=$(sed -n 's/^backup=//p' "$D/app.conf" 2> /dev/null)
   save "$D/app.conf" C || return 1
   WU_CHANGED=0
   write_unit || return 1
   ((WU_CHANGED)) && systemctl daemon-reload
+  [[ $pr == "${C[priority]:-}" ]] || prio_sync
   [[ $bk == "${C[backup]:-}" ]] || sync_backup_timer
   [[ -x $LOGS ]] && "$LOGS" app-setup "$A" > /dev/null
   db_follow
