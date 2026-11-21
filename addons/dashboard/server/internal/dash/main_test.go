@@ -118,7 +118,7 @@ func fakeTando(args []string) int {
 		fmt.Printf(`{"host":%q,"checks":[{"name":"ssh","ok":true}]}`+"\n", host)
 		return 0
 	}
-	fmt.Printf(`{"host":%q,"future_field":{"x":1},"status":{"apps":[{"app":"web","state":"running","link":"http://web.example.test","cpu":1.5},{"name":"api","state":"down"}],"alerts":[{"app":"api","check":"down","state":"firing"}]},"argv":%q%s}`+"\n",
+	fmt.Printf(`{"host":%q,"address":"192.0.2.10","user":"admin","future_field":{"x":1},"status":{"apps":[{"app":"web","state":"running","link":"http://web.example.test","cpu":1.5},{"name":"api","state":"down"}],"alerts":[{"app":"api","check":"down","state":"firing"}]},"argv":%q%s}`+"\n",
 		host, strings.Join(args, " "), fakeSnapApps(dir, host, args))
 	return 0
 }

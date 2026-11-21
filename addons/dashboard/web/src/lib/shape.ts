@@ -164,6 +164,12 @@ export function skewNote(skew: number | null | undefined): string | null {
   return `clock ${Math.abs(Math.round(skew))} s ${skew > 0 ? "ahead" : "behind"}`;
 }
 
+/** user@address tando connects to, as registered; null when the CLI does not say (older tando) */
+export function sshTarget(d: Pick<Snapshot, "address" | "user"> | null | undefined): string | null {
+  if (!d?.address) return null;
+  return d.user ? `${d.user}@${d.address}` : d.address;
+}
+
 /** sum of the apps' memory caps against the RAM */
 export function headroom(apps: AppRow[] | undefined, ramBytes: number | null | undefined): { capBytes: number; ramBytes: number; pct: number } | null {
   if (!apps || !ramBytes) return null;

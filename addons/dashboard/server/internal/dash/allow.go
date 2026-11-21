@@ -100,6 +100,8 @@ var shapes = []shape{
 		flags: map[string]flagRule{"-H": {vHost, true}}, write: true},
 	{name: "env-set", verb: []string{"env", "set"}, pos: []valueKind{vEnvKey},
 		flags: map[string]flagRule{"-a": {vApp, true}, "-H": {vHost, true}}, write: true},
+	// the laptop side of a server's name (lib/common.sh host_rename); never --drop-alias
+	{name: "host-rename", verb: []string{"host", "rename"}, pos: []valueKind{vHost, vHost}, write: true},
 }
 
 // ErrRefused: an argv that matches no shape of the table

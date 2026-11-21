@@ -2,7 +2,7 @@
 // (DESIGN sections 6, 7 and 9). The state lives in lib/actions.ts, so the panel survives
 // navigation and a reload reattaches to it.
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Input } from "./ui/select";
@@ -11,7 +11,7 @@ import { refreshAll, useNowMs } from "@/lib/resources";
 import { apiGet } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import {
-  actions, actionNoun, commandFor, conflictLine, deployBlocked, dialogCopy, endView, envKeyError, envValueError, gmt, runningLine,
+  actions, actionNoun, commandFor, conflictLine, deployBlocked, dialogCopy, endView, envKeyError, envValueError, gmt, hostNameError, runningLine,
   type ActionName, type Slot,
 } from "@/lib/actions";
 import type { Release } from "@/lib/types";
@@ -104,8 +104,9 @@ export function ActionDialog({ ctx, slot }: { ctx: AppCtx; slot: Slot }) {
   const target = d.params.release ?? rollbackTarget(ctx.releases);
   const copy = dialogCopy(d.action, ctx.host, ctx.app, { ...d.params, origin: ctx.origin, target, live: ctx.live, mac: isMac() });
   const env = d.action === "env-set";
-  const kErr = env ? envKeyError(key) : null;
-  const cmd = commandFor(d.action, ctx.host, ctx.app, { ...d.params, release: d.action === "rollback" ? d.params.release : undefined, key: env ? key : undefined });
+  const ren = d.action === "host-rename";
+  const kErr = env ? envKeyError(key) : ren ? hostNameError(key.trim(), ctx.host) : null;
+  const cmd = commandFor(d.action, ctx.host, ctx.app, { ...d.params, release: d.action === "rollback" ? d.params.release : undefined, key: env ? key : undefined, newHost: ren ? key.trim() : undefined });
   const cancel = () => a.cancel(ctx.host, ctx.app);
   const submit = () => {
     if (env) {
@@ -115,6 +116,13 @@ export function ActionDialog({ ctx, slot }: { ctx: AppCtx; slot: Slot }) {
       setValErr(ve);
       if (kErr || ve) return;
       void a.send(ctx.host, ctx.app, v, { key });
+      return;
+    }
+    if (ren) {
+      setTouched(true);
+      if (kErr) return;
+      renamedTo.set(ctx.host, key.trim());
+      void a.send(ctx.host, ctx.app, undefined, { newHost: key.trim() });
       return;
     }
     void a.send(ctx.host, ctx.app);
@@ -151,16 +159,48 @@ export function ActionDialog({ ctx, slot }: { ctx: AppCtx; slot: Slot }) {
                 {valErr && <p className="m-0 text-xs text-fail">{valErr}</p>}
               </div>
             )}
+            {ren && (
+              <div className="flex flex-col gap-2">
+                <label className="flex flex-col gap-1 text-[13px] font-medium">New name
+                  <Input value={key} onChange={(e) => setKey(e.target.value)} onBlur={() => setTouched(true)} autoFocus autoComplete="off" spellCheck={false}
+                    aria-invalid={touched && !!kErr} className="mono" name="host-name" />
+                </label>
+                {touched && kErr && <p className="m-0 text-xs text-fail">{kErr}</p>}
+              </div>
+            )}
             <code className="block truncate rounded-sm bg-muted px-2 py-1" title={cmd}>{cmd}</code>
             {(d.tokenError || d.error) && <p role="alert" className="m-0 text-[13px] text-fail">{d.error ?? d.tokenError}</p>}
             <div className="flex justify-between gap-2 pt-1">
-              <Button type="button" size="md" onClick={cancel} disabled={d.sending} autoFocus={copy.destructive && !env}>Cancel</Button>
-              <Button type="submit" size="md" variant={copy.destructive ? "destructive" : "primary"} disabled={off} autoFocus={!copy.destructive && !env}>{label}</Button>
+              <Button type="button" size="md" onClick={cancel} disabled={d.sending} autoFocus={copy.destructive && !env && !ren}>Cancel</Button>
+              <Button type="submit" size="md" variant={copy.destructive ? "destructive" : "primary"} disabled={off} autoFocus={!copy.destructive && !env && !ren}>{label}</Button>
             </div>
           </>
         )}
       </form>
     </dialog>
+  );
+}
+
+// the name a rename of a host was sent with (the Server page goes there when it is done)
+const renamedTo = new Map<string, string>();
+
+/** the Server page's Rename (a host-wide write: no app); on success the page moves to the new name */
+export function HostActions({ host }: { host: string }) {
+  const slot = useSlot(host, "");
+  const nav = useNavigate();
+  const o = slot.op;
+  const done = !!o && o.action === "host-rename" && o.status !== "running" && o.record?.status === "done";
+  useEffect(() => {
+    const to = renamedTo.get(host);
+    if (done && to) { renamedTo.delete(host); actions().close(host, ""); nav(`/s/${encodeURIComponent(to)}`); }
+  }, [done, host, nav]);
+  const ctx: AppCtx = { host, app: "", state: null, reachable: true, origin: null, releases: [], live: null };
+  const why = o && o.status === "running" ? `A ${actionNoun(o.action)} is running.` : null;
+  return (
+    <>
+      <Act why={why} onClick={() => actions().open(host, "", "host-rename")}>Rename</Act>
+      {slot.dialog && <ActionDialog ctx={ctx} slot={slot} />}
+    </>
   );
 }
 
@@ -183,7 +223,7 @@ export function ProgressPanel({ host, app }: { host: string; app: string }) {
     <section aria-label="Progress" className="mb-4 rounded-lg border border-border bg-card">
       <div className="flex min-h-10 items-center gap-3 border-b border-border px-4 py-2">
         {running ? <Badge kind="info">running</Badge> : ev ? <Badge kind={KIND[ev.kind]}>{ev.badge}</Badge> : <Badge kind="stale">unknown</Badge>}
-        <span className="min-w-0 flex-1 truncate text-[13px]">{runningLine(o, running ? nowMs : Date.parse(o.record?.ended_at ?? "") || nowMs, !running)}</span>
+        <span className="min-w-0 flex-1 truncate text-[13px]">{runningLine({ ...o, host }, running ? nowMs : Date.parse(o.record?.ended_at ?? "") || nowMs, !running)}</span>
         {!running && <Button onClick={() => actions().close(host, app)}>Close</Button>}
       </div>
       <div className="px-4 py-2">
@@ -200,7 +240,7 @@ export function ProgressPanel({ host, app }: { host: string; app: string }) {
             <p className="m-0">
               <span className={cn(ev.kind === "fail" && "text-fail")}>{ev.line}</span>
               {ev.next && <span className="text-muted-foreground"> {ev.next}</span>}
-              {ev.showLog && <> <Link className="underline underline-offset-2" to={`/s/${encodeURIComponent(host)}/${app}/logs`}>Show log</Link></>}
+              {ev.showLog && app && <> <Link className="underline underline-offset-2" to={`/s/${encodeURIComponent(host)}/${app}/logs`}>Show log</Link></>}
             </p>
           )}
         </div>

@@ -238,10 +238,12 @@ skew_line() {
   fi
   return 0
 }
-# json_meta: the fields every ls/status --json object starts with, after "host": reachable, when
+# json_meta: the fields every ls/status --json object starts with, after "host": its address and
+# ssh user (host_addr_json), reachable, when
 # the data was read (laptop clock), the server's clock and version, this client's, the skew
 json_meta() {
   skew_load
+  host_addr_json "$HOST"
   printf ',"reachable":true,"checked_at":%s,"server_version":%s,"client_version":%s,"clock_skew_s":%s' \
     "$NOW" "$( [ -n "$SRV_VER" ] && json_str "$SRV_VER" || printf null)" \
     "$( [ -n "$CLI_VER" ] && json_str "$CLI_VER" || printf null)" "${SKEW:-null}"
@@ -1217,8 +1219,8 @@ render_ls_all() {
       printf '%s' "$sep"; render_ls | tr -d '\n'; sep=,
     else
       e=$(host_err "$h")
-      printf '%s{"host":%s,"error":%s,"reachable":false,"checked_at":%s}' "$sep" "$(json_str "$h")" \
-        "$(json_str "${e:-unreachable}")" "$(now)"; sep=,
+      printf '%s{"host":%s%s,"error":%s,"reachable":false,"checked_at":%s}' "$sep" "$(json_str "$h")" \
+        "$(host_addr_json "$h")" "$(json_str "${e:-unreachable}")" "$(now)"; sep=,
     fi
   done
   printf ']}\n'

@@ -40,6 +40,15 @@ do {
     check("M1e", "a pending alert is not listed as firing", s.firing.isEmpty, "\(s.firing)")
 }
 
+// M10 the address: user@address of a host as tando registered it; a host from an older client has none
+do {
+    let m = Monitor()
+    let (s, _) = m.apply(ok, probes: probes(m, ok))
+    check("M10a", "the host row carries user@address", s.hosts[0].target == "admin@203.0.113.7", "\(String(describing: s.hosts[0].target))")
+    check("M10b", "a host without address (older tando): none, and it still decodes", s.hosts[1].target == nil, "\(String(describing: s.hosts[1].target))")
+    check("M10c", "the menu text shows it next to the name", describe(s).contains("host vps  admin@203.0.113.7"), describe(s))
+}
+
 // M2 one app down: badge 1 and one notification; back up: badge none and one "resolved"
 do {
     let m = Monitor()

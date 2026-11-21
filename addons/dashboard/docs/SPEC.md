@@ -32,7 +32,9 @@ the review itself is not in the repository). The design guideline is docs/DESIGN
   - Writes: `deploy` (in the app's recorded project folder, from `tando`'s last-deployed-from
     record; refused if the folder is missing or another machine deployed last), `rollback [id]`,
     `stop`, `start`, `restart`, `env set KEY` (value sent in the request body, passed on stdin,
-    never logged, never read back). Each write needs a per-action confirm token issued by the
+    never logged, never read back), and `host rename <old> <new>` (the Server page's Rename: a
+    host-wide write that waits for no app write of the host and holds them all off; refused when
+    the new name is a host already; the page moves to the new name). Each write needs a per-action confirm token issued by the
     server when the confirmation dialog opens (single use, 60 s), on top of the session cookie.
     Runs one write per app at a time; streams its progress (the CLI's output) to the page; the
     audit line's `from` says "dashboard".

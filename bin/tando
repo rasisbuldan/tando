@@ -20,7 +20,7 @@ TANDO_HOME=$(cd "$(dirname "$self")/.." && pwd -P)
 # (rsync splits its -e command on spaces: a $TMPDIR with a space would break the ssh wrapper)
 _tb=${TMPDIR:-/tmp}; case $_tb in *[[:space:]]*) _tb=/tmp;; esac
 TMPD=$(mktemp -d "$_tb/tando.XXXXXX") || exit 1; unset _tb
-trap 'ui_frame_cleanup; rm -rf "$TMPD"' EXIT
+trap 'ui_frame_cleanup; rm -rf "$TMPD"; [ -z "${BUSY_F:-}" ] || rm -f "$BUSY_F"' EXIT
 trap 'echo >&2; exit 130' INT   # Ctrl-C at a prompt: the next line starts clean
 trap 'exit 143' TERM
 ui_init
@@ -150,6 +150,7 @@ cmd_host() {
     add) shift; host_add "$@";;
     ls) host_ls;;
     rm) host_rm "$2";;
+    rename) shift; host_rename "$@";;
     status|care|update|reboot)   # host care: the server itself (lib/hostcare.sh, docs/HOSTCARE.md)
       . "$TANDO_HOME/lib/hostcare.sh"; "host_$1";;
     setup)
@@ -568,6 +569,12 @@ main() {
   parse ${pre[@]+"${pre[@]}"} "$@"
   pos_app
   [ "$cmd" = ssh ] && ssh_dashdash "$@"
+  # a command that changes a server marks it busy while it runs (host_use; tando host rename)
+  case $cmd in
+    up|deploy|rollback|start|stop|restart|destroy|unlock|domain|adopt|restore|link|go) BUSY_CMD="$cmd $*";;
+    env|backup|db|jobs) case ${ARGS[1]:-ls} in ls|log) ;; *) BUSY_CMD="$cmd $*";; esac;;
+    host) case ${ARGS[1]:-ls} in setup|update|reboot|care) BUSY_CMD="$cmd $*";; esac;;
+  esac
   case $cmd in
     host) cmd_host ${ARGS[@]+"${ARGS[@]:1}"};;
     doctor) cmd_doctor;;

@@ -1,5 +1,7 @@
 {
  "host": "web-1",
+ "address": "192.0.2.10",
+ "user": "nobody",
  "reachable": true,
  "checked_at": 1795263235,
  "server_version": "0.2.2",

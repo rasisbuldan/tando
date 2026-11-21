@@ -178,4 +178,60 @@ e8() {
     q "$T/out/status.json" "d['app']['state_reason'] == 'running'"
 }
 check "E8 ls and status --json carry state_reason and the system object" e8
+# ---- the address, and tando host rename (the laptop side only: nothing on the server has the name)
+check "A1 ls --all --json: each host's address and ssh user, as registered" \
+  q "$T/out/ls-all.json" 'd["hosts"][0]["address"] == "192.0.2.10" and d["hosts"][0]["user"] == "nobody"'
+check "A2 an unreachable host has its address too" \
+  q "$T/out/snapshot-unreachable.json" 'd["address"] == "192.0.2.99" and d["user"] == "nobody"'
+C=$T/rcfg P=$T/proj Q=$T/other
+mkdir -p "$C/hosts" "$C/cache" "$C/go" "$P/.tando" "$Q"
+rn() { (cd "$P" && TANDO_CONFIG_DIR=$C PATH=$T/bin:$PATH "$R/bin/tando" "$@"); }
+rq() { (cd "$Q" && TANDO_CONFIG_DIR=$C PATH=$T/bin:$PATH "$R/bin/tando" "$@"); }
+TANDO_CONFIG_DIR=$C host web-1 192.0.2.10; TANDO_CONFIG_DIR=$C host web-2 192.0.2.11
+printf 'shop\n' > "$C/cache/apps.web-1"; printf 'web-1\n' > "$C/last-host"; printf '{}' > "$C/cache/ls-all.json"
+printf 'host=web-1\nname=shop\n' > "$C/go/123"; printf 'host=web-2\n' > "$C/go/456"
+printf 'app = shop\nhost = web-1\n' > "$P/tando.conf"; printf 'web-1 shop %s\n' "$(cd "$P" && pwd -P)" > "$P/.tando/target"
+printf 'app = shop\nhost = web-1\n' > "$Q/tando.conf"
+out=$(rn host rename web-1 web-9 2>&1); rc=$?
+check "R1 host rename web-1 web-9: done, and says the old name keeps working ($rc: $out)" \
+  eval 'test $rc = 0 && printf "%s" "$out" | grep -q "renamed host web-1 to web-9" && printf "%s" "$out" | grep -q -- "--drop-alias web-1"'
+check "R2 the hosts file, the app cache and last-host follow; ls-all.json (the dashboard's copy) is dropped" \
+  eval 'test -f "$C/hosts/web-9" && ! test -e "$C/hosts/web-1" && test "$(cat "$C/cache/apps.web-9")" = shop && ! test -e "$C/cache/apps.web-1" && test "$(cat "$C/last-host")" = web-9 && ! test -e "$C/cache/ls-all.json"'
+check "R3 tando go's answers, tando.conf and .tando/target of this project say web-9; another host's answers are untouched" \
+  eval 'grep -qx host=web-9 "$C/go/123" && grep -qx name=shop "$C/go/123" && grep -qx host=web-2 "$C/go/456" && grep -qx "host = web-9" "$P/tando.conf" && grep -q "^web-9 shop " "$P/.tando/target"'
+check "R4 the old name is an alias (renamed/web-1), not a host: host ls and the completions do not list it" \
+  eval 'test "$(cat "$C/renamed/web-1")" = alias=web-9 && ! test -e "$C/hosts/web-1"'
+rq ls --json > "$T/rq.json" 2> "$T/rq.err"; rc=$?
+check "R5 a project whose tando.conf still says host = web-1 works, on web-9, with one note ($rc)" \
+  eval 'test $rc = 0 && q "$T/rq.json" "d[\"host\"] == \"web-9\" and d[\"address\"] == \"192.0.2.10\"" && test "$(grep -c "host web-1 was renamed to web-9" "$T/rq.err")" = 1 && grep -qx "host = web-1" "$Q/tando.conf"'
+rn snapshot --json -H web-1 > "$T/rs.json" 2> "$T/rs.err"
+check "R6 -H web-1 (a script) is followed the same way" \
+  eval 'q "$T/rs.json" "d[\"host\"] == \"web-9\"" && grep -q "host web-1 was renamed to web-9" "$T/rs.err"'
+out=$(rn host rename web-9 web-2 2>&1); rc=$?
+check "R7 refused when the new name exists; nothing changed ($rc)" \
+  eval 'test $rc != 0 && printf "%s" "$out" | grep -q "web-2 exists already" && test -f "$C/hosts/web-9" && grep -q 192.0.2.11 "$C/hosts/web-2"'
+out=$(rn host rename web-9 "a/b" 2>&1); rc=$?
+check "R8 refused: a bad new name, the host-name rule (exit 2)" eval 'test $rc = 2 && test -f "$C/hosts/web-9"'
+out=$(rn host rename web-7 web-8 2>&1); rc=$?
+check "R9 refused: no such host" eval 'test $rc != 0 && printf "%s" "$out" | grep -q "no host named web-7"'
+# a write command for web-9 that runs (the stub holds tando-agent stop) marks the host busy
+(cd "$Q" && STUB_HANG="tando-agent stop" TANDO_CONFIG_DIR=$C PATH=$T/bin:$PATH "$R/bin/tando" stop shop -H web-9 > /dev/null 2>&1) &
+bg=$!
+busy() { local f; for f in "$C"/run/web-9.*; do [ -f "$f" ] && return 0; done; return 1; }
+i=0; while [ $i -lt 100 ] && ! busy; do sleep 0.1; i=$((i + 1)); done
+out=$(rn host rename web-9 web-8 2>&1); rc=$?
+check "R10 refused while a stop of web-9 runs, and says what runs ($rc: $out)" \
+  eval 'test $rc != 0 && printf "%s" "$out" | grep -q "something runs on web-9" && printf "%s" "$out" | grep -q "stop" && test -f "$C/hosts/web-9"'
+wait $bg
+check "R11 the busy mark is gone when the command ends" eval '! busy'
+out=$(rn host rename web-9 web-8 2>&1); rc=$?
+check "R12 a second rename: every alias points at the newest name ($rc)" \
+  eval 'test $rc = 0 && test "$(cat "$C/renamed/web-1")" = alias=web-8 && test "$(cat "$C/renamed/web-9")" = alias=web-8'
+out=$(rn host rename web-8 web-1 2>&1); rc=$?
+check "R13 back to an old name: it is a host again (its alias goes), the others point at it ($rc)" \
+  eval 'test $rc = 0 && test -f "$C/hosts/web-1" && ! test -e "$C/renamed/web-1" && test "$(cat "$C/renamed/web-8")" = alias=web-1'
+out=$(rn host rename --drop-alias web-9 2>&1); rc=$?
+out2=$(rq ls --json -H web-9 2>&1); rc2=$?
+check "R14 --drop-alias web-9: the alias is gone, -H web-9 is an unknown host again ($rc, $rc2)" \
+  eval 'test $rc = 0 && ! test -e "$C/renamed/web-9" && test $rc2 != 0 && printf "%s" "$out2" | grep -q "unknown host: web-9"'
 finish

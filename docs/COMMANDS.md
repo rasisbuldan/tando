@@ -418,15 +418,16 @@ dropped first at 80 columns). While an alert fires for an app, an ALERT column n
 app. When the server's clock is more than 30 s off this laptop's (every age on screen is off by
 as much), or its tando is not this client's version, one yellow line says so (also in `tando
 status`); `--json` has `reachable`, `checked_at`, `server_version`, `client_version`,
-`clock_skew_s`, `alerts`, each app's `state_reason` and `system` (see `snapshot`). `--all`: every registered server in one box, the morning check: first
+`clock_skew_s`, `alerts`, each app's `state_reason` and `system` (see `snapshot`), and the
+server's `address` and ssh `user` as registered (`tando host add`; a name stays a name). `--all`: every registered server in one box, the morning check: first
 what needs attention (a server not answering, an app down, an alert firing, host care to do,
 clock or version skew), one line each with the command to look closer, then every app of every
 server (HOST APP STATE ALERT MEMORY CPU 1M UP) with those needing attention on top; with
 `--watch` and `--json` (one object per server, as `ls --json`). A
 worker that does not run while its app does gets a line under the table. `--json` has `apps` and
 `alerts` (each alert's app, check, state `firing` or `pending`, since, detail; a host check has app
-`host`); with `--all`, a server that did not answer is `{"host", "error", "reachable": false,
-"checked_at"}`.
+`host`); with `--all`, a server that did not answer is `{"host", "address", "user", "error",
+"reachable": false, "checked_at"}`.
 `--check` (ls, status; not with `--watch`): after the view, exit status 2 when an app is down or
 an alert fires (with `--all`: also a server that did not answer), 0 when nothing needs attention,
 1 when the server could not be asked (as without it). For scripts and a menu bar badge:
@@ -535,9 +536,19 @@ Example: `tando audit -n 20`
 ### host
 `tando host add <name> <user@address> [--port N] [--key FILE] [--yes] [--force] [--no-check]`
 `tando host setup <name> [apps_domain=D] [tls=auto|internal|off] [setting=value ...]`
-`tando host ls` · `tando host rm <name>`
-Flags: `--port --key --insecure-test --no-check --deploy --force --yes`. Subcommands: add (2),
-ls (default, 0), setup (1+), rm (1).
+`tando host ls` · `tando host rm <name>` · `tando host rename <old> <new>` · `tando host rename --drop-alias <old>`
+Flags: `--port --key --insecure-test --no-check --deploy --force --yes --drop-alias`. Subcommands: add (2),
+ls (default, 0), setup (1+), rm (1), rename (1-2).
+`ls` shows each server's `user@address` (TARGET) as registered; a name is shown as is, never
+looked up. `rename` changes a server's name on this laptop only (no server stores it; its audit
+log and deploy records keep `user@machine` and the ssh address, so history is unchanged). It is
+refused when the new name exists, when it breaks the host-name rule, or while a command that
+changes the server runs for the old name (each such command marks `~/.config/tando/run/<host>.<pid>`
+while it runs). It moves `hosts/<old>`, `cache/apps.<old>`, `last-host`, `tando go`'s answers,
+`host =` in `tando.conf` and `.tando/target` of the current directory, closes the old ssh
+connection and drops the dashboard's `cache/ls-all.json`. The old name stays an alias
+(`~/.config/tando/renamed/<old>`, `alias=<new>`): a `tando.conf` or `-H <old>` elsewhere keeps
+working with the note `host <old> was renamed to <new>`; `--drop-alias <old>` removes it.
 `add` checks the login and shows the host key to trust (`--yes` trusts without asking,
 `--no-check` saves without connecting, `--force` replaces an entry). `setup` installs rsync, curl,
 nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Settings: `apps_domain=`,

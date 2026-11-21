@@ -3,3 +3,5 @@ checked_at:number
 error:string
 host:string
 reachable:bool
+address:string
+user:string

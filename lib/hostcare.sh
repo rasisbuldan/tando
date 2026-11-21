@@ -6,7 +6,7 @@
 hc_host() {
   if [ -n "${1:-}" ]; then
     valid_host "$1" || usage_err "not a host name: $1 (tando host ls lists them)" host
-    [ -f "$CFG/hosts/$1" ] || die "no host \"$1\" here (tando host ls lists them; tando host add registers one)"
+    [ -f "$CFG/hosts/$1" ] || host_alias "$1" > /dev/null || die "no host \"$1\" here (tando host ls lists them; tando host add registers one)"
     host_use "$1"
   else resolve 0; fi
 }

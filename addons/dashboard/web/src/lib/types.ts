@@ -38,7 +38,9 @@ export interface AppDetail {
   origin?: string | null; // user@machine:path of the last deploy (deploy runs there)
 }
 export interface Snapshot {
-  host: string; reachable: boolean; error?: string; checked_at: number; server_version?: string | null; client_version?: string | null;
+  host: string; reachable: boolean; error?: string;
+  address?: string | null; user?: string | null; // the registered ssh target (newer tando; never resolved)
+  checked_at: number; server_version?: string | null; client_version?: string | null;
   clock_skew_s?: Num; server_now?: Num; system?: System; apps?: AppRow[]; alerts?: Alert[]; app?: AppDetail;
   host_metrics?: HostMetrics | null;
 }

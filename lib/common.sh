@@ -225,6 +225,71 @@ host_rm() {
   note "forgot host $1 (nothing on the server changed)"
 }
 
+# host_addr_json name: ,"address":<the address of target>,"user":<its user> (null when unknown:
+# no hosts file, as with a deploy key in CI). The address is as registered (a name stays a name;
+# nothing is looked up). No fork.
+host_addr_json() {
+  local t="" l
+  if valid_host "$1" && [ -f "$CFG/hosts/$1" ]; then
+    while IFS= read -r l; do case $l in target=*) t=${l#target=};; esac; done < "$CFG/hosts/$1"
+  elif [ "$1" = "$HOST" ]; then t=$TARGET; fi
+  # (host add allows these characters only: nothing to escape, no fork; anything else is null)
+  case $t in *@*) case $t in *[!A-Za-z0-9_.@:-]*) t="";; esac;; *) t="";; esac
+  [ -n "$t" ] || { printf ',"address":null,"user":null'; return 0; }
+  printf ',"address":"%s","user":"%s"' "${t#*@}" "${t%%@*}"
+}
+
+# host_rename old new | --drop-alias old: the laptop side of a server's name (nothing on the
+# server holds it). Moves the hosts file and everything here keyed by the name; old stays an alias
+# ($CFG/renamed/<old>) so projects and scripts that say old keep working.
+host_rename() {
+  local old=${1:-} new=${2:-} f p busy="" ore
+  if [ "$old" = --drop-alias ] || [ "$new" = --drop-alias ]; then
+    [ "$old" = --drop-alias ] && old=$new
+    valid_host "$old" && [ -f "$CFG/renamed/$old" ] || die "no alias named $old (tando host rename leaves one)"
+    rm -f "$CFG/renamed/$old"
+    note "dropped the alias $old; a tando.conf or script that still says $old fails now"
+    return 0
+  fi
+  [ -n "$old" ] && [ -n "$new" ] || usage_err "host rename needs the old and the new name" host
+  valid_host "$old" && [ -f "$CFG/hosts/$old" ] || die "no host named $old (tando host ls)"
+  valid_host "$new" || usage_err "bad host name: $new (letters, digits, . _ -)" host
+  [ "$old" != "$new" ] || die "$old is already called $new; nothing changed"
+  [ -f "$CFG/hosts/$new" ] && die "a host named $new exists already (tando host rm $new first, or pick another name); nothing changed"
+  for f in "$CFG/run/$old".*; do   # a command for old that runs now (host_use marks it)
+    [ -f "$f" ] || continue
+    p=${f##*.}
+    if is_num "$p" && kill -0 "$p" 2> /dev/null; then busy="$busy; tando $(head -c 200 "$f" | tr -cd 'A-Za-z0-9 ._@=:/-') (pid $p)"
+    else rm -f "$f"; fi
+  done
+  [ -z "$busy" ] || die "something runs on $old now${busy}: rename it when that is done; nothing changed"
+  ore=${old//./\\.}   # (old in a regex: a dot is a dot)
+  # the old ssh connection (its socket path holds the name): closed, never reused
+  host_use "$old" && ssh -O exit "${SSHO[@]}" "$TARGET" > /dev/null 2>&1
+  mv "$CFG/hosts/$old" "$CFG/hosts/$new" || die "cannot rename $CFG/hosts/$old"
+  [ -f "$CFG/cache/apps.$old" ] && mv -f "$CFG/cache/apps.$old" "$CFG/cache/apps.$new"
+  rm -f "$CFG/cache/ls-all.json"   # (the dashboard's copy of ls --all: read again on its next poll)
+  [ "$(cat "$CFG/last-host" 2> /dev/null)" = "$old" ] && printf '%s\n' "$new" | write_file "$CFG/last-host"
+  for f in "$CFG"/go/*; do   # tando go's answers (host=<name>)
+    [ -f "$f" ] && grep -qx "host=$ore" "$f" || continue
+    sed "s/^host=.*/host=$new/" "$f" | write_file "$f"
+  done
+  if [ -f tando.conf ] && grep -Eq "^host[[:space:]]*=[[:space:]]*${ore}[[:space:]]*$" tando.conf; then
+    sed -E "s/^host[[:space:]]*=[[:space:]]*${ore}[[:space:]]*$/host = $new/" tando.conf > tando.conf.tando-tmp &&
+      mv tando.conf.tando-tmp tando.conf && note "tando.conf here: host = $new"
+  fi
+  [ -f .tando/target ] && sed "s/^$ore /$new /" .tando/target > .tando/target.tmp && mv .tando/target.tmp .tando/target
+  # aliases: old -> new, and older names that pointed at old point at new
+  mkdir -p "$CFG/renamed" || die "cannot write $CFG/renamed"
+  for f in "$CFG"/renamed/*; do
+    [ -f "$f" ] && [ "$(cat "$f")" = "alias=$old" ] && printf 'alias=%s\n' "$new" | write_file "$f"
+  done
+  rm -f "$CFG/renamed/$new"
+  printf 'alias=%s\n' "$new" | write_file "$CFG/renamed/$old"
+  note "renamed host $old to $new (nothing on the server changed)"
+  note "a tando.conf or script that says $old still works (with a note); once none does: tando host rename --drop-alias $old"
+}
+
 host_get() { # name key
   local l
   while IFS= read -r l; do   # (IFS='=' read drops a trailing "=")
@@ -247,8 +312,26 @@ ctl_dir() {
   CTL_DIR=$d
 }
 
-# host_use name: sets HOST, TARGET and the ssh options SSHO
+# host_alias name: the new name of a renamed host ($CFG/renamed/<old> holds alias=<new>, written by
+# tando host rename), when that host still exists; fails otherwise
+host_alias() {
+  local l=""
+  valid_host "$1" && [ -f "$CFG/renamed/$1" ] || return 1
+  IFS= read -r l < "$CFG/renamed/$1"
+  l=${l#alias=}
+  valid_host "$l" && [ -f "$CFG/hosts/$l" ] || return 1
+  printf '%s' "$l"
+}
+
+# host_use name: sets HOST, TARGET and the ssh options SSHO. A renamed host's old name (a
+# tando.conf or script that still says it) is followed to the new one, with a note once.
 host_use() {
+  local _a
+  if valid_host "$1" && [ ! -f "$CFG/hosts/$1" ] && _a=$(host_alias "$1"); then
+    [ "${ALIAS_NOTED:-}" = "$1" ] || note "host $1 was renamed to $_a"
+    ALIAS_NOTED=$1
+    set -- "$_a"
+  fi
   if ! { valid_host "$1" && [ -f "$CFG/hosts/$1" ]; }; then
     local f hs=""; for f in "$CFG"/hosts/*; do [ -f "$f" ] && hs="${hs:+$hs, }${f##*/}"; done
     if [ -n "$hs" ]; then die "unknown host: $1 (servers here: $hs; tando host ls). A new one: tando host add $1 <user@address>"
@@ -256,6 +339,11 @@ host_use() {
   fi
   HOST=$1
   TARGET=$(host_get "$1" target)
+  # a command that changes something on this server marks it busy here while it runs (tando host
+  # rename waits for none of them: it refuses)
+  if [ -n "${BUSY_CMD:-}" ] && [ -z "${BUSY_F:-}" ]; then
+    mkdir -p "$CFG/run" 2> /dev/null && BUSY_F=$CFG/run/$1.$$ && printf '%s\n' "$BUSY_CMD" > "$BUSY_F" 2> /dev/null
+  fi
   # One control socket per host entry: %C (user, host, port) plus a checksum of the entry's name,
   # key file and host-key policy. Two entries for the same server never share a connection, so
   # each one's own key and host-key check are used (a shared master would skip both).

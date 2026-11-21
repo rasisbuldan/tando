@@ -17,6 +17,13 @@ first, grouped by area.
 - Fixed: a laptop that slept (or a CI runner that stalled) through a deploy's activation woke up to
   "the activation has not finished" and exit status 1, though the release had gone live: the client
   now asks for the result before it gives up at its deadline.
+- Added: `tando host rename <old> <new>`. It renames a server on this laptop (the hosts file, the
+  app cache, the last-used server, `tando go`'s answers, `host =` in the current project's
+  tando.conf), refused while a deploy or another change runs on it. The old name stays an alias,
+  so a tando.conf or script that still says it works with a note; `tando host rename --drop-alias
+  <old>` removes it. Nothing on the server stores the laptop's name for it.
+- Added: the server's address and ssh user in `--json` (`address`, `user` in `ls`, `ls --all`,
+  `status`, `alerts`, `snapshot`, also for a server that did not answer), as registered.
 - Added: live views every 5 s. tandod keeps a second loop beside the minute's checks (srv/live):
   every 5 s each app's memory, CPU, tasks and unit state and the host's load, memory, CPU and disk,
   from the cgroup v2 files, /proc and the bus connection it already has; no program started, no file

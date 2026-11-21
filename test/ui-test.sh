@@ -729,7 +729,7 @@ else bad "ls: no clock or version skew line ($out)"; fi
 out=$(MON_ST=$tmp/mon.st4 mon_run 'APP=web; render_status' | tr -d '│\n' | tr -s ' ')
 if [[ $out == *"clock: the server's is "[45]m*" ahead"* ]]; then ok; else bad "status: no clock skew line ($out)"; fi
 out=$(MON_ST=$tmp/mon.st4 mon_run 'JSON=1; render_ls')
-if [[ $out == '{"host":"vps","reachable":true,"checked_at":'[0-9]*',"server_version":"0.0.1","client_version":"'*'","clock_skew_s":'[0-9]*',"apps":'*'"alerts":[{"app":"api","check":"http","state":"firing",'* ]] &&
+if [[ $out == '{"host":"vps","address":null,"user":null,"reachable":true,"checked_at":'[0-9]*',"server_version":"0.0.1","client_version":"'*'","clock_skew_s":'[0-9]*',"apps":'*'"alerts":[{"app":"api","check":"http","state":"firing",'* ]] &&
    printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert 299 <= d["clock_skew_s"] <= 301' 2> /dev/null; then ok
 else bad "ls --json: no reachable, checked_at, versions, skew or alerts ($out)"; fi
 # --check: exit 2 when an alert fires or an app is down, 0 when nothing needs attention
@@ -764,7 +764,7 @@ if [[ $out == "╭─ tando ls --all "*"3 servers ─╮"* && $att == *"dead not
 else bad "ls --all: no summary with what needs attention first ($out)"; fi
 out=$(allrun 'JSON=1; render_ls_all')
 if printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); h={x["host"]: x for x in d["hosts"]}; assert h["dead"]["reachable"] is False and h["dead"]["error"] and h["vps"]["reachable"] is True and len(h["vps"]["apps"]) == 2' 2> /dev/null &&
-   [[ $out == '{"hosts":[{"host":"calm","reachable":true,'*'{"host":"dead","error":"connection refused","reachable":false,'* ]]; then ok
+   [[ $out == '{"hosts":[{"host":"calm","address":null,"user":null,"reachable":true,'*'{"host":"dead","address":null,"user":null,"error":"connection refused","reachable":false,'* ]]; then ok
 else bad "ls --all --json: reachable per host ($out)"; fi
 # the shared ssh connection stays 10 minutes after the last command (ControlPersist=600; was 60)
 out=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; CFG=$(mktemp -d); mkdir -p "$CFG/hosts"

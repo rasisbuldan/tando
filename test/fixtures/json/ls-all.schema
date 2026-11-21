@@ -47,3 +47,5 @@ hosts[].system.load_5:null-or-number
 hosts[].system.memory_total_bytes:null-or-number
 hosts[].system.memory_used_bytes:null-or-number
 hosts[].system.uptime_s:null-or-number
+hosts[].address:string
+hosts[].user:string

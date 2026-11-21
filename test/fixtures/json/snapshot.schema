@@ -47,3 +47,5 @@ system.load_5:null-or-number
 system.memory_total_bytes:null-or-number
 system.memory_used_bytes:null-or-number
 system.uptime_s:null-or-number
+address:string
+user:string
