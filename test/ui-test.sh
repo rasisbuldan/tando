@@ -625,7 +625,7 @@ mon_run() { # code: run with the views loaded, the stub agent answering from $tm
         TMPD=$(mktemp -d); CFG=$TMPD; HOST=vps; APP=""; JSON=""; WATCH=""; ui_init 80
         resolve() { :; }
         agent_raw() { cat "$MON_ST"; }
-        eval "$2"; rc=$?; rm -rf "$TMPD"; exit $rc' _ "$here" "$1" 2>&1
+        fetch_status; eval "$2"; rc=$?; rm -rf "$TMPD"; exit $rc' _ "$here" "$1" 2>&1
 }
 export MON_ST=$tmp/mon.st
 mon_rows > "$MON_ST"
@@ -643,6 +643,32 @@ out=$(mon_run 'WATCH=1; n=0
   watch_loop rend fetch' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
 if [[ $out == *"not answering: ssh: connect to host vps port 22: Connection refused"*"STALE: data "* ]]; then ok
 else bad "status --watch: a failed refresh does not show as stale ($out)"; fi
+
+# tando ls: an app with a firing alert has it in an ALERT column (a column only while one fires),
+# the footer counts it; --json carries alerts_firing and firing per app
+out=$(mon_run 'render_ls' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if grep -Eq '^│ APP +STATE +ALERT ' <<< "$out" && grep -Eq '^│ api +● running +http ' <<< "$out" &&
+   grep -Eq '^│ web +● running +- ' <<< "$out" && [[ $out == *"1 alert firing: tando alerts"* ]]; then ok
+else bad "ls: the firing alert is not shown per app ($out)"; fi
+out=$(mon_run 'JSON=1; render_ls')
+if [[ $out == *'"app":"api",'*'"alerts_firing":1,"firing":"http"'* && $out == *'"app":"web",'*'"alerts_firing":0,"firing":null'* ]]; then ok
+else bad "ls --json: no alerts_firing per app ($out)"; fi
+grep -v '^alert' "$MON_ST" > "$tmp/mon.st2"
+out=$(MON_ST=$tmp/mon.st2 mon_run 'render_ls')
+if grep -Eq '^│ APP +STATE +DEPLOYED' <<< "$out"; then ok; else bad "ls: an ALERT column with nothing firing ($out)"; fi
+# tando top: the firing check after the app's state, the count in the host strip
+out=$("$BASH_BIN" -c '
+    . "$1/lib/ui.sh"; . "$1/lib/common.sh"; set +u; TAB=$(printf "\t"); AGENT_BIN=/opt/tando/bin/tando-agent; . "$1/lib/cmd-top.sh"
+    ui_init 100; UI_ROWS=20 UI_COLS=100 TOP_H=0 SEL=0 SEL_APP=web AP_N=0 TOP_DETAIL=0 TOP_VIEW=main TOP_MODAL=""
+    TOP_INT=2 TOP_RO=0 TOP_CDETAIL=0 APPS_TOP=0 G_BK=60 D_REL=() D_HIST=() HV_ROWS=() TOP_KEYS_L="" TOP_KEYS_R=""
+    TH_NAME=(vps) TH_ST=(ok) TH_ERR=("") TH_PID=("") TH_T0=(0) TH_OKAT=(0) TH_CLK=(0)
+    TH_LOAD=(0) TH_CPUS=(1) TH_MT=(0) TH_MU=(0) TH_DT=(0) TH_DU=(0) TH_NAPPS=(0) TH_NBAD=(0)
+    GH_M=() GH_C=() GL_M=() GL_C=() GL_N=()
+    { cat "$2"; printf "clock\t1795200000.5\n"; } > "$3"; TH_GOOD=("$3")
+    top_parse 0 1; ui_frame_begin; top_draw_main; ui_frame_end' _ "$here" "$MON_ST" "$tmp/top.data" 2>&1 |
+    perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if grep -Eq '│ +api +● running http ' <<< "$out" && [[ $out == *"apps 2  1 alert"* ]]; then ok
+else bad "top: the firing alert is not shown ($out)"; fi
 
 echo "$checks checks, $fails failed"
 [[ $fails == 0 ]]

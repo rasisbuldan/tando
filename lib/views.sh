@@ -142,17 +142,19 @@ cpu_pct() {
 
 # the app rows of $TMPD/st with the columns ls --json and status --json share
 app_json_rows() {
+  firing_load
   local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx
   while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx; do
     [ "$r" = app ] || continue
     cpu_pct "$a" "$cpu" "$up"
     lim_clean
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(state_word "$state" "$rel" "$recipe")" \
+    firing_of "$a"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(state_word "$state" "$rel" "$recipe")" \
       "$recipe" "$port" "$rel" "$(id_epoch "$rel")" "$rst" "$mem" "$max" "$CPUP" "$rs" "$up" "$link" "$db" "${lb:-}" "${doms:-}" \
-      "$lcpu" "$ltasks" "$lconns" "$lreq"
+      "$lcpu" "$ltasks" "$lconns" "$lreq" "$FIREN" "$FIRED"
   done < "$TMPD/st"
 }
-APP_JSON="app:s,state:s,recipe:s,port:n,release:s,deployed_at:n,release_status:s,memory_bytes:n,memory_max_bytes:n,cpu_percent:n,restarts:n,uptime_s:n,link:s,database:s,log_bytes:n,domains:s,cpu_limit:s,tasks_max:n,max_conns:n,max_requests:n"
+APP_JSON="app:s,state:s,recipe:s,port:n,release:s,deployed_at:n,release_status:s,memory_bytes:n,memory_max_bytes:n,cpu_percent:n,restarts:n,uptime_s:n,link:s,database:s,log_bytes:n,domains:s,cpu_limit:s,tasks_max:n,max_conns:n,max_requests:n,alerts_firing:n,firing:s"
 # lim_clean: the app's limits from the server (cpu "50%" or "1.5" cores, "-" = no cap), else "-"
 lim_clean() {
   case ${lcpu:-} in [0-9]%|[0-9][0-9]%|[0-9][0-9][0-9]%|[0-9]|[0-9].[0-9]|[0-9].[0-9][0-9]|[0-9][0-9]|[0-9][0-9].[0-9]) ;; *) lcpu=-;; esac
@@ -194,14 +196,38 @@ worker_hint() {
   done < "$TMPD/st"
   return 0
 }
+# firing_load: FIRING = " app:check ..." for every firing alert in $TMPD/st (no fork)
+firing_load() {
+  local r fa fc fs _x
+  FIRING=""
+  while IFS=$TAB read -r r fa fc fs _x; do
+    [ "$r" = alert ] && [ "$fs" = firing ] || continue
+    case $fa$fc in *[!a-z0-9_.-]*) continue;; esac   # plain words only: the list is word-split
+    FIRING="$FIRING $fa:$fc"
+  done < "$TMPD/st"
+  return 0
+}
+# firing_of app: the checks firing for app, comma separated -> FIRED (and FIREN, their count)
+firing_of() {
+  local x
+  FIRED="" FIREN=0
+  for x in $FIRING; do
+    [ "${x%%:*}" = "$1" ] || continue
+    FIRED="${FIRED:+$FIRED,}${x#*:}" FIREN=$((FIREN + 1))
+  done
+}
 render_ls() {
   local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx n=0 upt dep
   if [ -n "$JSON" ]; then
     printf '{"host":%s,"apps":' "$(json_str "$HOST")"; app_json_rows | to_json "$APP_JSON"; printf '}\n'
     return
   fi
+  firing_load
+  # ALERT (the checks firing for the app) is a column only while one fires
+  local acol="" ahd=""
+  for a in $FIRING; do grep -q "^app${TAB}${a%%:*}${TAB}" "$TMPD/st" && { acol=1; ahd="${TAB}ALERT"; break; }; done
   {
-    printf 'APP\tSTATE\tDEPLOYED\tMEMORY\tCPU\tUP\tLOGS\tLINK\n'
+    printf 'APP\tSTATE%s\tDEPLOYED\tMEMORY\tCPU\tUP\tLOGS\tLINK\n' "$ahd"
     while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx; do
       [ "$r" = app ] || continue
       n=$((n + 1))
@@ -211,7 +237,8 @@ render_ls() {
       upt=- dep=-
       [ "$state" = running ] && upt=$(ui_dur "$up")
       [ "$state" = "not deployed" ] || dep=$(ago "$(id_epoch "$rel")")
-      printf '%s\t%s\t%s\t%s\t%s%%\t%s\t%s\t%s\n' "$a" "$(state_badge "$state")" "$dep" "$(mb "$mem")" \
+      if [ -n "$acol" ]; then firing_of "$a"; [ -n "$FIRED" ] && FIRED="${UI_RED}${FIRED}${UI_NC}"; FIRED="${TAB}${FIRED:--}"; fi
+      printf '%s\t%s%s\t%s\t%s\t%s%%\t%s\t%s\t%s\n' "$a" "$(state_badge "$state")" "${acol:+$FIRED}" "$dep" "$(mb "$mem")" \
         "$CPUP" "$upt" "$(mb "${lb:-}")" "$(short_link "$link")"
     done < "$TMPD/st"
   } > "$TMPD/rows"
@@ -222,7 +249,8 @@ render_ls() {
     ui_box_line "${UI_RED}caddy is not running: no app is reachable (tando doctor)${UI_NC}"
   ui_box_sep
   cache_apps
-  if [ $n -gt 0 ]; then ui_table "l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"   # LINK whole: other columns go first
+  if [ $n -gt 0 ] && [ -n "$acol" ]; then ui_table "l,l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"
+  elif [ $n -gt 0 ]; then ui_table "l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"   # LINK whole: other columns go first
   else ui_box_line "No apps on $HOST yet. In your app's directory: tando up"; fi
   worker_hint
   restore_hint

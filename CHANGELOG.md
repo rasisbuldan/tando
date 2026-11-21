@@ -6,6 +6,10 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: firing alerts per app. `tando ls` gets an ALERT column (only while something fires) with
+  the checks firing for each app; `tando top` shows them in red after the app's state and counts
+  them in the host strip (it showed none). `ls --json` and `status --json` have `alerts_firing`
+  and `firing` per app.
 - Fixed: `--watch` (ls, status, alerts, host status) no longer repaints old numbers as if they
   were new. The footer says how old the data is (`updated 2s ago`); a refresh that fails, or gets
   no answer within 15 s (it is cut there: a hung ssh used to freeze the screen), shows a red
