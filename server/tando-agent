@@ -353,16 +353,30 @@ drop_release() {
   return 0
 }
 
-# new_uid: a system uid no user or group has, and that no destroyed app had (its files in places
-# tando does not clean must never belong to a later app); the destroyed ones are in $R/retired-uids
+# new_uid: an id for a new app user or group from tando's own band (host.conf uid_min-uid_max,
+# default 30000-39999: the system range 200-999 ran out after about 250 apps made over a host's
+# life). No user or group has it (passwd and group are read once, then the one picked is asked of
+# NSS by number, as useradd does: a directory service need not list its users), and none that a
+# destroyed app had ($R/retired-uids: its files in places tando does not clean must not belong to
+# a later app) while the band has others; when only retired ones are left they are used again,
+# oldest first. Apps made before keep their ids.
+UID_MIN=30000 UID_MAX=39999
 new_uid() {
-  local u
-  for ((u = 999; u >= 200; u--)); do
-    getent passwd "$u" > /dev/null || getent group "$u" > /dev/null && continue
-    grep -qx "$u" "$R/retired-uids" 2> /dev/null && continue
+  local u lo=${H[uid_min]:-$UID_MIN} hi=${H[uid_max]:-$UID_MAX} used ret=" "
+  [[ $lo =~ ^[0-9]{3,9}$ && $hi =~ ^[0-9]{3,9}$ ]] && ((lo <= hi)) || { lo=$UID_MIN hi=$UID_MAX; }
+  used=" $( { getent passwd; getent group; } 2> /dev/null | cut -d: -f3 | tr '\n' ' ') "
+  [[ -f $R/retired-uids ]] && ret=" $(tr '\n' ' ' < "$R/retired-uids") "
+  local cands
+  if [[ -z ${NU_REUSE:-} ]]; then cands=$(seq "$lo" "$hi")
+  else cands=$(awk -v lo="$lo" -v hi="$hi" '$1 >= lo && $1 <= hi' "$R/retired-uids" 2> /dev/null); fi
+  for u in $cands; do
+    [[ $used == *" $u "* ]] && continue
+    [[ -z ${NU_REUSE:-} && $ret == *" $u "* ]] && continue
+    getent passwd "$u" > /dev/null || getent group "$u" > /dev/null && { used+="$u "; continue; }
     echo "$u"; return 0
   done
-  die "no free system uid left (200-999)"
+  [[ -z ${NU_REUSE:-} ]] && { NU_REUSE=1 new_uid; return; }
+  die "no free uid left in $lo-$hi (uid_min, uid_max in tando host setup)"
 }
 
 # domains: C[domains] = "example.com|redirect shop.example.org|off" (domain|www handling)
@@ -2164,6 +2178,9 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
     case $kv in
       port_min=*|port_max=*|preflight_min=*|preflight_max=*)
         [[ ${kv#*=} =~ ^[0-9]{4,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
+      uid_min=*|uid_max=*)   # the band of new app users' ids (new_uid); apps made before keep theirs
+        [[ ${kv#*=} =~ ^[1-9][0-9]{3,4}$ ]] && ((${kv#*=} >= 1000 && ${kv#*=} <= 59999)) || die "bad ${kv%%=*}: 1000 to 59999"
+        H[${kv%%=*}]=${kv#*=};;
       apps_domain=*) [[ ${kv#*=} =~ ^[a-z0-9.-]+$ ]] || die "bad apps_domain"; H[apps_domain]=${kv#*=};;
       tls=off|tls=internal|tls=auto) H[tls]=${kv#*=};;
       domain_tls=off|domain_tls=internal|domain_tls=auto) H[domain_tls]=${kv#*=};;
@@ -2221,6 +2238,7 @@ EOF
     printf '\nimport /etc/caddy/tando/*.caddy\n' >> /etc/caddy/Caddyfile
   for kv in "${!H[@]}"; do H[$kv]=$(int_norm "${H[$kv]}"); done
   port_ranges; port_ranges_ok || die "port ranges: $PR_WHY"
+  ((${H[uid_min]:-$UID_MIN} <= ${H[uid_max]:-$UID_MAX})) || die "uid_min must not be above uid_max"
   # an app whose port is outside the new range keeps it (fw_sync still closes it to other apps)
   save "$R/host.conf" H
   chmod 644 "$R/host.conf"

@@ -42,6 +42,8 @@ type host struct {
 	unit string           // list-units' answer before systemd-run ("" = not loaded)
 	ran  map[string]int   // calls per command word
 	pids map[int]struct{} // fake processes of the deploy user; Kill removes them
+	ents map[string]string // getent passwd / getent group (enumerated): its output
+	nss  map[string]bool   // ids getent finds by number only (a directory service that does not enumerate)
 }
 
 func newHost(t *testing.T) *host {
@@ -154,6 +156,12 @@ func (h *host) answer(argv []string) ([]byte, error) {
 			return []byte(h.unit), nil
 		}
 	case "getent":
+		if len(argv) == 2 {
+			return []byte(h.ents[argv[1]]), nil
+		}
+		if len(argv) == 4 && h.nss[argv[3]] {
+			return []byte("x"), nil
+		}
 		return nil, errors.New("not found")
 	case "uname":
 		return []byte("aarch64\n"), nil
@@ -730,12 +738,16 @@ func TestAdminSudoersRejected(t *testing.T) {
 
 func TestEnsureUserCreates(t *testing.T) {
 	h := newHost(t)
-	write(t, filepath.Join(h.g.P.Root, "retired-uids"), "999\n")
+	// from tando's band (30000-39999): not retired (30000), not in passwd (30001) or group (30002)
+	// as enumerated, not known to NSS by number (30003)
+	write(t, filepath.Join(h.g.P.Root, "retired-uids"), "999\n30000\n")
+	h.ents = map[string]string{"passwd": "test-z:*:30001:1::/:/usr/sbin/nologin\n", "group": "g:x:30002:\n"}
+	h.nss = map[string]bool{"30003": true}
 	write(t, filepath.Join(h.g.appDir("bravo"), "app.conf"), "recipe=node\n")
 	os.MkdirAll(h.g.incoming("bravo"), 0o755)
-	h.g.ensureUser("bravo") // (ends at handing incoming/ to uid 998, which a test cannot do)
+	h.g.ensureUser("bravo") // (ends at handing incoming/ to uid 30004, which a test cannot do)
 	a := strings.Join(h.argvs(), "\n")
-	want := "useradd --system --user-group --no-create-home --home-dir ROOT/ci/bravo --shell GATE -u 998 --comment tando CI deploys for bravo -- tando-d-bravo\nusermod -p * -- tando-d-bravo"
+	want := "useradd --system --user-group --no-create-home --home-dir ROOT/ci/bravo --shell GATE -u 30004 --comment tando CI deploys for bravo -- tando-d-bravo\nusermod -p * -- tando-d-bravo"
 	if !strings.Contains(a, want) {
 		t.Errorf("ran:\n%s\nwant:\n%s", a, want)
 	}
@@ -885,5 +897,21 @@ func TestReceiveHoldsLockUntilActive(t *testing.T) {
 	h.g.Root([]string{"alpha", "receive"})
 	if polls.Load() < 60 || freed.Load() {
 		t.Fatalf("%d polls; lock free while the unit was not active yet: %v", polls.Load(), freed.Load())
+	}
+}
+
+// TestNewUIDBand: host.conf's uid_min/uid_max set the band; when every id of it is taken or
+// retired, a retired one is used again (the oldest first), and only then it fails.
+func TestNewUIDBand(t *testing.T) {
+	h := newHost(t)
+	write(t, filepath.Join(h.g.P.Root, "host.conf"), "uid_min=40000\nuid_max=40002\n")
+	write(t, filepath.Join(h.g.P.Root, "retired-uids"), "40001\n40000\n")
+	h.ents = map[string]string{"passwd": "test-y:*:40002:1::/:/usr/sbin/nologin\n"}
+	if u, err := h.g.newUID(); err != nil || u != 40001 {
+		t.Errorf("got %d %v, want 40001 (the oldest retired one)", u, err)
+	}
+	h.ents["group"] = "a:x:40001:\nb:x:40000:\n"
+	if _, err := h.g.newUID(); err == nil || !strings.Contains(err.Error(), "no free uid left in 40000-40002") {
+		t.Errorf("%v", err)
 	}
 }

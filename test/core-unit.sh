@@ -188,5 +188,27 @@ check "U7e ... and every file is back as it was" eq "$(sort "$T/after" | tr '\n'
 cis ok
 check "U7f nothing staged: no validation, no reload" eq "$(grep -c 'validate\|reload' "$T/calls")" 0
 
+# ---- U8 new_uid: app users and groups get ids from tando's band (uid_min-uid_max, default
+# 30000-39999), not from 200-999 (used up after about 250 apps over a host's life); passwd and
+# group are read once (getent per id forked 2 x 800 times); a retired id is used again only when
+# the band has no other, the oldest first. (getent: a stub over $T/passwd, $T/group, $T/nss)
+nu() { # [uid_min uid_max] -> the id new_uid picks, or "none"
+  # shellcheck disable=SC2016
+  R=$T LO=${1:-} HI=${2:-} "$BASH" -c 'eval "$1"; die() { echo none; exit 1; }
+    getent() { if [ $# = 1 ]; then cat "$R/$1"; echo "$1" >> "$R/calls"; else grep -qx "$2" "$R/nss"; fi; }
+    H_uid_min=$LO H_uid_max=$HI
+    UID_MIN=30000 UID_MAX=39999
+    new_uid' _ "$(agent_fn new_uid | sed 's/\${H\[uid_min\]:-/${H_uid_min:-/; s/\${H\[uid_max\]:-/${H_uid_max:-/')"
+}
+printf 'root:x:0:0::/:/bin/sh\ntando-x:x:30000:30000::/:/usr/sbin/nologin\n' > "$T/passwd"
+printf 'root:x:0:\ng:x:30001:\n' > "$T/group"; echo 30002 > "$T/nss"; printf '999\n30003\n' > "$T/retired-uids"
+: > "$T/calls"
+check "U8a from the band: not a user's, group's, NSS's or retired id" eq "$(nu)" 30004
+check "U8b passwd and group are read once each" eq "$(sort "$T/calls" | tr '\n' ' ')" "group passwd "
+printf '30003\n30005\n30004\n' > "$T/retired-uids"
+check "U8c only retired ones left: the oldest is used again" eq "$(nu 30003 30005)" 30003
+printf 'root:x:0:\ng:x:30001:\nh:x:30003:\n' > "$T/group"
+check "U8d none at all: fails" eq "$(nu 30003 30003)" none
+
 echo "core-unit: $n checks, $nf failed"
 [ "$nf" = 0 ]
