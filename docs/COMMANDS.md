@@ -388,7 +388,9 @@ Example: `tando restore --from-host 3f9a01c2b7de --all -H newvps`
 `tando ls [-H host] [--all] [--watch N] [--json]`. Arguments: none. `-a` is refused.
 The apps of a server: state, deploy age, memory, cpu, uptime, link (never cut: other columns are
 dropped first at 80 columns). `--all`: every registered server, with `--watch` and `--json`. A
-worker that does not run while its app does gets a line under the table.
+worker that does not run while its app does gets a line under the table. `--json` has `apps` and
+`alerts` (each alert's app, check, state `firing` or `pending`, since, detail; a host check has app
+`host`); with `--all`, a server that did not answer is `{"host", "error"}`.
 Example: `tando ls --all`
 
 ### alerts
@@ -784,3 +786,44 @@ Example: `tando ssh shop -- node scripts/migrate.js`
 ### cheat
 `tando cheat`. The commands that matter on one screen. No server call.
 Example: `tando cheat`
+
+### menubar
+`tando menubar install [--dry-run]` · `uninstall [--dry-run]` · `status` · `build --out DIR`. macOS
+only. A menu bar icon for every registered server, and an outside heartbeat from the laptop.
+- `install` compiles `macos/menubar/*.swift` with `swiftc` (the Command Line Tools are enough:
+  `xcode-select --install`; no Xcode, no packages), makes `~/Applications/tando.app` (no Dock icon),
+  signs it ad hoc (`codesign -s -`), writes `$TANDO_CONFIG_DIR/menubar.conf` (which `tando` to run:
+  the launcher you ran install with, since a LaunchAgent has no PATH of yours) and the LaunchAgent
+  `~/Library/LaunchAgents/local.tando.menubar.plist` (RunAtLoad: it starts at login; Quit stops it
+  until the next login), and starts it. `--dry-run` prints all of that and changes nothing. Run it
+  again after a tando update: it rebuilds the app and keeps your settings.
+- `uninstall` stops it and removes the app, the LaunchAgent and menubar.conf. `status`: installed,
+  running, which tando, the interval. `build --out DIR` only compiles and signs `DIR/tando.app`.
+- **What it checks**, every `interval` seconds (menubar.conf, default 60), one check at a time, each
+  stopped after `timeout` seconds (default 45): `tando ls --all --json` (one ssh connection per
+  server: the apps, their state and the firing alerts), then a GET of every running app's link from
+  the laptop (8 s limit; any answer below 500 counts as up). Also at once after the Mac wakes or
+  comes back online.
+- **The icon.** Plain: all is well. A red count: the problems now, where each is one of a server the
+  laptop cannot reach, an app with something wrong (down or failed, a link that failed two checks in
+  a row, or a firing alert: an app counts once), and a firing host check (disk, memory, ...). Dimmed:
+  nothing could be checked (the laptop is offline, or tando failed or timed out); the last menu stays.
+  Pending alerts and apps you stopped are not problems.
+- **The menu.** The last check time; per server its apps with a coloured dot and their state (each
+  with "Open <link>" and "Open status in Terminal", which runs `tando status <app> -H <server>`); a
+  server it cannot reach, with the reason; the firing alerts; Refresh now (⌘R); Open status in
+  Terminal (`tando ls --all`); Quit.
+- **Notifications.** Once per new problem (more than 3 at once: one summary) and once when it is
+  resolved. A server that cannot be reached hides its other problems until it answers again (they
+  are not reported as resolved). Delivered through macOS notifications (allow them when asked;
+  System Settings, Notifications, tando); if the system refuses to register the ad-hoc signed app,
+  through `osascript` (shown as Script Editor). `notify=off` in menubar.conf turns them off.
+- **Only while the laptop is on and online.** This heartbeat watches from outside the server, so it
+  sees what a visitor sees, but it is asleep when the laptop is. It complements `tando alerts
+  heartbeat` to an outside service (docs/MONITORING.md, "From outside"), which keeps watching
+  around the clock; it does not replace it.
+- It stores no credentials (it runs your tando, which uses your ssh setup), opens no listening
+  socket, and sends nothing anywhere but the ssh connections and the requests to your apps' links.
+  The app's `--once [--checks N]` prints one check as text:
+  `~/Applications/tando.app/Contents/MacOS/tando-menubar --once`.
+Example: `tando menubar install`

@@ -318,6 +318,17 @@ else
     echo "native: ${nt_n% *} checks, ${nt_n#* } failed"
 fi
 
+# ---- the macOS menu bar app (test/menubar-test.sh: the ls --json alerts, a swiftc build into a temp
+# dir, the badge logic on canned JSON, the app's --once mode; SKIP lines without swiftc)
+mt=$("$BASH_BIN" "$here/test/menubar-test.sh" 2>&1)
+printf '%s\n' "$mt" | grep '^FAIL\|^SKIP' || true
+mt_n=$(printf '%s\n' "$mt" | sed -n 's/^menubar: \([0-9]*\) checks, \([0-9]*\) failed$/\1 \2/p')
+if [[ -z $mt_n ]]; then bad "menubar-test.sh did not finish: $(printf '%s\n' "$mt" | tail -3)"
+else
+    checks=$((checks + ${mt_n% *})); fails=$((fails + ${mt_n#* }))
+    echo "menubar: ${mt_n% *} checks, ${mt_n#* } failed"
+fi
+
 # ---- what tando init detects for each framework fixture (test/detect-test.sh: test/fixtures/apps)
 dt=$("$BASH_BIN" "$here/test/detect-test.sh" 2>&1)
 printf '%s\n' "$dt" | grep '^FAIL' || true

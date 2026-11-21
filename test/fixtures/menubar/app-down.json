@@ -1,0 +1,1 @@
+{"hosts":[{"host":"vps","apps":[{"app":"web","state":"down","link":"https://web.example.com"},{"app":"site","state":"static","link":"https://site.example.com"},{"app":"old","state":"stopped","link":"https://old.example.com"}],"alerts":[]},{"host":"lab","apps":[{"app":"api","state":"running","link":"http://api.lab.example.net:8080"}],"alerts":[]}]}

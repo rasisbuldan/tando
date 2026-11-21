@@ -1,0 +1,1 @@
+{"hosts":[{"host":"vps","apps":[{"app":"a","state":"down","link":null},{"app":"b","state":"failed","link":null},{"app":"c","state":"down","link":null},{"app":"d","state":"down","link":null}],"alerts":[]}]}

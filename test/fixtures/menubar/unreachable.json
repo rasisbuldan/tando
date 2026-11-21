@@ -1,0 +1,1 @@
+{"hosts":[{"host":"vps","error":"no answer"},{"host":"lab","apps":[{"app":"api","state":"running","link":"http://api.lab.example.net:8080"}],"alerts":[]}]}

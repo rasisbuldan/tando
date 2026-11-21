@@ -14,7 +14,7 @@
 #
 # Needs only what tando needs: /bin/bash (3.2 or newer), ssh, rsync, and curl for downloads.
 # Layout: PREFIX/lib/tando/ holds bin/, lib/, server/ (with the Go programs in server/linux-<cpu>/),
-# templates/, completions/, VERSION, .manifest;
+# templates/, completions/, macos/ (the menu bar app's source: tando menubar install), VERSION, .manifest;
 # PREFIX/bin/tando is a symlink to it; completions go to PREFIX/share/bash-completion/completions/tando
 # and PREFIX/share/zsh/site-functions/_tando. An update replaces the tree in one rename.
 # uninstall.sh removes exactly what .manifest lists. Settings in ~/.config/tando are never touched.
@@ -125,7 +125,7 @@ run() { $SUDO "$@"; }
 dest=$prefix/lib/tando
 run mkdir -p "$prefix/lib" "$prefix/bin" || die "cannot create $prefix/lib and $prefix/bin"
 new=$(run mktemp -d "$prefix/lib/.tando-new.XXXXXX") || die "cannot write to $prefix/lib"
-for d in bin lib server templates completions; do   # what tando reads from $TANDO_HOME
+for d in bin lib server templates completions macos; do   # what tando reads from $TANDO_HOME
   [ -d "$src/$d" ] && { run cp -R "$src/$d" "$new/" || die "copy failed"; }
 done
 for f in VERSION README.md CHANGELOG.md LICENSE install.sh uninstall.sh; do
