@@ -38,6 +38,7 @@ func TestNoExecNoNetworkListener(t *testing.T) {
 		execs := 0
 		for _, im := range af.Imports {
 			p, _ := strconv.Unquote(im.Path.Value)
+			// lint: allow RL15 the one front file that may import os/exec
 			if spawn && p == "os/exec" && im.Name == nil {
 				continue
 			}
