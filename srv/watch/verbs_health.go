@@ -45,7 +45,7 @@ func (w Watch) Health(o *out.Writer, args []string) error {
 	}
 	for _, a := range list {
 		var fir []string
-		for _, c := range []string{"down", "health", "oom", "restarts", "http", "slow", "errors", "logs", "memory", "disk", "db_conns"} {
+		for _, c := range []string{"down", "health", "oom", "restarts", "http", "slow", "errors", "logs", "memory", "disk", "db_conns", "db_deadlock", "db_wrap", "db_wrap_warn"} {
 			if st.get(a+"."+c+".st") == "firing" {
 				fir = append(fir, c)
 			}

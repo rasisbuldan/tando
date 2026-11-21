@@ -322,8 +322,8 @@ func TestPostgresAskedOnlyWithADatabaseOnceARunWithTimeouts(t *testing.T) {
 			t.Fatalf("psql call without its user, timeouts or with the connections not last: %+v", c)
 		}
 	}
-	if sizes != 2 { // disk_every=10: at the first run and ten minutes later
-		t.Errorf("sizes asked %d times in 11 minutes, want 2", sizes)
+	if sizes != 3 { // every 5 minutes (disk_every=10 is longer): at the first run, 5 and 10 minutes later
+		t.Errorf("sizes asked %d times in 11 minutes, want 3", sizes)
 	}
 	if vs := f.vstate(); vs["pgsz.hog"] != "8388608" || vs["pgc.hog"] != "2" || vs["pgl.hog"] != "10" || vs["pgc.plain"] != "" {
 		t.Errorf("volatile state: %v", vs)
