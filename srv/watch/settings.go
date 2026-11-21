@@ -65,7 +65,9 @@ var (
 	hostChecks = []string{"disk", "inodes", "host_memory", "swap", "load", "host_oom", "caddy", "caddy_config", "firewall", "monitor", "postgres"}
 )
 
-func lowSeverity(check string) bool { return check == "logs" || check == "ssh" || check == "db_wrap_warn" }
+func lowSeverity(check string) bool {
+	return check == "logs" || check == "ssh" || check == "db_wrap_warn"
+}
 
 // textSettings are the settings that are not numbers.
 func textSetting(k string) bool {

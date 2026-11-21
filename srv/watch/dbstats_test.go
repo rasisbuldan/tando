@@ -73,7 +73,9 @@ func TestDBStatsPerVersion(t *testing.T) {
 				t.Errorf("PG %s: asked another version's statement %q", tt.ver, other)
 			}
 		}
-		if first := f.pgCmds[0].Argv; slices.ContainsFunc(first, func(a string) bool { return strings.Contains(a, "pg_stat_bgwriter") || strings.Contains(a, "pg_stat_checkpointer") }) {
+		if first := f.pgCmds[0].Argv; slices.ContainsFunc(first, func(a string) bool {
+			return strings.Contains(a, "pg_stat_bgwriter") || strings.Contains(a, "pg_stat_checkpointer")
+		}) {
 			t.Errorf("PG %s: the first run (version not known yet) asked a version-dependent statement", tt.ver)
 		}
 		l := dbLines(t, f)
@@ -142,7 +144,7 @@ func TestDBStatsOnceAMinute(t *testing.T) {
 	pgVersion(f, "160004", false)
 	f.tick()
 	f.now = f.now.Add(-50 * time.Second) // (tick moved the clock a minute on)
-	f.tick() // a second run 10 s later: re-evaluates, writes nothing
+	f.tick()                             // a second run 10 s later: re-evaluates, writes nothing
 	if n := len(dbLines(t, f)); n != 1 {
 		t.Errorf("%d lines from two runs 10 s apart, want 1", n)
 	}
