@@ -71,6 +71,7 @@ check "i3 status: installed version, same as the client, not running" \
 out=$(r dashboard --version 2>&1)
 check "i4 'tando dashboard' runs tando-dash ('$out')" t_eq "$out" "tando-dash $V"
 if [ "$(uname -s)" = Darwin ]; then
+  # shellcheck disable=SC2034  # bad: read by the eval below
   bad=$(grep -v "^-d com.apple.quarantine $LIB/$V/" "$E/xattr.log")
   check "q1 the quarantine attribute is removed from the files of the verified archive and from nothing else ($(wc -l < "$E/xattr.log" | tr -d ' ') calls)" \
     eval 'test -s "$E/xattr.log" && test -z "$bad" && grep -q "^-d com.apple.quarantine $LIB/$V/tando-dash\$" "$E/xattr.log"'
@@ -84,7 +85,7 @@ check "i6 'addon install' without a name, or with an unknown one, says what exis
   eval 'test $rc != 0 && test $rc2 != 0 && grep -q "which add-on" "$E/n1.out" && grep -q "there is: dashboard" "$E/n2.out"'
 
 # ---- refusals: each in a fresh HOME so "nothing installed" is a fact ---------------------------
-fresh() { rm -rf "$E/h2"; mkdir -p "$E/h2"; HOME=$E/h2; export HOME; : > "$E/xattr.log"; }
+fresh() { rm -rf "${E:?}/h2"; mkdir -p "$E/h2"; HOME=$E/h2; export HOME; : > "$E/xattr.log"; }
 untouched() { [ ! -e "$E/h2/.local" ] && [ ! -s "$E/xattr.log" ]; }
 fresh
 cp "$A/$ASSET" "$E/bad.tar.gz"; cp "$A/$ASSET.sha256" "$E/bad.tar.gz.sha256"; printf 'x' >> "$E/bad.tar.gz"

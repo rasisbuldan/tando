@@ -116,7 +116,7 @@ ad_install() {
   # only now is anything looked at: safe names, plain files, one directory
   tar -tzf "$tmp/a.tgz" > "$tmp/list" 2> /dev/null || die "addon: not a tar.gz archive"
   if grep -qE '^/|(^|/)\.\.(/|$)' "$tmp/list"; then die "addon: archive has unsafe paths (nothing was installed)"; fi
-  tar -tvzf "$tmp/a.tgz" 2> /dev/null | grep -q '^[lh]' && die "addon: archive has links (nothing was installed)"
+  tar -tvzf "$tmp/a.tgz" 2> /dev/null | grepq '^[lh]' && die "addon: archive has links (nothing was installed)"
   mkdir "$tmp/x" && tar -xzf "$tmp/a.tgz" -C "$tmp/x" || die "addon: cannot unpack the archive"
   [ "$(find "$tmp/x" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ] || die "addon: archive must hold one directory"
   d=$(find "$tmp/x" -mindepth 1 -maxdepth 1 -type d | head -1)
