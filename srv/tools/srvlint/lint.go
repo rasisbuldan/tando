@@ -77,7 +77,7 @@ var pathResolvers = map[string]int{
 }
 
 // layering: the layer of a package is the first element of its directory under srv/.
-var domains = map[string]bool{"watch": true, "logs": true, "metrics": true, "gate": true, "status": true, "studio": true}
+var domains = map[string]bool{"watch": true, "logs": true, "metrics": true, "gate": true, "status": true, "studio": true, "live": true}
 
 // forbiddenImports are refused everywhere outside the tests, whatever the name they get.
 var forbiddenImports = map[string]string{

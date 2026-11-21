@@ -150,6 +150,9 @@ func (s *Server) pollHint(r *http.Request) int {
 	if r.URL.Query().Get("visible") == "0" {
 		return s.cfg.PollHidden
 	}
+	if _, ok := s.cfg.Runner.(Streamer); ok && s.cfg.LivePoll > 0 { // (a live line answers each poll; live.go)
+		return s.cfg.LivePoll
+	}
 	return s.cfg.PollVisible
 }
 
@@ -164,10 +167,20 @@ type snapOut struct {
 	Data      json.RawMessage `json:"data"`
 }
 
-// fetchSnap: the cached snapshot of (host, app, range)
-func (s *Server) fetchSnap(ctx context.Context, host, app, rng string) (entry, bool, error) {
+// fetchSnap: the snapshot of (host, app, range): the server's live line when it has one (live.go;
+// an app's own snapshot under it, cached), else the cached snapshot. visible: a page on screen
+// (visible=1: the web app always says; a follow starts only then).
+func (s *Server) fetchSnap(ctx context.Context, host, app, rng string, visible bool) (entry, bool, error) {
 	key := host + "\x00" + app + "\x00" + rng
-	return s.snaps.get(ctx, s.base, key, s.cfg.CacheTTL, s.cfg.ReadTimeout, s.cfg.Now, s.jsonRun(host, argvSnapshot(host, app, rng)))
+	live, at, ok := s.liveFrame(host, visible)
+	if ok && app == "" && rng == "" {
+		return entry{data: live, at: at}, true, nil
+	}
+	e, cached, err := s.snaps.get(ctx, s.base, key, s.cfg.CacheTTL, s.cfg.ReadTimeout, s.cfg.Now, s.jsonRun(host, argvSnapshot(host, app, rng)))
+	if err == nil && ok {
+		e.data, e.at = liveOver(e.data, live, app), at
+	}
+	return e, cached, err
 }
 
 // GET /api/snapshot?host=&app=&range=&visible=
@@ -188,7 +201,7 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 404, "no_host", "no host named "+host+" (tando host ls)")
 		return
 	}
-	e, cached, err := s.fetchSnap(r.Context(), host, app, rng)
+	e, cached, err := s.fetchSnap(r.Context(), host, app, rng, r.URL.Query().Get("visible") == "1")
 	poll := s.pollHint(r)
 	if err != nil {
 		if r.Context().Err() != nil {
@@ -221,7 +234,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			e, cached, err := s.fetchSnap(r.Context(), h, "", "")
+			e, cached, err := s.fetchSnap(r.Context(), h, "", "", r.URL.Query().Get("visible") == "1")
 			if err != nil {
 				out[i] = hostOut{Host: h, Error: cliErr(err)}
 				return

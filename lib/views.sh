@@ -374,6 +374,7 @@ watch_note() {
   local age=$((SECONDS - ${WATCH_OK:-$SECONDS}))
   if [ -n "${WATCH_FAIL:-}" ]; then
     printf '%sSTALE: data %s old, reconnecting%s %s Ctrl-C stops' "$UI_RED" "$(ui_dur "$age")" "$UI_NC$UI_DIM" "$UI_G_MID"
+  elif [ -n "$LIVE" ]; then printf 'live %s updated %s ago %s Ctrl-C stops' "$UI_G_MID" "$(ui_dur "$age")" "$UI_G_MID"
   else printf 'updated %s ago %s every %ss %s Ctrl-C stops' "$(ui_dur "$age")" "$UI_G_MID" "$WATCH" "$UI_G_MID"; fi
 }
 # watch_stale_line: under --watch after a failed refresh, one red line saying why (top of a view)
@@ -459,7 +460,9 @@ render_status() {
   else
     ui_kv memory "$(mb "$mem") (no cap)  ${UI_DIM}in use, not cache${UI_NC}"
   fi
-  ui_kv cpu "$CPUP  ${UI_DIM}last minute${UI_NC}"
+  local win=minute
+  [ -n "$LIVE" ] && win="5 s"
+  ui_kv cpu "$CPUP  ${UI_DIM}last $win${UI_NC}"
   worker_lines
   local rcid rcsf rcwh
   while IFS=$TAB read -r r _x rcid rcsf rcwh _y; do
@@ -1007,6 +1010,10 @@ WATCH_TIMEOUT=15
 watch_loop() {
   local render=$1 fetch=$2
   shift 2
+  if [ -n "$LIVE" ]; then
+    if [ "$fetch" = fetch_status ]; then follow_loop "$render" "$@"; return; fi
+    LIVE=""   # (ls --all: each server polled every 5 s)
+  fi
   $fetch "$@" || exit 1
   if [ -z "$WATCH" ]; then $render; return; fi
   trap 'UI_WINCH=1' WINCH
@@ -1037,6 +1044,69 @@ watch_fetch() {
   WATCH_FAIL=$(strip < "$TMPD/wf.err" 2> /dev/null | grep . | tail -1)
   WATCH_FAIL=${WATCH_FAIL:-the refresh failed}
   return 1
+}
+
+# follow_loop render [app]: --follow. One ssh session for the whole view: the server pushes a frame
+# of status rows every 5 s (tando-status follow: tandod's fast loop, the whole status once a
+# minute), read here from a fifo so a silent server shows as stale (WATCH_TIMEOUT) and a session
+# that ends is opened again. A server that sends no frame at all (an older agent, no tandod, no
+# cgroup v2) is polled every 5 s instead, as --watch 5 does. FOLLOW_RAW=1 (snapshot --follow, for
+# the dashboard): render prints each frame as it is, a stale or ended session is not painted, and
+# with no first frame it exits 3 (the caller polls).
+follow_loop() {
+  local render=$1 app=${2:-} fifo=$TMPD/live.fifo pid l pre frames=0 last s="sudo -n"
+  [ -z "$app" ] || valid_app "$app" || die "bad app name"
+  # (from the dashboard: its audit lines say so, as agent_raw does)
+  [ "${TANDO_FROM:-}" = dashboard ] && [ -z "${DEPLOY_KEY:-}" ] && s="TANDO_FROM=dashboard sudo -n"
+  rm -f "$fifo"
+  if ! mkfifo -m 600 "$fifo" 2> /dev/null; then
+    [ -n "${FOLLOW_RAW:-}" ] && exit 3
+    LIVE=""; watch_loop "$render" fetch_status ${app:+"$app"}; return
+  fi
+  trap 'UI_WINCH=1' WINCH
+  trap 'exit 0' INT
+  WATCH_OK=$SECONDS WATCH_FAIL=""
+  while :; do
+    # lint: allow RL04 AGENT_BIN is a constant path, app passed valid_app above, s is one of two constants
+    ssh "${SSHO[@]}" -n "$TARGET" "$s $AGENT_BIN status-follow${app:+ $app}" > "$fifo" 2> "$TMPD/live.err" &
+    pid=$! last=$SECONDS pre=""
+    exec 7< "$fifo"
+    : > "$TMPD/live.frame"
+    while :; do
+      l=""   # (bash 3.2 leaves the last line in l when a read times out)
+      if IFS= read -r -t 1 l <&7; then
+        l=$pre$l pre="" last=$SECONDS
+        case $l in
+          "@frame "*) : > "$TMPD/live.frame";;
+          "@end") strip < "$TMPD/live.frame" > "$TMPD/st"; NOW=$(now)
+                  frames=$((frames + 1)) WATCH_OK=$SECONDS WATCH_FAIL=""; follow_paint "$render";;
+          *) printf '%s\n' "$l" >> "$TMPD/live.frame";;
+        esac
+        continue
+      fi
+      pre=$pre$l   # (a line cut by the timeout goes on in the next read)
+      kill -0 "$pid" 2> /dev/null || break   # the session ended
+      if [ $((SECONDS - last)) -ge "$WATCH_TIMEOUT" ] && [ $frames -gt 0 ]; then
+        WATCH_FAIL="no answer within $WATCH_TIMEOUT s" last=$SECONDS; follow_paint "$render"
+        # silent twice as long: a session gone without a word; a new one
+        [ $((SECONDS - WATCH_OK)) -ge $((2 * WATCH_TIMEOUT)) ] && kill "$pid" 2> /dev/null
+      fi
+    done
+    exec 7<&-
+    wait "$pid" 2> /dev/null
+    if [ $frames = 0 ]; then   # no live view there: poll (the first fetch says why it fails, if it does)
+      [ -n "${FOLLOW_RAW:-}" ] && exit 3
+      LIVE=""; watch_loop "$render" fetch_status ${app:+"$app"}; return
+    fi
+    WATCH_FAIL=$(strip < "$TMPD/live.err" 2> /dev/null | grep . | tail -1)
+    WATCH_FAIL=${WATCH_FAIL:-the connection ended}
+    follow_paint "$render"
+    sleep 2   # (then a new session)
+  done
+}
+follow_paint() {
+  if [ -n "${FOLLOW_RAW:-}" ]; then [ -n "$WATCH_FAIL" ] || $1; return 0; fi
+  ui_frame_begin; $1; ui_frame_end
 }
 
 cmd_backup_ls() {

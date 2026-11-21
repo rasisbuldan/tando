@@ -411,7 +411,7 @@ final class Controller: NSObject, NSMenuDelegate {
                     sub.addItem(o)
                 }
                 let st = NSMenuItem(title: "Open status in Terminal", action: #selector(openStatus(_:)), keyEquivalent: "")
-                st.target = self; st.representedObject = ["status", a.name, "-H", h.name, "--watch", "5"]
+                st.target = self; st.representedObject = ["status", a.name, "-H", h.name, "--follow"]
                 sub.addItem(st)
                 i.submenu = sub
                 menu.addItem(i)
@@ -446,7 +446,8 @@ final class Controller: NSObject, NSMenuDelegate {
     }
 
     /// Opens Terminal on `tando <args>` through a .command file (no Apple Events permission needed).
-    /// The menu's commands carry `--watch 5`: a live view that refreshes until Ctrl-C, like `top`,
+    /// The menu's commands are live views that refresh until Ctrl-C, like `top` (an app's status
+    /// `--follow`: pushed every 5 s over one ssh session; every server's list `--watch 5`),
     /// not one print that goes stale while the window stays open.
     @objc func openStatus(_ sender: NSMenuItem) {
         guard let args = sender.representedObject as? [String] else { return }
