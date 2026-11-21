@@ -9,9 +9,9 @@ You need: a Mac or Linux laptop, and a server with Ubuntu 24.04 or newer where y
 **1. Install tando on your laptop.**
 Download a release archive from the GitHub Releases page, then:
 
-    ./install.sh --from tando-0.1.1.tar.gz
+    ./install.sh --from tando-0.2.0.tar.gz
 
-You should see `tando 0.1.1 installed`. Open a new terminal if `tando` is not found.
+You should see `tando 0.2.0 installed`. Open a new terminal if `tando` is not found.
 (From a checkout of the repository, `./install.sh` also works; it needs Go to build the server programs.)
 
 **2. Check that you can log in to the server.**

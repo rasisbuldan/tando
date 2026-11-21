@@ -6,6 +6,8 @@ first, grouped by area.
 
 ## Unreleased
 
+## 0.2.0 - 2026-11-21
+
 - Fixed: with `spa = true`, an older release's fingerprinted file (and a missing one) was
   answered with index.html (200, text/html): the single-page fallback is a rewrite, which Caddy
   runs before the shared assets handle. The fallback now leaves the assets prefixes alone: an
