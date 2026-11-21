@@ -6,6 +6,14 @@ first, grouped by area.
 
 ## Unreleased
 
+- New: one package of a monorepo deploys from its own directory (`cd apps/api && tando up`) with
+  no extra settings, for pnpm and npm workspaces. tando up installs the workspace at its root on a
+  fresh clone, builds in the package, and ships the package with every package it uses at run time
+  (`workspace:*` packages and their dependencies) as real files, read from the workspace's
+  node_modules (no `pnpm deploy`, no network); the root's lockfile verifies swapped platform
+  packages. `tando init` says it: "workspace: package apps/api of ../..". Yarn and Bun workspaces
+  and a Next.js package are still refused, with what to do (docs/RECIPES.md, "One package of a
+  monorepo"). A Next.js package used to get a tando.conf from init and be refused only at deploy; init refuses it now.
 - Fixed: the upgrade from 0.1.1 left each replaced job unit of the old name in `systemctl --failed`
   ("not-found failed") when its last run had failed, until the server rebooted. Seen on a real
   server during the 0.2.0 game day; the replaced units' failed state is now cleared (e2e-upgrade U3a2).

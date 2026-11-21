@@ -49,9 +49,11 @@ node_start() {
   note "node: no start script, main, server.js, index.js, app.js or main.js: set  start = node <file>  in tando.conf"
 }
 
-# node_pm: the package manager the lockfile names (what tando up installs the dependencies with)
+# node_pm: the package manager the lockfile names (what tando up installs the dependencies with);
+# for a package of a workspace, the workspace's lockfile and where it is
 node_pm() {
-  if [ -f pnpm-lock.yaml ]; then echo pnpm-lock.yaml
+  if ws_member; then echo "$WS_LOCK at $WS_UP"
+  elif [ -f pnpm-lock.yaml ]; then echo pnpm-lock.yaml
   elif [ -f yarn.lock ] && [ -f .yarnrc.yml ]; then echo "yarn.lock, Yarn 2+"
   elif [ -f yarn.lock ]; then echo yarn.lock
   elif [ -f bun.lock ] || [ -f bun.lockb ]; then echo bun.lock
@@ -59,25 +61,54 @@ node_pm() {
   else echo "no lockfile: npm"; fi
 }
 
-# ws_member_check: this directory is a package of a workspace (pnpm-workspace.yaml or "workspaces"
-# in package.json, with the lockfile, in a parent directory) and has no lockfile of its own: its
-# node_modules point into the root's (pnpm links them), so uploading it alone cannot work. Stops
-# with what to do instead. (Real support for deploying one package is a later feature.)
+# ws_member: this directory is a package of a workspace (pnpm-workspace.yaml or "workspaces" in
+# package.json, with the lockfile, in a parent directory) and has no lockfile of its own. Sets
+# WS_ROOT (the workspace root), WS_UP (it, relative: ../..), WS_REL (this package, from the
+# root) and WS_LOCK (the root's lockfile); fails when this is no member. Looked up once.
+ws_member() {
+  if [ "${WS_DONE:-}" != "$PWD" ]; then
+    WS_DONE=$PWD WS_ROOT="" WS_UP="" WS_REL="" WS_LOCK=""
+    local d=$PWD f l
+    if [ -f package.json ] && [ ! -f pnpm-lock.yaml ] && [ ! -f yarn.lock ] && [ ! -f package-lock.json ] &&
+       [ ! -f npm-shrinkwrap.json ] && [ ! -f bun.lock ] && [ ! -f bun.lockb ]; then
+      while [ "$d" != / ] && [ -n "$d" ]; do
+        d=$(dirname "$d") l=""
+        for f in pnpm-lock.yaml yarn.lock npm-shrinkwrap.json package-lock.json bun.lock bun.lockb; do
+          [ -f "$d/$f" ] && { l=$f; break; }
+        done
+        [ -n "$l" ] || continue
+        if [ -f "$d/pnpm-workspace.yaml" ] ||
+           { [ -f "$d/package.json" ] && [ -n "$(tr -d '\n\r' < "$d/package.json" | sed -n 's/.*"workspaces"[[:space:]]*:[[:space:]]*\([[{]\).*/\1/p')" ]; }; then
+          WS_ROOT=$d WS_LOCK=$l WS_REL=${PWD#"$d"/}
+          WS_UP=$(printf '%s\n' "$WS_REL" | sed 's#[^/][^/]*#..#g')
+        fi
+        break
+      done
+    fi
+  fi
+  [ -n "$WS_ROOT" ]
+}
+
+# ws_member_check: a package of a workspace deploys with what it uses from the workspace (stage
+# copies it in) when the workspace is a pnpm or npm one; Yarn and Bun workspaces, and a Next.js
+# package, are refused with what to do instead
 ws_member_check() {
-  local d=$PWD p root="" name
-  [ -f package.json ] || return 0
-  [ ! -f pnpm-lock.yaml ] && [ ! -f yarn.lock ] && [ ! -f package-lock.json ] && [ ! -f bun.lock ] && [ ! -f bun.lockb ] || return 0
-  while [ "$d" != / ] && [ -n "$d" ]; do
-    d=$(dirname "$d")
-    [ -f "$d/pnpm-lock.yaml" ] || [ -f "$d/yarn.lock" ] || [ -f "$d/package-lock.json" ] || [ -f "$d/bun.lock" ] || [ -f "$d/bun.lockb" ] || continue
-    if [ -f "$d/pnpm-workspace.yaml" ]; then root=$d; break; fi
-    [ -f "$d/package.json" ] && [ -n "$(tr -d '\n\r' < "$d/package.json" | sed -n 's/.*"workspaces"[[:space:]]*:[[:space:]]*\([[{]\).*/\1/p')" ] && { root=$d; break; }
-  done
-  [ -n "$root" ] || return 0
-  name=$(pkg_str name); p=${PWD#"$root"/}
-  die "this directory ($p) is a package of the workspace in $root: its dependencies are linked into the" \
-    "workspace's node_modules, so deploying it alone is not supported yet. Make a standalone copy" \
-    "(from $root: pnpm deploy --filter ${name:-<package>} <dir>, a directory outside the workspace) and run tando there"
+  ws_member || return 0
+  local name what
+  name=$(pkg_str name)
+  case $WS_LOCK in
+    pnpm-lock.yaml|package-lock.json|npm-shrinkwrap.json) ;;
+    *) case $WS_LOCK in yarn.lock) what=Yarn;; *) what=Bun;; esac
+       die "this directory ($WS_REL) is a package of the $what workspace in $WS_UP: deploying one package works" \
+         "for pnpm and npm workspaces, not yet for $what ones. Make a standalone copy of it (its own package.json," \
+         "lockfile and node_modules, outside the workspace) and run tando there";;
+  esac
+  if pkg_dep next; then
+    die "this directory ($WS_REL) is a package of the workspace in $WS_UP: a Next.js package of a monorepo is" \
+      "not supported yet. Make a standalone copy (from $WS_UP: pnpm deploy --filter ${name:-<package>} <dir>," \
+      "a directory outside the workspace) and run tando there"
+  fi
+  return 0
 }
 
 # node_framework: a Node framework whose build, start and output tando knows (the first that
@@ -85,15 +116,13 @@ ws_member_check() {
 # A workspace root (a monorepo) stops here: which package to deploy cannot be guessed.
 node_framework() {
   local b=npm\ run\ build v
-  ws_member_check
   pkg_script build > /dev/null || b=""
   if [ -f pnpm-workspace.yaml ] || [ -n "$(tr -d '\n\r' < package.json | sed -n 's/.*"workspaces"[[:space:]]*:[[:space:]]*\([[{]\).*/\1/p')" ]; then
     v=$(for d in */*/package.json; do [ -f "$d" ] && printf '%s ' "${d%/package.json}"; done)
     d=${v%% *}
     die "this is a monorepo (a workspace root${v:+ with ${v% }}): tando deploys one app from its own" \
-      "directory, with its dependencies installed there. Run tando init in that directory" \
-      "(cd ${d:-apps/web}) once its dependencies are installed there as a standalone project (a workspace package" \
-      "that links into the root's node_modules is not supported yet: pnpm deploy --filter <package> <dir> makes a standalone copy)"
+      "directory, with the workspace packages it uses. Run tando init in that directory" \
+      "(cd ${d:-apps/web}); pnpm and npm workspaces are supported"
   fi
   if pkg_dep nuxt; then
     recipe=node fw=Nuxt why="nuxt in package.json" build=${b:-npx nuxt build} out=.output start="node server/index.mjs"
@@ -151,6 +180,7 @@ cmd_init() {
     [ $# -eq 1 ] && [ -f "$1" ] && host=${1##*/}
   fi
   local fw="" why="" spa="" v
+  [ -f package.json ] && ws_member_check
   if [ -f package.json ] && pkg_dep next; then
     recipe=next build="npm run build" start="node server.js" fw=Next.js why="next in package.json"
     cfg=$(next_config)
@@ -198,6 +228,7 @@ cmd_init() {
   note "  build: ${build:-none}"
   note "  start: ${start:-none (Caddy serves the files)}"
   note "  output: $out${spa:+, SPA (unknown paths get index.html)}${v:+, Node $(node_major) ($v)}"
+  [ -f package.json ] && ws_member && note "  workspace: package $WS_REL of $WS_UP, shipped with the packages it uses"
   [ "$recipe" = next ] && out=.
   [ "$recipe" = static ] || [ ! -f .yarnrc.yml ] || (yarn_pnp) || true   # (says what to add; deploy refuses)
   if [ "$recipe" != static ]; then
@@ -486,7 +517,11 @@ stage() {
       # fsevents is macOS only (an optional dependency of vite, rollup, chokidar: they run without
       # it); its Mach-O file would stop the release at the native-code guard
       ex+=(--exclude=node_modules/fsevents)
-      sync_dir "$out" "$STAGE" "${ex[@]}" --exclude=/.tando --exclude=/tando.conf
+      if [ "$C_recipe" = node ] && [ "$out" = . ] && ws_member; then
+        stage_ws_member "${ex[@]}"
+      else
+        sync_dir "$out" "$STAGE" "${ex[@]}" --exclude=/.tando --exclude=/tando.conf
+      fi
       if [ -n "$C_data" ] && [ -e "$out/$C_data" ]; then
         STAGE_NOTE="$C_data/ not uploaded: it is the app's data directory on the server"
       elif [ -f "$out/.env" ]; then
@@ -500,6 +535,24 @@ stage() {
   native_fix
   guard
 }
+
+# stage_ws_member excludes...: a package of a workspace: its own files, and in node_modules the
+# packages it uses (workspace packages and their dependencies, from the workspace's node_modules,
+# lib/workspace.js), as real files: the release stands on its own on the server
+stage_ws_member() {
+  local n w
+  command -v node > /dev/null || sfail "a package of a workspace is staged with Node: install Node.js"
+  sync_dir . "$STAGE" "$@" --exclude=/.tando --exclude=/tando.conf --exclude=/node_modules
+  node "$TANDO_HOME/lib/workspace.js" deps . "$WS_ROOT" .tando/ws > "$TMPD/ws" 2> "$TMPD/ws.err" ||
+    sfail "cannot collect what $WS_REL uses from the workspace in $WS_UP: $(strip < "$TMPD/ws.err" | grep . | tail -1)" \
+      "(install it at the root first: $(ws_install))"
+  sync_dir .tando/ws/node_modules "$STAGE/node_modules" "$@" --exclude=/fsevents
+  rm -rf .tando/ws
+  n=$(grep -c . "$TMPD/ws"); w=$(awk -F'\t' '$4 == "workspace" { printf "%s%s", (n++ ? ", " : ""), $2 }' "$TMPD/ws")
+  STAGE_NOTE="workspace $WS_UP: $(plural "$n" package) copied in${w:+, of them from the workspace: $w}"
+}
+# ws_install: the command that installs the workspace at its root
+ws_install() { case $WS_LOCK in pnpm-lock.yaml) echo "pnpm install --frozen-lockfile";; *) echo "npm ci";; esac; }
 
 # container: the saved image (an OCI/docker archive, unpacked so unchanged layers are files that
 # rsync skips), or just the name of an image the server pulls
@@ -756,6 +809,8 @@ native_lockdir() {
   for f in pnpm-lock.yaml yarn.lock bun.lock bun.lockb npm-shrinkwrap.json package-lock.json; do
     [ -f "$d/$f" ] && { printf '%s\n' "$d"; return 0; }
   done
+  # a package of a workspace: the root's lockfile describes what was copied in
+  if [ "$d" = . ] && ws_member; then printf '%s\n' "$WS_ROOT"; return 0; fi
   echo .
 }
 

@@ -83,27 +83,45 @@ if [ -f "$T/monorepo/tando.conf" ] || ! grep -q 'monorepo (a workspace root with
   bad "monorepo: not refused with the packages: $(tr '\n' ' ' < "$T/monorepo.out")"
 fi
 
-# a package inside a workspace (pnpm install at the root linked its node_modules): init stops early
-# with what to do instead, and so does a deploy of it (it used to say "no lockfile: npm", then
-# stop at stage on "dangling symlink: node_modules/express")
-n=$((n + 1)); rm -rf "${T:?}/ws"; mkdir -p "$T/ws/apps/web/node_modules" "$T/ws/node_modules/.pnpm/express"
-printf 'packages:\n  - "apps/*"\n' > "$T/ws/pnpm-workspace.yaml"
-printf 'lockfileVersion: 9.0\n' > "$T/ws/pnpm-lock.yaml"
-printf '{ "name": "root", "private": true }\n' > "$T/ws/package.json"
+# a package inside a workspace (pnpm or npm workspaces; its dependencies are in the root's
+# node_modules): init detects it as a Node app and says where the workspace and its lockfile are
+# (it used to refuse with "deploying it alone is not supported yet")
+member() { # fixture member-dir: tando init in that package of a copy of the workspace
+  rm -rf "${T:?}/$1"; cp -R "$here/test/fixtures/apps/$1" "$T/$1"
+  (cd "$T/$1/$2" && "$ROOT/bin/tando" init < /dev/null) > "$T/$1.out" 2>&1
+}
+for v in pnpm:pnpm-lock.yaml npm:package-lock.json; do
+  n=$((n + 1)); member "ws-${v%%:*}" "apps/${v%%:*}-api"
+  if ! grep -qx 'start = node server.js' "$T/ws-${v%%:*}/apps/${v%%:*}-api/tando.conf" 2> /dev/null ||
+     ! grep -qx '  why: express in package.json, start script, '"${v#*:}"' at ../..' "$T/ws-${v%%:*}.out" ||
+     ! grep -qx '  workspace: package apps/'"${v%%:*}"'-api of ../.., shipped with the packages it uses' "$T/ws-${v%%:*}.out"; then
+    bad "ws-${v%%:*}: a workspace member is not detected with its workspace: $(tr '\n' ' ' < "$T/ws-${v%%:*}.out")"
+  fi
+  awk 'length > 80 { exit 1 }' "$T/ws-${v%%:*}.out" || bad "ws-${v%%:*}: a line of tando init is wider than 80 columns"
+done
+# a Yarn workspace member: still refused, at init and at deploy, saying which managers work
+n=$((n + 1)); rm -rf "${T:?}/ws"; mkdir -p "$T/ws/apps/web/node_modules" "$T/ws/node_modules/express"
+printf '{ "name": "root", "private": true, "workspaces": ["apps/*"] }\n' > "$T/ws/package.json"
+: > "$T/ws/yarn.lock"
 printf '{ "name": "web", "dependencies": { "express": "4.21.0" } }\n' > "$T/ws/apps/web/package.json"
 echo 'require("http").createServer((q, s) => s.end("hi")).listen(process.env.PORT)' > "$T/ws/apps/web/server.js"
-ln -s ../../../node_modules/.pnpm/express "$T/ws/apps/web/node_modules/express"
 (cd "$T/ws/apps/web" && "$ROOT/bin/tando" init < /dev/null) > "$T/ws.out" 2>&1
-if [ -f "$T/ws/apps/web/tando.conf" ] || ! grep -q 'is a package of the workspace in .*deploying it alone is not supported yet' "$T/ws.out" ||
-   ! grep -q 'pnpm deploy --filter web <dir>' "$T/ws.out" || grep -q 'no lockfile' "$T/ws.out"; then
-  bad "workspace member: init did not stop with the message: $(tr '\n' ' ' < "$T/ws.out")"
+if [ -f "$T/ws/apps/web/tando.conf" ] || ! grep -q 'is a package of the Yarn workspace in ../..: deploying one package works for pnpm and npm workspaces, not yet for Yarn' "$T/ws.out" || grep -q 'no lockfile' "$T/ws.out"; then
+  bad "yarn workspace member: init did not stop with the message: $(tr '\n' ' ' < "$T/ws.out")"
 fi
 n=$((n + 1))
 printf 'app = web\nhost = vps\nrecipe = node\nstart = node server.js\n' > "$T/ws/apps/web/tando.conf"
 mkdir -p "$T/cfg/hosts"; printf 'target=nobody@127.0.0.1\nport=9\nkey=\ninsecure=1\nkind=admin\n' > "$T/cfg/hosts/vps"
 (cd "$T/ws/apps/web" && "$ROOT/bin/tando" deploy < /dev/null) > "$T/ws2.out" 2>&1
-if ! grep -q 'is a package of the workspace in' "$T/ws2.out"; then
-  bad "workspace member: deploy did not stop early: $(tr '\n' ' ' < "$T/ws2.out")"
+if ! grep -q 'is a package of the Yarn workspace in' "$T/ws2.out"; then
+  bad "yarn workspace member: deploy did not stop early: $(tr '\n' ' ' < "$T/ws2.out")"
+fi
+# a Next.js package of a workspace: refused at init (not supported yet), nothing written
+n=$((n + 1)); rm -rf "${T:?}/wsn"; cp -R "$here/test/fixtures/apps/ws-npm" "$T/wsn"; mkdir -p "$T/wsn/apps/site"
+printf '{ "name": "site", "scripts": { "build": "next build" }, "dependencies": { "next": "15.0.0" } }\n' > "$T/wsn/apps/site/package.json"
+(cd "$T/wsn/apps/site" && "$ROOT/bin/tando" init < /dev/null) > "$T/wsn.out" 2>&1
+if [ -f "$T/wsn/apps/site/tando.conf" ] || ! grep -q 'a Next.js package of a monorepo is not supported yet' "$T/wsn.out"; then
+  bad "next workspace member: init did not refuse: $(tr '\n' ' ' < "$T/wsn.out")"
 fi
 # a standalone project with its own lockfile inside a directory tree that has a workspace above is no member
 n=$((n + 1)); : > "$T/ws/apps/web/package-lock.json"; rm "$T/ws/apps/web/tando.conf"

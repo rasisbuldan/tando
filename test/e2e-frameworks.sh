@@ -48,4 +48,18 @@ up sveltekit
 check "F5 SvelteKit: up (rc=$RC), node build answers its page and /health" \
   eval 'get sveltekit | grep -q "sveltekit fixture" && t_eq "$(get sveltekit /health)" ok'
 
+# F6. One package of a monorepo (a fresh clone: no node_modules anywhere), deployed from its own
+# directory: tando up installs the workspace at its root with its lockfile, and the release holds
+# the workspace package it uses (@fixture/greet, and greet's own dependency ms) as real files
+for pm in pnpm npm; do
+  rsync -a "$ROOT/test/fixtures/apps/ws-$pm/" "$W/ws-$pm/"
+  (cd "$W/ws-$pm/apps/$pm-api" && "$R" up < /dev/null) > "$E/ws-$pm.out" 2>&1; RC=$?
+  cat "$E/ws-$pm.out" >&2
+  check "F6a $pm workspace member: up (rc=$RC) and the workspace package answers" \
+    t_eq "$(get $pm-api)" "hello $pm workspace from the greet package (1m)"
+  case $pm in pnpm) i="\(corepack \)\{0,1\}pnpm install --frozen-lockfile";; npm) i="npm ci";; esac
+  check "F6b $pm: installed at the workspace root, detected as a member" \
+    eval 'grep -q "installed dependencies: $i, in ../.." "$E/ws-$pm.out" && grep -q "^  workspace: package apps/$pm-api of ../.., " "$E/ws-$pm.out"'
+done
+
 t_done
