@@ -259,7 +259,7 @@ gnu() { # script: runs as user runner in tando-ci-runner:test, ssh to 127.0.0.1:
   # the key and known_hosts are mounted files: never on a command line (ps)
   mkdir -p "$E/gnu/secrets"; cp "$KA" "$E/gnu/secrets/key"
   secret "$E/setup.alpha" TANDO_KNOWN_HOSTS > "$E/gnu/secrets/known_hosts"
-  docker run --rm --network "container:$TN" -v "$T:/tando:ro" -v "$E/gnu:/gnu" \
+  docker run --rm ${TANDO_TEST_RUN:+--label "tando.run=$TANDO_TEST_RUN"} --network "container:$TN" -v "$T:/tando:ro" -v "$E/gnu:/gnu" \
     -e TANDO_DEPLOY_KEY=/gnu/secrets/key -e TANDO_HOST=127.0.0.1 -e TANDO_PORT=22 -e CI=true \
     -e TANDO_COLOR=never tando-ci-runner:test bash -c \
     "export HOME=/tmp/h TANDO_KNOWN_HOSTS=\"\$(cat /gnu/secrets/known_hosts)\"; mkdir -p \$HOME; cd /gnu/app; $1"
@@ -692,7 +692,7 @@ check "7f the job's steps translate to a script" test -s "$E/sim/job.sh"
 mkdir -p "$E/secrets"; chmod 700 "$E/secrets"
 for n in TANDO_DEPLOY_KEY TANDO_KNOWN_HOSTS; do secret "$E/setup.alpha" $n > "$E/secrets/$n"; done
 printf '127.0.0.1\n' > "$E/secrets/TANDO_HOST"; printf '22\n' > "$E/secrets/TANDO_PORT"
-docker run --rm --network "container:$TN" -v "$E:/e" -e HOME=/tmp/h tando-ci-runner:test bash -c \
+docker run --rm ${TANDO_TEST_RUN:+--label "tando.run=$TANDO_TEST_RUN"} --network "container:$TN" -v "$E:/e" -e HOME=/tmp/h tando-ci-runner:test bash -c \
   'for n in TANDO_DEPLOY_KEY TANDO_HOST TANDO_PORT TANDO_KNOWN_HOSTS; do export "SECRET_$n=$(cat /e/secrets/$n)"; done
    mkdir -p $HOME && bash /e/sim/job.sh' > "$E/sim.out" 2>&1
 check "7g simulated job (clean ubuntu 24.04 container, deploy key): succeeds" test $? = 0

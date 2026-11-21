@@ -1,6 +1,10 @@
 #!/bin/bash
 # Build and start the tando test server (container tando-testvm). Idempotent.
 # Usage: test/server/up.sh [--reset]    --reset: remove the container and start a clean one.
+#        test/server/up.sh --build-only  build (or check) the image only and print its name; with
+#        TANDO_TEST_IMAGE_BUILT=<that name> later starts skip the build (test/all.sh: once per run).
+# TANDO_TEST_RUN=<id>: the container also gets the label tando.run=<id> (test/all.sh removes its
+# run's containers by it).
 set -eu
 D=$(cd "$(dirname "$0")" && pwd)
 # TANDO_TEST_CADDY=ubuntu builds with the distribution's older Caddy (2.6.2 on 26.04), as on the real VPS.
@@ -13,6 +17,10 @@ BARE=${TANDO_TEST_BARE:-0}; [ "$BARE" = 1 ] && IMAGE=tando-testvm:bare
 NODE=${TANDO_TEST_NODE:-}; NODEARG=()
 if [ -n "$NODE" ] && [ "$BARE" != 1 ]; then IMAGE=$IMAGE-node-$NODE; NODEARG=(--build-arg "NODE=$NODE"); fi
 SSHP=${TANDO_TEST_SSH_PORT:-2222} HTTPP=${TANDO_TEST_HTTP_PORT:-8080}
+if [ "${1:-}" = --build-only ]; then
+  docker build -q --build-arg "CADDY=$CADDY" --build-arg "BARE=$BARE" ${NODEARG[@]+"${NODEARG[@]}"} -t "$IMAGE" "$D" >/dev/null
+  echo "$IMAGE"; exit 0
+fi
 READY=$D/.ready; [ "$NAME" = tando-testvm ] || READY=$D/.ready-$NAME
 rm -f "$READY"
 [ "${1:-}" = "--reset" ] && docker rm -f "$NAME" >/dev/null 2>&1 || true
@@ -24,9 +32,11 @@ if [ ! -f "$D/id_test" ]; then
   until [ -f "$D/id_test" ] && [ -f "$D/id_test.pub" ]; do sleep 0.2; done
 fi
 
-docker build -q --build-arg "CADDY=$CADDY" --build-arg "BARE=$BARE" ${NODEARG[@]+"${NODEARG[@]}"} -t "$IMAGE" "$D" >/dev/null
+if [ "${TANDO_TEST_IMAGE_BUILT:-}" != "$IMAGE" ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  docker build -q --build-arg "CADDY=$CADDY" --build-arg "BARE=$BARE" ${NODEARG[@]+"${NODEARG[@]}"} -t "$IMAGE" "$D" >/dev/null
+fi
 if ! docker container inspect "$NAME" >/dev/null 2>&1; then
-  docker run -d --name "$NAME" --hostname "$NAME" --label tando.test=1 \
+  docker run -d --name "$NAME" --hostname "$NAME" --label tando.test=1 ${TANDO_TEST_RUN:+--label "tando.run=$TANDO_TEST_RUN"} \
     --privileged --cgroupns=private \
     -p "127.0.0.1:$SSHP:22" -p "127.0.0.1:$HTTPP:80" ${TANDO_TEST_DOCKER_ARGS:-} "$IMAGE" >/dev/null
 elif [ "$(docker inspect -f '{{.State.Running}}' "$NAME")" != true ]; then

@@ -10,7 +10,8 @@ where changes are tested. Server suites need Docker
 | When | Run | Takes | What it tells you |
 |---|---|---|---|
 | After every edit | `test/check.sh` | seconds | The changed files parse (bash 3.2 and the server's bash), lint is clean on them, the changed Go packages vet and pass, no secret or private detail is in the tree, the suite map knows the change. |
-| Before you say a change works | `test/all.sh --tier quick` | minutes | The suites the changed files can break (it prints which, from `test/suites.map`) plus one smoke deploy. |
+| While you work (inner loop) | `test/all.sh --smoke` | 2 to 3 min | check.sh, then only the short suites the change selects (at most 120 s each) plus the smoke deploy. It names what it left out: that still needs quick. |
+| Before you say a change works | `test/all.sh --tier quick` (= `--changed`) | minutes | The suites the changed files can break (it prints which, from `test/suites.map`) plus one smoke deploy. |
 | Before a push to main, a tag, or when quick said "every suite" | `test/all.sh` (the full tier) | see docs/TESTING.md | Every suite, nothing cached, the fault scenarios in six parallel shards. |
 | After a failure | `test/all.sh --failed` | the failed suites | Only what failed in the last run. Fix, then rerun this, then the tier you were in. |
 | When the owner asks, or the machine is free | `--tier nightly`, `--tier weekly` | long | The fault scenarios in longer chains (order matters there), weekly with the long soak everywhere. |
@@ -23,6 +24,10 @@ where changes are tested. Server suites need Docker
   `PASS <id> <text>`, `FAIL <id> <text>` or `SKIP <id> <text>`. Start from the first `FAIL`, and
   read the lines above it: suites print what the server said on stderr into the same log.
 - `test/all.sh --slow` shows where the last run's time went (longest waits between two checks).
+- Free the machine sooner: `--fail-fast` stops a run at the first failing suite (fix it, then
+  `--failed`); Ctrl-C kills every process of the running suites and removes the run's own
+  containers. `test/all.sh --list` (with `--smoke`, `--tier quick` or `--only`) prints the plan and
+  about how long it will take, without starting anything.
 - A suite that failed because the test server could not be built or could not install a package
   (apt, network) did not test your change: rerun it (`--failed`) before drawing a conclusion,
   and say so in your report.

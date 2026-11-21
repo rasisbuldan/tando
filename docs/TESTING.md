@@ -7,6 +7,7 @@
 | `test/go.sh` | the Go server programs (srv/): gofmt, go vet, go test, race detector, no-shell lint (srvlint), layering, static builds for amd64 and arm64 | Go |
 | `test/install-test.sh` | install from the checkout and from a release archive into temp prefixes: every `$TANDO_HOME` path the code reads is installed, every command's `--help` and `ci github --help` work, uninstall | perl |
 | `test/addon-test.sh` | `tando addon` and `tando dashboard`: scripts/release-dashboard.sh builds the archive for this platform (`--skip-web`), twice the same bytes, modes and owners; install from a local archive in a temp HOME, status, the binary runs, quarantine removed only from verified files (a stub `xattr`), checksum mismatch, missing checksum, wrong `--sha256`, unsafe paths, wrong version and a foreign `tando-dash` refused with nothing installed, `file://` download, uninstall of a running tando-dash leaves nothing | Go, perl |
+| `test/runner-test.sh` | the test runner itself, in seconds, with no server: `test/all.sh` in a sandbox of fake suites and a fake `docker` (start order and the `--list` estimate, the smoke tier's choice, `--fail-fast` and an interrupted run killing every process of their suites and removing their own containers, by name and by run label, in one call), `test/server/up.sh` (`--build-only`, no second build, the run label), the rules of `test/suites.map`, `--save-durations` | perl |
 | `test/ui-test.sh` | lib/ui.sh at 5 widths, 2 locales, colour on/off; render speed; the `tando.conf` keys of the client parser and the server's configure against docs/CONFIG.md and `tando help conf`; `default_www` of client and server over one table of names; `tando doctor`'s collapsed program row on a stub agent; the platform-package swap and the native-code guard on fixture trees (`test/native-test.sh`: a stub `npm`, a local fake registry and a stub download host, no network); what `tando init` detects for every framework fixture in test/fixtures/apps (`test/detect-test.sh`: framework, recipe, build, start, output, message); the macOS menu bar app (`test/menubar-test.sh`: `ls --all --json` with alerts on a stub ssh, the app compiled with swiftc into a temp dir and its bundle, the badge and notification logic on canned JSON in test/fixtures/menubar (`test/menubar-model.swift`), the dashboard window logic (`test/menubar-dash-model.swift`: dash.lock, stale lock, launch decision tree, address policy, cache freshness), the shared `ls-all.json` cache, "Open dashboard" without the window (`--dash-url`) against a real tando-dash started in the temp HOME, the app's `--once` against the real CLI with a local web server, `menubar install --dry-run`, install, status and uninstall in a temp HOME without launchctl; SKIP lines without swiftc) | perl, node, openssl; swiftc (Command Line Tools) for the menu bar app |
 | `test/e2e.sh`, `test/e2e-*.sh` | end-to-end against a throwaway Ubuntu+systemd container | Docker (OrbStack), some need npm |
 | `test/portability.sh` (`make portability`) | macOS bash 3.2, Debian, Linux and BusyBox clients | Docker |
@@ -18,7 +19,8 @@ What to run when. [AGENTS.md](../AGENTS.md) has the short version and the rules.
 | Tier | Command | When | What runs |
 |---|---|---|---|
 | check | `test/check.sh` | after every edit | on the changed files only: `bash -n` (3.2, and the server's bash for `server/`), lint, gofmt/vet/test of the changed Go packages, the secret scan, and that `test/suites.map` knows the change. No server. |
-| quick | `test/all.sh --tier quick` | before saying a change works | the suites `test/select.sh` maps the changed files to (`test/suites.map`), plus `e2e-trial` as a smoke deploy. Go without the race detector; lint and Go may reuse cached results. A core file, or a file no rule knows, selects every suite. |
+| smoke | `test/all.sh --smoke` | the inner loop, while you work: about 2 to 3 minutes | `test/check.sh` first (a failure stops it before any server starts), then of the suites the quick tier would pick only the short ones: reference time in `test/durations.tsv` at most `TANDO_SMOKE_MAX` (120 s), plus `e2e-trial`. It names the suites it left for the quick tier. Not a substitute for quick: it says the change did not break the obvious. |
+| quick | `test/all.sh --tier quick` (or `--changed`) | before saying a change works | the suites `test/select.sh` maps the changed files to (`test/suites.map`), plus `e2e-trial` as a smoke deploy. Go without the race detector; lint and Go may reuse cached results. A core file, or a file no rule knows, selects every suite. |
 | full | `test/all.sh` | before a push to main and before a tag | every suite, nothing cached, the fault scenarios as six parallel shards (`e2e-faults-q1` to `q6`) and the fault matrix's quick cells (`e2e-matrix-quick`: node, container, static). The map is not read. |
 | nightly | `test/all.sh --tier nightly` | by hand, when the machine is free for half an hour (not in CI) | full, with the fault scenarios as two chains (`e2e-faults-h1`, `h2`) whose split moves every day, so over a week every scenario runs right after every neighbour; the matrix's weekly cells of the other kinds of app (`e2e-matrix-weekly`). |
 | weekly | `test/all.sh --tier weekly` | by hand, about once a week and before a release that touched deploys (not in CI) | full, with the fault scenarios as one chain (`e2e-faults`) and the 25 s soak on every deploy (`FAULT_SETUP_SOAK=25`): the suite as it was before it was made faster, with every scenario file (`--all`, 49 more than the shards run) and `e2e-matrix-weekly`. |
@@ -42,12 +44,16 @@ check or a section line (from `<suite>.times`, written beside each log).
 
 ```
 test/all.sh                      every suite once (the full tier)
-test/all.sh --tier quick         see Tiers; also nightly, weekly; --base REF, --files a b
+test/all.sh --smoke              the inner loop (see Tiers): check.sh, then the short selected suites
+test/all.sh --tier quick         see Tiers (--changed is the same); also nightly, weekly; --base REF, --files a b
+test/all.sh --fail-fast          stop at the first failing suite: the running ones are killed, their servers removed
 test/all.sh --failed             the suites that failed in the last run
 test/all.sh --slow 30            where the last run's time went
 test/all.sh --only e2e,lint      some suites (names without .sh); --skip e2e-next
 test/all.sh --repeat 3           three rounds; lists checks that did not pass every time
-test/all.sh --list               the plan: how and where each suite will run
+test/all.sh --list               the plan: how and where each suite will run, in start order, and
+                                 about how long the run takes with TANDO_ALL_SLOTS slots (a dry run:
+                                 nothing starts; try TANDO_ALL_SLOTS=8 test/all.sh --list)
 test/all.sh --keep               leave the test servers running
 test/all.sh --report .tando/all/<run>   the summary and flaky checks of an earlier run
 test/all.sh --portability        include test/portability.sh
@@ -64,14 +70,20 @@ is the suite's place among all server suites, the same n with `--only`/`--skip`.
 second server (`TANDO_TEST_NAME2`, e2e-ease) gets `<name>b` on ports +50. At most
 `TANDO_ALL_SLOTS` server suites run at once (default: the CPUs less two, at most 8, at least 2),
 the longest first, by `test/durations.tsv` (the same order in every run; `--save-durations`
-rewrites it from the last passing run, and a run warns about a suite that took over 1.5 times its
-line there); a
+rewrites it with each suite's median passing time over the last 5 runs that have it, and a run
+warns about a suite that took over 1.5 times its line there; a suite without a line counts as
+900 s, so give a new suite its line); the test server image is built (checked) once per run, before
+the first suite starts, not by every suite at once; a
 suite's server is created when it starts and removed when it ends (unless `--keep`). A suite marked `# all.sh: own-server` creates its server
 itself; all.sh only picks its name and ports. The plan is checked first: two suites that would share
 a name or a port stop the run. Suites may reset (`TANDO_TEST_OWNED=1`) only the servers this run
 created. One all.sh per user and prefix runs at a time (lock
 `$TMPDIR/tando-all-<uid>-<prefix>.lock`): a second run is refused, because two runs would reset each
-other's servers mid-suite.
+other's servers mid-suite. Every container of a run carries the label `tando.run=<prefix>-<pid>`
+(`TANDO_TEST_RUN`; set it on a helper container a suite starts): an interrupted run (Ctrl-C) or a
+`--fail-fast` stop kills the whole process tree of each running suite and removes the run's own
+containers, by name and by that label, in one docker call. Containers of other runs are never
+touched.
 
 **Skips.** The summary has a SKIPPED column. A suite whose checks in a round were all SKIP (none
 passed or failed) fails that round, unless `--allow-skip` or `TANDO_ALLOW_SKIP=1`; a skip never
@@ -80,7 +92,7 @@ counts as a pass. `t_done` in test/lib.sh applies the same rule to a suite on it
 
 How a suite runs depends on what it supports (`--list` shows it):
 
-- **local** (ui-test, lint, go, install-test): no server. They start at once, beside the server
+- **local** (ui-test, lint, go, install-test, runner-test, dashboard-test, addon-test): no server. They start at once, beside the server
   suites. (They used to run first, alone: ui-test's frame-time check read 73-82 ms of wall clock
   next to busy test servers, against a limit of 50. It now measures CPU time, about 28 ms with the
   machine idle or at load 20.) `portability` uses a server, so it runs with the server suites.

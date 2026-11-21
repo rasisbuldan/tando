@@ -43,7 +43,7 @@ arch=$(docker info --format '{{.Architecture}}' 2> /dev/null); case $arch in aar
 mkdir -p "$E/s3"
 (cd "$ROOT/srv" && CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -o "$E/s3/fakes3" ./offsite/testdata/fakes3) || exit 1
 docker rm -f "$S3" > /dev/null 2>&1
-docker run -d --name "$S3" --label tando.test=1 -v "$E/s3:/s3" ubuntu:24.04 /s3/fakes3 -addr :9000 -bucket "$BUCKET" \
+docker run -d --name "$S3" --label tando.test=1 ${TANDO_TEST_RUN:+--label "tando.run=$TANDO_TEST_RUN"} -v "$E/s3:/s3" ubuntu:24.04 /s3/fakes3 -addr :9000 -bucket "$BUCKET" \
   -access "$ACCESS" -secret "$SECRET" -names s3.test -ca /s3/ca.pem > /dev/null || exit 1
 T_UNTIL_STEP=0.5 t_until 20 test -s "$E/s3/ca.pem" || exit 1
 s3ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$S3")

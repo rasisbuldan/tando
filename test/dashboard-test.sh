@@ -5,8 +5,10 @@
 #   d1 gofmt -l prints nothing          d4 the main release archive (scripts/release.sh) holds
 #   d2 go vet ./...                        nothing of addons/ (the add-on ships on its own)
 #   d3 go test -race ./... (with the    d5 tando-dash builds (stripped) and prints its version
-#      2-minute soak; the quick tier
-#      passes -short and skips it)      d6 addons/dashboard/VERSION is tando's VERSION (the add-on
+#      2-minute soaks; the quick tier
+#      passes -short and skips them;
+#      the tests run in DASH_SHARDS
+#      groups at once, default 4)        d6 addons/dashboard/VERSION is tando's VERSION (the add-on
 #                                          release must match the CLI it is installed for)
 #   w1 npm ci (SKIP without node)       w3 npm run build writes server/webdist/dist, and tando-dash
 #   w2 vitest run                          builds with it embedded (index.html in the binary)
@@ -80,11 +82,47 @@ go vet ./... > "$E/vet.out" 2>&1; rc=$?
 check "d2 go vet ./... (rc=$rc)" test "$rc" = 0 -a ! -s "$E/vet.out"
 cat "$E/vet.out" >&2
 
-short=""; [ "$quick" = 1 ] && short=-short
-go test -race -count=1 $short ./... > "$E/test.out" 2>&1; rc=$?
-[ "$rc" = 0 ] || cat "$E/test.out" >&2
-grep -E '^(ok|FAIL|---)' "$E/test.out" >&2
-check "d3 go test -race ./...${short:+ (-short: no soak)} (rc=$rc)" test "$rc" = 0
+# d3: the tests mostly wait (fake CLIs, timeouts, the soaks), one after the other they took 3 to 7
+# minutes. So each package's -race test binary is built once, its tests are cut into DASH_SHARDS
+# groups (default 4, by turns; every soak a group of its own) and the groups run at once, each in
+# its own process: the same tests, flags and timeouts. A listed test that no group ran fails d3.
+short=""; [ "$quick" = 1 ] && short=-test.short
+nsh=${DASH_SHARDS:-4}
+case $nsh in ""|*[!0-9]*|0) nsh=4;; esac
+: > "$E/test.out"
+rc=0 k=0 ntests=0 ngroups=0 missing=""
+pkgs=$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}={{.Dir}}{{end}}' ./... 2>> "$E/test.out") || rc=1
+for p in $pkgs; do
+  k=$((k + 1)) bin=$E/pkg$k.test dir=${p#*=}
+  if ! go test -race -c -o "$bin" "${p%%=*}" >> "$E/test.out" 2>&1; then rc=1; continue; fi
+  (cd "$dir" && "$bin" -test.list '.*') 2>> "$E/test.out" | grep '^Test' > "$E/pkg$k.list" || rc=1
+  awk -v n="$nsh" '{ if ($1 ~ /Soak$/) print "s" (++s), $1; else print "g" (i++ % n), $1 }' "$E/pkg$k.list" > "$E/pkg$k.groups"
+  for g in $(awk '{ print $1 }' "$E/pkg$k.groups" | sort -u); do
+    re=$(awk -v g="$g" '$1 == g { printf "%s%s", (c++ ? "|" : ""), $2 }' "$E/pkg$k.groups")
+    ngroups=$((ngroups + 1))
+    # shellcheck disable=SC2086  # $short is one flag or nothing
+    ( cd "$dir" && "$bin" -test.run "^($re)\$" -test.v -test.timeout=10m $short > "$E/pkg$k.$g.out" 2>&1
+      echo $? > "$E/pkg$k.$g.rc" ) &
+  done
+done
+wait
+k=0
+for p in $pkgs; do
+  k=$((k + 1))
+  for f in "$E"/pkg$k.*.rc; do
+    [ -f "$f" ] || continue
+    g=${f%.rc}; read -r grc < "$f"
+    if [ "$grc" != 0 ]; then rc=1; cat "$g.out" >&2; fi
+    grep -E '^(--- |ok|FAIL|PASS$)' "$g.out" | grep -v '^--- PASS' >&2
+  done
+  while read -r t; do
+    ntests=$((ntests + 1))
+    cat "$E"/pkg$k.*.out 2> /dev/null | grep -qE "^--- (PASS|SKIP): $t \\(" || missing="$missing $t"
+  done < "$E/pkg$k.list"
+done
+[ -z "$missing" ] || { rc=1; echo "d3: these tests did not run or did not pass:$missing" >&2; }
+check "d3 go test -race ./... ($ntests tests in $ngroups groups at once${short:+, -short: no soak}) (rc=$rc)" \
+  test "$rc" = 0 -a "$ntests" -gt 0
 
 # d4: the release archive is built in a scratch directory; nothing under addons/ may be in it
 if scripts_out=$("$ROOT/scripts/release.sh" --out "$E/rel" 2>&1); then
