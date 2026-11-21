@@ -57,13 +57,23 @@ echo 2 > "$W/zz/VERSION"
 check "I10 a deploy of an idle app goes live (the new version answers)" eval '[ $rc = 0 ] && curl -s --max-time 30 "$(t_url zz)" | grep -q "hello v2"'
 check "I11 and the app goes idle again afterwards" t_until 75 is_idle
 
+# ---- a wake socket that is gone (it failed after starts that failed) comes back -----------------
+"$SSH" 'sudo systemctl stop tando-zz_wake.socket' > /dev/null 2>&1
+sock_up() { "$SSH" 'systemctl -q is-active tando-zz_wake.socket && test -S /run/tando-wake/zz.sock'; }
+"$SSH" 'sudo systemctl start tando-watch.service' > /dev/null 2>&1
+check "I14 the monitor's run starts a wake socket that is gone again, and the app answers" eval 't_until 30 sock_up && [ "$(code)" = 200 ]'
+
 # ---- not for a static site, and destroy ----------------------------------------------------------
 cp -R "$ROOT/examples/site" "$W/st"; printf 'app = zst\nidle_stop = 10m\n' >> "$W/st/tando.conf"
 (cd "$W/st" && "$R" up --yes > "$E/up3.log" 2>&1); rc=$?
 check "I12 idle_stop on a static site is refused, with why" eval '[ $rc != 0 ] && grep -q "not for a static site" "$E/up3.log"'
-had=0; "$SSH" 'test -S /run/tando-wake/zz.sock' && had=1
-"$R" destroy -a zz -H test --yes > "$E/destroy.log" 2>&1
-check "I13 destroy removes the wake socket and its units" eval '[ $had = 1 ] && ! "$SSH" "test -e /run/tando-wake/zz.sock || ls /etc/systemd/system/ | grep -q zz_wake || ls /etc/systemd/system/sockets.target.wants/ | grep -q zz_wake"'
+# (the socket was there before: a destroy that found nothing proves nothing)
+gone() { ! "$SSH" 'test -e /run/tando-wake/zz.sock || ls /etc/systemd/system/ /etc/systemd/system/sockets.target.wants/ | grep -q zz_wake'; }
+if gone; then fail "I13 destroy removes the wake socket and its units (there was none to remove)"
+else
+  "$R" destroy -a zz -H test --yes > "$E/destroy.log" 2>&1
+  check "I13 destroy removes the wake socket and its units" gone
+fi
 
 cat "$E/numbers" >&2
 t_done

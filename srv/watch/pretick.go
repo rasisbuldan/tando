@@ -66,6 +66,10 @@ func (w Watch) recoverNeeded() bool {
 			return true
 		case s["down"] != "" && s["stopped"] == "" && cur != "" && !w.isStatic(a):
 			return true
+		case s["down"] == "" && s["stopped"] == "" && cur != "" && w.wakeGone(a):
+			// an idle app (idle_stop) whose wake socket failed (its start failed again and again,
+			// systemd stopped triggering): recover-all starts the socket again, or Caddy answers 502
+			return true
 		case w.reservationOrphaned(d, a, s):
 			return true
 		case w.leaseOrphaned(d):
@@ -188,4 +192,15 @@ func (s execScanner) WatchScan(ctx context.Context) ([]byte, error) {
 // program; tandod calls srv/logs in-process.
 type LogScanner interface {
 	WatchScan(ctx context.Context) ([]byte, error)
+}
+
+// wakeGone: the app has idle_stop (not static, not a container) and its wake socket is not there
+// (systemd removes the file when the socket stops or fails).
+func (w Watch) wakeGone(a string) bool {
+	c, _ := w.Cache.load(filepath.Join(w.appDir(a), "app.conf"))
+	if is := c["idle_stop"]; is == "" || is == "off" || c["recipe"] == "static" || c["recipe"] == "container" {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join("/run/tando-wake", a+".sock"))
+	return err != nil
 }

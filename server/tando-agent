@@ -3869,7 +3869,9 @@ rec_service() {
     case $as in
       failed) S[down]=1; save "$D/state" S; write_caddy;;    # systemd gave up; app-down did not get to it
       # an idle app (idle_stop) waits for its next request: its socket listens, Caddy proxies to it
-      inactive) if idle_app; then systemctl start "tando-${A}_wake.socket"; write_caddy
+      # (a socket that failed, after starts that failed again and again, is started again)
+      inactive) if idle_app; then systemctl reset-failed "tando-$A" "tando-${A}_wake.socket" 2> /dev/null
+                  systemctl start "tando-${A}_wake.socket"; write_caddy
                 else restart_app || true; fi;;                # a start or restart cut short
       *) write_caddy
          systemctl -q is-enabled "tando-$A" 2> /dev/null || systemctl enable -q "tando-$A";;
