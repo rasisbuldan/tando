@@ -24,7 +24,7 @@ Deploy     up · deploy · rollback [id] · releases · history
 Run        status · logs [-f] · start · stop · restart · top
 Configure  env · jobs [run|log|pause] · db · backup [offsite] · restore
 Observe    ls · health · errors · alerts · requests · audit
-Servers    host add|ls|setup|status|care|update|reboot|rename|rm · domain · doctor
+Servers    host add|ls|setup|status|care|update|reboot|rename|rm · domain
 CI         ci setup|ls|revoke|rotate|github|hook
 More       init · destroy · unlock · recipes · adopt
 
