@@ -185,7 +185,7 @@ snap_app() {
 # and "top_queries" (pg_stat_statements' top 10 by total time, null when it is not on)
 snap_db() {
   local o=$1
-  grep -q "^d[xl]*$TAB[0-9]" "$TMPD/s.db" 2> /dev/null || { printf '%s' "$o"; return 0; }
+  grep -q "^d[xl]*${TAB}[0-9]" "$TMPD/s.db" 2> /dev/null || { printf '%s' "$o"; return 0; }
   [ -n "$o" ] || o=',"database":{"bytes":null,"connections":null,"connection_limit":null}'
   printf '%s,' "${o%\}}"
   awk -F '\t' -v P="$SNAP_PTS" -v B="$SNAP_BK" -v SN="$2" '

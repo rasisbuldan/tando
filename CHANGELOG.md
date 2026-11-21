@@ -6,6 +6,21 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added: database monitoring like Cloud SQL and RDS, for apps with `database = postgres`, in the
+  one `psql` a minute tando-watch already ran (no new connection): sessions by state against
+  `max_connections`, commits and rollbacks, rows, cache hit, deadlocks, temporary files,
+  conflicts, the oldest transaction and longest idle-in-transaction, `age(datfrozenxid)`, the size
+  every 5 minutes (was 10), and the server's checkpoints and WAL bytes (statements chosen by
+  `server_version_num`: PostgreSQL 16 and older, 17 and newer). One line a minute in
+  `/var/lib/tando/metrics/<app>.db`; `tando-metrics read-db`; `tando snapshot --json --app A`
+  gains `database.series`, `database.latest` and `database.top_queries`. New alerts:
+  `db_deadlock` (a new deadlock), `db_wrap` (50% of the transaction IDs towards wraparound) and
+  `db_wrap_warn` (low, 25%). The new statements run before the connections statement with a
+  500 ms statement timeout, so they cannot make "PostgreSQL does not answer" fire; the `psql`
+  call may now take 10 s (was 8 s).
+- Added: `tando host setup <host> --pg-stat-statements` turns on PostgreSQL's
+  `pg_stat_statements` (asks first: PostgreSQL restarts once). Then the top 10 normalized
+  statements of each app's database are in `tando snapshot`, latest only (`<app>.dbtop`, 0600).
 - Monitoring, lighter (slice 1): tandod's `MemoryMax` is 160M instead of 64M. At 64M its cgroup
   evicted the page cache of the journals and programs it reads every minute and read them again
   (on a real server: about 300 MB a minute of re-reads); its own memory still stays under 20 MB.

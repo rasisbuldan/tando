@@ -103,6 +103,8 @@ tando alerts backup-ping                     # a URL called after each whole run
 | `disk` | the app's own files (shared/, its `data_dir`, releases, incoming) and its PostgreSQL database together take more than `app_max_mb` (host setup, 8192 MB by default); the files measured with `du`, the database as the server gives its size, every 10 min. The detail says which: `shop uses 9100 MB of disk (files 400 MB, database 8700 MB), over the 8192 MB allowed per app`. When its file system is also 95% full (`disk_stop_pct`), the app is **stopped** (as `tando stop`: a 503 page; `tando start -a <app>` after freeing space), so one app cannot fill the disk under every other app's writes and deploys (the database counts for the stop only when PostgreSQL keeps its data on that file system) | 1 measurement |
 | `job.<name>` | a scheduled job (`job.<name>` in tando.conf) failed: its last run ended with a non-zero exit status, a signal, its timeout or the memory limit. One message per failed run: `FIRING shop/job.nightly: job nightly failed at 11-19 03:00 UTC: exit status 1; tando jobs run nightly -a shop runs it again and shows its output` (`killed by its timeout`, `killed at its memory limit 256M`, `killed by SIGKILL`); a run that fails again while it fires is one more message. See "Scheduled jobs" below | fires at once; resolves at the job's next success |
 | `db_conns` | apps with `database = postgres`: the app's database role holds at least 80% (`db_conn_pct`) of the role's connection limit (10 as tando sets it; read from the server, `pg_roles.rolconnlimit`). At the limit PostgreSQL refuses the app's next connection: a pool larger than the limit, connections never given back, a second instance during a deploy. Idle connections count: the limit counts them | 5 samples in a row (`db_conn_for`) |
+| `db_deadlock` | apps with `database = postgres`: PostgreSQL broke a deadlock in the app's database since the last run (it cancelled one transaction of each; the app got an error). Read from `pg_stat_database.deadlocks`; a counter that went down or a new `stats_reset` is a reset, never a deadlock | fires at once; resolves 30 min after the last one (`deadlock_quiet`) |
+| `db_wrap`, `db_wrap_warn` (low) | apps with `database = postgres`: the database has used 50% (`db_wrap_pct`) of its transaction IDs towards wraparound (`age(datfrozenxid)` of 2^31; at 100% PostgreSQL stops accepting writes); the low-severity warning from 25% (`db_wrap_warn_pct`) up to it. Autovacuum normally keeps it under 10% | 1 sample |
 | host `disk`, `inodes` | `/`, `/var` or `/opt/tando` at or above 90% | 1 sample |
 | host `firewall` | the per-app loopback rules (nftables table `inet tando`) differ from `/opt/tando/firewall.nft`: after `nft flush ruleset` (the stock `/etc/nftables.conf`, a firewall tool). The run loads them again at once, writes an audit line (`fw-restore`) and fires; it resolves on the next good runs. `tando-firewall.service` also reloads them whenever `nftables.service` (re)starts | 1 sample |
 | host `memory` | MemAvailable below 5% of RAM, or memory PSI "some" avg60 at or above 30% (when the kernel has PSI) | 5 samples |
@@ -162,10 +164,10 @@ journal read for it.
 Asked once per run, and only on a host where an app has `database = postgres`: one `psql` as the
 `postgres` user over the local socket, as the agent connects (a superuser slot: it gets in when
 the apps hold every other slot), with a connect timeout of 3 s, a statement timeout of 4 s and
-8 s for the whole call, after which the run goes on without an answer (that is the `postgres`
+10 s for the whole call, after which the run goes on without an answer (that is the `postgres`
 alert). One query reads `max_connections`, the reserved slots, the number of client sessions,
-and each `tando_*` role's connection limit and sessions; every `disk_every` minutes (10) a second
-one in the same call reads the databases' sizes (`pg_database_size`, which stats every file of a
+and each `tando_*` role's connection limit and sessions; every 5 minutes (or `disk_every`, when
+shorter) a second one in the same call reads the databases' sizes (`pg_database_size`, which stats every file of a
 database: not every minute).
 
 - **The size has no threshold of its own**: no number fits (50 MB and 50 GB are both healthy
@@ -177,6 +179,37 @@ database: not every minute).
 - **The limit is the server's**: `db_conns` compares against the role's `CONNECTION LIMIT` as
   PostgreSQL reports it, so a limit changed by hand is followed; a role without a limit is only
   covered by the host's slots.
+- **The database's own numbers** (as Cloud SQL and RDS show them), in the same `psql`, never a
+  connection of their own: per app database its sessions by state (active, idle, idle in
+  transaction, waiting for a lock) against `max_connections`; commits and rollbacks; rows
+  returned, fetched, inserted, updated, deleted; blocks hit and read (the cache hit ratio);
+  deadlocks; temporary files and bytes; conflicts; `stats_reset`; the oldest open transaction
+  (`pg_dump`'s and tando-watch's left out) and the longest idle-in-transaction session;
+  `age(datfrozenxid)`; the size every 5 minutes. For the server: checkpoints timed and requested
+  (`pg_stat_bgwriter` up to PostgreSQL 16, `pg_stat_checkpointer` from 17) and WAL bytes
+  (`pg_stat_wal`, 14 and newer). The statement that depends on the version is chosen by
+  `server_version_num` as the previous run saw it (the first run after a start has none).
+  Written to `/var/lib/tando/metrics/<app>.db` (root, 0600), one line a minute, the counters raw:
+  readers take differences, and a counter that went down or a changed `stats_reset` is a gap,
+  never a negative rate. `tando-metrics read-db <app> <points> <bucket>` gives the rates per
+  bucket and `tando snapshot --json --app <app>` the `database` object (docs/COMMANDS.md).
+  Idle in transaction is shown, not alerted: every app's role ends such a session after 5 minutes
+  (`db_idle_tx_timeout`). tando-watch's `psql` runs as the `postgres` superuser, which reads every
+  session and statement: no `pg_monitor` grant is needed.
+- **It cannot make PostgreSQL look down.** The `postgres` alert fires when the `psql` fails or
+  times out, and `psql`'s exit status is its last statement's. So the new statements run before
+  the connections, which stay last; each under a statement timeout of 500 ms (set just before
+  them, 4 s again just after), so together they add at most 2 s, and the whole call may take
+  10 s (8 s before); one that fails (a view the version lacks) only loses its rows.
+- **Top statements** (`pg_stat_statements`), only after `tando host setup <host>
+  --pg-stat-statements`, which asks first: it adds the module to `shared_preload_libraries`, so
+  PostgreSQL restarts once (every app's database away for a few seconds), and creates the
+  extension in the `postgres` database only (the view covers every database; the apps cannot
+  connect there, so they do not see each other's statements). `track_utility` is off: statements
+  such as `ALTER ROLE ... PASSWORD` keep their literals and are never recorded. The checks never
+  install it; while it is on, each app's 10 statements with the most total time (calls, total
+  and mean time, rows; normalized: constants are `$1`, never values; the text cut to 500
+  characters) are written to `<app>.dbtop` (0600), the latest only, never into the history.
 - Measured cost: see "Cost".
 
 ### Settings
@@ -533,7 +566,9 @@ tandod's cgroup (psql is its child) and of the PostgreSQL cluster's unit:
 So about 15 ms in psql (most of it starting the program: it loads libpq and what that needs) and
 4 ms in the server for the session, 19 ms a run in all: about 27 s of CPU a day, 0.03% of one
 CPU. A run with the question took 51 ms of wall time. The call cannot hold a run: psql gives up
-connecting after 3 s, the server ends a statement after 4 s, and the program is killed after 8 s.
+connecting after 3 s, the server ends a statement after 4 s (the database's numbers after
+500 ms), and the program is killed after 10 s. The database's numbers were added after these
+measurements and not measured yet.
 Speaking the protocol from tandod itself would save the 15 ms but needs a password login for a
 monitoring role; not done.
 
