@@ -245,8 +245,12 @@ How runs behave.
 - A run the server missed because it was off or down is made up once when it is back
   (`job_missed = run`, the default: systemd's `Persistent=`); `job_missed = skip` waits for the
   next time. A deploy does not make up a run, and neither does `tando jobs resume`.
-- A job's start is spread over `job_spread` seconds (default 15; `RandomizedDelaySec=`), so the
-  hourly jobs of many apps do not start together; `job_spread = 0` starts them on the second. A
+- A job's start is spread over `job_spread` seconds (default: a sixth of its period, at most 10
+  minutes; `RandomizedDelaySec=` with `FixedRandomDelay=yes`, so each timer keeps its own offset),
+  so the hourly jobs of many apps do not start together; `job_spread = 0` starts them on the second.
+  At most `job_slots` job runs go on at once on the server (all apps; host setup, default the
+  number of CPUs, at least 2): a run waits for a slot before it starts, and the wait counts in its
+  timeout. A
   job's `job.<name>.spread` and `.missed` set one job.
 - The last 50 runs of each job (start, result, duration, exit status; never output) are kept on the
   server (`jobhist/` in the app's directory, root only), so `ls` answers after the journal has
@@ -592,7 +596,13 @@ nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Setting
 `ci_max_file_mb=`, `unit_drop=`, `journal_max=` (not in help.txt), and the per-client limits on ports
 80/443: `rate_limit=on|off|auto` (auto: on when tando owns Caddy), `conn_limit=N` (connections at
 once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections per second, burst
-3x; default 100). Without `apps_domain`, links use
+3x; default 100). Scale (docs/ARCHITECTURE.md, "Many apps on one server"): `port_min=`,
+`port_max=` (app ports, default 4100-4999), `preflight_min=`, `preflight_max=` (pre-flight ports,
+default 14100-14999; the ranges must not overlap or hold 2019 or 5432), `uid_min=`, `uid_max=`
+(new app users' ids, default 30000-39999), `mem_overcommit=` (default 1.5; 0 turns the check off),
+`job_slots=`, `backup_window=HH:MM-HH:MM` (default 01:00-05:00, the server's time),
+`backup_jobs=1|2` (backups at once, default 1), `log_budget=` (all apps' logs together, default
+`auto`: 20% of the log file system). Without `apps_domain`, links use
 `<ip-with-dashes>.sslip.io` (an outside service). `--deploy` and `--insecure-test` are not in the
 usage (docs/DEV-NOTES.md, mismatch 7). `care=on|off`: host care's security updates (on by default where tando
 installed Caddy itself; docs/HOSTCARE.md). `--pg-stat-statements` (with PostgreSQL on the server):

@@ -6,6 +6,27 @@ first, grouped by area.
 
 ## Unreleased
 
+- Scale: a server holds 100 apps and more (tuned for 4 vCPU / 8 GB). Upgrade with
+  `tando host setup <host>`; apps keep their ports, users and settings.
+  - Ports: the app range is 4100-4999 (was 4100-4199: app 101 was refused), set with `port_min=`
+    and `port_max=`; a new app's pre-flight port comes from its own range, 14100-14999
+    (`preflight_min=`, `preflight_max=`), kept as `preflight_port`. A server still on the old
+    default range is widened by host setup.
+  - Users: new app users get ids from 30000-39999 (`uid_min=`, `uid_max=`), not 200-999, which
+    ran out after about 250 apps made over a server's life.
+  - Restarts of different apps no longer wait for each other (the hold window's lock is shared).
+  - A job's start and end read only its app's journal, not every app's.
+  - Host setup reloads systemd and Caddy once for all apps, and only when something changed (it
+    took minutes with 100 apps).
+  - Memory: a deploy that raises an app's memory caps over RAM x 1.5 (`mem_overcommit=`) is refused
+    unless `--force`. New `priority = high|low` in tando.conf.
+  - Jobs: the default spread is a sixth of the period (hourly: 10 minutes), at a fixed offset per
+    timer; at most `job_slots` runs at once on the server.
+  - Backups: one queue for the whole server (`tando-backups.timer`, 01:00-05:00, one backup at a
+    time; `backup_window=`, `backup_jobs=`) instead of a timer per app at midnight.
+  - Logs: `log_budget=` (default 20% of the disk) is split across the apps' default log caps;
+    `tando doctor` compares the caps with it.
+
 - Fixed: a new app could get another app's pre-flight port (its port + 100) as its own port once
   the port range was widened past 100 ports (what the docs advise when it is used up): that app's
   every deploy and env change then failed with "pre-flight port in use", and the loopback rules let

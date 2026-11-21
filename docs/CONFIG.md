@@ -75,6 +75,7 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 | `max_requests` | number | off | requests | Requests in flight through Caddy; over it a visitor waits, then gets a 503. | `max_requests = 200` |
 | `hold` | number | `15`, or `health_timeout` if larger | seconds | How long Caddy holds a request while the app (re)starts, 1 to 999. | `hold = 20` |
 | `stop_timeout` | number | `10` | seconds | How long a stopping process may finish its requests before it is killed, 1 to 999. | `stop_timeout = 30` |
+| `priority` | `high`, `normal` or `low` | `normal` | | Which app the kernel stops last (`high`) or first (`low`) when the server runs out of memory. `high` also keeps the app's memory, up to its cap, from being reclaimed while other apps have more. | `priority = high` |
 
 ## Assets
 
@@ -118,7 +119,7 @@ Runs on the server once per deploy, before the switch (migrations). Not for `sta
 | `job.<name>` | text | none | | A scheduled job: `<schedule> \| <command>`. The schedule is cron (`*/15 * * * *`, `0 9 * * mon-fri`, `@daily`: five fields, lists, ranges, steps, month and weekday names) or a systemd calendar expression (`daily`, `*-*-* 03:00`, `Mon..Fri 09:00`); either is checked before anything is deployed. Times are the server's time zone (`tando jobs` says which). The name is lower case letters, digits and `-`, starts with a letter, at most 21 characters. One line per job. A job removed from tando.conf (or by a rollback) loses its timer at once; a run of it still going on finishes within its timeout. | `job.nightly = daily \| node scripts/nightly.js` |
 | `job_timeout` | number | `3600` | seconds | Longest any of the app's jobs may run, 1 to 86400; past it the job is stopped and its result is `timeout`. | `job_timeout = 600` |
 | `job.<name>.timeout` | number | `job_timeout` | seconds | The same for one job, 1 to 86400. | `job.nightly.timeout = 7200` |
-| `job_spread` | number | `15` | seconds | A job starts at a random moment up to this long after its time, so the hourly jobs of 20 apps do not all start in the same second. 0 to 3600; 0 starts them exactly on time. | `job_spread = 0` |
+| `job_spread` | number | a sixth of the job's period, at most 600 (hourly: 10 minutes) | seconds | A job starts this long after its time at most, at a fixed offset of its own, so the hourly jobs of 100 apps do not all start in the same second. 0 to 3600; 0 starts them exactly on time. | `job_spread = 0` |
 | `job.<name>.spread` | number | `job_spread` | seconds | The same for one job. | `job.report.spread = 300` |
 | `job_missed` | `run` or `skip` | `run` | | What a run the server missed while it was off or down becomes: `run` makes it up once when the server is back (a nightly backup), `skip` waits for the next time (a morning digest that would arrive at night). | `job_missed = skip` |
 | `job.<name>.missed` | `run` or `skip` | `job_missed` | | The same for one job. | `job.digest.missed = skip` |

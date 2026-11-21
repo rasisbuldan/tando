@@ -343,7 +343,7 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
   (`own_listener`). Journal namespace directories are 0750 root:<app's group>, so no app writes
   into another's journal. `destroy` stops every unit, kills every process of the uid (failing if
   one survives), deletes its files in /dev/shm, /tmp and /var/tmp, and retires the uid for good
-  (`$R/retired-uids`). Failed releases are deleted at once; `incoming/` plus `releases/` share one
+  (`$R/retired-uids`; new ids come from tando's band, 30000-39999: "Many apps on one server"). Failed releases are deleted at once; `incoming/` plus `releases/` share one
   per-app limit (`app_max_mb`, real bytes). Requests whose Host carries a port get 400 (Caddy
   before 2.7 would serve them unlogged). tando's probes carry a root-only secret header, the only
   thing that keeps a request out of the request log; site files are root:caddy 640.
@@ -594,3 +594,40 @@ copies of the same helpers: `die`, `valid_app`, `load`/`save`, `row`, `san_v`, n
 locking. A fix in one (such as keeping a trailing `=` in values) must be repeated in the others.
 The Go port replaces these copies with shared packages (`srv/internal/`) for the programs it
 covers; the agent keeps its own.
+
+## Many apps on one server
+
+Tuned for 100 apps on a 4 vCPU / 8 GB server (docs/CONFIG.md and `tando host setup` have the
+settings; all are in `host.conf`). What keeps the work per app O(1), and the shared parts shared:
+
+- **Ports.** Apps take ports from `port_min`-`port_max` (default 4100-4999) and their pre-flight
+  port from a separate range, `preflight_min`-`preflight_max` (14100-14999), stored as
+  `preflight_port`. Apps made before keep port + 100 as theirs; `port_pick` skips every app's
+  port and pre-flight port, 2019, 5432 and what listens (one `ss` per scan). The loopback rules
+  close both ranges to every app but its owner.
+- **Users.** New app users and groups get ids from `uid_min`-`uid_max` (30000-39999, nologin):
+  passwd and group are read once, the id picked is checked against NSS by number. A destroyed
+  app's id is retired and used again only when the band has no other.
+- **Caddy's lock.** A site change takes `.caddy.lock` exclusively; an app's restart takes it
+  shared for its hold window (until the app listens), so restarts of different apps run at once
+  and only reloads wait for them.
+- **systemd and Caddy reloads.** `write_if_changed` says when it wrote; a daemon-reload follows
+  only then. Host setup writes every app's units and sites first (sites staged as
+  `<app>.caddy.new`), then reloads systemd once and validates and reloads Caddy once; when Caddy
+  refuses, every site file goes back.
+- **Memory.** Configure refuses a deploy that raises an app's caps (memory plus workers') when all
+  apps' caps would pass RAM x `mem_overcommit` (1.5), unless `--force`. `priority = high|low` sets
+  OOMScoreAdjust 100/900 (default 500); high also sets MemoryLow on the app's slice, and their sum
+  on tando.slice (a child is protected only as far as its parent).
+- **Jobs.** A job's journal is read from its app's namespace only (`--namespace=+tando-<app>`).
+  Timers spread starts over a sixth of the period (at most 10 minutes) at a fixed offset. A run
+  takes one of `job_slots` host-wide slots in job-begin (`$R/jobslots/<i>`, made with mkdir) and
+  gives it back in job-end; a slot whose run has ended without its job-end is taken over.
+- **Backups.** One `tando-backups.timer` at the start of `backup_window` runs `backup-all`: every
+  `backup = daily` app's `tando-<app>-backup.service`, `backup_jobs` at a time, in an order by a
+  hash of the name, none started after the window's end; an app backed up in the last 20 hours is
+  skipped. Host setup removes the per-app timers of before.
+- **Logs.** `log_budget` (default 20% of the log file system) is split across the apps: an app's
+  default journal cap is min(256M, 5% of the disk, 4/5 of the budget / apps), its request log a
+  quarter of that. A cap is applied at the app's next deploy or host setup.
+
