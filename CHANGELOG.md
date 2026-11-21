@@ -6,6 +6,10 @@ first, grouped by area.
 
 ## Unreleased
 
+- Added (dashboard add-on, not in the main archive): the web app, `addons/dashboard/web` (React, Vite,
+  Tailwind, Recharts in a lazy chunk): sidebar, Overview, Server page, App page with the Overview
+  and Deploys tabs; the other pages are placeholders. Bundle budgets and design rules are checked
+  by `test/dashboard-test.sh`.
 - Added: `tando snapshot --json [-H host | --all] [--app A --range 1h|24h|7d]`, everything a
   dashboard shows of a server in one ssh exec per host: apps with `state_reason`, the `system`
   object (load 1/5/15, memory, disk, cpus, uptime), the server's clock and skew, versions, alerts;

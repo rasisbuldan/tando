@@ -7,8 +7,13 @@ archive. Its version matches the tando CLI it is installed for (`VERSION`).
 - `docs/SPEC.md`: what the dashboard is, its architecture, budgets and robustness rules.
 - `docs/DESIGN.md`: the design guideline for the web app (M2 onwards).
 - `server/`: `tando-dash`, a Go program with no third-party dependencies.
-- `server/webdist/dist/`: the built web app, embedded into the binary (a placeholder until M2;
-  the web app's build writes here; `theme.js` stays a file of its own).
+- `web/`: the web app (React, Vite, TypeScript, Tailwind, Recharts). `npm ci && npm run build` writes
+  the build into `server/webdist/dist/`; `theme.js` stays a file of its own (`web/public/`).
+- `server/webdist/dist/`: what `go build` embeds. The repository holds only a placeholder page; the
+  build output is not committed, so the release build runs the web build first:
+  `(cd web && npm ci && npm run build) && (cd server && go build ...)`. Developing the web app
+  without a server: `web/dev/restart.sh` builds both and runs tando-dash against `web/dev/fake-tando.sh`
+  (fixtures; one reachable host, one not).
 
 ## Running it
 
@@ -75,7 +80,8 @@ here also no leading `-` or `.` and no `..`) and the host must be one of `~/.con
 
 ## Tests
 
-`test/dashboard-test.sh` (in `test/all.sh`): gofmt, `go vet`, `go test -race` (with a 2-minute
+`test/dashboard-test.sh` (in `test/all.sh`): for the web app `npm ci`, vitest, the build, the bundle
+budgets and the design rules (SKIP without node); then gofmt, `go vet`, `go test -race` (with a 2-minute
 soak; the quick tier skips it with `-short`; `TANDO_DASH_SOAK=30m` for the long one), the main
 release archive holding nothing of `addons/`, the stripped build, and the VERSION match. The Go
 tests run a fake tando CLI (the test binary itself) with fault injection chosen by host name:
