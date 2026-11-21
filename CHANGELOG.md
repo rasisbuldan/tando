@@ -24,6 +24,19 @@ first, grouped by area.
   <old>` removes it. Nothing on the server stores the laptop's name for it.
 - Added: the server's address and ssh user in `--json` (`address`, `user` in `ls`, `ls --all`,
   `status`, `alerts`, `snapshot`, also for a server that did not answer), as registered.
+- Database studio: one always-on service per server instead of a program per ssh session
+  (docs/STUDIO.md). `tando host setup` installs `tando-studio.service` (a front as root with
+  CAP_SETUID/CAP_SETGID only, unix sockets only, MemoryMax 128M; idle it holds no database
+  connection) and removes what the per-session studios left. Each app is served by its own helper
+  process as the app's user with the app's role, started on the first request and ended after 2
+  minutes unused; the guarantees are the same code as before (read-only, scope guard, limits).
+  `tando db studio [app]` now mints a one-time link and forwards a port; Ctrl-C ends the forward,
+  not the studio. The page has a switcher for the server's apps with a database, and the link can
+  name the app (`#c=<code>&app=<app>`). `--stop` ends every session of the server (a restart).
+  A new client against an older server uses the old per-session studio; an older client against a
+  new server is told to update. Not yet: the dashboard still opens the studio through
+  `tando db studio --json` with its confirm dialog.
+
 - Added: live views every 5 s. tandod keeps a second loop beside the minute's checks (srv/live):
   every 5 s each app's memory, CPU, tasks and unit state and the host's load, memory, CPU and disk,
   from the cgroup v2 files, /proc and the bus connection it already has; no program started, no file

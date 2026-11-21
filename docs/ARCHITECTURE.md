@@ -357,7 +357,11 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
   no command text is written into unit files.
 - PostgreSQL: one role per app with CONNECT only on its own database; the password exists only in
   the server's env file and is shown only by `tando db url --show`.
-- db studio (`tando db studio`, srv/studio): a program the admin starts for one ssh session.
+- db studio (`tando db studio`, srv/studio): one always-on service per server since the studio-vm
+  change (docs/STUDIO.md: a front as root with CAP_SETUID/CAP_SETGID only, holding the codes and
+  tokens; a helper per app and page as the app's user, which is the per-app studio described here).
+  The points below describe that helper; "Who reaches it" and "Resources" changed as STUDIO.md says
+  (a socket per admin login, tokens 12 h, the backend lowered by tando-studio-lower.path).
   - **Who it is.** The app's user (`C[user]`, the uid nftables lets reach 5432) with the app's
     role and password, in a transient unit under tando.slice: no capabilities, no new privileges,
     ProtectSystem=strict, private /tmp, /dev and IPC, SocketBindDeny=any, IP only to localhost,

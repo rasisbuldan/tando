@@ -14,8 +14,17 @@ import (
 //	serve --sock PATH --app APP --host NAME --admin USER --port N --idle MINUTES
 //	      [--hb SECONDS] [--idle-s SECONDS] [--timeout SECONDS] [--conn-idle SECONDS]   (tests only)
 //	      [--cred FILE] [--pg ADDR]                                 (tests; else $CREDENTIALS_DIRECTORY/db, 127.0.0.1:5432)
+//
+// The service's helper (service.go starts it as the app's user):
+//
+//	serve --fd --app APP --host NAME --admin USER --port N --idle-s SECONDS [--env FILE]
+//
+// listens on the socket passed as fd 3, reads the app's DATABASE_URL from its env file
+// (/opt/tando/apps/<app>/env; --env for tests) and has no heartbeat (stdin's EOF still ends it).
 type Args struct {
 	Sock, Cred string
+	FD         bool   // the listener is fd 3 (the service's helper)
+	Env        string // the app's env file (the helper's credential)
 	Cfg        Config
 }
 
@@ -32,6 +41,10 @@ func ParseArgs(a []string) (Args, error) {
 	r := Args{Cfg: Config{Heartbeat: 10 * time.Second, StmtLimit: DefaultLimit, PGAddr: "127.0.0.1:5432"}}
 	anySock := false
 	for len(a) > 0 {
+		if len(a) == 1 && a[0] == "--fd" {
+			r.FD, r.Cfg.Heartbeat, a = true, 0, nil
+			break
+		}
 		if len(a) < 2 {
 			return r, errArgs
 		}
@@ -47,6 +60,12 @@ func ParseArgs(a []string) (Args, error) {
 		var err error
 		var d time.Duration
 		switch k {
+		case "--fd":
+			r.FD, r.Cfg.Heartbeat = true, 0
+			a = append([]string{v}, a...) // (a flag without a value)
+			continue
+		case "--env":
+			r.Env, anySock = v, true
 		case "--sock":
 			r.Sock = v
 		case "--app":
@@ -91,8 +110,13 @@ func ParseArgs(a []string) (Args, error) {
 		return r, errors.New("bad host or admin name")
 	case r.Cfg.Port == 0 || r.Cfg.Idle == 0:
 		return r, errArgs
-	case !sockRe.MatchString(r.Sock) && !(anySock && strings.HasSuffix(r.Sock, "/s")):
+	case r.FD && r.Sock != "":
+		return r, errors.New("--fd or --sock, not both")
+	case !r.FD && !sockRe.MatchString(r.Sock) && !(anySock && strings.HasSuffix(r.Sock, "/s")):
 		return r, errors.New("bad socket path")
+	}
+	if r.FD && r.Env == "" {
+		r.Env = "/opt/tando/apps/" + r.Cfg.App + "/env"
 	}
 	return r, nil
 }
@@ -118,4 +142,48 @@ func ParseCred(b []byte, c *Config) error {
 		return errors.New("the credential file is incomplete")
 	}
 	return nil
+}
+
+// Role: the app's PostgreSQL role and database (tando_<app>, - as _)
+func Role(app string) string { return "tando_" + strings.ReplaceAll(app, "-", "_") }
+
+// ParseEnvCred reads the app's env file (KEY="value" lines, \ escapes; the agent's env_save) for
+// DATABASE_URL, postgres://<role>:<password>@...: the helper's credential. The role must be the
+// app's own (Role): an env edited to name another role is refused.
+func ParseEnvCred(b []byte, app string, c *Config) error {
+	for _, l := range strings.Split(string(b), "\n") {
+		v, ok := strings.CutPrefix(l, "DATABASE_URL=")
+		if !ok {
+			continue
+		}
+		v = strings.TrimSuffix(strings.TrimPrefix(v, `"`), `"`)
+		var o strings.Builder
+		for i := 0; i < len(v); i++ {
+			if v[i] == '\\' && i+1 < len(v) {
+				i++
+			}
+			o.WriteByte(v[i])
+		}
+		rest, ok := strings.CutPrefix(o.String(), "postgres://")
+		if !ok {
+			rest, ok = strings.CutPrefix(o.String(), "postgresql://")
+		}
+		if !ok {
+			break
+		}
+		userinfo, _, ok := strings.Cut(rest, "@")
+		if !ok {
+			break
+		}
+		c.Role, c.Password, _ = strings.Cut(userinfo, ":")
+		c.Database = c.Role
+		if c.Role != Role(app) {
+			return errors.New("DATABASE_URL in the app's env names another role than the app's")
+		}
+		if !roleRe.MatchString(c.Role) || c.Password == "" || strings.ContainsAny(c.Password, "\x00\r") {
+			break
+		}
+		return nil
+	}
+	return errors.New("no DATABASE_URL in the app's env (tando db url)")
 }

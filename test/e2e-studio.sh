@@ -1,25 +1,29 @@
 #!/bin/bash
 # test/e2e-studio.sh: tando db studio (lib/studio.sh, the agent's db-studio verbs, srv/studio) on a
-# test server with PostgreSQL. The page's API is driven with curl through the client's own ssh
-# forward (curl is this harness's tool, not the client's); the studio runs with the hidden test
-# options (TANDO_STUDIO_TEST: a 1 s heartbeat, seconds of idle time, a short statement limit)
-# so the lifecycle checks take seconds. Every attempt to write is checked as the postgres
-# superuser: the data must be unchanged.
+# test server with PostgreSQL: the always-on service of host setup (docs/STUDIO.md), its front and
+# its per-app helpers. The page's API is driven with curl through the client's own ssh forward
+# (curl is this harness's tool, not the client's); the helpers run with shorter limits from
+# /opt/tando/studio.test (a 4 s statement limit, a few seconds of idle time) so the lifecycle
+# checks take seconds. Every attempt to write is checked as the postgres superuser: the data
+# must be unchanged.
 #
-#   S1  start: the link, /healthz and its probe word, the page and its CSP, read-only, one unit,
-#       no TCP listener, the socket's directory and modes, the app's user, no capabilities
+#   S1  start: the service installed, enabled and running; the link, /healthz and its probe word,
+#       the page and its CSP, read-only, one helper as the app's user without capabilities, the
+#       front with CAP_SETUID/CAP_SETGID only, no TCP listener, the sockets' modes
 #   S2  refusals: no or a wrong token, a used or foreign code, foreign Host/Origin/Sec-Fetch-Site,
 #       a form post, a preflight
 #   S3  read-only: every bypass known (the review's and more), each across one and two requests;
 #       the app's own sessions cannot be signalled, the settings not changed through U& or SQL text
 #   S4  limits: 5M rows, a 20 MB cell, the studio's own clock, SET LOCAL timeout, nothing runaway
-#   S5  cancel; S6 browsing; S7 the session's end in every way, nothing left; S8 CI keys (four
-#       layers); S9 no database, not installed, an old agent, sshd without stream forwarding, two
-#       at once and a third refused, destroy; S10 the password and a secret cell never in the
-#       journal, the audit log or a process list; S11 pgwire and the studio against this server's
-#       PostgreSQL (Go tests built for its CPU); S12 doctor; S13 the backend's scoping (settings,
-#       priority, a heavy query's memory, a migration's lock wait, no snapshot between requests);
-#       S9s/t/i connection slots and the idle connection; S14 isolation of two apps; S15 the picker;
+#   S5  cancel; S6 browsing; S7 the end of a session in every way (Stop, Ctrl-C ends the forward
+#       and not the service, idle, --stop and a restart revoke every token, two clients at once,
+#       --json), the service's memory when idle; S8 CI keys (four layers); S9 no database, not
+#       installed, an old agent, the old client's verb, sshd without stream forwarding, destroy;
+#       S10 the password and a secret cell never in the journal, the audit log or a process list;
+#       S11 pgwire and the studio against this server's PostgreSQL (Go tests built for its CPU);
+#       S12 doctor; S13 the backend's scoping (settings, priority, a heavy query's memory, a
+#       migration's lock wait, no snapshot between requests); S9s/t/i connection slots and the
+#       idle connection; S14 isolation of two apps and the switcher's routes; S15 the picker;
 #       S16 scope: the app's own tables only (no system schema listed or served, every way to a
 #       system relation refused in the editor, the demo's tables and everyday SQL still work)
 # shellcheck disable=SC2034 # (values set here are read inside the eval strings of checks)
@@ -37,20 +41,18 @@ export TANDO_NO_BROWSER=1 TANDO_STUDIO_HB=1
 # ---- helpers ----------------------------------------------------------------------------------
 # st_start <out> <app> [args]: the client in the background (SIGINT left at its default, as in a
 # terminal: a background job of a script would ignore it); waits for the link and trades its code
-# for the token -> ST_PID ST_PORT ST_CODE ST_TOKEN ST_SID12
+# for the token -> ST_PID ST_PORT ST_CODE ST_TOKEN ST_APP
 st_start() {
   local o=$1 a=$2 url; shift 2
-  ST_TOKEN="" ST_PORT="" ST_CODE=""
+  ST_TOKEN="" ST_PORT="" ST_CODE="" ST_APP=""
   perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV or die' "$R" db studio -a "$a" --no-open "$@" > "$o" 2>&1 &
   ST_PID=$!
   T_UNTIL_STEP=0.2 t_until 30 eval 'grep -q "^http://127.0.0.1:" "$o" || ! kill -0 $ST_PID 2> /dev/null' || return 1
   url=$(grep '^http://127.0.0.1:' "$o" | head -1)
   [ -n "$url" ] || { cat "$o" >&2; return 1; }
-  ST_PORT=${url#http://127.0.0.1:}; ST_PORT=${ST_PORT%%/*}; ST_CODE=${url#*#c=}
+  ST_PORT=${url#http://127.0.0.1:}; ST_PORT=${ST_PORT%%/*}; ST_CODE=${url#*#c=}; ST_APP=${ST_CODE#*&app=}; ST_CODE=${ST_CODE%%&*}
   ST_TOKEN=$(curl -s -m 5 -H 'Content-Type: application/json' --data "{\"code\":\"$ST_CODE\"}" \
     "http://127.0.0.1:$ST_PORT/api/session" | sed -n 's/.*"token":"\([A-Za-z0-9_-]*\)".*/\1/p')
-  ST_SID12=$(srv "systemctl list-units --plain --no-legend 'tando-$a-studio-*' | awk '{ print \$1 }'" |
-    sed -n 's/^tando-.*-studio-\([0-9a-f]\{12\}\)\.service$/\1/p' | tail -1)
   [ -n "$ST_TOKEN" ]
 }
 # api <path> [json] [curl args...]: the studio's API with the token -> $E/body, HTTP status in CODE
@@ -77,23 +79,19 @@ DATASUM="SELECT (SELECT md5(string_agg(t::text, ',' ORDER BY id)) FROM items t) 
   (SELECT last_value FROM s) || ' ' || (SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace) || ' ' ||
   (SELECT count(*) FROM pg_largeobject_metadata) || ' ' || (SELECT count(*) FROM pg_prepared_xacts)"
 datasum() { echo "$DATASUM" | pgsu tando_shop; }
-studio_units() { srv "systemctl list-units --plain --no-legend --all 'tando-*-studio-*' | grep -c ."; }
+knobs() { echo "$1" | srv "sudo tee /opt/tando/studio.test > /dev/null"; }   # the helpers' test limits
+helpers() { srv "pgrep -f '^/opt/tando/bin/tando-studio serve --fd' | grep -c ." 2> /dev/null; }   # helpers running
+helper_pid() { srv "pgrep -u tando-${1:-shop} -f '^/opt/tando/bin/tando-studio serve --fd' | head -1"; }
+front_pid() { srv "systemctl show -P MainPID tando-studio.service"; }
 db_scopes() { srv "systemctl list-units --plain --no-legend --all 'tando-*-studiodb-*' | grep -c ."; }
-left_now() { # no unit or scope, no studio process, no session directory or credential, no connection
-  [ "$(studio_units)" = 0 ] && [ "$(db_scopes)" = 0 ] &&
-  srv "! pgrep -x tando-studio > /dev/null && ! sudo test -e /run/tando-studio && ! sudo test -e /run/tando/studio" &&
+left_now() { # the service runs on; no helper, no studio connection, no lowered scope, no forward
+  [ "$(helpers)" = 0 ] && [ "$(db_scopes)" = 0 ] && srv "systemctl is-active -q tando-studio.service" &&
   [ "$(echo "SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE 'tando studio%'" | pgsu postgres)" = 0 ]
 }
-# nothing_left: within 10 s (the agent removes the directories after the client has seen the end)
+# nothing_left: within 20 s (a helper ends after its idle time: 8 s here, 120 s for real)
 nothing_left() {
-  T_UNTIL_STEP=0.5 t_until 10 left_now && return 0
-  # (what still holds a unit that has ended: its references, job and the processes that could)
-  srv "for u in \$(systemctl list-units --all --plain --no-legend 'tando-*-studio-*' | cut -d' ' -f1); do systemctl show \$u -p Refs,Job,CollectMode,Transient,ActiveState,SubState,Result,RequiredBy,WantedBy,BoundBy,ConsistsOf,TriggeredBy | tr '\n' ' '; echo; done; busctl list --no-pager 2> /dev/null | grep -i 'systemd-run\|systemctl' | cut -c1-120; pgrep -af 'systemd-run|systemctl' | cut -c1-160" >&2
-  srv "ls -d /sys/fs/cgroup/tando.slice/*studio* /sys/fs/cgroup/tando.slice/*/*studio* 2>&1 | head -4; for u in \$(systemctl list-units --all --plain --no-legend 'tando-*-studio-*' | cut -d' ' -f1); do systemctl show \$u -p ControlGroup,MainPID,ControlPID,NRestarts,StateChangeTimestamp | tr '\n' ' '; sudo systemctl stop \$u; sleep 1; echo; echo \"after a stop: \$(systemctl list-units --all --plain --no-legend \$u | tr -s ' ')\"; done" >&2
-  # (whether the unit is still the one that ran, or a file that loads it again; then whether
-  # systemd's next garbage collection pass, which a daemon-reload runs, unloads it)
-  srv "for u in \$(systemctl list-units --all --plain --no-legend 'tando-*-studio-*' | cut -d' ' -f1); do systemctl show \$u -p LoadState,FragmentPath,DropInPaths,InvocationID | tr '\n' ' '; sudo ls -d /run/systemd/transient/\$u 2>&1; done; sudo systemctl daemon-reload; echo \"after a daemon-reload: \$(systemctl list-units --all --plain --no-legend 'tando-*-studio-*' | tr -s ' \n' ' ')\"" >&2
-  srv "systemctl list-units --all --plain --no-legend 'tando-*-studio-*'; pgrep -ax tando-studio; sudo ls -la /run/tando-studio /run/tando/studio; pgrep -af 'tando-agent db-studio'" >&2
+  T_UNTIL_STEP=0.5 t_until 20 left_now && return 0
+  srv "systemctl status --no-pager tando-studio.service | head -20; pgrep -af tando-studio; systemctl list-units --all --plain --no-legend 'tando-*-studiodb-*'" >&2
   echo "SELECT pid, usename, state, application_name FROM pg_stat_activity WHERE application_name LIKE 'tando studio%'" | pgsu postgres >&2
   return 1
 }
@@ -137,10 +135,13 @@ T0=$(srv date +%s)
 
 # ---- S1 start ----------------------------------------------------------------------------------
 log "S1 start"
-export TANDO_STUDIO_TEST="hb=1 timeout=4"
+check "S1s host setup installed the service: enabled, running, no helper and no database connection yet" \
+  eval 'srv "systemctl is-enabled -q tando-studio.service && systemctl is-active -q tando-studio.service && systemctl is-enabled -q tando-studio-lower.path" && [ "$(helpers)" = 0 ] && [ "$(echo "SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE '"'"'tando studio%'"'"'" | pgsu postgres)" = 0 ]'
+knobs "timeout=4 idle-s=8"
+FRONT=$(front_pid)
 st_start "$E/s1.out" shop
-check "S1a the client printed the box and the link, and the code bought a token" eval '[ -n "$ST_TOKEN" ] && grep -q "database studio" "$E/s1.out"'
-check "S1b the link's port is the app's stable port (47100-47409): $ST_PORT" eval '[ "$ST_PORT" -ge 47100 ] && [ "$ST_PORT" -le 47409 ]'
+check "S1a the client printed the box and the link (with the app), and the code bought a token" eval '[ -n "$ST_TOKEN" ] && [ "$ST_APP" = shop ] && grep -q "database studio" "$E/s1.out"'
+check "S1b the link's port is the host's stable port (47100-47409): $ST_PORT" eval '[ "$ST_PORT" -ge 47100 ] && [ "$ST_PORT" -le 47409 ]'
 probe=$(curl -s -m 5 "http://127.0.0.1:$ST_PORT/healthz")
 check "S1c /healthz answers with the probe word: $probe" eval 'case $probe in "tando-studio "?*) true;; *) false;; esac'
 curl -s -m 5 -D "$E/h" -o "$E/page" "http://127.0.0.1:$ST_PORT/"
@@ -149,19 +150,23 @@ check "S1d the page: CSP self only, no inline script, Trusted Types, nosniff" ev
    grep -qi "^x-content-type-options: nosniff" "$E/h" && grep -q "<script src=\"/s.js\"></script>" "$E/page"'
 api /api/info
 check "S1e /api/info: read-only, the role and database, no password" eval '[ "$(jx "%->{mode}")" = ro ] && [ "$(jx "%->{role}")" = tando_shop ] && ! grep -q "$PW" "$E/body"'
-check "S1f one unit, under tando.slice" eval '[ "$(studio_units)" = 1 ] && srv "systemctl show -P Slice tando-shop-studio-$ST_SID12" | grep -qx tando.slice'
+check "S1f one helper (for shop), in the service's cgroup" eval '[ "$(helpers)" = 1 ] && srv "cat /proc/$(helper_pid)/cgroup" | grep -q "/system.slice/tando-studio.service$"'
 srv "sudo ss -ltnpuwH" > "$E/ss" 2>&1
 check "S1g no TCP or UDP listener belongs to the studio" eval '! grep -q tando-studio "$E/ss" && [ -s "$E/ss" ]'
-sid=$(srv "sudo ls /run/tando-studio" | head -1)
-perm=$(srv "sudo stat -c '%a %U:%G' /run/tando-studio /run/tando-studio/$sid /run/tando-studio/$sid/s /run/tando/studio /run/tando/studio/shop.$sid.cred" | tr '\n' ' ')
-check "S1h /run/tando-studio root 711, the session dir 770 admin:app, socket 666, credential root 600: $perm" \
-  test "$perm" = "711 root:root 770 vmadmin:tando-shop 666 tando-shop:tando-shop 700 root:root 600 root:root "
-pid=$(srv "systemctl show -P MainPID tando-shop-studio-$ST_SID12")
-st=$(srv "ps -o user= -p $pid; grep -E '^(CapEff|CapPrm|NoNewPrivs):' /proc/$pid/status | tr -s '\t' ' '" | tr '\n' ' ')
-check "S1i the studio runs as tando-shop without capabilities, no new privileges: $st" \
-  test "$st" = "tando-shop CapPrm: 0000000000000000 CapEff: 0000000000000000 NoNewPrivs: 1 "
-check "S1j another local user cannot reach the socket (a user of no group: permission denied)" \
-  eval 'srv "sudo useradd -M stranger 2> /dev/null; sudo -u stranger curl -s -m 3 --unix-socket /run/tando-studio/$sid/s http://127.0.0.1:$ST_PORT/healthz; echo rc=\$?" | grep -q "rc=7"'
+perm=$(srv "sudo stat -c '%a %U:%G' /run/tando-studio /run/tando-studio/ctl /run/tando-studio/u/vmadmin /run/tando-studio/u/vmadmin/s /run/tando-studio/h" | tr '\n' ' ')
+check "S1h /run/tando-studio root 711, ctl root 600, the admin's directory 711 and socket 600 vmadmin, the helpers' root 700: $perm" \
+  test "$perm" = "711 root:root 600 root:root 711 root:root 600 vmadmin:root 700 root:root "
+pid=$(helper_pid)
+st=$(srv "ps -o user:32=,group:32= -p $pid; grep -E '^(Groups|CapEff|CapPrm|NoNewPrivs):' /proc/$pid/status | tr -s '\t' ' '" | tr '\n' ' ' | tr -s ' ')
+check "S1i the helper runs as tando-shop, no other group, without capabilities, no new privileges: $st" \
+  test "$st" = "tando-shop tando-shop Groups: CapPrm: 0000000000000000 CapEff: 0000000000000000 NoNewPrivs: 1 "
+st=$(srv "ps -o user= -p $FRONT; grep -E '^(CapEff|CapBnd|NoNewPrivs):' /proc/$FRONT/status | tr -s '\t' ' '" | tr '\n' ' ')
+check "S1k the front: root with CAP_SETUID and CAP_SETGID only, no new privileges: $st" \
+  test "$st" = "root CapEff: 00000000000000c0 CapBnd: 00000000000000c0 NoNewPrivs: 1 "
+check "S1j another local user cannot reach the admin's socket (permission denied)" \
+  eval 'srv "sudo useradd -M stranger 2> /dev/null; sudo -u stranger curl -s -m 3 --unix-socket /run/tando-studio/u/vmadmin/s http://127.0.0.1:$ST_PORT/healthz; echo rc=\$?" | grep -q "rc=7"'
+check "S1l the app's env stays root 0640 to its own group: another app's user cannot read it (shop's helper reads its own)" \
+  eval '! srv "sudo -u tando-other cat /opt/tando/apps/shop/env" > /dev/null 2>&1 && [ "$(srv "sudo stat -c %a:%U /opt/tando/apps/shop/env")" = 640:root ]'
 
 # ---- S2 refusals -----------------------------------------------------------------------------
 log "S2 refusals"
@@ -269,8 +274,8 @@ done
 # ---- S4 limits ---------------------------------------------------------------------------------
 log "S4 limits"
 q "SELECT generate_series(1, 5000000)"
-mem=$(srv "cat /sys/fs/cgroup/tando.slice/tando-shop-studio-$ST_SID12.service/memory.peak")
-check "S4a 5M rows: 1,000 kept, truncated (rows); the unit's peak memory $((mem / 1048576)) MB <= 64 MB" \
+mem=$(($(srv "awk '/^VmHWM:/ { print \$2 }' /proc/$(helper_pid)/status") * 1024))
+check "S4a 5M rows: 1,000 kept, truncated (rows); the helper's peak memory $((mem / 1048576)) MB <= 64 MB" \
   eval '[ "$(jx "scalar @{%->{results}[0]{rows}}")" = 1000 ] && [ "$(jx "%->{results}[0]{reason}")" = rows ] && [ "$mem" -le 67108864 ]'
 active=$(echo "SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE 'tando studio%' AND state = 'active'" | pgsu postgres)
 check "S4b nothing runaway: no studio query active after the answer ($active)" test "$active" = 0
@@ -278,7 +283,7 @@ q "SELECT big FROM wide"
 check "S4c a 20 MB cell is cut at 64 KB, with its full length in trunc" \
   eval '[ "$(jx "length %->{results}[0]{rows}[0][0]")" = 65536 ] && [ "$(jx "%->{results}[0]{trunc}[0][2]")" = 20971520 ]'
 q "SELECT left(big, 100000) FROM wide, generate_series(1, 200)" 1000
-mem=$(srv "cat /sys/fs/cgroup/tando.slice/tando-shop-studio-$ST_SID12.service/memory.peak")
+mem=$(($(srv "awk '/^VmHWM:/ { print \$2 }' /proc/$(helper_pid)/status") * 1024))
 check "S4d 200 cells of 100 KB: the 8 MB answer cap ($(jx "%->{results}[0]{reason}"), $(jx "scalar @{%->{results}[0]{rows}}") rows), peak $((mem / 1048576)) MB" \
   eval '[ "$(jx "%->{results}[0]{reason}")" = bytes ] && [ "$mem" -le 67108864 ]'
 t1=$SECONDS; q "SET statement_timeout = 0; SELECT pg_sleep(30)"; dt=$((SECONDS - t1))
@@ -316,8 +321,9 @@ done
 q "SHOW work_mem"
 check "S13c work_mem is still 2MB in the next request" test "$(jx '%->{results}[0]{rows}[0][0]')" = 2MB
 bpid=$(echo "SELECT pid FROM pg_stat_activity WHERE application_name LIKE 'tando studio%'" | pgsu postgres)
-pr=$(srv "ps -o ni= -p $bpid; ionice -p $bpid; ps -o ni= -p \$(systemctl show -P MainPID tando-shop-studio-$ST_SID12); cut -d: -f3 /proc/$bpid/cgroup; cat /sys/fs/cgroup/tando-shop-studiodb-$bpid.scope/cpu.weight" | tr -s ' \n' ' ')
-check "S13d the backend $bpid in a scope of its own at CPU weight 1, nice 19, idle I/O; the studio at nice 10: $pr" \
+T_UNTIL_STEP=0.2 t_until 10 eval 'srv "test -e /sys/fs/cgroup/tando-shop-studiodb-$bpid.scope/cpu.weight"'   # (the path unit runs the agent)
+pr=$(srv "ps -o ni= -p $bpid; ionice -p $bpid; ps -o ni= -p $(helper_pid); cut -d: -f3 /proc/$bpid/cgroup; cat /sys/fs/cgroup/tando-shop-studiodb-$bpid.scope/cpu.weight" | tr -s ' \n' ' ')
+check "S13d the backend $bpid in a scope of its own at CPU weight 1, nice 19, idle I/O; the helper at nice 10 (through the front's request and the root agent's checks): $pr" \
   eval 'case "$pr" in *"19 idle 10 /tando-shop-studiodb-$bpid.scope 1 ") true;; *) false;; esac'
 # (red team) the agent lowers no other process: its studio_lower, given the pid of the other
 # app's session (with the studio's application_name), of shop's own app session and of the
@@ -507,61 +513,72 @@ q "SELECT v FROM secrets WHERE id = 1"
 check "S10a the canary cell is in the answer (the probe works)" grep -q "$CANARY" "$E/body"
 srv "ps -eo args" > "$E/ps.server"; ps -eo args > "$E/ps.laptop"
 check "S10b the password is in no process list (server and laptop)" eval '! grep -q "$PW" "$E/ps.server" "$E/ps.laptop" && grep -q tando-studio "$E/ps.server"'
-check "S10c ... nor in the studio's environment" eval '! srv "sudo cat /proc/$pid/environ" | tr "\0" "\n" | grep -q "$PW"'
+check "S10c ... nor in the helper's or the front's environment" eval '! srv "sudo cat /proc/$(helper_pid)/environ /proc/$(front_pid)/environ" | tr "\0" "\n" | grep -q "$PW"'
 check "S10d ... nor in the laptop's config directory or the client's output" eval '! grep -rq "$PW" "$TANDO_CONFIG_DIR" "$E/s1.out"'
 
 # ---- S7 the end, in every way -----------------------------------------------------------------
 log "S7 end"
 api /api/end '{}'
-st_wait_exit 15
-check "S7a Stop in the page: the client ends by itself and says nothing is left" \
-  eval 'grep -q "studio stopped (Stop in the page); nothing of it left running on test" "$E/s1.out"'
-check "S7b no unit, process, socket, credential or connection left" nothing_left
+api /api/ping
+check "S7a Stop in the page: its token is gone (401) and its helper with it" eval '[ "$CODE" = 401 ] && T_UNTIL_STEP=0.2 t_until 10 eval "[ \"\$(helpers)\" = 0 ]"'
+kill -INT "$ST_PID"; st_wait_exit 15
+check "S7b Ctrl-C at the client ends the forward only: it says so; the service runs on (same process), nothing else left" \
+  eval 'grep -q "forward closed; the studio keeps running on test" "$E/s1.out" && [ "$(front_pid)" = "$FRONT" ] && nothing_left'
 srv "sudo journalctl --since=@$T0 --no-pager -o cat" > "$E/journal"; srv "sudo cat /var/log/tando/audit.log" > "$E/audit"
 check "S10e the password and the canary cell are not in the journal or the audit log" \
-  eval '! grep -q "$PW" "$E/journal" "$E/audit" && ! grep -q "$CANARY" "$E/journal" "$E/audit" && grep -q "tando studio shop ro vmadmin" "$E/journal"'
-check "S7i the unit stopped cleanly (its ExecStopPost removed the session's files: no failed control process)" \
-  eval '! grep -q "studio-.*Control process exited\|studio-.*Failed with result" "$E/journal"'
-check "S10f the audit log: the session's start and end, counts only" \
-  eval 'grep "	db-studio	shop	ok	read-only, ended: end, [0-9]* queries$" "$E/audit" | grep -q vmadmin && ! grep -q "SELECT" "$E/audit"'
+  eval '! grep -q "$PW" "$E/journal" "$E/audit" && ! grep -q "$CANARY" "$E/journal" "$E/audit" && grep -q "tando-studio: started for shop (vmadmin)" "$E/journal"'
+check "S7i the service never restarted (no failure)" test "$(srv "systemctl show -P NRestarts tando-studio.service")" = 0
+check "S10f the audit log: every code minted, by whom, for which app and port; no SQL" \
+  eval 'grep "	db-studio-code	shop	ok	read-only, port $ST_PORT$" "$E/audit" | grep -q vmadmin && ! grep -q "SELECT" "$E/audit"'
 
-st_start "$E/s7c.out" shop
+st_start "$E/s7c.out" shop; t1=$ST_TOKEN
+q "SELECT 1"
 kill -INT "$ST_PID"; st_wait_exit 15
-check "S7c Ctrl-C (SIGINT) at the client: it says nothing is left, and nothing is" \
-  eval 'grep -q "nothing of it left running" "$E/s7c.out" && nothing_left'
-TANDO_STUDIO_TEST="hb=1 idle-s=3" st_start "$E/s7d.out" shop
-t1=$SECONDS; st_wait_exit 20; dt=$((SECONDS - t1))
-check "S7d unused (idle 3 s): ended in $dt s, the client says why, nothing left" \
-  eval 'grep -q "studio stopped (unused for 30 min); nothing" "$E/s7d.out" && nothing_left'
-st_start "$E/s7e.out" shop
-sshpid=$(pgrep -f "ControlPath=none.*127.0.0.1:$ST_PORT:/run/tando-studio" | head -1)
-kill -STOP "$sshpid"; t1=$SECONDS
-T_UNTIL_STEP=0.5 t_until 20 eval '[ "$(studio_units)" = 0 ]'; dt=$((SECONDS - t1))
-check "S7e the laptop stops answering (ssh stopped: no heartbeat): the studio is gone in $dt s (4.5 heartbeats)" \
-  eval '[ "$(studio_units)" = 0 ] && [ $dt -le 15 ]'
-kill -CONT "$sshpid"; kill "$sshpid" 2> /dev/null; st_wait_exit 20
-check "S7f ... nothing left" nothing_left
-st_start "$E/s7g.out" shop
+check "S7c Ctrl-C with a helper open: the service survives the client, the helper ends when unused, nothing left" \
+  eval 'grep -q "forward closed" "$E/s7c.out" && [ "$(front_pid)" = "$FRONT" ] && nothing_left'
+mem=$(srv "ps -o rss= -p $FRONT" | tr -d ' ')
+check "S7n idle: the front alone, no helper, no database connection, $((mem / 1024)) MB resident (< 15 MB)" eval '[ "$mem" -gt 0 ] && [ "$mem" -lt 15360 ] && left_now'
+# two clients at once, on two ports; the second's token is not the first's
+st_start "$E/s7d1.out" shop; p1=$ST_PID k1=$ST_TOKEN o1=$ST_PORT
+st_start "$E/s7d2.out" shop; p2=$ST_PID k2=$ST_TOKEN o2=$ST_PORT
+q "SELECT 2"; a2=$(jx '%->{results}[0]{rows}[0][0]')
+ST_TOKEN=$k1 ST_PORT=$o1; q "SELECT 1"; a1=$(jx '%->{results}[0]{rows}[0][0]')
+check "S7d two clients at once (ports $o1, $o2) both answer, through one service" eval '[ "$a1" = 1 ] && [ "$a2" = 2 ] && [ "$o1" != "$o2" ] && [ "$(front_pid)" = "$FRONT" ]'
+kill -INT "$p2"; ST_PID=$p2; st_wait_exit 15
+q "SELECT 3"
+check "S7e the second client's Ctrl-C leaves the first one working" test "$(jx '%->{results}[0]{rows}[0][0]')" = 3
 "$R" db studio -a shop --stop > "$E/stop.out" 2>&1
-st_wait_exit 15
-check "S7g tando db studio --stop from another shell: stopped 1, the first client ends, nothing left" \
-  eval 'grep -q "stopped 1 studio session" "$E/stop.out" && nothing_left'
-check "S7h the stable port is the same each time ($ST_PORT)" eval 'grep -q "127.0.0.1:$ST_PORT/" "$E/s1.out"'
-# --json (tando-dash runs it so): one JSON line when ready; the end of its stdin ends the session
+# (the restarted service makes an admin's socket again on that admin's next code: one minted for
+# the same port, so the old token comes back through the old forward to a new front)
+srv "sudo /opt/tando/bin/tando-agent db-studio-code shop $ST_PORT test" > /dev/null
+api /api/ping
+check "S7g tando db studio --stop: the service restarted (a new process), every token revoked (401)" \
+  eval 'grep -q "every studio session on test ended; the service restarted" "$E/stop.out" && [ "$CODE" = 401 ] && [ "$(front_pid)" != "$FRONT" ] && srv "systemctl is-active -q tando-studio.service"'
+kill -INT "$p1"; ST_PID=$p1; st_wait_exit 15
+FRONT=$(front_pid)
+st_start "$E/s7r.out" shop
+srv "sudo systemctl restart tando-studio.service"
+srv "sudo /opt/tando/bin/tando-agent db-studio-code shop $ST_PORT test" > /dev/null
+api /api/ping
+check "S7r a restart of the service revokes the tokens (401)" test "$CODE" = 401
+kill -INT "$ST_PID"; st_wait_exit 15
+FRONT=$(front_pid)
+check "S7h the stable port is the same each time ($o1)" eval 'grep -q "127.0.0.1:$o1/" "$E/s1.out"'
+# --json (tando-dash runs it so): one JSON line when ready; the end of its stdin ends the forward
 rm -f "$E/s7i.in"; mkfifo "$E/s7i.in"
 "$R" db studio -a shop --json < "$E/s7i.in" > "$E/s7i.out" 2> "$E/s7i.err" &
 ST_PID=$!
 exec 5> "$E/s7i.in"   # (the writer end: held here, as tando-dash holds its pipe)
 T_UNTIL_STEP=0.2 t_until 30 eval 'grep -q . "$E/s7i.out" || ! kill -0 $ST_PID 2> /dev/null'
 s7k=0
-grep -qE "^\{\"url\":\"http://127\.0\.0\.1:([0-9]+)/#c=[A-Za-z0-9_-]+\",\"port\":[0-9]+,\"sid\":\"[0-9a-f]{12}\"\}$" "$E/s7i.out" &&
-  [ "$(wc -l < "$E/s7i.out" | tr -d " ")" = 1 ] && [ "$(studio_units)" = 1 ] && s7k=1
-check "S7k --json prints one line {url, port, sid} and no box, the session runs ($(head -c 40 "$E/s7i.out"))" eval '[ $s7k = 1 ]'
+grep -qE "^\{\"url\":\"http://127\.0\.0\.1:([0-9]+)/#c=[A-Za-z0-9_-]+&app=shop\",\"port\":[0-9]+,\"sid\":\"[A-Za-z0-9_-]+\"\}$" "$E/s7i.out" &&
+  [ "$(wc -l < "$E/s7i.out" | tr -d " ")" = 1 ] && s7k=1
+check "S7k --json prints one line {url, port, sid} and no box ($(head -c 60 "$E/s7i.out"))" eval '[ $s7k = 1 ]'
 exec 5>&-
 s7l=0; T_UNTIL_STEP=0.2 t_until 20 eval '! kill -0 $ST_PID 2> /dev/null' && s7l=1
 kill -TERM "$ST_PID" 2> /dev/null; wait "$ST_PID" 2> /dev/null   # (when it did not end: not left running; a background job ignores SIGINT)
-check "S7l --json: the end of stdin (the program that started it is gone) ends it; nothing left ($(grep -o 'studio stopped[^;]*' "$E/s7i.err" | head -1))" \
-  eval '[ $s7k = 1 ] && [ $s7l = 1 ] && nothing_left'
+check "S7l --json: the end of stdin (the program that started it is gone) ends the forward; the service runs on, nothing else left" \
+  eval '[ $s7k = 1 ] && [ $s7l = 1 ] && [ "$(front_pid)" = "$FRONT" ] && nothing_left'
 
 # ---- S8 CI keys -----------------------------------------------------------------------------
 log "S8 CI keys"
@@ -574,21 +591,22 @@ check "S8a tando ci setup made a deploy key" grep -q "PRIVATE KEY" "$KEY"
 check "S8b layer 1, the client: a deploy key is refused ($(tail -1 "$E/s8b.out"))" grep -q "needs the admin's login, not a deploy key" "$E/s8b.out"
 KOPTS=(-F /dev/null -p "$SP" -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o StrictHostKeyChecking=no
        -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5)
-ssh "${KOPTS[@]}" -i "$KEY" tando-d-shop@127.0.0.1 "sudo -n /opt/tando/bin/tando-agent db-studio shop ro 0123456789abcdef0123456789abcdef 5 47999 test" > "$E/s8c.out" 2>&1; rc=$?
-check "S8c layer 2, the gate: db-studio is not in its grammar (rc=$rc, no unit)" eval '[ $rc != 0 ] && [ "$(studio_units)" = 0 ]'
+ssh "${KOPTS[@]}" -i "$KEY" tando-d-shop@127.0.0.1 "sudo -n /opt/tando/bin/tando-agent db-studio-code shop 47999 test" > "$E/s8c.out" 2>&1; rc=$?
+ssh "${KOPTS[@]}" -i "$KEY" tando-d-shop@127.0.0.1 "sudo -n /opt/tando/bin/tando-studio ctl code tando-d-shop shop 47999 test" > "$E/s8c2.out" 2>&1; rc2=$?
+check "S8c layer 2, the gate: db-studio-code and tando-studio ctl are not in its grammar (rc=$rc, $rc2; no code minted)" \
+  eval '[ $rc != 0 ] && [ $rc2 != 0 ] && ! grep -q "code=" "$E/s8c.out" "$E/s8c2.out"'
 srv "sudo sudo -l -U tando-d-shop" > "$E/sudo-l" 2>&1
 check "S8d layer 3, sudo: the deploy user may run the gate's root mode only" \
   eval 'grep -q "tando-gate" "$E/sudo-l" && ! grep -q "tando-agent" "$E/sudo-l"'
 st_start "$E/s8e.out" shop
-sid=$(srv "sudo ls /run/tando-studio" | head -1)
-ssh "${KOPTS[@]}" -i "$KEY" -N -o ExitOnForwardFailure=yes -L "47998:/run/tando-studio/$sid/s" tando-d-shop@127.0.0.1 > "$E/s8e.ssh" 2>&1 &
+ssh "${KOPTS[@]}" -i "$KEY" -N -o ExitOnForwardFailure=yes -L "47998:/run/tando-studio/u/vmadmin/s" tando-d-shop@127.0.0.1 > "$E/s8e.ssh" 2>&1 &
 fpid=$!
 T_UNTIL_STEP=0.2 t_until 10 eval '! kill -0 $fpid 2> /dev/null || (exec 3<> /dev/tcp/127.0.0.1/47998) 2> /dev/null'
 check "S8e layer 4, sshd: the deploy key's ssh -L to the studio's socket gets nothing" \
   eval '! curl -s -m 3 http://127.0.0.1:47998/healthz | grep -q tando-studio'
 kill $fpid 2> /dev/null; wait $fpid 2> /dev/null
-out=$(srv "sudo env SUDO_USER=tando-d-shop /opt/tando/bin/tando-agent db-studio shop ro 0123456789abcdef0123456789abcdef 5 47997 test" 2>&1 < /dev/null)
-check "S8f the agent itself refuses SUDO_USER=tando-d-*: $out" eval 'echo "$out" | grep -q "a CI deploy key cannot open the studio" && [ "$(studio_units)" = 1 ]'
+out=$(srv "sudo env SUDO_USER=tando-d-shop /opt/tando/bin/tando-agent db-studio-code shop 47997 test" 2>&1 < /dev/null)
+check "S8f the agent itself refuses SUDO_USER=tando-d-*: $out" eval 'echo "$out" | grep -q "a CI deploy key cannot open the studio" && ! srv "sudo test -e /run/tando-studio/u/tando-d-shop"'
 kill -INT "$ST_PID"; st_wait_exit 15
 
 # ---- S9 misc --------------------------------------------------------------------------------
@@ -603,6 +621,13 @@ srv "sudo cp -p /opt/tando/bin/tando-agent /root/agent.new && sudo sed -i '/^  d
 "$R" db studio -a shop --no-open > "$E/s9c.out" 2>&1
 srv "sudo cp -p /root/agent.new /opt/tando/bin/tando-agent"
 check "S9c an agent without the verbs (older): $(tail -1 "$E/s9c.out")" grep -q "is older than this client: tando host setup test" "$E/s9c.out"
+srv "sudo cp -p /opt/tando/bin/tando-agent /root/agent.new && sudo sed -i '/^  echo \"service=1\"$/d' /opt/tando/bin/tando-agent"
+"$R" db studio -a shop --no-open > "$E/s9c2.out" 2>&1; rc=$?
+srv "sudo cp -p /root/agent.new /opt/tando/bin/tando-agent"
+check "S9c2 an agent without the service (older): the client takes the per-session way (here answered: update): $(tail -1 "$E/s9c2.out")" \
+  eval '[ $rc != 0 ] && grep -q "now one service for the whole server: update tando on this computer" "$E/s9c2.out"'
+out=$(srv "sudo /opt/tando/bin/tando-agent db-studio shop ro 0123456789abcdef0123456789abcdef 5 47996 test" 2>&1 < /dev/null)
+check "S9c3 an older client's per-session verb: a clear update message: $out" eval 'echo "$out" | grep -q "update tando on this computer"'
 srv "echo 'AllowStreamLocalForwarding no' | sudo tee /etc/ssh/sshd_config.d/00-studio-test.conf > /dev/null && sudo systemctl reload ssh"
 "$R" db studio -a shop --no-open > "$E/s9d.out" 2>&1; rc=$?
 srv "sudo rm -f /etc/ssh/sshd_config.d/00-studio-test.conf && sudo systemctl reload ssh"
@@ -615,22 +640,29 @@ app_sessions() { # n: n sessions of the app's role, each in pg_sleep(60), detach
 }
 echo "ALTER ROLE tando_shop CONNECTION LIMIT 4" | pgsu postgres > /dev/null
 app_sessions 2
-"$R" db studio -a shop --no-open > "$E/s9s.out" 2>&1; rc=$?
-check "S9s near its limit (2 of 4 in use: the studio would leave 1) the studio does not connect: $(grep tando: "$E/s9s.out" | tail -1)" \
-  eval '[ $rc != 0 ] && grep -q "the app uses 2 of its 4 database connections; the studio needs one and leaves 2 free" "$E/s9s.out" && nothing_left'
+st_start "$E/s9s.out" shop; q "SELECT 1"
+check "S9s near its limit (2 of 4 in use: the studio would leave 1) the studio does not connect ($CODE): $(jx '%->{error}{message}')" \
+  eval '[ "$CODE" = 503 ] && grep -q "the app uses 2 of its 4 database connections; the studio needs one and leaves 2 free" "$E/body"'
+kill -INT "$ST_PID"; st_wait_exit 15
 echo "ALTER ROLE tando_shop CONNECTION LIMIT 5" | pgsu postgres > /dev/null
-check "S9t with 2 free after it (2 of 5 in use), it does" st_start "$E/s9t.out" shop
+st_start "$E/s9t.out" shop; q "SELECT 1"
+check "S9t with 2 free after it (2 of 5 in use), it does" test "$(jx '%->{results}[0]{rows}[0][0]')" = 1
 kill -INT "$ST_PID"; st_wait_exit 15
 echo "ALTER ROLE tando_shop CONNECTION LIMIT 10; SELECT count(pg_terminate_backend(pid)) >= 0 FROM pg_stat_activity WHERE usename = 'tando_shop'" | pgsu postgres > /dev/null
 # the connection is closed when the page sends nothing for a while (conn-idle: 2 s here, 60 s)
-TANDO_STUDIO_TEST="hb=1 timeout=4 conn-idle=2" st_start "$E/s9i.out" shop
+knobs "timeout=4 conn-idle=2 idle-s=30"
+st_start "$E/s9i.out" shop
 q "SELECT 1"
 T_UNTIL_STEP=0.5 t_until 15 eval '[ "$(echo "SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE '"'"'tando studio%'"'"'" | pgsu postgres)" = 0 ]'; gone=$?
 q "SELECT 2"; again=$(jx '%->{results}[0]{rows}[0][0]')
 bpid=$(echo "SELECT pid FROM pg_stat_activity WHERE application_name LIKE 'tando studio%'" | pgsu postgres)
-check "S9i unused, the database connection is closed (the unit runs on); the next request opens one ($again), its priority lowered again" \
-  eval '[ $gone = 0 ] && [ "$(studio_units)" = 1 ] && [ "$again" = 2 ] && [ "$(srv "ps -o ni= -p $bpid" | tr -d " ")" = 19 ]'
+T_UNTIL_STEP=0.2 t_until 10 eval '[ "$(srv "ps -o ni= -p $bpid" | tr -d " ")" = 19 ]'
+hn=$(helpers)
+check "S9i unused, the database connection is closed (the helper runs on: $hn); the next request opens one ($again), its priority lowered again ($bpid)" \
+  eval '[ $gone = 0 ] && [ "$hn" -ge 1 ] && [ "$again" = 2 ] && [ "$(srv "ps -o ni= -p $bpid" | tr -d " ")" = 19 ]'
+api /api/end '{}'   # (its helper has 30 s of idle time: Stop ends it now)
 kill -INT "$ST_PID"; st_wait_exit 15
+knobs "timeout=4 idle-s=8"
 
 # ---- S15 which app: the picker -----------------------------------------------------------------
 log "S15 picker"
@@ -640,12 +672,15 @@ check "S15a no app named, no tando.conf, not a terminal: the list with the comma
         grep -q "plain.*no database" "$E/pick.list" && ! grep -q "tando db studio plain" "$E/pick.list"'
 (cd "$W" && printf '2\n' | "$ROOT/test/pty-run.sh" "$E/pick.tty" "$R" db studio -H test --no-open > /dev/null 2>&1) &
 pk=$!
-T_UNTIL_STEP=0.2 t_until 30 eval '[ "$(studio_units)" = 1 ]'   # (script(1) may write its file only at the end)
-"$R" db studio -a shop --stop > /dev/null 2>&1
+fwd() { pgrep -f 'ControlPath=none.*127.0.0.1:[0-9]*:/run/tando-studio/u/' > /dev/null; }   # a client's forward
+T_UNTIL_STEP=0.2 t_until 30 fwd   # (script(1) may write its file only at the end)
+fport=$(ps -axo args= | sed -n 's/.*ControlPath=none.* -L 127\.0\.0\.1:\([0-9]*\):\/run\/tando-studio\/u\/.*/\1/p' | head -1)   # (macOS pgrep prints no arguments)
+T_UNTIL_STEP=0.2 t_until 15 eval 'curl -s -m 2 "http://127.0.0.1:$fport/healthz" | grep -q tando-studio'   # (the forward to shop's studio answers)
+pkill -f 'ControlPath=none.*127.0.0.1:[0-9]*:/run/tando-studio/u/'   # (the forward ends: so does the client)
 wait $pk 2> /dev/null
-check "S15b at a terminal: a numbered list (other, shop; plain dimmed), 2 picks shop and opens its studio" \
+check "S15b at a terminal: a numbered list (other, shop; plain dimmed), 2 picks shop: a link is minted for shop and its forward answers" \
   eval 'grep -q "Which app.s database" "$E/pick.tty" && grep -q " 1) other" "$E/pick.tty" && grep -q " 2) shop" "$E/pick.tty" &&
-        grep -q "plain *no database" "$E/pick.tty" && grep -q "shop .*database studio" "$E/pick.tty" && nothing_left'
+        grep -q "plain *no database" "$E/pick.tty" && [ -n "$fport" ] && srv "sudo tail -3 /var/log/tando/audit.log" | grep -q "	db-studio-code	shop	ok	read-only, port $fport$" && nothing_left'
 
 # ---- S14 isolation: two apps, two studios, no data of one in the other ---------------------------
 log "S14 isolation"
@@ -658,7 +693,7 @@ q "SELECT count(*) FROM items"; e2=$(qerr)
 ST_TOKEN=$t1 ST_PORT=$o1; q "SELECT count(*) FROM items"; a1=$(jx '%->{results}[0]{rows}[0][0]')
 check "S9e two studios at once (shop, other) both answer, each with its own database only ($w1: $a1; $w2: $a2, items: $e2)" \
   eval '[ "$a1" = 100000 ] && [ "$a2" = "$OCANARY" ] && [ "$e2" = 42P01 ] && [ "$o1" != "$o2" ] && [ "$w1" = "shop tando_shop" ] && [ "$w2" = "other tando_other" ]'
-check "S14a the token of one studio is refused by the other (401 both ways)" \
+check "S14a the token of one client is refused on the other's port (401 both ways)" \
   eval '[ "$(st -H "Authorization: Bearer $t1" "http://127.0.0.1:$o2/api/info")" = 401 ] && [ "$(st -H "Authorization: Bearer $t2" "http://127.0.0.1:$o1/api/info")" = 401 ]'
 check "S14b each has its own history key and browser origin (port $o1, $o2)" eval '[ -n "$h1" ] && [ -n "$h2" ] && [ "$h1" != "$h2" ]'
 : > "$E/iso.all"
@@ -705,19 +740,24 @@ out2=$(srv "read -r PGPASSWORD; export PGPASSWORD; psql -X -At -h 127.0.0.1 -U t
 check "S14o a database left open to PUBLIC (as an older server may have: shop got in: $out) is closed again by host setup ($(echo "$out2" | tail -1))" \
   eval '[ "$out" = 1 ] && echo "$out2" | grep -q "CONNECT privilege"'
 ST_TOKEN=$t2 ST_PORT=$o2
-"$R" db studio -a shop --no-open > "$E/s9f.out" 2>&1
-check "S9f a third is refused and names the open ones: $(grep tando: "$E/s9f.out" | tail -1)" \
-  eval 'grep -q "2 studios are open on test already (shop (vmadmin), other (vmadmin))\|2 studios are open on test already (other (vmadmin), shop (vmadmin))" "$E/s9f.out"'
+st_start "$E/s14s.out" shop; p3=$ST_PID   # (a new client: S14o's host setup restarted the service)
+api /api/a/other/info; sw=$(jx '%->{app} . " " . %->{db}')
+q "SELECT 1"
+check "S14s the switcher: shop's page may open other (the admin's), each request on that app's own helper ($sw); the link's app stays shop" \
+  eval '[ "$sw" = "other tando_other" ] && [ "$(jx "%->{results}[0]{rows}[0][0]")" = 1 ] && [ -n "$(helper_pid other)" ] && [ -n "$(helper_pid shop)" ]'
+api /api/a/plain/info; c1=$CODE; api /api/a/nope/info; c2=$CODE; api "/api/a/..%2fshop/info"; c3=$CODE
+check "S14t no route to an app without a database, an unknown one or a path trick ($c1 $c2 $c3)" eval '[ $c1 = 404 ] && [ $c2 = 404 ] && [ $c3 = 404 ]'
 "$R" destroy -a other --purge --yes > "$E/destroy.out" 2>&1
-ST_PID=$p2; st_wait_exit 20
-check "S9g destroy of an app with an open studio: its studio is gone, its credential too" \
-  eval '[ "$(studio_units)" = 1 ] && ! srv "sudo ls /run/tando/studio/" | grep -q "^other\."'
+check "S9g destroy of an app with a studio open: its helpers are gone, the service runs on" \
+  eval 'T_UNTIL_STEP=0.2 t_until 10 eval "[ -z \"\$(helper_pid other)\" ]" && srv "systemctl is-active -q tando-studio.service"'
+kill -INT "$p3"; ST_PID=$p3; st_wait_exit 15
+kill -INT "$p2"; ST_PID=$p2; st_wait_exit 15
 ST_PID=$p1; kill -INT "$p1"; st_wait_exit 15
 check "S9h nothing left at the end" nothing_left
 (cd "$W" && "$R" db studio -H test --no-open < /dev/null > "$E/pick.one" 2>&1) &
 pk=$!
 T_UNTIL_STEP=0.2 t_until 30 grep -q "^http://127.0.0.1:" "$E/pick.one"
-"$R" db studio -a shop --stop > /dev/null 2>&1; wait $pk 2> /dev/null
+pkill -f 'ControlPath=none.*127.0.0.1:[0-9]*:/run/tando-studio/u/'; wait $pk 2> /dev/null
 check "S15c one app with a database left: it opens that one and says which" \
   eval 'grep -q "the one app with a database on test is shop: opening its studio" "$E/pick.one" && grep -q "^http://127.0.0.1:" "$E/pick.one" && nothing_left'
 
@@ -744,6 +784,6 @@ else skip "S11a Go is not installed here: the live pgwire tests need it"; fi
 
 # ---- S12 doctor ---------------------------------------------------------------------------------
 "$R" doctor > "$E/doctor.out" 2>&1
-check "S12 doctor: the studio is the client's, no session open" \
-  eval 'grep -q "studio .*same as the client" "$E/doctor.out" && grep -q "studio sessions .*none open" "$E/doctor.out"'
+check "S12 doctor: the studio is the client's, and its service runs" \
+  eval 'grep -q "studio .*same as the client" "$E/doctor.out" && grep -q "studio .*running" "$E/doctor.out"'
 t_done

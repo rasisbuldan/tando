@@ -159,6 +159,9 @@ func dbErr(err error) error {
 	return err
 }
 
+// Rnd: n random bytes, base64url
+func Rnd(n int) string { return rnd(n) }
+
 func rnd(n int) string {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {

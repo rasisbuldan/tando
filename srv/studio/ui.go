@@ -38,16 +38,22 @@ func assets() map[string]asset {
 }
 
 func (s *Studio) serveStatic(w http.ResponseWriter, r *http.Request) {
+	serveStatic(w, r, s.static, s.probe)
+}
+
+// serveStatic: the page's three files and /healthz (the probe word: the client reached this
+// studio, not another listener on the port)
+func serveStatic(w http.ResponseWriter, r *http.Request, static map[string]asset, probe string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		apiErr(w, 405, "bad_request", "GET")
 		return
 	}
 	if r.URL.Path == "/healthz" { // the client's probe: it reached this studio, not another listener
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(w, "tando-studio %s\n", s.probe)
+		fmt.Fprintf(w, "tando-studio %s\n", probe)
 		return
 	}
-	a, ok := s.static[r.URL.Path]
+	a, ok := static[r.URL.Path]
 	if !ok {
 		apiErr(w, 404, "not_found", "not found")
 		return

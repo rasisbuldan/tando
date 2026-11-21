@@ -8,7 +8,7 @@
 </head>
 <body>
 <header id="top">
-<b id="app">tando studio</b><span id="where" class="dim"></span>
+<b id="app">tando studio</b><select id="appsel" aria-label="App" hidden></select><span id="where" class="dim"></span>
 <span class="badge" title="Writes: tando db psql">read-only</span>
 <nav class="seg"><button id="t-tables" aria-selected="true">Tables</button><button id="t-sql" aria-selected="false">SQL</button></nav>
 <span class="grow"></span>
@@ -74,7 +74,7 @@
 <dl><dt>⌘/Ctrl Enter</dt><dd>run the selection, or the statement at the cursor</dd>
 <dt>⌘/Ctrl Shift Enter</dt><dd>run everything</dd><dt>⌘/Ctrl .</dt><dd>cancel the query</dd>
 <dt>Tab</dt><dd>indent (Esc, then Tab, leaves the editor)</dd><dt>/</dt><dd>filter the tables</dd><dt>Esc</dt><dd>close a panel</dd></dl>
-<p class="dim small">Read-only (writes: tando db psql). One app per studio: tando db studio &lt;app&gt;</p>
+<p class="dim small">Read-only (writes: tando db psql). Other apps: the list at the top.</p>
 </div></div>
 <script src="/s.js"></script>
 </body>

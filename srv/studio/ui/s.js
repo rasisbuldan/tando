@@ -6,13 +6,17 @@ const $ = id => document.getElementById(id);
 const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
 const fmt = n => Number(n).toLocaleString('en-US');
 const NUM = new Set([20, 21, 23, 26, 700, 701, 1700]), JSONT = new Set([114, 3802]);
-const S = { token: '', info: null, key: null, ended: false, busy: false, qid: 0, running: '', t: null, res: [], cur: 0, hist: [] };
+const S = { token: '', app: '', apps: null, info: null, key: null, ended: false, busy: false, qid: 0, running: '', t: null, res: [], cur: 0, hist: [] };
 const LS = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch { } }, del(k) { try { localStorage.removeItem(k); } catch { } } };
 
 // ---- talking to the studio --------------------------------------------------------------------
 class Gone extends Error { }
+// the service (docs/STUDIO.md): app requests name their app, /api/a/<app>/...; the session's own
+// (ping, end, apps) do not. A per-session studio (an older server) has no /api/apps: S.apps null.
+const OWN = new Set(['/api/ping', '/api/end', '/api/apps']);
 async function api(path, body) {
   if (S.ended) throw new Gone();
+  if (S.apps && !OWN.has(path)) path = '/api/a/' + encodeURIComponent(S.app) + path.slice(4);
   let r;
   try {
     r = await fetch(path, { method: body ? 'POST' : 'GET', headers: Object.assign({ Authorization: 'Bearer ' + S.token }, body ? { 'Content-Type': 'application/json' } : {}), body: body ? JSON.stringify(body) : undefined, cache: 'no-store' });
@@ -27,7 +31,7 @@ function ended(why) {
   if (S.ended) return;
   S.ended = true;
   saveDraft();
-  $('end-why').textContent = (why || 'The connection to the studio is gone: it was stopped (Ctrl-C, Stop, idle time) or the computer slept.') + ' (Another app: tando db studio <app>.)';
+  $('end-why').textContent = (why || 'The connection to the studio is gone: it was stopped (Ctrl-C, Stop, idle time) or the computer slept.') + (S.apps ? '' : ' (Another app: tando db studio <app>.)');
   $('end-cmd').textContent = 'tando db studio' + (S.info ? ' ' + S.info.app : '');
   if (S.info) $('end-title').textContent = 'The studio of ' + S.info.app + ' ended';
   $('ended').hidden = false;
@@ -407,21 +411,43 @@ function wire() {
 
 async function boot() {
   theme(0); wire();
-  const m = /^#c=([\w-]{20,100})$/.exec(location.hash);
+  const m = /^#c=([\w-]{20,100})(?:&app=([a-z0-9-]{1,40}))?$/.exec(location.hash);
   history.replaceState(null, '', location.pathname);
-  try { S.token = sessionStorage.getItem('tando.studio.token') || ''; } catch { }
+  try { S.token = sessionStorage.getItem('tando.studio.token') || ''; S.app = sessionStorage.getItem('tando.studio.app') || ''; } catch { }
   if (m) {
     try {
       const r = await fetch('/api/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: m[1] }) });
-      if (r.ok) { S.token = (await r.json()).token; try { sessionStorage.setItem('tando.studio.token', S.token); } catch { } }
+      if (r.ok) { const j = await r.json(); S.token = j.token; S.app = m[2] || j.app || ''; try { sessionStorage.setItem('tando.studio.token', S.token); } catch { } }
     } catch { }
   }
-  if (!S.token) { ended('This link was already used, or it expired (a link works once, within a minute). The studio opens one tab per session.'); return; }
-  try { S.info = await api('/api/info'); } catch (e) { if (!(e instanceof Gone)) ended(e.message); return; }
+  if (!S.token) { ended('This link was already used, or it expired (a link works once, within a minute). Open the database again from tando or the dashboard.'); return; }
+  try {
+    const j = await api('/api/apps');
+    S.apps = j.apps;
+    if (!S.apps.includes(S.app)) S.app = S.apps.includes(j.app) ? j.app : S.apps[0] || '';
+  } catch (e) { if (e instanceof Gone) return; S.apps = null; }
+  const sel = $('appsel');
+  if (S.apps && S.apps.length > 1) {
+    sel.replaceChildren(...S.apps.map(a => { const o = el('option', null, a); o.value = a; return o; }));
+    sel.hidden = false; $('app').hidden = true;
+    sel.onchange = () => openApp(sel.value);
+  }
+  await openApp(S.app);
+}
+// openApp: the page shows app (the switcher, or the link's app); the editor text and the history
+// are kept per app (each encrypted with that app's key)
+async function openApp(a) {
+  if (S.info) { const k = lsKey('.draft'), v = await seal({ sql: $('ed').value }); if (v) LS.set(k, v); }
+  if (S.running) await cancel();
+  S.app = a; S.info = null; S.key = null; S.t = null; tables = [];
+  try { sessionStorage.setItem('tando.studio.app', a); } catch { }
+  $('appsel').value = a;
+  $('t-empty').hidden = false; $('t-head').hidden = $('p-rows').hidden = $('p-struct').hidden = true; $('tree').replaceChildren();
+  try { S.info = await api('/api/info'); } catch (e) { if (!(e instanceof Gone)) { status('Could not open ' + a + ': ' + e.message); } return; }
   const i = S.info;
   document.title = i.app + ' · ' + i.db + '@' + i.host + ' · tando studio';
   $('app').textContent = i.app;
-  $('app').title = 'This page shows the database of ' + i.app + ' only. Another app: tando db studio <app>';
+  $('app').title = 'The database of ' + i.app + (S.apps && S.apps.length > 1 ? ' (the list switches to another app of this server)' : '');
   $('where').textContent = 'database ' + i.db + ' on ' + i.host + ' · PostgreSQL ' + i.pg_version;
   try { S.key = await crypto.subtle.importKey('raw', Uint8Array.from(atob(i.hkey.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)), 'AES-GCM', false, ['encrypt', 'decrypt']); } catch { }
   S.hist = (await unseal(LS.get(lsKey('.history')))) || [];

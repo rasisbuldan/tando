@@ -1,8 +1,10 @@
 # shellcheck shell=bash
 # lib/studio.sh: `tando db studio [app] [--no-open] [--json] [--idle M] [--stop]` (sourced by cmd_db). bash 3.2.
 #
-# A read-only web UI and SQL editor for the app's database. tando-studio (srv/studio) runs on the
-# server as the app's user, on a unix socket; this command opens its own ssh connection (not the
+# A read-only web UI and SQL editor for the app's database. A server set up by this version runs
+# it as one always-on service for every app (studio_service; docs/STUDIO.md): this command only
+# mints a code and forwards a port. Below it, for an older agent, the per-session flow:
+# tando-studio (srv/studio) runs on the server as the app's user, on a unix socket; this command opens its own ssh connection (not the
 # shared master: a forward asked through it would outlive this command) that forwards
 # 127.0.0.1:<port> here to that socket, sends a heartbeat on the session's stdin, waits for the
 # studio's "ready" line, checks that the port answers as *this* studio (/healthz and the probe
@@ -97,6 +99,76 @@ studio_pick() {
   valid_app "$APP" || die "bad app name (a-z, 0-9, -; 2-24 characters)"
 }
 
+# studio_service json noopen: the server's always-on studio (docs/STUDIO.md). A one-time code
+# from the agent for this login, this app and this computer's port; a forward of that port to
+# this login's socket on the server, on an ssh connection of its own; the browser. The forward
+# lasts while this command runs; Ctrl-C ends the forward, not the studio.
+studio_service() {
+  local json=$1 noopen=$2 port n=0 err=$TMPD/studio.err code probe sock t
+  port=$(( STUDIO_PORT0 + $(printf '%s' "$HOST" | cksum | cut -d' ' -f1) % STUDIO_PORTS ))
+  STUDIO_SSH="" STUDIO_WATCH=""
+  trap 'studio_end; exit 130' INT
+  trap 'studio_end; exit 143' TERM
+  trap 'studio_end; exit 129' HUP
+  if [ -n "$json" ]; then   # stdin's EOF (the program that started this is gone) ends the forward
+    exec 4<&0
+    ( while IFS= read -r t; do :; done; kill -TERM $$ 2> /dev/null ) <&4 > /dev/null 2>&1 &
+    STUDIO_WATCH=$!
+    exec 4<&-
+  fi
+  while :; do
+    n=$((n + 1)); [ $n -le 10 ] || die "no free port between $((port - 10)) and $((port - 1)) on this computer"
+    if ! studio_port_free "$port"; then port=$((port + 1)); continue; fi
+    agent sudo db-studio-code "$APP" "$port" "$HOST" > "$TMPD/code"
+    code=$(sed -n 's/^code=\([A-Za-z0-9_-]*\) .*/\1/p' "$TMPD/code" | head -1)
+    probe=$(sed -n 's/^code=.* probe=\([A-Za-z0-9_-]*\) .*/\1/p' "$TMPD/code" | head -1)
+    sock=$(sed -n 's/^code=.* sock=\(\/run\/tando-studio\/u\/[A-Za-z0-9_.-]*\/s\)$/\1/p' "$TMPD/code" | head -1)
+    [ -n "$code" ] && [ -n "$probe" ] && [ -n "$sock" ] || die "the studio on $HOST gave no code (tando doctor $HOST)"
+    : > "$err"
+    ssh -o ControlMaster=no -o ControlPath=none "${SSHO[@]}" -N -T -o ExitOnForwardFailure=yes \
+      -L "127.0.0.1:$port:$sock" "$TARGET" < /dev/null > /dev/null 2> "$err" &
+    STUDIO_SSH=$!
+    t=0
+    while [ $t -lt 150 ]; do   # 15 s for the forward to answer as this server's studio
+      studio_probe "$port" "$probe" && break
+      kill -0 "$STUDIO_SSH" 2> /dev/null || break
+      sleep 0.1; t=$((t + 1))
+    done
+    [ $t -lt 150 ] && kill -0 "$STUDIO_SSH" 2> /dev/null && break
+    if ! kill -0 "$STUDIO_SSH" 2> /dev/null && grep -qE 'Address already in use|cannot listen to port|Could not request local forwarding' "$err"; then
+      wait "$STUDIO_SSH" 2> /dev/null; STUDIO_SSH=""; port=$((port + 1)); continue   # (lost a race for the port)
+    fi
+    studio_end
+    ssh_explain "$err" && exit 1
+    if grep -qE 'administratively prohibited|open failed' "$err"; then
+      explain "sshd on $HOST does not allow forwarding to a unix socket, which the studio needs" \
+        "allow it for your login: a file /etc/ssh/sshd_config.d/tando-studio.conf with  Match User ${TARGET%@*}  and  AllowStreamLocalForwarding local  (then sudo systemctl reload ssh)" \
+        "or use tando db psql"
+      exit 1
+    fi
+    die "the studio on $HOST does not answer through the forward on port $port (tando doctor $HOST)"
+  done
+  local url="http://127.0.0.1:$port/#c=$code&app=$APP" opened="open it in your browser (the link works once)"
+  if [ -n "$json" ]; then
+    printf '{"url":"%s","port":%s,"sid":"%s"}\n' "$url" "$port" "$probe"   # (checked words and digits only)
+  else
+    if [ -z "$noopen" ] && open_url "$url"; then opened="opened"; fi
+    ui_box_open "$APP" "database studio"
+    ui_kv studio "read-only, port $port of this computer; every app of $HOST in its list" 10
+    ui_kv browser "$opened" 10
+    ui_kv stops "Ctrl-C here ends the forward; the studio keeps running on $HOST" 10
+    ui_box_close "always on, on $HOST · reached through this ssh session only"
+    printf '%s\n' "$url"   # (whole, on a line of its own: it is copied)
+  fi
+  trap 'studio_end; note "forward closed; the studio keeps running on $HOST (tando db studio --stop ends every session)"; exit 130' INT
+  trap 'studio_end; exit 143' TERM HUP
+  wait "$STUDIO_SSH" 2> /dev/null
+  STUDIO_SSH=""
+  trap - INT TERM HUP
+  [ -z "$STUDIO_WATCH" ] || { kill "$STUDIO_WATCH" 2> /dev/null; STUDIO_WATCH=""; }
+  note "the forward to $HOST ended (the ssh connection closed); the studio keeps running there"
+}
+
 cmd_db_studio() {
   local noopen="" json=${JSON:-} stop="" idle=30 i=2 a knobs="${TANDO_STUDIO_TEST:-}" hb=${TANDO_STUDIO_HB:-10}
   while [ $i -lt ${#ARGS[@]} ]; do
@@ -118,14 +190,22 @@ cmd_db_studio() {
   resolve 1
   [ -z "${DEPLOY_KEY:-}" ] || die "tando db studio needs the admin's login, not a deploy key"
   if [ -n "$stop" ]; then
+    agent sudo db-studio-ls > "$TMPD/sls"; kv_read "$TMPD/sls" service
+    if [ "$K_service" = 1 ]; then   # the always-on studio: every token of the server is revoked
+      agent sudo db-studio-stop > "$TMPD/o"; kv_read "$TMPD/o" stopped
+      note "every studio session on $HOST ended; the service restarted (${K_stopped:-0} app database(s) were open)"
+      return 0
+    fi
     agent sudo db-studio-stop "$APP" > "$TMPD/o"; kv_read "$TMPD/o" stopped
     note "stopped ${K_stopped:-0} studio session(s) of $APP on $HOST"
     return 0
   fi
   agent sudo db-studio-ls "$APP" > "$TMPD/sls"
-  kv_read "$TMPD/sls" database installed
+  kv_read "$TMPD/sls" database installed service
   [ "$K_database" = 1 ] || die "$APP has no database (add database = postgres to tando.conf, then tando up)"
   [ "$K_installed" = 1 ] || die "the studio is not installed on $HOST: tando host setup $HOST"
+  if [ "$K_service" = 1 ]; then studio_service "$json" "$noopen"; return; fi
+  # (an older agent: its per-session studio, below)
   STUDIO_SID=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
   case $STUDIO_SID in [0-9a-f]*) ;; *) die "could not make a session id";; esac
   local port n=0 out=$TMPD/studio.out err=$TMPD/studio.err code="" probe="" t

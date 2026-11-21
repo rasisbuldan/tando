@@ -259,13 +259,14 @@ The app's PostgreSQL database (database = postgres in tando.conf). Without a
 subcommand: its size, connections in use and limits. psql opens a shell as the
 app's role; url prints DATABASE_URL, password included.
 studio opens a small web page in your browser: the tables (rows, structure) and
-a SQL editor. It is read-only (writes: tando db psql). The page goes through
-this command's own ssh connection; nothing listens on the server's network. It
-stops with Ctrl-C, Stop in the page, or after --idle minutes unused (30;
-5 to 240). --no-open prints the link only; --json (for programs) prints one
-line {url, port, sid} and ends when its stdin closes; --stop ends the app's
-studio. One studio shows one app: without an app and outside a project it
-lists the apps with a database and asks which.
+a SQL editor, read-only (writes: tando db psql), for every app of the server
+with a database (a list in the page switches). The studio runs on the server
+all the time; this command forwards a port to it over its own ssh connection
+(nothing listens on the server's network) and opens the app. Ctrl-C ends the
+forward, not the studio. --no-open prints the link only; --json (for programs)
+prints one line {url, port, sid} and ends when its stdin closes; --stop ends
+every studio session of the server. Without an app and outside a project it
+lists the apps with a database and asks which. (--idle: older servers only.)
 Limits of the app's role, per app in tando.conf, applied by a deploy (off: no
 limit): db_statement_timeout = 30s (a statement running longer is cancelled),
 db_idle_tx_timeout = 5m (a connection idle inside a transaction is closed),
