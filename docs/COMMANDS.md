@@ -104,7 +104,8 @@ Example: `tando history -n 10`
 One app in detail: state, release, memory, cpu, last 16 minutes, logs, alerts, its database
 (`database  postgres  412 MB, 3 of 10 connections`: the size and the connections of its role
 against the role's limit, as the alert checks last read them), backups, releases,
-recent deploys. Each worker (`worker.<name>` in tando.conf) has a line: `worker  queue  running
+recent deploys. The backup line turns red (`over 50 h, the backup alert fires`) past the backup
+alert's `backup_hours`, the same threshold. Each worker (`worker.<name>` in tando.conf) has a line: `worker  queue  running
 restarts 0  memory 41 MB of 256 MB`; `restarting` when it exited and waits to be started again.
 Outside a project without an app it shows `tando ls`. `--watch N` repaints; the footer says how
 old the data is (`updated 2s ago`), and a refresh that fails or gets no answer within 15 s marks
@@ -414,7 +415,8 @@ Example: `tando alerts notifier add phone ntfy`
 
 ### health
 `tando health [app] [--json]` · `tando health <app> --forget N`. Flags: `-a -H --json --forget`.
-Uptime over 24 h and 7 d, incidents (start, how long, cause), probe latency; for one app also the
+Uptime over 24 h and 7 d, incidents (start, how long, cause), probe latency (`PROBE P95`: tando-watch's
+own request once a minute, 24 h; not visitors: `tando requests` has theirs); for one app also the
 size and connections of its PostgreSQL database (as `tando status` shows them) and the
 last lines it wrote before its last crash. Recorded once a minute by tando-watch (docs/MONITORING.md).
 `--forget N` drops incident N of the app's list (1 is the newest) when it was a false alarm: the
@@ -431,7 +433,8 @@ Example: `tando errors shop --since 6h`
 `tando requests [summary [app]] [--since 15m|1h|24h]` · `tando requests tail [app] [-n N] [-f]` ·
 `tando requests errors [app] [--since W] [--4xx]` (the app after the subcommand). Flags: `-a -H --last --since -n -f --4xx`.
 Subcommands: summary (default), tail, errors.
-The app's Caddy request log: counts, status codes, latency percentiles, slowest paths. `--last` =
+The app's Caddy request log: counts, status codes, latency percentiles of the real requests in
+the window (`real requests, 1h`), slowest paths. `--last` =
 `--since`.
 Example: `tando requests errors --since 1h --4xx`
 

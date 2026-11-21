@@ -659,6 +659,21 @@ if grep -Eq '^│ APP +STATE +DEPLOYED' <<< "$out"; then ok; else bad "ls: an AL
 # status: memory says what it counts (anon + shmem, the same in ls, top, the graph and the alert)
 out=$(mon_run 'APP=web; render_status' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
 if grep -Eq '^│ memory .* 50 MB of 128 MB  in use, not cache' <<< "$out"; then ok; else bad "status: memory without its label ($out)"; fi
+# status: the backup age is judged by backup_hours (the alert's threshold, from the backupcfg row),
+# red past it; 50 h without the row (an older tando-watch). The stub's api backed up 30 h ago.
+out=$(mon_run 'APP=api; grep -v "^app${TAB}web" "$TMPD/st" > "$TMPD/x"; mv "$TMPD/x" "$TMPD/st"; render_status' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if grep -Eq '^│ backup +daily, last .* GMT  late after 50 h' <<< "$out"; then ok; else bad "status: backup age without backup_hours ($out)"; fi
+{ cat "$MON_ST"; printf 'backupcfg\tapi\t24\ton\n'; } > "$tmp/mon.st3"
+out=$(TANDO_COLOR=always MON_ST=$tmp/mon.st3 mon_run 'APP=api; grep -v "^app${TAB}web" "$TMPD/st" > "$TMPD/x"; mv "$TMPD/x" "$TMPD/st"; render_status')
+out=$(grep 'backup' <<< "$out")
+if [[ $out == *"daily, "*"31m"*"last "*" GMT: over 24 h, the backup alert fires"* ]]; then ok
+else bad "status: a backup older than backup_hours is not red ($out)"; fi
+# health and requests say which p95 they show: the probe's (24 h) or real requests' (the window)
+out=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/views.sh"; . "$1/lib/cmd-health.sh"; ui_init 80
+  TMPD=$(mktemp -d); HOST=vps; NOW=$(date +%s); found=""
+  printf "up\tweb\t9990\t9990\t1440\t10080\t0\t12\t30\t5,6,7\tok\t11\t\n" > "$TMPD/hl"; hl_all; rm -rf "$TMPD"' _ "$here" 2>&1)
+if [[ $out == *"PROBE P95"*"P95: tando-watch's probe, 24 h; real traffic: tando requests"* ]]; then ok
+else bad "health: the p95 does not say it is the probe's ($out)"; fi
 # tando top: the firing check after the app's state, the count in the host strip
 out=$("$BASH_BIN" -c '
     . "$1/lib/ui.sh"; . "$1/lib/common.sh"; set +u; TAB=$(printf "\t"); AGENT_BIN=/opt/tando/bin/tando-agent; . "$1/lib/cmd-top.sh"

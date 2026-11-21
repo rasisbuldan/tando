@@ -6,6 +6,12 @@ first, grouped by area.
 
 ## Unreleased
 
+- Changed: labels say what they measure. `tando health`'s p95 column is `PROBE P95` (tando-watch's
+  probe, 24 h; the footer points to `tando requests` for real traffic), `tando health <app>` shows
+  `probe 24h`, and `tando requests`' latency row ends with `real requests, <window>`. The backup
+  line of `tando status` uses the backup alert's `backup_hours` (50 h unless set; it was a fixed
+  2 days) and turns red past it, as the alert fires; tando-watch's `brief <app>` adds a
+  `backupcfg` row for it.
 - Fixed: one memory definition everywhere. The per-minute history (`tando status`'s 16-minute
   trend, `tando top`'s graph) counted anon memory only, while the live numbers and the `memory`
   alert count anon + shmem: a shmem-heavy app read lower in the graph, with a step where live

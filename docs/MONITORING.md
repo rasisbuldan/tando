@@ -284,14 +284,18 @@ counted.
 ```
 $ tando health
 ╭─ health ────────────────────────────────────────────────────────────── test ─╮
-│ APP   NOW      UP 24H    UP 7D    P95  PROBE LATENCY 24H         INC 7D      │
-│ boom  ✗ http  100.00%  100.00%  33 ms  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█       1      │
-│ h1    ● ok    100.00%  100.00%  71 ms  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█       0      │
+│ APP   NOW      UP 24H    UP 7D  PROBE P95  PROBE LATENCY 24H         INC 7D  │
+│ boom  ✗ http  100.00%  100.00%      33 ms  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█       1  │
+│ h1    ● ok    100.00%  100.00%      71 ms  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█       0  │
 ├─ recent incidents ───────────────────────────────────────────────────────────┤
 │ START (GMT)  APP   CHECK  LASTED       CAUSE                                 │
 │ 11-15 01:52  boom  http   ongoing, 4m  29 of 58 requests answered 5xx (50%)… │
-╰─ minutes judged once a minute; tando health <app> for one app ─── 01:56 GMT ─╯
+╰─ P95: tando-watch's probe, 24 h; real traffic: tando requests ─── 01:56 GMT ─╯
 ```
+
+Three p95s, three populations: `tando health`'s is tando-watch's own probe through Caddy, once a
+minute over 24 h (`PROBE P95`; `probe 24h` for one app); `tando requests`' is the real requests of
+its window (`latency ... real requests, 1h`); the `slow` alert's is real requests per minute.
 
 `tando health <app>` adds p50/p95, the 24-hour latency sparkline, up to 15 incidents and the last
 lines the app wrote before its last crash or liveness restart. `--json` for both.

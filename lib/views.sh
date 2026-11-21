@@ -418,10 +418,17 @@ render_status() {
     fi
   fi
   if [ "$bk" = daily ]; then
+    # late after backup_hours (the backup alert's threshold, from tando-watch's backupcfg row; 50 h
+    # without it): red, as the alert that fires then
+    local bh=50 bon=on bx bh2 bon2
+    while IFS=$TAB read -r r bx bh2 bon2 _; do
+      [ "$r" = backupcfg ] && ui_int "$bh2" && bh=$bh2 bon=$bon2
+    done < "$TMPD/st"
     if ! ui_int "$last"; then ui_kv backup "daily, ${UI_YELLOW}no backup yet${UI_NC}"
-    elif [ $((NOW - last)) -gt 172800 ]; then
-      ui_kv backup "daily, ${UI_YELLOW}last $(ago "$last"): older than 2 days${UI_NC}"
-    else ui_kv backup "daily, last $(ago "$last")"; fi
+    elif [ $((NOW - last)) -gt $((bh * 3600)) ]; then
+      if [ "$bon" = off ]; then ui_kv backup "daily, ${UI_YELLOW}last $(ago "$last"): over $bh h${UI_NC} (its alert is off)"
+      else ui_kv backup "daily, ${UI_RED}last $(ago "$last"): over $bh h, the backup alert fires${UI_NC}"; fi
+    else ui_kv backup "daily, last $(ago "$last")  ${UI_DIM}late after $bh h${UI_NC}"; fi
   fi
   # offsite copies (tando-offsite's state, one row): last upload, waiting, late, failing
   local olu opn oop oah ocr oer

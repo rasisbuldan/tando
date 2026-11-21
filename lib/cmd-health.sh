@@ -62,7 +62,7 @@ hl_dur() { # start end
 hl_all() {
   local r a u1 u7 n1 n7 ni p50 p95 sp lc lm fir na=0
   {
-    printf 'APP\tNOW\tUP 24H\tUP 7D\tP95\tPROBE LATENCY 24H\tINC 7D\n'
+    printf 'APP\tNOW\tUP 24H\tUP 7D\tPROBE P95\tPROBE LATENCY 24H\tINC 7D\n'
     while IFS=$TAB read -r r a u1 u7 n1 n7 ni p50 p95 sp lc lm fir; do
       [ "$r" = up ] || continue
       na=$((na + 1))
@@ -83,7 +83,7 @@ hl_all() {
   ui_box_sep "recent incidents"
   if [ "$(wc -l < "$TMPD/hl.inc")" -gt 1 ]; then ui_table "l,l,l,l!1,l:10-" < "$TMPD/hl.inc"
   else ui_box_line "none recorded"; fi
-  ui_box_close "minutes judged once a minute; tando health <app> for one app" "$(date -u '+%H:%M GMT')"
+  ui_box_close "P95: tando-watch's probe, 24 h; real traffic: tando requests" "$(date -u '+%H:%M GMT')"
 }
 
 hl_one() {
@@ -97,7 +97,7 @@ hl_one() {
   ui_int "$n1" || n1=0; ui_int "$n7" || n7=0
   ui_kv "uptime 24h" "$(hl_pct "$u1")  ${UI_DIM}of $n1 minutes judged${UI_NC}"
   ui_kv "uptime 7d" "$(hl_pct "$u7")  ${UI_DIM}of $n7 minutes, $ni incidents${UI_NC}"
-  ui_kv latency "$(hl_spark "$sp")  ${UI_DIM}p50${UI_NC} $(hl_ms "$p50")  ${UI_DIM}p95${UI_NC} $(hl_ms "$p95")"
+  ui_kv "probe 24h" "$(hl_spark "$sp")  ${UI_DIM}p50${UI_NC} $(hl_ms "$p50")  ${UI_DIM}p95${UI_NC} $(hl_ms "$p95")  ${UI_DIM}tando-watch's, not visitors'${UI_NC}"
   local pgn; pgn=$(pg_note "$TMPD/hl" "$APP")   # its PostgreSQL database: size, connections of its role
   [ -z "$pgn" ] || ui_kv database "$pgn"
   {

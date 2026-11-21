@@ -532,10 +532,10 @@ func TestPgRowsOfBriefAndHealth(t *testing.T) {
 	f.ticks(2)
 	w := f.watch()
 	o, _ := do(func(o *out.Writer) error { w.Brief(o, []string{"hog"}); return nil })
-	if o != "pg\thog\t8388608\t2\t10\n" {
+	if o != "pg\thog\t8388608\t2\t10\nbackupcfg\thog\t50\ton\n" {
 		t.Errorf("brief hog: %q", o)
 	}
-	if o, _ := do(func(o *out.Writer) error { w.Brief(o, []string{"plain"}); return nil }); o != "" {
+	if o, _ := do(func(o *out.Writer) error { w.Brief(o, []string{"plain"}); return nil }); o != "backupcfg\tplain\t50\ton\n" {
 		t.Errorf("brief of an app without a database: %q", o)
 	}
 	if o, _ := do(func(o *out.Writer) error { w.Brief(o, nil); return nil }); o != "" {
