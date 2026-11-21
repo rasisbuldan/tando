@@ -140,6 +140,11 @@ func TestSoak(t *testing.T) {
 	if n, _ := e.srv.snaps.stats(); n > e.srv.cfg.MaxCache {
 		t.Errorf("cache %d entries", n)
 	}
+	// A live follow (`snapshot --json --follow`, live.go) is not a leak: polls with visible=1 keep
+	// one per host running by design, and it ends liveLinger after the last such poll (its
+	// ticker is one second, and under CPU load the sample above may have taken most of that
+	// time). Wait for it, by polling, before asking for "nothing left".
+	until(liveLinger+15*time.Second, func() bool { return e.lim.Running() == 0 && e.srv.inflight.Load() == 0 })
 	if e.lim.Running() != 0 || e.srv.inflight.Load() != 0 {
 		t.Errorf("left: %d children, %d requests", e.lim.Running(), e.srv.inflight.Load())
 	}
