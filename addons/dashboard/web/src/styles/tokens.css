@@ -1,0 +1,38 @@
+/* The only file with colour literals (scripts/check-rules.mjs). Values from docs/DESIGN.md section 2. */
+:root {
+  --background:#f6f5f2; --card:#ffffff; --popover:#ffffff;
+  --foreground:#1f1c19; --muted:#efede8; --muted-foreground:#5c5650; --faint:#6f665c;
+  --border:#e5e1da; --input:#8c8378; --ring:#1f1c19;
+  --primary:#1f1c19; --primary-foreground:#ffffff;
+  --secondary:var(--muted); --secondary-foreground:var(--foreground);
+  --accent:var(--muted); --accent-foreground:var(--foreground);
+  --ok:#2f6b2b; --warn:#8a5f12; --fail:#b3261e; --stale:#6f665c; --info:#1f4f8a; --neutral:#5c5650;
+  --destructive:var(--fail); --destructive-foreground:#ffffff;
+  --chart-1:#1f6fb2; --chart-2:#b86e00; --chart-3:#00806a;
+  --chart-4:#6b5b95; --chart-5:#a3456a; --chart-6:#c2410c;
+  --shadow-pop:0 4px 16px rgb(0 0 0 / .08), 0 1px 3px rgb(0 0 0 / .06);
+  --radius:8px; --radius-sm:6px;
+}
+.dark {
+  --background:#141312; --card:#1c1b19; --popover:#22201e;
+  --foreground:#ece8e2; --muted:#292724; --muted-foreground:#a8a097; --faint:#9c938a;
+  --border:#34312d; --input:#736b61; --ring:#ece8e2;
+  --primary:#ece8e2; --primary-foreground:#1c1b19;
+  --ok:#7cc277; --warn:#e3b55c; --fail:#f08a80; --stale:#a8a097; --info:#8db4e8; --neutral:#a8a097;
+  --destructive-foreground:#1c1b19;
+  --chart-1:#6aaee8; --chart-2:#e8a33a; --chart-3:#3fbfa0;
+  --chart-4:#a99be0; --chart-5:#e68ab3; --chart-6:#f2855a;
+  --shadow-pop:0 4px 16px rgb(0 0 0 / .4), 0 1px 3px rgb(0 0 0 / .3);
+}
+:root {
+  --ok-bg:color-mix(in oklab, var(--ok) 12%, var(--card));
+  --ok-border:color-mix(in oklab, var(--ok) 35%, var(--card));
+  --warn-bg:color-mix(in oklab, var(--warn) 12%, var(--card));
+  --warn-border:color-mix(in oklab, var(--warn) 35%, var(--card));
+  --fail-bg:color-mix(in oklab, var(--fail) 12%, var(--card));
+  --fail-border:color-mix(in oklab, var(--fail) 35%, var(--card));
+  --info-bg:color-mix(in oklab, var(--info) 12%, var(--card));
+  --info-border:color-mix(in oklab, var(--info) 35%, var(--card));
+  --stale-bg:transparent; --stale-border:var(--input);
+  --neutral-bg:var(--muted); --neutral-border:var(--border);
+}
