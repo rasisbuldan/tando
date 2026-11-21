@@ -6,6 +6,59 @@ first, grouped by area.
 
 ## Unreleased
 
+- Docs: docs/MONITORING.md, "Recipe: alerts on your phone and on your laptop": ntfy on the phone
+  (exact commands), the same topic on the laptop (browser or `ntfy subscribe` with a macOS
+  notification), a polling loop with `tando ls --all --check`, and `tando menubar install`.
+- Added: `tando alerts --json`: every firing or pending alert (with `silenced`) and every
+  notifier (last delivery, failures in a row, queued, error), with `reachable` and `checked_at`.
+- Changed: `tando host status --watch N` repaints at most once a minute (each refresh runs a full
+  collection on the server: sshd -T, systemctl, journalctl). Docs: the `logs` header comment says
+  times are GMT (as they are parsed); docs/STATUS.md S-R2 (logs follow reconnects) is fixed;
+  docs/TOP.md says tandod runs the metrics sample.
+- Changed: `tando ls --all` is a one-screen morning check: one box for every server, first what
+  needs attention (a server not answering, an app down, an alert firing, host care to do, clock
+  or version skew) with the command to look closer, then every app of every server with those
+  on top. It was one full `tando ls` box per server. `--json` is unchanged (one object per
+  server), plus `reachable` and `checked_at`.
+- Changed: the client's shared ssh connection stays open 10 minutes after the last command
+  (`ControlPersist=600`, was 60 s), so a `tando ls` a few minutes after the last one does not pay
+  a new ssh handshake (test server: 0.37 s cold, 0.25 s after 75 s idle with the change; more on
+  a real VPS). As before, a server whose host key changed is noticed on the next new connection.
+- Added: `tando ls --check` and `tando status --check`: exit status 2 when an app is down or an
+  alert fires (with `--all`, also when a server does not answer), 0 when nothing needs attention;
+  for scripts and the menu bar app, which reads `tando ls --all --json --check`.
+- Added: a clock and version skew line in `tando ls` and `tando status`: when the server's clock
+  is more than 30 s off the laptop's (every "3m ago" is off by as much), or its tando differs
+  from the client's. `status` has a new `server` row (the server's clock and VERSION), printed
+  the same by the shell agent and tando-status. `ls --json` and `status --json` now carry
+  `reachable`, `checked_at`, `server_version`, `client_version`, `clock_skew_s` and `alerts`
+  (every firing or pending alert); an unreachable host in `ls --all --json` has
+  `"reachable":false`.
+- Changed: CPU in `tando ls` and `tando status` is the last minute's, with and without `--watch`
+  (`CPU 1M`; status: `12%  last minute`); it was the average since the app started, or under
+  `--watch` a delta timed by the laptop's whole seconds, so a pegged app could read 0%. It comes
+  from tando-metrics' last sample: the app row of `status` has a 26th field (per mille of one
+  core, `-` without a sample in the last 3 minutes), printed the same by the shell agent and
+  tando-status. `--json`'s `cpu_percent` is that number (null without a sample).
+- Changed: labels say what they measure. `tando health`'s p95 column is `PROBE P95` (tando-watch's
+  probe, 24 h; the footer points to `tando requests` for real traffic), `tando health <app>` shows
+  `probe 24h`, and `tando requests`' latency row ends with `real requests, <window>`. The backup
+  line of `tando status` uses the backup alert's `backup_hours` (50 h unless set; it was a fixed
+  2 days) and turns red past it, as the alert fires; tando-watch's `brief <app>` adds a
+  `backupcfg` row for it.
+- Fixed: one memory definition everywhere. The per-minute history (`tando status`'s 16-minute
+  trend, `tando top`'s graph) counted anon memory only, while the live numbers and the `memory`
+  alert count anon + shmem: a shmem-heavy app read lower in the graph, with a step where live
+  and history met. tando-metrics now samples anon + shmem too; status labels it
+  (`in use, not cache`).
+- Added: firing alerts per app. `tando ls` gets an ALERT column (only while something fires) with
+  the checks firing for each app; `tando top` shows them in red after the app's state and counts
+  them in the host strip (it showed none). `ls --json` and `status --json` have `alerts_firing`
+  and `firing` per app.
+- Fixed: `--watch` (ls, status, alerts, host status) no longer repaints old numbers as if they
+  were new. The footer says how old the data is (`updated 2s ago`); a refresh that fails, or gets
+  no answer within 15 s (it is cut there: a hung ssh used to freeze the screen), shows a red
+  `not answering: <why>` line and `STALE: data 40s old, reconnecting` until the server answers.
 - New: `tando menubar install` (macOS): a menu bar icon for every registered server, built from
   source with `swiftc` (Command Line Tools only), signed ad hoc, started at login by a LaunchAgent.
   Every minute it runs `tando ls --all --json` and requests each running app's link from the

@@ -100,13 +100,17 @@ Example: `tando history -n 10`
 ## Run
 
 ### status
-`tando status [app] [--watch N] [-H host] [--json]`. Flags also `-a`. Arguments: 0-1.
-One app in detail: state, release, memory, cpu, last 16 minutes, logs, alerts, its database
+`tando status [app] [--watch N] [-H host] [--json] [--check]`. Flags also `-a`. Arguments: 0-1.
+One app in detail: state, release, memory, cpu (the last minute: `12%  last minute`), last 16 minutes, logs, alerts, its database
 (`database  postgres  412 MB, 3 of 10 connections`: the size and the connections of its role
 against the role's limit, as the alert checks last read them), backups, releases,
-recent deploys. Each worker (`worker.<name>` in tando.conf) has a line: `worker  queue  running
+recent deploys. The backup line turns red (`over 50 h, the backup alert fires`) past the backup
+alert's `backup_hours`, the same threshold. Each worker (`worker.<name>` in tando.conf) has a line: `worker  queue  running
 restarts 0  memory 41 MB of 256 MB`; `restarting` when it exited and waits to be started again.
-Outside a project without an app it shows `tando ls`. `--watch N` repaints.
+Outside a project without an app it shows `tando ls`. `--watch N` repaints; the footer says how
+old the data is (`updated 2s ago`), and a refresh that fails or gets no answer within 15 s marks
+the screen: a red `not answering: <why>` line and `STALE: data 40s old, reconnecting` (the same
+in `tando ls`, `tando alerts` and `tando host status` with `--watch`).
 Example: `tando status --watch 2`
 
 ### logs
@@ -385,33 +389,50 @@ Example: `tando restore --from-host 3f9a01c2b7de --all -H newvps`
 ## Observe
 
 ### ls
-`tando ls [-H host] [--all] [--watch N] [--json]`. Arguments: none. `-a` is refused.
-The apps of a server: state, deploy age, memory, cpu, uptime, link (never cut: other columns are
-dropped first at 80 columns). `--all`: every registered server, with `--watch` and `--json`. A
+`tando ls [-H host] [--all] [--watch N] [--json] [--check]`. Arguments: none. `-a` is refused.
+The apps of a server: state, deploy age, memory, cpu over the last minute (`CPU 1M`), uptime, link (never cut: other columns are
+dropped first at 80 columns). While an alert fires for an app, an ALERT column names the checks
+(`http`, `slow`, ...) and the footer counts them; `--json` has `alerts_firing` and `firing` per
+app. When the server's clock is more than 30 s off this laptop's (every age on screen is off by
+as much), or its tando is not this client's version, one yellow line says so (also in `tando
+status`); `--json` has `reachable`, `checked_at`, `server_version`, `client_version`,
+`clock_skew_s` and `alerts`. `--all`: every registered server in one box, the morning check: first
+what needs attention (a server not answering, an app down, an alert firing, host care to do,
+clock or version skew), one line each with the command to look closer, then every app of every
+server (HOST APP STATE ALERT MEMORY CPU 1M UP) with those needing attention on top; with
+`--watch` and `--json` (one object per server, as `ls --json`). A
 worker that does not run while its app does gets a line under the table. `--json` has `apps` and
 `alerts` (each alert's app, check, state `firing` or `pending`, since, detail; a host check has app
-`host`); with `--all`, a server that did not answer is `{"host", "error"}`.
+`host`); with `--all`, a server that did not answer is `{"host", "error", "reachable": false,
+"checked_at"}`.
+`--check` (ls, status; not with `--watch`): after the view, exit status 2 when an app is down or
+an alert fires (with `--all`: also a server that did not answer), 0 when nothing needs attention,
+1 when the server could not be asked (as without it). For scripts and a menu bar badge:
+`tando ls --all --json --check` gives, per server, `reachable`, `checked_at`, each app's `state`,
+`alerts_firing` and `firing`, and every alert in `alerts`.
 Example: `tando ls --all`
 
 ### alerts
-`tando alerts [--watch N]` · `enable` · `disable` · `test [name]` · `history [app] [-n N]` ·
+`tando alerts [--watch N] [--json]` · `enable` · `disable` · `test [name]` · `history [app] [-n N]` ·
 `set [key=value ...]` · `silence <app|all> <30m|2h|1d|off>` ·
 `notifier add <name> webhook|slack|telegram|ntfy|email` · `notifier rm <name>` · `notifier ls` ·
-`heartbeat [off]`. Flags: `-a -H --watch -n`. Default subcommand: show.
+`heartbeat [off]`. Flags: `-a -H --watch -n --json`. Default subcommand: show.
 What is firing on the server and where alerts go; checks run every minute (docs/MONITORING.md):
 the apps (down, health, memory, disk, failed jobs as `job.<name>`, a worker that keeps exiting as
 `worker.<name>` (new restarts in two checks in a row; `worker=off` turns it off), database connections as
 `db_conns`, ...) and the host (disk, memory, Caddy, `postgres`, ...). `set` without arguments lists
-every setting; `job=off`, `db_conns=off`, `postgres=off` turn the newest checks off, `db_conn_pct`
+every setting; `--json` (show): every firing or pending alert (app, check, state, since, detail,
+silenced) and every notifier (last delivery, failures in a row, queued, error). `job=off`, `db_conns=off`, `postgres=off` turn the newest checks off, `db_conn_pct`
 (80) and `db_conn_for` (5) are the connection threshold and its samples.
-`heartbeat [off]` · `backup-ping [off]`. Flags: `-a -H --watch -n`. Default subcommand: show.
+`heartbeat [off]` · `backup-ping [off]`. Flags: `-a -H --watch -n --json`. Default subcommand: show.
 What is firing on the server and where alerts go; checks run every minute (docs/MONITORING.md).
 Secrets are read without echo. `notifiers` = `notifier` (docs/DEV-NOTES.md, mismatch 9).
 Example: `tando alerts notifier add phone ntfy`
 
 ### health
 `tando health [app] [--json]` · `tando health <app> --forget N`. Flags: `-a -H --json --forget`.
-Uptime over 24 h and 7 d, incidents (start, how long, cause), probe latency; for one app also the
+Uptime over 24 h and 7 d, incidents (start, how long, cause), probe latency (`PROBE P95`: tando-watch's
+own request once a minute, 24 h; not visitors: `tando requests` has theirs); for one app also the
 size and connections of its PostgreSQL database (as `tando status` shows them) and the
 last lines it wrote before its last crash. Recorded once a minute by tando-watch (docs/MONITORING.md).
 `--forget N` drops incident N of the app's list (1 is the newest) when it was a false alarm: the
@@ -428,7 +449,8 @@ Example: `tando errors shop --since 6h`
 `tando requests [summary [app]] [--since 15m|1h|24h]` · `tando requests tail [app] [-n N] [-f]` ·
 `tando requests errors [app] [--since W] [--4xx]` (the app after the subcommand). Flags: `-a -H --last --since -n -f --4xx`.
 Subcommands: summary (default), tail, errors.
-The app's Caddy request log: counts, status codes, latency percentiles, slowest paths. `--last` =
+The app's Caddy request log: counts, status codes, latency percentiles of the real requests in
+the window (`real requests, 1h`), slowest paths. `--last` =
 `--since`.
 Example: `tando requests errors --since 1h --4xx`
 
@@ -467,7 +489,8 @@ Example: `tando host setup vps apps_domain=apps.example.com tls=auto`
 `tando host reboot [name] [--now] [--yes] [--even-with-other-sites]`.
 Subcommands: status (0-1), care (0-3), update (0-1), reboot (0-1). The name defaults to `-H`,
 tando.conf or the only host. `status`: the machine, updates, security and health findings and a
-to-do list (exit 1 when something fails); `care`: what tando may do by itself; `update`: install
+to-do list (exit 1 when something fails; `--watch N` repaints at most once a minute: each
+refresh is a full collection on the server); `care`: what tando may do by itself; `update`: install
 the pending security updates (`--all`: every update); `reboot`: the safe reboot (docs/HOSTCARE.md).
 Example: `tando host status vps`
 

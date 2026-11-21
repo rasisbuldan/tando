@@ -123,36 +123,33 @@ host_line() { # from the host row
   done < "$TMPD/st"
 }
 
-# cpu_pct app cpu_ns uptime -> CPUP: percent since the previous sample while watching,
-# otherwise the average since the app started
-cpu_pct() {
-  local v pc pt p=""
-  ui_int "$2" || set -- "$1" 0 "${3:-}"   # server fields never reach $(( )) unchecked (N4)
-  ui_int "${3:-}" || set -- "$1" "$2" 0
-  v=$(var "$1"); pc="PC_$v" pt="PT_$v"
-  if [ -n "${!pc:-}" ] && [ "$NOW" -gt "${!pt}" ]; then
-    p=$(( ($2 - ${!pc}) / 10000000 / (NOW - ${!pt}) ))
-  elif ui_int "$3" && [ "$3" -gt 0 ]; then
-    p=$(( $2 / 10000000 / $3 ))
-  fi
-  printf -v "$pc" %s "$2"
-  printf -v "$pt" %s "$NOW"
-  CPUP=${p:-0}
+# cpu_min permille -> CPUP: the app's CPU over the last minute (tando-metrics' last sample, the app
+# row's 26th field, per mille of one core) as "12%" or "0.4%"; "-" without one (no sample yet, or
+# an older agent). The same window in ls and status, with and without --watch. CPUN: the number
+# (percent, for JSON), "" without one.
+cpu_min() {
+  if ui_int "${1:-}" && [ ${#1} -le 9 ]; then   # server fields never reach $(( )) unchecked (N4)
+    local v=$((10#$1))
+    if [ $v -ge 100 ]; then CPUP="$((v / 10))%"; else CPUP="$((v / 10)).$((v % 10))%"; fi
+    CPUN="$((v / 10)).$((v % 10))"
+  else CPUP=- CPUN=""; fi
 }
 
 # the app rows of $TMPD/st with the columns ls --json and status --json share
 app_json_rows() {
-  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx
-  while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx; do
+  firing_load
+  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx
+  while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx; do
     [ "$r" = app ] || continue
-    cpu_pct "$a" "$cpu" "$up"
+    cpu_min "${cpum:-}"
     lim_clean
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(state_word "$state" "$rel" "$recipe")" \
-      "$recipe" "$port" "$rel" "$(id_epoch "$rel")" "$rst" "$mem" "$max" "$CPUP" "$rs" "$up" "$link" "$db" "${lb:-}" "${doms:-}" \
-      "$lcpu" "$ltasks" "$lconns" "$lreq"
+    firing_of "$a"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(state_word "$state" "$rel" "$recipe")" \
+      "$recipe" "$port" "$rel" "$(id_epoch "$rel")" "$rst" "$mem" "$max" "$CPUN" "$rs" "$up" "$link" "$db" "${lb:-}" "${doms:-}" \
+      "$lcpu" "$ltasks" "$lconns" "$lreq" "$FIREN" "$FIRED"
   done < "$TMPD/st"
 }
-APP_JSON="app:s,state:s,recipe:s,port:n,release:s,deployed_at:n,release_status:s,memory_bytes:n,memory_max_bytes:n,cpu_percent:n,restarts:n,uptime_s:n,link:s,database:s,log_bytes:n,domains:s,cpu_limit:s,tasks_max:n,max_conns:n,max_requests:n"
+APP_JSON="app:s,state:s,recipe:s,port:n,release:s,deployed_at:n,release_status:s,memory_bytes:n,memory_max_bytes:n,cpu_percent:n,restarts:n,uptime_s:n,link:s,database:s,log_bytes:n,domains:s,cpu_limit:s,tasks_max:n,max_conns:n,max_requests:n,alerts_firing:n,firing:s"
 # lim_clean: the app's limits from the server (cpu "50%" or "1.5" cores, "-" = no cap), else "-"
 lim_clean() {
   case ${lcpu:-} in [0-9]%|[0-9][0-9]%|[0-9][0-9][0-9]%|[0-9]|[0-9].[0-9]|[0-9].[0-9][0-9]|[0-9][0-9]|[0-9][0-9].[0-9]) ;; *) lcpu=-;; esac
@@ -194,35 +191,101 @@ worker_hint() {
   done < "$TMPD/st"
   return 0
 }
+# skew_load: from the server row of status (the server's clock and tando version; an older agent
+# sends none): SKEW (server minus laptop seconds, "" unknown), SRV_VER, CLI_VER (no fork)
+SKEW_MAX=30
+skew_load() {
+  local r se sv _x
+  SKEW="" SRV_VER="" CLI_VER=""
+  { IFS= read -r CLI_VER || :; } < "${TANDO_HOME:-.}/VERSION" 2> /dev/null
+  case $CLI_VER in [0-9]*.[0-9]*.[0-9]*) case $CLI_VER in *[!0-9.]*) CLI_VER="";; esac;; *) CLI_VER="";; esac
+  while IFS=$TAB read -r r se sv _x; do
+    [ "$r" = server ] || continue
+    ui_int "$se" && [ ${#se} -le 12 ] && ui_int "${NOW:-}" && SKEW=$((10#$se - NOW))
+    case $sv in [0-9]*.[0-9]*.[0-9]*) case $sv in *[!0-9.]*) ;; *) SRV_VER=$sv;; esac;; esac
+  done < "$TMPD/st"
+  return 0
+}
+# skew_line: one line when the server's clock is off from this laptop's by more than SKEW_MAX
+# seconds (every age on screen is off by as much), or the server's tando is not this client's
+skew_line() {
+  skew_load
+  local d=${SKEW:-0} w=ahead
+  [ "$d" -lt 0 ] && d=$((-d)) w=behind
+  if [ "$d" -gt "$SKEW_MAX" ]; then
+    ui_box_wrap "${UI_YELLOW}clock: the server's is $(ui_dur "$d") $w of this laptop's; ages here are off by that (is time sync on, here and there?)${UI_NC}"
+  fi
+  if [ -n "$SRV_VER" ] && [ -n "$CLI_VER" ] && [ "$SRV_VER" != "$CLI_VER" ]; then
+    ui_box_wrap "${UI_YELLOW}tando $SRV_VER on the server, $CLI_VER here: tando host setup $HOST (or update this laptop's tando)${UI_NC}"
+  fi
+  return 0
+}
+# json_meta: the fields every ls/status --json object starts with, after "host": reachable, when
+# the data was read (laptop clock), the server's clock and version, this client's, the skew
+json_meta() {
+  skew_load
+  printf ',"reachable":true,"checked_at":%s,"server_version":%s,"client_version":%s,"clock_skew_s":%s' \
+    "$NOW" "$( [ -n "$SRV_VER" ] && json_str "$SRV_VER" || printf null)" \
+    "$( [ -n "$CLI_VER" ] && json_str "$CLI_VER" || printf null)" "${SKEW:-null}"
+}
+# firing_load: FIRING = " app:check ..." for every firing alert in $TMPD/st (no fork)
+firing_load() {
+  local r fa fc fs _x
+  FIRING=""
+  while IFS=$TAB read -r r fa fc fs _x; do
+    [ "$r" = alert ] && [ "$fs" = firing ] || continue
+    case $fa$fc in *[!a-z0-9_.-]*) continue;; esac   # plain words only: the list is word-split
+    FIRING="$FIRING $fa:$fc"
+  done < "$TMPD/st"
+  return 0
+}
+# firing_of app: the checks firing for app, comma separated -> FIRED (and FIREN, their count)
+firing_of() {
+  local x
+  FIRED="" FIREN=0
+  for x in $FIRING; do
+    [ "${x%%:*}" = "$1" ] || continue
+    FIRED="${FIRED:+$FIRED,}${x#*:}" FIREN=$((FIREN + 1))
+  done
+}
 render_ls() {
-  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx n=0 upt dep
+  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx n=0 upt dep
   if [ -n "$JSON" ]; then
-    printf '{"host":%s,"apps":' "$(json_str "$HOST")"; app_json_rows | to_json "$APP_JSON"
+    printf '{"host":%s' "$(json_str "$HOST")"; json_meta
+    printf ',"apps":'; app_json_rows | to_json "$APP_JSON"
     printf ',"alerts":'; alerts_json; printf '}\n'
     return
   fi
+  firing_load
+  # ALERT (the checks firing for the app) is a column only while one fires
+  local acol="" ahd=""
+  for a in $FIRING; do grep -q "^app${TAB}${a%%:*}${TAB}" "$TMPD/st" && { acol=1; ahd="${TAB}ALERT"; break; }; done
   {
-    printf 'APP\tSTATE\tDEPLOYED\tMEMORY\tCPU\tUP\tLOGS\tLINK\n'
-    while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx; do
+    printf 'APP\tSTATE%s\tDEPLOYED\tMEMORY\tCPU 1M\tUP\tLOGS\tLINK\n' "$ahd"
+    while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx; do
       [ "$r" = app ] || continue
       n=$((n + 1))
       case ${doms:--} in -) ;; *,*) link="${doms%%,*} +$(printf '%s' "$doms" | tr -cd , | wc -c | tr -d ' ')";; *) link=$doms;; esac
       state=$(down_word "$a" "$(state_word "$state" "$rel" "$recipe")")
-      cpu_pct "$a" "$cpu" "$up"
+      cpu_min "${cpum:-}"
       upt=- dep=-
       [ "$state" = running ] && upt=$(ui_dur "$up")
       [ "$state" = "not deployed" ] || dep=$(ago "$(id_epoch "$rel")")
-      printf '%s\t%s\t%s\t%s\t%s%%\t%s\t%s\t%s\n' "$a" "$(state_badge "$state")" "$dep" "$(mb "$mem")" \
+      if [ -n "$acol" ]; then firing_of "$a"; [ -n "$FIRED" ] && FIRED="${UI_RED}${FIRED}${UI_NC}"; FIRED="${TAB}${FIRED:--}"; fi
+      printf '%s\t%s%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$(state_badge "$state")" "${acol:+$FIRED}" "$dep" "$(mb "$mem")" \
         "$CPUP" "$upt" "$(mb "${lb:-}")" "$(short_link "$link")"
     done < "$TMPD/st"
   } > "$TMPD/rows"
   ui_box_open "tando ls" "$HOST"
+  watch_stale_line
+  skew_line
   host_line
   grep -q "^check${TAB}fail${TAB}caddy" "$TMPD/st" 2> /dev/null &&
     ui_box_line "${UI_RED}caddy is not running: no app is reachable (tando doctor)${UI_NC}"
   ui_box_sep
   cache_apps
-  if [ $n -gt 0 ]; then ui_table "l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"   # LINK whole: other columns go first
+  if [ $n -gt 0 ] && [ -n "$acol" ]; then ui_table "l,l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"
+  elif [ $n -gt 0 ]; then ui_table "l,l,l!3,r!2,r!4,r!5,r!6,l" < "$TMPD/rows"   # LINK whole: other columns go first
   else ui_box_line "No apps on $HOST yet. In your app's directory: tando up"; fi
   worker_hint
   restore_hint
@@ -231,7 +294,7 @@ render_ls() {
   na=$(grep -c "^alert${TAB}[^${TAB}]*${TAB}[^${TAB}]*${TAB}firing" "$TMPD/st")
   foot="$(plural $n app)"
   [ "$na" -gt 0 ] && foot="$foot  ${UI_RED}$(plural "$na" alert) firing: tando alerts${UI_NC}"
-  [ $n -gt 0 ] && foot="$foot ${UI_G_MID} tando status <app> for details"
+  [ $n -gt 0 ] && [ -z "$WATCH" ] && foot="$foot ${UI_G_MID} tando status <app> for details"
   ui_box_close "$foot ${UI_G_MID} $(watch_note)"
 }
 # restore_cut_text: the restorecut row (app, backup to restore again, safety backup, what was being
@@ -260,14 +323,35 @@ hc_hint() {
   done < "$TMPD/st"
   return 0
 }
-watch_note() { if [ -n "$WATCH" ]; then printf 'every %ss %s Ctrl-C stops' "$WATCH" "$UI_G_MID"; else date -u '+%H:%M:%S GMT'; fi; }
+# watch_note: the footer's time. Under --watch the age of the data on screen ("updated 3s ago"),
+# or, when the last refresh failed or timed out, that the numbers are stale and since when.
+watch_note() {
+  if [ -z "$WATCH" ]; then date -u '+%H:%M:%S GMT'; return; fi
+  local age=$((SECONDS - ${WATCH_OK:-$SECONDS}))
+  if [ -n "${WATCH_FAIL:-}" ]; then
+    printf '%sSTALE: data %s old, reconnecting%s %s Ctrl-C stops' "$UI_RED" "$(ui_dur "$age")" "$UI_NC$UI_DIM" "$UI_G_MID"
+  else printf 'updated %s ago %s every %ss %s Ctrl-C stops' "$(ui_dur "$age")" "$UI_G_MID" "$WATCH" "$UI_G_MID"; fi
+}
+# watch_stale_line: under --watch after a failed refresh, one red line saying why (top of a view)
+watch_stale_line() {
+  [ -n "$WATCH" ] && [ -n "${WATCH_FAIL:-}" ] || return 0
+  ui_box_wrap "${UI_RED}not answering: ${WATCH_FAIL}; the numbers below are from $(ui_dur $((SECONDS - ${WATCH_OK:-$SECONDS}))) ago${UI_NC}"
+}
 # app names per host for shell completions (never read over the network)
 cache_apps() {
   mkdir -p "$CFG/cache" 2> /dev/null || return 0
   awk -F '\t' '$1 == "app" {print $2}' "$TMPD/st" | write_file "$CFG/cache/apps.$HOST" 2> /dev/null
   return 0
 }
-cmd_ls() { resolve 0; watch_loop render_ls fetch_status; }
+# --check: after the view, exit 2 when something needs attention (an app down, an alert firing;
+# with --all also a server that did not answer), 0 when not. For scripts and the menu bar app.
+check_flag() { [ -z "$CHECK" ] || [ -z "$WATCH" ] || usage_err "--check goes without --watch" "${ARGS[0]:-}"; }
+# attention <rows file>...: how many apps are down (failed) plus alerts firing
+attention() {
+  awk -F '\t' '($1 == "app" && $3 == "failed") || ($1 == "alert" && $4 == "firing") { n++ } END { print n + 0 }' "$@"
+}
+check_exit() { [ -n "$CHECK" ] || return 0; [ "$(attention "$TMPD/st")" = 0 ] || exit 2; }
+cmd_ls() { resolve 0; check_flag; watch_loop render_ls fetch_status; check_exit; }
 
 hist_rows() { # max -> TIME (GMT) RELEASE KIND RESULT TOTAL, newest first; the notes -> $TMPD/notes
   local r a ts id kind res tot b u c p s v note
@@ -296,15 +380,15 @@ hist_notes_box() {
 }
 
 render_status() {
-  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly c g upt doms lcpu ltasks lconns lreq lx
-  while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq lx; do
+  local r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly c g upt doms lcpu ltasks lconns lreq cpum lx
+  while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx; do
     [ "$r" = app ] && break
   done < "$TMPD/st"
   [ "$r" = app ] || die "no status for $APP"
   if [ -n "$JSON" ]; then status_json; return; fi
   state=$(down_word "$a" "$(state_word "$state" "$rel" "$recipe")")
-  cpu_pct "$a" "$cpu" "$up"
-  SPC="$SPC $CPUP" SPM="$SPM $mem"
+  cpu_min "${cpum:-}"
+  SPC="$SPC ${CPUN%.*}" SPM="$SPM $mem"
   # without --watch, the trend comes from the server's per-minute samples (tando-metrics)
   local mrows hm="" hc=""
   if [ -z "$WATCH" ] && mrows=$(awk -F '\t' '$1 == "m" {print $3, $4}' "$TMPD/st") && [ -n "$mrows" ]; then
@@ -314,6 +398,8 @@ render_status() {
   upt=-
   [ "$state" = running ] && upt=$(ui_dur "$up")
   ui_box_open "$a" "$HOST"
+  watch_stale_line
+  skew_line
   if [ "$state" = down ]; then
     ui_kv state "$(state_badge down) (not stopped by you)   ${UI_DIM}recipe${UI_NC} $recipe"
     ui_kv next "tando logs -a $a; then tando start -a $a"
@@ -325,11 +411,11 @@ render_status() {
   else ui_kv release "$rel"; fi
   ui_kv uptime "$upt   ${UI_DIM}restarts${UI_NC} $rs"
   if ui_int "$max" && [ "$max" -gt 0 ]; then
-    ui_kv memory "$(ui_bar "$mem" "$max" 20) $(mb "$mem") of $(mb "$max")"
+    ui_kv memory "$(ui_bar "$mem" "$max" 20) $(mb "$mem") of $(mb "$max")  ${UI_DIM}in use, not cache${UI_NC}"
   else
-    ui_kv memory "$(mb "$mem") (no cap)"
+    ui_kv memory "$(mb "$mem") (no cap)  ${UI_DIM}in use, not cache${UI_NC}"
   fi
-  ui_kv cpu "$CPUP%"
+  ui_kv cpu "$CPUP  ${UI_DIM}last minute${UI_NC}"
   worker_lines
   local rcid rcsf rcwh
   while IFS=$TAB read -r r _x rcid rcsf rcwh _y; do
@@ -376,10 +462,17 @@ render_status() {
     fi
   fi
   if [ "$bk" = daily ]; then
+    # late after backup_hours (the backup alert's threshold, from tando-watch's backupcfg row; 50 h
+    # without it): red, as the alert that fires then
+    local bh=50 bon=on bx bh2 bon2
+    while IFS=$TAB read -r r bx bh2 bon2 _; do
+      [ "$r" = backupcfg ] && ui_int "$bh2" && bh=$bh2 bon=$bon2
+    done < "$TMPD/st"
     if ! ui_int "$last"; then ui_kv backup "daily, ${UI_YELLOW}no backup yet${UI_NC}"
-    elif [ $((NOW - last)) -gt 172800 ]; then
-      ui_kv backup "daily, ${UI_YELLOW}last $(ago "$last"): older than 2 days${UI_NC}"
-    else ui_kv backup "daily, last $(ago "$last")"; fi
+    elif [ $((NOW - last)) -gt $((bh * 3600)) ]; then
+      if [ "$bon" = off ]; then ui_kv backup "daily, ${UI_YELLOW}last $(ago "$last"): over $bh h${UI_NC} (its alert is off)"
+      else ui_kv backup "daily, ${UI_RED}last $(ago "$last"): over $bh h, the backup alert fires${UI_NC}"; fi
+    else ui_kv backup "daily, last $(ago "$last")  ${UI_DIM}late after $bh h${UI_NC}"; fi
   fi
   # offsite copies (tando-offsite's state, one row): last upload, waiting, late, failing
   local olu opn oop oah ocr oer
@@ -424,7 +517,8 @@ alerts_json() {
   awk -F '\t' -v OFS='\t' '$1 == "alert" { print $2, $3, $4, $5, $6 }' "$TMPD/st" | to_json "app:s,check:s,state:s,since:n,detail:s"
 }
 status_json() {
-  printf '{"host":%s,"app":' "$(json_str "$HOST")"
+  printf '{"host":%s' "$(json_str "$HOST")"; json_meta
+  printf ',"app":'
   app_json_rows | to_json "$APP_JSON" | sed 's/^\[//; s/\]$//'
   printf ',"releases":'; rel_json
   printf ',"history":'; hist_json
@@ -437,7 +531,9 @@ cmd_status() {
   if [ -z "$APP" ]; then cmd_ls; return; fi
   valid_app "$APP" || die "bad app name (a-z, 0-9, -; 2-24 characters)"
   SPC="" SPM=""
+  check_flag
   watch_loop render_status fetch_status "$APP"
+  check_exit
 }
 
 cmd_history() {
@@ -808,7 +904,10 @@ cmd_doctor() {
   [ $fail -eq 0 ]
 }
 
-# watch_loop render fetch args...: one view, or repaint every $WATCH seconds
+# watch_loop render fetch args...: one view, or repaint every $WATCH seconds. Each refresh has
+# WATCH_TIMEOUT seconds (15); one that fails or takes longer repaints the last data with its age
+# and "reconnecting" (watch_note), never the old numbers as if they were new.
+WATCH_TIMEOUT=15
 watch_loop() {
   local render=$1 fetch=$2
   shift 2
@@ -816,13 +915,32 @@ watch_loop() {
   if [ -z "$WATCH" ]; then $render; return; fi
   trap 'UI_WINCH=1' WINCH
   trap 'exit 0' INT              # Ctrl-C is how a watch ends: not an error
+  WATCH_OK=$SECONDS WATCH_FAIL=""
   while :; do
     ui_frame_begin
     $render
     ui_frame_end
     sleep "$WATCH"
-    $fetch "$@" || sleep "$WATCH"
+    if watch_fetch "$fetch" "$@"; then WATCH_OK=$SECONDS WATCH_FAIL=""; NOW=$(now); fi
   done
+}
+# watch_fetch fetch args...: the fetch in the background, killed after WATCH_TIMEOUT seconds of
+# wall clock (a hung ssh must not freeze the screen); on failure WATCH_FAIL says why
+watch_fetch() {
+  local pid end rc
+  rm -f "$TMPD/wf.rc"
+  ( "$@" 2> "$TMPD/wf.err"; echo $? > "$TMPD/wf.rc" ) &
+  pid=$! end=$((SECONDS + WATCH_TIMEOUT))
+  while [ ! -s "$TMPD/wf.rc" ] && [ $SECONDS -lt $end ]; do sleep 0.2; done
+  if [ ! -s "$TMPD/wf.rc" ]; then
+    pkill -P "$pid" 2> /dev/null; kill "$pid" 2> /dev/null; wait "$pid" 2> /dev/null
+    WATCH_FAIL="no answer within $WATCH_TIMEOUT s"; return 1
+  fi
+  wait "$pid" 2> /dev/null; read -r rc < "$TMPD/wf.rc"
+  [ "$rc" = 0 ] && return 0
+  WATCH_FAIL=$(strip < "$TMPD/wf.err" 2> /dev/null | grep . | tail -1)
+  WATCH_FAIL=${WATCH_FAIL:-the refresh failed}
+  return 1
 }
 
 cmd_backup_ls() {
@@ -906,28 +1024,92 @@ host_err() { # the reason a host did not answer, in a few words
 cmd_ls_all() {
   LS_HOSTS=$(all_hosts)
   [ -n "$LS_HOSTS" ] || die "no hosts registered: tando host add"
+  check_flag
   watch_loop render_ls_all fetch_ls_all
+  [ -n "$CHECK" ] || return 0
+  local h; for h in $LS_HOSTS; do [ "$(cat "$TMPD/h.$h.rc")" = 0 ] || exit 2; done
+  # shellcheck disable=SC2046  # a list of file names (host names: no spaces)
+  [ "$(cd "$TMPD" && attention $(for h in $LS_HOSTS; do printf 'h.%s.st ' "$h"; done))" = 0 ] || exit 2
 }
 # shellcheck disable=SC2086  # a list of host names
 fetch_ls_all() { rm -f "$TMPD"/h.*.rc; fetch_hosts $LS_HOSTS; }
 render_ls_all() {
   local h e sep=""
-  [ -n "$JSON" ] && printf '{"hosts":['
+  if [ -z "$JSON" ]; then render_ls_summary; return 0; fi
+  printf '{"hosts":['
   for h in $LS_HOSTS; do
     if [ "$(cat "$TMPD/h.$h.rc")" = 0 ]; then
       cp "$TMPD/h.$h.st" "$TMPD/st"; HOST=$h NOW=$(now)
-      if [ -n "$JSON" ]; then printf '%s' "$sep"; render_ls | tr -d '\n'; sep=,; else render_ls; fi
-    elif [ -n "$JSON" ]; then
-      e=$(host_err "$h")
-      printf '%s{"host":%s,"error":%s}' "$sep" "$(json_str "$h")" "$(json_str "${e:-unreachable}")"; sep=,
+      printf '%s' "$sep"; render_ls | tr -d '\n'; sep=,
     else
-      ui_box_open "tando ls" "$h"
-      ui_box_line "$(ui_badge failed unreachable)  $(host_err "$h")"
-      ui_box_close
+      e=$(host_err "$h")
+      printf '%s{"host":%s,"error":%s,"reachable":false,"checked_at":%s}' "$sep" "$(json_str "$h")" \
+        "$(json_str "${e:-unreachable}")" "$(now)"; sep=,
     fi
   done
-  [ -n "$JSON" ] && printf ']}\n'
+  printf ']}\n'
   return 0
+}
+# render_ls_summary: the morning check, one box for every server: what needs attention first
+# (a server not answering, an app down, an alert firing, host care to do, clock or version skew),
+# then every app of every server, those that need attention on top
+render_ls_summary() {
+  local h r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx
+  local nh=0 na=0 natt=0 rank upt x todo fail
+  : > "$TMPD/att"; : > "$TMPD/all.rows"
+  for h in $LS_HOSTS; do
+    nh=$((nh + 1))
+    if [ "$(cat "$TMPD/h.$h.rc")" != 0 ]; then
+      printf '%s  %s\n' "$(ui_badge failed "$h")" "not answering: $(host_err "$h")" >> "$TMPD/att"; continue
+    fi
+    cp "$TMPD/h.$h.st" "$TMPD/st"; HOST=$h NOW=$(now)
+    firing_load; skew_load
+    grep -q "^check${TAB}fail${TAB}caddy" "$TMPD/st" 2> /dev/null &&
+      printf '%s  caddy is not running: no app is reachable (tando doctor -H %s)\n' "$(ui_badge failed "$h")" "$h" >> "$TMPD/att"
+    while IFS=$TAB read -r r a state port rel rst mem max cpu rs up link recipe bk last db lb lcap lines hourly doms lcpu ltasks lconns lreq cpum lx; do
+      [ "$r" = app ] || continue
+      na=$((na + 1)) rank=1
+      state=$(down_word "$a" "$(state_word "$state" "$rel" "$recipe")")
+      firing_of "$a"; cpu_min "${cpum:-}"
+      if [ "$state" = down ]; then
+        rank=0; printf '%s  %s is down: tando logs -a %s -H %s\n' "$(ui_badge failed "$h")" "$a" "$a" "$h" >> "$TMPD/att"
+      fi
+      if [ -n "$FIRED" ]; then
+        rank=0; printf '%s  %s: %s firing: tando alerts -H %s\n' "$(ui_badge failed "$h")" "$a" "$FIRED" "$h" >> "$TMPD/att"
+      fi
+      [ $rank = 0 ] && natt=$((natt + 1))
+      upt=-; [ "$state" = running ] && upt=$(ui_dur "$up")
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rank" "$h" "$a" "$(state_badge "$state")" \
+        "$( [ -n "$FIRED" ] && printf '%s%s%s' "$UI_RED" "$FIRED" "$UI_NC" || printf -- -)" "$(mb "$mem")" "$CPUP" "$upt" >> "$TMPD/all.rows"
+    done < "$TMPD/st"
+    # alerts not of an app (the host's: disk, memory, ...)
+    for x in $FIRING; do
+      grep -q "^app${TAB}${x%%:*}${TAB}" "$TMPD/st" && continue
+      printf '%s  %s firing: tando alerts -H %s\n' "$(ui_badge failed "$h")" "${x#*:}" "$h" >> "$TMPD/att"
+    done
+    while IFS=$TAB read -r r todo fail _x; do
+      [ "$r" = hostcare ] && ui_int "$todo" && [ "$todo" -gt 0 ] || continue
+      printf '%s  server: %s to do%s: tando host status %s\n' "$(ui_badge deploying "$h")" "$todo" \
+        "$(ui_int "$fail" && [ "$fail" -gt 0 ] && printf ', %s failing' "$fail")" "$h" >> "$TMPD/att"
+    done < "$TMPD/st"
+    x=${SKEW:-0}; [ "$x" -lt 0 ] && x=$((-x))
+    [ "$x" -gt "$SKEW_MAX" ] && printf '%s  clock %s off this laptop'"'"'s\n' "$(ui_badge deploying "$h")" "$(ui_dur "$x")" >> "$TMPD/att"
+    [ -n "$SRV_VER" ] && [ -n "$CLI_VER" ] && [ "$SRV_VER" != "$CLI_VER" ] &&
+      printf '%s  tando %s there, %s here: tando host setup %s\n' "$(ui_badge deploying "$h")" "$SRV_VER" "$CLI_VER" "$h" >> "$TMPD/att"
+  done
+  ui_box_open "tando ls --all" "$(plural "$nh" server)"
+  watch_stale_line
+  if [ -s "$TMPD/att" ]; then
+    while IFS= read -r x; do ui_box_wrap "$x"; done < "$TMPD/att"
+  else ui_box_line "$(ui_badge ok "nothing needs attention")"; fi
+  ui_box_sep
+  if [ "$na" -gt 0 ]; then
+    { printf 'HOST\tAPP\tSTATE\tALERT\tMEMORY\tCPU 1M\tUP\n'; sort -t "$TAB" -k1,1n -k2,2 -k3,3 "$TMPD/all.rows" | cut -f2-; } |
+      ui_table "l,l,l,l,r!3,r!2,r!1"
+  else ui_box_line "no apps yet"; fi
+  local foot; foot="$(plural "$na" app)"
+  [ "$natt" -gt 0 ] && foot="$foot, ${UI_RED}$natt need attention${UI_NC}"
+  ui_box_close "$foot ${UI_G_MID} tando ls -H <host> for one ${UI_G_MID} $(watch_note)"
 }
 
 host_ls() {

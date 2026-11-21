@@ -67,7 +67,7 @@ func (h *host) read(name string) string {
 
 func (h *host) app(name, cgdir string, anon, usec int64) {
 	h.write("opt/apps/"+name+"/app.conf", "port=4100\n")
-	h.write("cgroup/"+cgdir+"/memory.stat", "anon "+decimal.Itoa(anon)+"\nfile 5\n")
+	h.write("cgroup/"+cgdir+"/memory.stat", "anon "+decimal.Itoa(anon-24)+"\nfile 5\nshmem 24\n")
 	h.write("cgroup/"+cgdir+"/cpu.stat", "usage_usec "+decimal.Itoa(usec)+"\nuser_usec 1\n")
 }
 

@@ -231,7 +231,7 @@ All the scenarios of the 27 failures, plus the baseline, passed in the dev run (
 | R4 | `LINES` reused for `-n` | fixed (`NLINES`) |
 | R5 | three ways to pass ssh options | fixed: one `ssh_wrapper` script (lib/common.sh) used by `tando top` and by the upload (`rsync -e`); `user@host:port` and `ssh://` refused with the `--port` command |
 | S-R1, S-R3 | watch timeout headroom; Caddy 2.6.2 directives | partly; no Caddy 2.6.2 lane in all.sh |
-| S-R2 | logs follow survives disconnect | open |
+| S-R2 | logs follow survives disconnect | fixed (`tando logs -f` reconnects with backoff and resumes after the last cursor, lib/cmd-logx.sh; e2e-logs) |
 | T2, T4, T7 | SKIP counted as success; inverted check; empty file passes | partly |
 | T3, T6, T8, T9, T10 | negated ssh checks, ui-test unit block, unused `shipped`, a16 empty = PASS, swallowed timeout | open |
 | D3, D5, D8 | TOP.md `-n`; MONITORING.md "30 s" hold; README "flags may come before the command" | D8 fixed (README matches; a flag before the command gets the line reordered); D3, D5 open |

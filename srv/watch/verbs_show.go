@@ -314,7 +314,7 @@ func (w Watch) History(o *out.Writer, args []string) error {
 	return nil
 }
 
-// Brief is the verb `brief [app]`: firing and pending alerts as rows, for `tando status` (no
+// Brief is the verb `brief [app]` (with an app also its pg and backupcfg rows): firing and pending alerts as rows, for `tando status` (no
 // root needed: without it the state cannot be read and there are none); for one app also its
 // database's size and connections (pgRow).
 func (w Watch) Brief(o *out.Writer, args []string) {
@@ -336,6 +336,17 @@ func (w Watch) Brief(o *out.Writer, args []string) {
 	}
 	if only != "" && valid.App(only) {
 		w.pgRow(o, newStore(loadQuiet(w.vstatePath())), only)
+		// the threshold of the backup check, so status colours the backup age as the alert judges it:
+		//	backupcfg <app> <backup_hours> <on|off>
+		if _, err := os.Stat(filepath.Join(w.appDir(only), "app.conf")); err != nil {
+			return // not an app ("host")
+		}
+		cfg := loadSettings(w.Conf)
+		on := "on"
+		if !cfg.on("backup", only) {
+			on = "off"
+		}
+		o.Row("backupcfg", only, decimal.Itoa(cfg.num("backup_hours", only)), on)
 	}
 }
 

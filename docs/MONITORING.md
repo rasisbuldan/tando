@@ -284,14 +284,18 @@ counted.
 ```
 $ tando health
 ╭─ health ────────────────────────────────────────────────────────────── test ─╮
-│ APP   NOW      UP 24H    UP 7D    P95  PROBE LATENCY 24H         INC 7D      │
-│ boom  ✗ http  100.00%  100.00%  33 ms  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█       1      │
-│ h1    ● ok    100.00%  100.00%  71 ms  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█       0      │
+│ APP   NOW      UP 24H    UP 7D  PROBE P95  PROBE LATENCY 24H         INC 7D  │
+│ boom  ✗ http  100.00%  100.00%      33 ms  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█       1  │
+│ h1    ● ok    100.00%  100.00%      71 ms  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█       0  │
 ├─ recent incidents ───────────────────────────────────────────────────────────┤
 │ START (GMT)  APP   CHECK  LASTED       CAUSE                                 │
 │ 11-15 01:52  boom  http   ongoing, 4m  29 of 58 requests answered 5xx (50%)… │
-╰─ minutes judged once a minute; tando health <app> for one app ─── 01:56 GMT ─╯
+╰─ P95: tando-watch's probe, 24 h; real traffic: tando requests ─── 01:56 GMT ─╯
 ```
+
+Three p95s, three populations: `tando health`'s is tando-watch's own probe through Caddy, once a
+minute over 24 h (`PROBE P95`; `probe 24h` for one app); `tando requests`' is the real requests of
+its window (`latency ... real requests, 1h`); the `slow` alert's is real requests per minute.
 
 `tando health <app>` adds p50/p95, the 24-hour latency sparkline, up to 15 incidents and the last
 lines the app wrote before its last crash or liveness restart. `--json` for both.
@@ -361,6 +365,46 @@ and deletes the file. The next run finishes a committed one and drops one that w
 2xx (and a committed run that is finished by the next run may queue again a message a delivery
 running at the same moment had just sent: at least once, never lost). Temp files of a run killed
 while it queued are swept after 10 minutes.
+
+## Recipe: alerts on your phone and on your laptop
+
+The server sends; nothing is pushed to the laptop by tando itself. Three ways, from the least
+setup:
+
+**Phone, with ntfy** (no account; the topic name is the only secret on the public ntfy.sh, so make
+it long and random, and keep it out of your repository):
+
+    printf 'tando-%s\n' "$(openssl rand -hex 12)"   # your topic name, e.g. tando-3f9c...
+    # in the ntfy app (iOS, Android): + -> subscribe to that topic (server ntfy.sh)
+    tando alerts notifier add phone ntfy         # paste https://ntfy.sh/<topic> (not echoed)
+    tando alerts test phone                      # the phone should buzz now
+    tando alerts heartbeat                       # optional: a dead man's switch (next section)
+
+A self-hosted ntfy server works the same (its URL, and an access token when it asks for one).
+
+**Laptop, the same topic.** In a browser: open `https://ntfy.sh/app` and subscribe to the topic
+(desktop notifications when the browser allows them). Or with the ntfy command-line client
+(`brew install ntfy`), a macOS notification per alert:
+
+    ntfy subscribe "https://ntfy.sh/<topic>" \
+      'osascript -e "display notification \"$m\" with title \"$t\""'
+
+**Laptop, polling with tando** (no third party; it notices a server that does not answer too,
+which no notifier can send). `--check` exits 2 when an app is down, an alert fires or a server
+does not answer, 1 when tando itself failed:
+
+    while sleep 300; do
+      tando ls --all --check > /dev/null 2>&1 ||
+        osascript -e 'display notification "tando ls --all" with title "tando: something needs attention"'
+    done
+
+**Laptop, the menu bar app** (macOS; new, still being finished): `tando menubar install` puts an
+icon in the menu bar that runs `tando ls --all --json` every minute and probes each app's link: a
+red count of the problems, a notification once per new problem and once when it clears
+(docs/COMMANDS.md, "menubar"). `ls --all --json` carries what such a badge needs: per server
+`reachable` and `checked_at`, per app `state`, `alerts_firing` and `firing`, every alert in
+`alerts`; `tando alerts --json` adds the notifiers' failures. Like the loop above, it works only
+while the laptop is on and online.
 
 ## What it cannot see (and the heartbeat)
 

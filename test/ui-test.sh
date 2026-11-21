@@ -621,5 +621,157 @@ r=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/views.sh";
   printf "%s|%s|%s|%s" "$(ago 1835481540)" "$(ago 1797000000)" "$(ago 1764000000)" "$(ago 1795198380)"' _ "$here" 2>&1)
 if [[ $r == "2028-02-29 23:59 GMT|12-11 14:40 GMT|2025-11-24 16:00 GMT|27m ago" ]]; then ok; else bad "ago with the year: $r"; fi
 
+# ---- monitoring views (lib/views.sh) on stub status rows: tando ls / status rendered from a file
+# the stub agent prints; $tmp/mon.st holds the rows (host, app, alert, server, ...)
+mon_rows() { # the default stub: one host, apps web (running) and api (running, an alert firing)
+    local n; n=$(date +%s)
+    printf 'host\tvps\t2\t0.40\t2000000000\t500000000\t40000000000\t10000000000\t86400\n'
+    printf 'app\tweb\tactive\t3001\t20261101-101010\tok\t52428800\t134217728\t9000000000\t0\t3600\thttp://web.example.test\tnode\toff\t-\t-\t1000\t2000\t10\t0\t-\t-\t1024\t256\t-\t123\n'
+    printf 'app\tapi\tactive\t3002\t20261101-101010\tok\t52428800\t134217728\t9000000000\t0\t3600\thttp://api.example.test\tnode\tdaily\t%s\t-\t1000\t2000\t10\t0\t-\t-\t1024\t256\t-\t-\n' $((n - 30 * 3600))
+    printf 'alert\tapi\thttp\tfiring\t%s\t5xx 12%% of 300 requests\n' $((n - 120))
+    printf 'server\t%s\t%s\n' "${MON_CLK:-$n}" "${MON_VER:-$(cat "$here/VERSION")}"
+}
+mon_run() { # code: run with the views loaded, the stub agent answering from $tmp/mon.st
+    "$BASH_BIN" -c '
+        . "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/deploy.sh"; . "$1/lib/views.sh"
+        TMPD=$(mktemp -d); CFG=$TMPD; HOST=vps; TANDO_HOME=$1; APP=""; JSON=""; WATCH=""; ui_init 80
+        resolve() { :; }
+        agent_raw() { cat "$MON_ST"; }
+        fetch_status; eval "$2"; rc=$?; rm -rf "$TMPD"; exit $rc' _ "$here" "$1" 2>&1
+}
+export MON_ST=$tmp/mon.st
+mon_rows > "$MON_ST"
+# --watch: a refresh that hangs is cut after WATCH_TIMEOUT and the next frame says the data is
+# stale and why; one that fails says so too (it used to repaint the old numbers silently)
+out=$(mon_run 'WATCH=1 WATCH_TIMEOUT=2; n=0
+  fetch() { [ -f "$TMPD/calls" ] || { : > "$TMPD/calls"; fetch_status; return; }; sleep 30; }
+  rend() { n=$((n + 1)); [ $n -ge 3 ] && exit 0; render_ls; }
+  s=$SECONDS; n=0; watch_loop rend fetch' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if [[ $out == *"updated 0s ago"*"every 1s"*"not answering: no answer within 2 s"*"STALE: data "*" old, reconnecting"* ]]; then ok
+else bad "ls --watch: a hung refresh does not show as stale ($out)"; fi
+out=$(mon_run 'WATCH=1; n=0
+  fetch() { [ -f "$TMPD/calls" ] || { : > "$TMPD/calls"; fetch_status; return; }; echo "ssh: connect to host vps port 22: Connection refused" >&2; return 255; }
+  rend() { n=$((n + 1)); [ $n -ge 3 ] && exit 0; APP=web; render_status; }
+  watch_loop rend fetch' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if [[ $out == *"not answering: ssh: connect to host vps port 22: Connection refused"*"STALE: data "* ]]; then ok
+else bad "status --watch: a failed refresh does not show as stale ($out)"; fi
+
+# tando ls: an app with a firing alert has it in an ALERT column (a column only while one fires),
+# the footer counts it; --json carries alerts_firing and firing per app
+out=$(mon_run 'render_ls' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if grep -Eq '^│ APP +STATE +ALERT ' <<< "$out" && grep -Eq '^│ api +● running +http ' <<< "$out" &&
+   grep -Eq '^│ web +● running +- ' <<< "$out" && [[ $out == *"1 alert firing: tando alerts"* ]]; then ok
+else bad "ls: the firing alert is not shown per app ($out)"; fi
+out=$(mon_run 'JSON=1; render_ls')
+if [[ $out == *'"app":"api",'*'"alerts_firing":1,"firing":"http"'* && $out == *'"app":"web",'*'"alerts_firing":0,"firing":null'* ]]; then ok
+else bad "ls --json: no alerts_firing per app ($out)"; fi
+grep -v '^alert' "$MON_ST" > "$tmp/mon.st2"
+out=$(MON_ST=$tmp/mon.st2 mon_run 'render_ls')
+if grep -Eq '^│ APP +STATE +DEPLOYED' <<< "$out"; then ok; else bad "ls: an ALERT column with nothing firing ($out)"; fi
+# status: memory says what it counts (anon + shmem, the same in ls, top, the graph and the alert)
+out=$(mon_run 'APP=web; render_status' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if grep -Eq '^│ memory .* 50 MB of 128 MB  in use, not cache' <<< "$out"; then ok; else bad "status: memory without its label ($out)"; fi
+# status: the backup age is judged by backup_hours (the alert's threshold, from the backupcfg row),
+# red past it; 50 h without the row (an older tando-watch). The stub's api backed up 30 h ago.
+out=$(mon_run 'APP=api; grep -v "^app${TAB}web" "$TMPD/st" > "$TMPD/x"; mv "$TMPD/x" "$TMPD/st"; render_status' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if grep -Eq '^│ backup +daily, last .* GMT  late after 50 h' <<< "$out"; then ok; else bad "status: backup age without backup_hours ($out)"; fi
+{ cat "$MON_ST"; printf 'backupcfg\tapi\t24\ton\n'; } > "$tmp/mon.st3"
+out=$(TANDO_COLOR=always MON_ST=$tmp/mon.st3 mon_run 'APP=api; grep -v "^app${TAB}web" "$TMPD/st" > "$TMPD/x"; mv "$TMPD/x" "$TMPD/st"; render_status')
+out=$(grep 'backup' <<< "$out")
+if [[ $out == *"daily, "*"31m"*"last "*" GMT: over 24 h, the backup alert fires"* ]]; then ok
+else bad "status: a backup older than backup_hours is not red ($out)"; fi
+# health and requests say which p95 they show: the probe's (24 h) or real requests' (the window)
+out=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/views.sh"; . "$1/lib/cmd-health.sh"; ui_init 80
+  TMPD=$(mktemp -d); HOST=vps; NOW=$(date +%s); found=""
+  printf "up\tweb\t9990\t9990\t1440\t10080\t0\t12\t30\t5,6,7\tok\t11\t\n" > "$TMPD/hl"; hl_all; rm -rf "$TMPD"' _ "$here" 2>&1)
+if [[ $out == *"PROBE P95"*"P95: tando-watch's probe, 24 h; real traffic: tando requests"* ]]; then ok
+else bad "health: the p95 does not say it is the probe's ($out)"; fi
+# CPU is the last minute's (the app row's 26th field, per mille) in ls, status and --json alike;
+# "-" without a sample (it was the average since the app started, or a delta while watching)
+out=$(mon_run 'render_ls' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if grep -Eq '^│ APP .* MEMORY +CPU 1M ' <<< "$out" && grep -Eq '^│ web .* 50 MB +12% ' <<< "$out" &&
+   grep -Eq '^│ api .* 50 MB +- ' <<< "$out"; then ok; else bad "ls: cpu is not the last minute's ($out)"; fi
+out=$(mon_run 'APP=web; render_status' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if grep -Eq '^│ cpu +12%  last minute' <<< "$out"; then ok; else bad "status: cpu is not the last minute's ($out)"; fi
+out=$(mon_run 'JSON=1; render_ls')
+if [[ $out == *'"app":"web",'*'"cpu_percent":12.3,'*'"app":"api",'*'"cpu_percent":null,'* ]]; then ok
+else bad "ls --json: cpu_percent is not the last minute's ($out)"; fi
+# the server's clock 5 minutes ahead, an older tando there: one line each in ls and status; none
+# when they agree; --json carries both, with reachable and checked_at (what a menu bar badge needs)
+out=$(mon_run 'render_ls')
+if [[ $out != *"clock: "* && $out != *" on the server, "* ]]; then ok; else bad "ls: a skew line with none ($out)"; fi
+MON_CLK=$(( $(date +%s) + 300 )) MON_VER=0.0.1 mon_rows > "$tmp/mon.st4"
+out=$(MON_ST=$tmp/mon.st4 mon_run 'render_ls' | tr -d '│\n' | tr -s ' ')
+if [[ $out == *"clock: the server's is "[45]m*" ahead of this laptop's; ages here are off by that"* &&
+      $out == *"tando 0.0.1 on the server, $(cat "$here/VERSION") here: tando host setup vps"* ]]; then ok
+else bad "ls: no clock or version skew line ($out)"; fi
+out=$(MON_ST=$tmp/mon.st4 mon_run 'APP=web; render_status' | tr -d '│\n' | tr -s ' ')
+if [[ $out == *"clock: the server's is "[45]m*" ahead"* ]]; then ok; else bad "status: no clock skew line ($out)"; fi
+out=$(MON_ST=$tmp/mon.st4 mon_run 'JSON=1; render_ls')
+if [[ $out == '{"host":"vps","reachable":true,"checked_at":'[0-9]*',"server_version":"0.0.1","client_version":"'*'","clock_skew_s":'[0-9]*',"apps":'*'"alerts":[{"app":"api","check":"http","state":"firing",'* ]] &&
+   printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert 299 <= d["clock_skew_s"] <= 301' 2> /dev/null; then ok
+else bad "ls --json: no reachable, checked_at, versions, skew or alerts ($out)"; fi
+# --check: exit 2 when an alert fires or an app is down, 0 when nothing needs attention
+mon_run 'CHECK=1; cmd_ls' > /dev/null; r1=$?
+MON_ST=$tmp/mon.st2 mon_run 'CHECK=1; cmd_ls' > /dev/null; r2=$?
+sed 's/^app\tweb\tactive/app\tweb\tfailed/' "$tmp/mon.st2" > "$tmp/mon.st5"
+MON_ST=$tmp/mon.st5 mon_run 'CHECK=1; JSON=1; cmd_ls' > /dev/null; r3=$?
+MON_ST=$tmp/mon.st2 mon_run 'APP=web; CHECK=1; cmd_status' > /dev/null; r4=$?
+if [[ "$r1 $r2 $r3 $r4" == "2 0 2 0" ]]; then ok; else bad "--check exit status: firing $r1, fine $r2, down $r3, status fine $r4 (want 2 0 2 0)"; fi
+# ls --all: one box for every server, what needs attention first (a server not answering, an app
+# down, an alert firing, host care), then every app with those on top; --json keeps one object
+# per host, an unreachable one with "error" and "reachable": false
+sed 's/^app\tweb\tactive/app\tweb\tfailed/' "$MON_ST" > "$tmp/mon.st6"; printf 'hostcare\t3\t0\t1\t1\n' >> "$tmp/mon.st6"
+grep -v '^alert' "$MON_ST" > "$tmp/mon.st7"
+allrun() { mon_run 'LS_HOSTS="calm dead vps"; cp "$2" "$TMPD/h.vps.st"; cp "$3" "$TMPD/h.calm.st"
+  echo 0 > "$TMPD/h.vps.rc"; echo 0 > "$TMPD/h.calm.rc"; echo 255 > "$TMPD/h.dead.rc"
+  echo "ssh: connect to host 192.0.2.1 port 22: Connection refused" > "$TMPD/h.dead.err"; '"$1" "$tmp/mon.st6" "$tmp/mon.st7"; }
+mon_run() { # (again, with the files of allrun as $2 $3)
+    "$BASH_BIN" -c '
+        . "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/deploy.sh"; . "$1/lib/views.sh"
+        TMPD=$(mktemp -d); CFG=$TMPD; HOST=vps; TANDO_HOME=$1; APP=""; JSON=""; WATCH=""; ui_init 80
+        resolve() { :; }
+        agent_raw() { cat "$MON_ST"; }
+        fetch_status; set -- "$2" "$3" "$4"; eval "$1"; rc=$?; rm -rf "$TMPD"; exit $rc' _ "$here" "$@" 2>&1
+}
+out=$(allrun 'render_ls_all' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+att=$(sed -n '2,/^├/p' <<< "$out" | tr -d '│' | tr -s ' ')
+tbl=$(sed -n '/^│ HOST /,/^╰/p' <<< "$out")
+if [[ $out == "╭─ tando ls --all "*"3 servers ─╮"* && $att == *"dead not answering: connection refused"*"vps web is down: tando logs -a web -H vps"*"vps api: http firing: tando alerts -H vps"*"vps server: 3 to do: tando host status vps"* ]] &&
+   [[ "$(sed -n 2,3p <<< "$tbl" | awk '{print $2}' | tr '\n' ' ')" == "vps vps " ]] && grep -Eq '^│ calm +web +● running +- ' <<< "$tbl" &&
+   [[ $out == *"4 apps, 2 need attention"* ]]; then ok
+else bad "ls --all: no summary with what needs attention first ($out)"; fi
+out=$(allrun 'JSON=1; render_ls_all')
+if printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); h={x["host"]: x for x in d["hosts"]}; assert h["dead"]["reachable"] is False and h["dead"]["error"] and h["vps"]["reachable"] is True and len(h["vps"]["apps"]) == 2' 2> /dev/null &&
+   [[ $out == '{"hosts":[{"host":"calm","reachable":true,'*'{"host":"dead","error":"connection refused","reachable":false,'* ]]; then ok
+else bad "ls --all --json: reachable per host ($out)"; fi
+# the shared ssh connection stays 10 minutes after the last command (ControlPersist=600; was 60)
+out=$("$BASH_BIN" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; CFG=$(mktemp -d); mkdir -p "$CFG/hosts"
+  printf "target=admin@192.0.2.1\nport=22\nkind=admin\n" > "$CFG/hosts/vps"; host_use vps; printf "%s\n" "${SSHO[@]}"; rm -rf "$CFG"' _ "$here" 2>&1)
+if grep -qx 'ControlPersist=600' <<< "$out" && grep -qx 'ControlMaster=auto' <<< "$out"; then ok
+else bad "host_use: the shared connection does not persist 10 minutes ($out)"; fi
+# alerts --json: the alerts (with silenced) and notifiers (with their failures) as one object
+printf 'alert\tapi\thttp\tfiring\t1795200000\t5xx 12%%\tok\t1\t0\t3\nnotifier\tphone\tntfy\tntfy.sh/x\t1795100000\t2\t1\t-\tHTTP 500\t0\n' > "$tmp/al"
+out=$(mon_run '. "$TANDO_HOME/lib/cmd-alerts.sh"; JSON=1; NOW=1795200100; cp "$2" "$TMPD/al"; render_alerts' "$tmp/al")
+if printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d["alerts"][0]; n=d["notifiers"][0]; assert d["reachable"] is True and d["checked_at"] == 1795200100 and a["check"] == "http" and a["state"] == "firing" and a["silenced"] is True and n["failures"] == 2 and n["error"] == "HTTP 500"' 2> /dev/null; then ok
+else bad "alerts --json: not one object with alerts and notifiers ($out)"; fi
+# host status --watch: at most one full collection a minute (it runs sshd -T, systemctl, journalctl)
+out=$(mon_run '. "$TANDO_HOME/lib/hostcare.sh"; hc_opts() { :; }; hc_host() { :; }; watch_loop() { echo "every $WATCH"; }
+  WATCH=5; host_status; WATCH=120; host_status')
+if [[ $out == *"every 60"*"every 120"* ]]; then ok; else bad "host status --watch 5 is not held to 60 s ($out)"; fi
+# tando top: the firing check after the app's state, the count in the host strip
+out=$("$BASH_BIN" -c '
+    . "$1/lib/ui.sh"; . "$1/lib/common.sh"; set +u; TAB=$(printf "\t"); AGENT_BIN=/opt/tando/bin/tando-agent; . "$1/lib/cmd-top.sh"
+    ui_init 100; UI_ROWS=20 UI_COLS=100 TOP_H=0 SEL=0 SEL_APP=web AP_N=0 TOP_DETAIL=0 TOP_VIEW=main TOP_MODAL=""
+    TOP_INT=2 TOP_RO=0 TOP_CDETAIL=0 APPS_TOP=0 G_BK=60 D_REL=() D_HIST=() HV_ROWS=() TOP_KEYS_L="" TOP_KEYS_R=""
+    TH_NAME=(vps) TH_ST=(ok) TH_ERR=("") TH_PID=("") TH_T0=(0) TH_OKAT=(0) TH_CLK=(0)
+    TH_LOAD=(0) TH_CPUS=(1) TH_MT=(0) TH_MU=(0) TH_DT=(0) TH_DU=(0) TH_NAPPS=(0) TH_NBAD=(0)
+    GH_M=() GH_C=() GL_M=() GL_C=() GL_N=()
+    { cat "$2"; printf "clock\t1795200000.5\n"; } > "$3"; TH_GOOD=("$3")
+    top_parse 0 1; ui_frame_begin; top_draw_main; ui_frame_end' _ "$here" "$MON_ST" "$tmp/top.data" 2>&1 |
+    perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+if grep -Eq '│ +api +● running http ' <<< "$out" && [[ $out == *"apps 2  1 alert"* ]]; then ok
+else bad "top: the firing alert is not shown ($out)"; fi
+
 echo "$checks checks, $fails failed"
 [[ $fails == 0 ]]

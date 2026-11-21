@@ -72,8 +72,9 @@ rq_summary() { # seconds label
   fi
   ui_kv "$per" "$(ui_spark "$(printf '%s' "$K_counts" | tr ',' ' ')")$cover"
   [ "${K_c5xx:-0}" != 0 ] && ui_kv "5xx" "$(ui_spark "$(printf '%s' "$K_counts_5xx" | tr ',' ' ')")"
-  ui_kv latency "p50 $(rq_ms "$K_p50_ms")   p95 $(rq_ms "$K_p95_ms")   p99 $(rq_ms "$K_p99_ms")$(
-    )   ${UI_DIM}max${UI_NC} $(rq_ms "$K_max_ms")"
+  # (real requests of this window, from Caddy's log; tando health's p95 is tando-watch's probe)
+  ui_kv latency "p50 $(rq_ms "$K_p50_ms")  p95 $(rq_ms "$K_p95_ms")  p99 $(rq_ms "$K_p99_ms")$(
+    )  ${UI_DIM}max${UI_NC} $(rq_ms "$K_max_ms")  ${UI_DIM}real requests, $label${UI_NC}"
   ui_box_sep "status codes"
   {
     printf 'CODE\tCOUNT\tSHARE\t\n'

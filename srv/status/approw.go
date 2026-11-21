@@ -16,6 +16,8 @@ type AppFacts struct {
 	// Logs are tando-logs log-stats' four words (bytes on disk, journal cap, lines in 24 h, lines
 	// per hour); nil: none ("- - - -").
 	Logs []string
+	// CPUMin is the CPU of tando-metrics' last sample, per mille of one core ("-": none); cpuMinute.
+	CPUMin string
 }
 
 // AppRow is the agent's app_row:
@@ -23,7 +25,7 @@ type AppFacts struct {
 //	row app "$A" "$state" "${C[port]}" "${S[current]:-}" "${S[status_${S[current]:-x}]:-}" \
 //	  "$mem" "$max" "$cpu" "${_u[NRestarts]:-0}" "$up" "$(link)" "${C[recipe]:-}" \
 //	  "${C[backup]:-off}" "${S[last_backup]:-}" "${C[database]:-}" ${LG[$A]:-- - - -} "$(app_domains)" \
-//	  "${C[cpu]:--}" "${C[tasks]:-1024}" "${C[max_conns]:-256}" "${C[max_requests]:--}"
+//	  "${C[cpu]:--}" "${C[tasks]:-1024}" "${C[max_conns]:-256}" "${C[max_requests]:--}" "$(cpu_minute)"
 //
 // uptime is the host's (whole seconds of /proc/uptime), host its host.conf.
 func AppRow(f AppFacts, host kv, uptime int64) []string {
@@ -72,7 +74,7 @@ func AppRow(f AppFacts, host kv, uptime int64) []string {
 	}
 	row = append(row, lg...)
 	return append(row, appDomains(C), C.or("cpu", "-"), C.or("tasks", "1024"), C.or("max_conns", "256"),
-		C.or("max_requests", "-"))
+		C.or("max_requests", "-"), orStr(f.CPUMin, "-"))
 }
 
 func orStr(s, def string) string {

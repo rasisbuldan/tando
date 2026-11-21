@@ -117,20 +117,23 @@ time of the release command (release = in tando.conf), when a deploy ran one.
 Example: tando history -n 10
 
 @@ status
-flags: -a= -H= --watch= --json
+flags: -a= -H= --watch= --json --check
 args: 0-1
-usage: tando status [app] [--watch N] [-H host] [--json]
+usage: tando status [app] [--watch N] [-H host] [--json] [--check]
 One app in detail: state, release, memory, cpu, the last 16 minutes, logs,
 alerts, backups, releases and recent deploys. Outside a project and without
 an app it shows tando ls. --watch N repaints every N seconds (Ctrl-C stops).
+--check: exit status 2 when the app is down or an alert fires (0 when not).
 Example: tando status --watch 2
 
 @@ ls
-flags: -H= --all --watch= --json
+flags: -H= --all --watch= --json --check
 args: 0
-usage: tando ls [-H host] [--all] [--watch N] [--json]
+usage: tando ls [-H host] [--all] [--watch N] [--json] [--check]
 The apps of a server: state, when deployed, memory, cpu, uptime and link.
---all shows every registered server.
+--all: every registered server in one box, what needs attention first.
+--check: exit status 2 when an app is
+down, an alert fires or (with --all) a server does not answer; 0 when not.
 Example: tando ls --all
 
 @@ logs
@@ -403,9 +406,9 @@ key that can deploy only this app and prints the CI secrets once; github writes
 .github/workflows/deploy.yml; hook installs a git pre-push hook. See docs/CI.md.
 
 @@ alerts
-flags: -a= -H= --watch= -n=
+flags: -a= -H= --watch= -n= --json
 subs: show=0 enable=0 disable=0 test=0-1 history=0-1 set=0+ silence=2 heartbeat=0-1 backup-ping=0-1 notifier=1+ notifiers=0+ default=show
-usage: tando alerts [--watch N] | enable | disable | test [name] | history [app] [-n N]
+usage: tando alerts [--watch N] [--json] | enable | disable | test [name] | history [app] [-n N]
 usage: tando alerts set [key=value ...] | silence <app|all> <30m|2h|1d|off>
 usage: tando alerts notifier add <name> webhook|slack|telegram|ntfy|email | rm <name> | ls
 usage: tando alerts heartbeat [off] | backup-ping [off]

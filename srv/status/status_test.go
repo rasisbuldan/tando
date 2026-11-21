@@ -12,7 +12,8 @@ import (
 	"tando/srv/internal/fsinfo"
 )
 
-const hostRow = "host\tbox\t3\t0.52\t2048000000\t512000000\t1024000\t409600\t5000"
+// (then the server row: the clock and the first line of VERSION, "unknown" without the file)
+const hostRow = "host\tbox\t3\t0.52\t2048000000\t512000000\t1024000\t409600\t5000\nserver\t1800000000\tunknown"
 
 func running(start string) map[string]string {
 	return map[string]string{"ActiveState": "active", "MemoryMax": "134217728", "CPUUsageNSec": "2500000000",
@@ -54,18 +55,24 @@ func TestStatusAll(t *testing.T) {
 		tab("logs", "dep", "1", "with space", "2", "3", "x", "y", "4"),
 	) + "logs\tsite\t9" // unterminated: dropped by read
 	h.programs["tando-watch brief"] = "alert\tweb\tmemory\tfiring\t1799999000\t90% of 128M\n"
+	// the last minute's CPU from tando-metrics: 30 s of CPU in 60 s = 500 per mille; crash's last
+	// sample is 10 minutes old and dep has one line only: "-"
+	os.MkdirAll(h.path("lib/metrics"), 0o700)
+	h.write("lib/metrics/web.tsv", "1799999880\t1\t9\t2\tr\n1799999940\t1\t30000000\t2\tr\n")
+	h.write("lib/metrics/crash.tsv", "1799999340\t1\t9\t2\tr\n1799999400\t1\t30000000\t2\tf\n")
+	h.write("lib/metrics/dep.tsv", "1799999940\t1\t30000000\t2\tr\n")
 	got, err := h.out(func(c *Collector, b *bytes.Buffer) error { return c.Status(context.Background(), b, "") })
 	if err != nil {
 		t.Fatal(err)
 	}
 	eq(t, got, rows(hostRow,
-		tab("app", "crash", "failed", "4102", "20261114-170102", "-", "7", "0", "0", "9", "0", "http://crash.example.org:8080", "-", "off", "-", "-", "5", "-", "-", "-", "-", "-", "1024", "256", "-"),
-		tab("app", "dep", "deploying", "4103", "-", "-", "0", "134217728", "2500000000", "2", "0", "http://dep.example.org:8080/demo", "next", "off", "-", "-", "3", "with", "space", "3", "4", "-", "-", "1024", "256", "-"),
-		tab("app", "halt", "stopped", "4101", "20261114-170102", "verified", "0", "0", "0", "0", "0", "http://halt.example.org:8080", "node", "off", "-", "-", "-", "-", "-", "-", "-", "-", "1024", "256", "-"),
-		tab("app", "noport", "inactive", "-", "-", "-", "0", "0", "0", "0", "0", "http://noport.example.org:8080", "node", "off", "-", "-", "-", "-", "-", "-", "-", "-", "1024", "256", "-"),
-		tab("app", "old", "inactive", "4105", "ab", "-", "0", "0", "0", "0", "0", "https://old.example.net/p", "-", "off", "-", "-", "-", "-", "-", "-", "-", "-", "1024", "256", "-"),
-		tab("app", "site", "active", "4104", "20261114-170102", "verified", "0", "0", "0", "0", "0", "http://site.example.org:8080", "static", "off", "-", "-", "-", "-", "-", "-", "-", "-", "1024", "256", "-"),
-		tab("app", "web", "active", "4100", "20261114-170102", "verified", "1024", "134217728", "2500000000", "2", "2000", "http://web.example.org:8080", "node", "daily", "20261115-030000-daily", "postgres", "1024", "64M", "300", "12", "shop.example.com,www.x.org", "50%", "200", "256", "-"),
+		tab("app", "crash", "failed", "4102", "20261114-170102", "-", "7", "0", "0", "9", "0", "http://crash.example.org:8080", "-", "off", "-", "-", "5", "-", "-", "-", "-", "-", "1024", "256", "-", "-"),
+		tab("app", "dep", "deploying", "4103", "-", "-", "0", "134217728", "2500000000", "2", "0", "http://dep.example.org:8080/demo", "next", "off", "-", "-", "3", "with", "space", "3", "4", "-", "-", "1024", "256", "-", "-"),
+		tab("app", "halt", "stopped", "4101", "20261114-170102", "verified", "0", "0", "0", "0", "0", "http://halt.example.org:8080", "node", "off", "-", "-", "-", "-", "-", "-", "-", "-", "1024", "256", "-", "-"),
+		tab("app", "noport", "inactive", "-", "-", "-", "0", "0", "0", "0", "0", "http://noport.example.org:8080", "node", "off", "-", "-", "-", "-", "-", "-", "-", "-", "1024", "256", "-", "-"),
+		tab("app", "old", "inactive", "4105", "ab", "-", "0", "0", "0", "0", "0", "https://old.example.net/p", "-", "off", "-", "-", "-", "-", "-", "-", "-", "-", "1024", "256", "-", "-"),
+		tab("app", "site", "active", "4104", "20261114-170102", "verified", "0", "0", "0", "0", "0", "http://site.example.org:8080", "static", "off", "-", "-", "-", "-", "-", "-", "-", "-", "1024", "256", "-", "-"),
+		tab("app", "web", "active", "4100", "20261114-170102", "verified", "1024", "134217728", "2500000000", "2", "2000", "http://web.example.org:8080", "node", "daily", "20261115-030000-daily", "postgres", "1024", "64M", "300", "12", "shop.example.com,www.x.org", "50%", "200", "256", "-", "500"),
 		"alert\tweb\tmemory\tfiring\t1799999000\t90% of 128M"))
 	if n := h.called("systemctl show"); n != 1 {
 		t.Errorf("systemctl show ran %d times, want 1", n)
@@ -99,7 +106,7 @@ func TestStatusNotRoot(t *testing.T) {
 	}
 	got, _ := h.out(func(c *Collector, b *bytes.Buffer) error { return c.Status(context.Background(), b, "") })
 	eq(t, got, rows(hostRow,
-		tab("app", "web", "inactive", "4100", "-", "-", "0", "0", "0", "0", "0", "http://web.example.org:8080", "-", "off", "-", "-", "-", "-", "-", "-", "-", "-", "1024", "256", "-")))
+		tab("app", "web", "inactive", "4100", "-", "-", "0", "0", "0", "0", "0", "http://web.example.org:8080", "-", "off", "-", "-", "-", "-", "-", "-", "-", "-", "1024", "256", "-", "-")))
 	if h.called(h.path("root/bin/tando-logs")) != 0 {
 		t.Error("log-stats ran without root")
 	}
@@ -111,7 +118,7 @@ func TestStatusSystemctlFails(t *testing.T) {
 	h.app("web", "port=4100\n", "")
 	got, _ := h.out(func(c *Collector, b *bytes.Buffer) error { return c.Status(context.Background(), b, "") })
 	eq(t, got, rows(hostRow,
-		tab("app", "web", "inactive", "4100", "-", "-", "0", "0", "0", "0", "0", "http://web.example.org:8080", "-", "off", "-", "-", "-", "-", "-", "-", "-", "-", "1024", "256", "-")))
+		tab("app", "web", "inactive", "4100", "-", "-", "0", "0", "0", "0", "0", "http://web.example.org:8080", "-", "off", "-", "-", "-", "-", "-", "-", "-", "-", "1024", "256", "-", "-")))
 	if !strings.Contains(h.stderr.String(), "tando-agent: systemctl: Failed to connect to bus") {
 		t.Errorf("stderr %q", h.stderr.String())
 	}
@@ -145,7 +152,7 @@ func TestStatusOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	eq(t, got, rows(hostRow,
-		tab("app", "web", "inactive", "4100", "20261114-170102", "verified", "0", "0", "0", "0", "0", "https://web.example.org", "-", "off", "-", "-", "15", "64M", "300", "12", "shop.example.com,deep.a.example.com", "-", "1024", "256", "-"),
+		tab("app", "web", "inactive", "4100", "20261114-170102", "verified", "0", "0", "0", "0", "0", "https://web.example.org", "-", "off", "-", "-", "15", "64M", "300", "12", "shop.example.com,deep.a.example.com", "-", "1024", "256", "-", "-"),
 		tab("logcfg", "web", "7d", "16M", "app"),
 		tab("rel", "20261115-090000-2", "rolledback", "0", "0"),
 		tab("rel", "20261114-170102", "verified", "1", "1"),
@@ -329,7 +336,7 @@ func TestStatusRowsInProcess(t *testing.T) {
 	}
 	got := run("web")
 	eq(t, got, rows(hostRow,
-		tab("app", "web", "inactive", "4100", "-", "-", "0", "0", "0", "0", "0", "http://web.example.org:8080", "-", "off", "-", "-", "15", "64M", "300", "12", "-", "-", "1024", "256", "-"),
+		tab("app", "web", "inactive", "4100", "-", "-", "0", "0", "0", "0", "0", "http://web.example.org:8080", "-", "off", "-", "-", "15", "64M", "300", "12", "-", "-", "1024", "256", "-", "-"),
 		tab("logcfg", "web", "7d", "16M", "app"),
 		"mx\t60\t1", "alert\tweb\tdown\tfiring\t1\tx"))
 	run("")
@@ -375,5 +382,18 @@ func TestStatusRestoreCut(t *testing.T) {
 	if !strings.Contains(got, "\nrestorecut\tweb\t20261114-180000-manual\t20261114-180100-safety\tdatabase\n") ||
 		strings.Count(got, "restorecut") != 1 {
 		t.Fatalf("want one restorecut row for web, got:\n%s", got)
+	}
+}
+
+// the server row: the clock and the first line of VERSION, for the client's skew line
+func TestStatusServerRow(t *testing.T) {
+	h := newHost(t)
+	h.write("root/VERSION", "1.4.2\nsomething else\n")
+	got, err := h.out(func(c *Collector, b *bytes.Buffer) error { return c.Status(context.Background(), b, "") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "\nserver\t1800000000\t1.4.2\n") {
+		t.Errorf("no server row with the version: %q", got)
 	}
 }

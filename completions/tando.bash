@@ -66,8 +66,8 @@ _tando() {
     rollback) subs="" flags="$flags -H -a" args="apps";;
     releases) subs="" flags="$flags -H --json -a" args="apps";;
     history) subs="" flags="$flags -n -H --json -a" args="apps";;
-    status) subs="" flags="$flags --watch -H --json -a" args="apps";;
-    ls) subs="" flags="$flags -H --all --watch --json" args="";;
+    status) subs="" flags="$flags --watch -H --json --check -a" args="apps";;
+    ls) subs="" flags="$flags -H --all --watch --json --check" args="";;
     logs) subs="pull" flags="$flags -f -n --since --until --grep -i --regex -E -a -H --level --release --deploy --worker --json" args="apps";;
     start) subs="" flags="$flags -H -a" args="apps";;
     stop) subs="" flags="$flags -H -a" args="apps";;
@@ -87,7 +87,7 @@ _tando() {
     unlock) subs="" flags="$flags -H -a" args="apps";;
     recipes) subs="" flags="$flags " args="";;
     ci) subs="setup rotate ls revoke github hook" flags="$flags -a -H --ref --repo --branch --node --env --force --remove" args="";;
-    alerts) subs="enable disable test history set silence notifier rm ls heartbeat backup-ping show notifiers" flags="$flags --watch -n -a -H" args="apps";;
+    alerts) subs="enable disable test history set silence notifier rm ls heartbeat backup-ping show notifiers" flags="$flags --watch --json -n -a -H" args="apps";;
     health) subs="" flags="$flags --json -a -H --forget" args="apps";;
     errors) subs="" flags="$flags --since -n --json -a -H --last" args="apps";;
     requests) subs="tail errors summary" flags="$flags --since -a -H --last -n -f --4xx" args="apps";;

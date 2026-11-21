@@ -56,6 +56,7 @@ hc_render() {
   n_todo=$(grep -c . "$TMPD/hs.todo")
   n_fail=$(grep -c "^[^$TAB]*${TAB}fail$TAB" "$TMPD/hs.todo")
   ui_box_open "host status" "$HOST"
+  watch_stale_line
   while IFS=$TAB read -r r a b c d e f g h i j k l m n o p q x; do
     [ "$r" = sys ] || continue
     ui_kv machine "$b ${UI_G_MID} kernel $c ${UI_G_MID} $d${e:+ ${UI_G_MID} $e}"
@@ -132,6 +133,9 @@ hc_json() {
 host_status() {
   hc_opts
   hc_host "${HC_POS[0]:-}"
+  # each refresh is a full collection on the server (sshd -T, systemctl, journalctl): at most one
+  # a minute (the facts change hourly)
+  if [ -n "$WATCH" ] && [ "$WATCH" -lt 60 ]; then WATCH=60; fi
   watch_loop hc_render hc_fetch
 }
 

@@ -6,14 +6,14 @@
 // Files, in Dir (/var/lib/tando/metrics, root 700: an app must not read another app's memory, CPU
 // and restarts), read through sudo by `tando top`:
 //
-//	<app>.tsv, <app>.tsv.1   time  anon_bytes  cpu_usec_since_last_sample  restarts  state(r|s|f|a)
+//	<app>.tsv, <app>.tsv.1   time  mem_bytes  cpu_usec_since_last_sample  restarts  state(r|s|f|a)
 //	host.tsv, host.tsv.1     time  load1x100  mem_used_bytes  mem_total_bytes
 //	.state                   "<app> <cpu usage_usec> <file start time> <lines>" per app, and
 //	                         ".host 0 <start> <lines>"
 //
 // Each file covers at most 3.5 days or 5100 lines, then becomes .1 (the old .1 is dropped), so an
 // app keeps at most 7 days, about 2 x 160 KB. The format is the shell version's: files it wrote
-// are read as they are.
+// are read as they are. mem_bytes is anon + shmem of memory.stat (before 2026-11: anon only).
 //
 // Layer: domain. It imports internal/* only; no other domain package, not daemon.
 package metrics

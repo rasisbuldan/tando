@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"tando/srv/internal/bashread"
 	"tando/srv/internal/cgroup"
@@ -70,6 +71,8 @@ func (c *Collector) Status(ctx context.Context, w io.Writer, name string) error 
 	upt := c.uptime()
 	s := newSink()
 	s.row(HostRow(c.host(upt))...)
+	// the server's clock and tando version, for the client's skew line (the agent's server row)
+	s.row("server", decimal.Itoa(c.now()), c.versionLine())
 	if r := c.hostcareRow(); r != nil { // host care's counts (tando ls's hint), when root can read them
 		s.row(r...)
 	}
@@ -91,7 +94,8 @@ func (c *Collector) Status(ctx context.Context, w io.Writer, name string) error 
 	}
 	for i, a := range apps {
 		f := AppFacts{Name: a.name, Conf: a.conf, State: a.state, Logs: lg[a.name],
-			Mem: memAnonShmem(filepath.Join(cgroup.AppDir(c.Env.Cgroup, a.name), "memory.stat"))}
+			Mem:    memAnonShmem(filepath.Join(cgroup.AppDir(c.Env.Cgroup, a.name), "memory.stat")),
+			CPUMin: c.cpuMinute(a.name)}
 		if i < len(shown) {
 			f.Unit = shown[i]
 		}
@@ -251,3 +255,37 @@ func (c *Collector) hostcareRow() []string {
 	}
 	return nil
 }
+
+// cpuMinute is the agent's cpu_minute: the app's CPU over tando-metrics' last sample (about the
+// last minute), per mille of one core: the usec of the last line over the seconds since the line
+// before; "-" without two lines, with a gap over 10 minutes, or a last sample older than 3 minutes.
+func (c *Collector) cpuMinute(name string) string {
+	f, err := os.Open(filepath.Join(c.Env.Lib, "metrics", name+".tsv"))
+	if err != nil {
+		return "-"
+	}
+	defer f.Close()
+	b := make([]byte, 512)
+	if fi, err := f.Stat(); err == nil && fi.Size() > 512 {
+		if _, err := f.Seek(fi.Size()-512, io.SeekStart); err != nil {
+			return "-"
+		}
+	}
+	n, _ := io.ReadFull(f, b)
+	lines := bashread.Lines(b[:n])
+	if len(lines) < 2 {
+		return "-"
+	}
+	l1, l2 := strings.Split(lines[len(lines)-2], "\t"), strings.Split(lines[len(lines)-1], "\t")
+	if len(l2) < 3 || !digits(l1[0], 12) || !digits(l2[0], 12) || !digits(l2[2], 15) {
+		return "-"
+	}
+	t1, t2, u2 := atoi(l1[0]), atoi(l2[0]), atoi(l2[2])
+	dt := t2 - t1
+	if dt < 1 || dt > 600 || c.now()-t2 > 180 {
+		return "-"
+	}
+	return decimal.Itoa(u2 / (dt * 1000))
+}
+
+func digits(s string, max int) bool { return s != "" && len(s) <= max && decimal.IsDigits(s) }

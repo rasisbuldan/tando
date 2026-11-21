@@ -130,6 +130,7 @@ same() {
       if (t == "host") return i == 4 || i == 6 || i == 8 || i == 9
       if (t == "app") return i == 7 || i == 9 || i == 10 || i == 11 || i == 17 || i == 19 || i == 20
       if (t == "mx") return i == 3
+      if (t == "server") return i == 2                  # the server clock: seconds between the runs
       if (t == "m") return i >= 2
       if (t == "busy_left" || t == "waiting_left") return i == 2
       return 0
@@ -138,7 +139,7 @@ same() {
       if (t == "host" && i == 4) return 0.3
       if (t == "app" && i == 9) return 0               # cpu time only grows: between the two runs
       if (t == "app" && i == 10) return 1
-      if ((t == "host" && i == 9) || (t == "app" && i == 11) || t == "mx" || t ~ /_left$/) return 2
+      if ((t == "host" && i == 9) || (t == "app" && i == 11) || t == "mx" || t == "server" || t ~ /_left$/) return 2
       return v * 0.05 + 65536                            # memory, disk, log sizes and counts
     }
     FNR == 1 { file++ }
@@ -345,6 +346,19 @@ srv 'sudo mv /opt/tando/bin/tando-status /opt/tando/bin/tando-status.off'
 fb=$(srv 'sudo /opt/tando/bin/tando-agent releases web | head -1; sudo /opt/tando/bin/tando-agent status | head -1 | cut -f1')
 srv 'sudo mv /opt/tando/bin/tando-status.off /opt/tando/bin/tando-status'
 check "5 without tando-status the agent falls back to its shell versions ($(echo $fb))" eval 'echo "$fb" | grep -q "^rel" && echo "$fb" | grep -qx host'
+# what the client's monitoring reads from status (docs/COMMANDS.md, ls and status): the server
+# row (its clock and version), the last minute's CPU of a running app (26th field, from
+# tando-metrics once it has two samples), the backup alert's threshold with an app
+srv 'sudo /opt/tando/bin/tando-agent status web' > "$E/mon.st"
+sv=$(srv 'cat /opt/tando/VERSION' | head -1)
+check "8a status has the server row: the server's clock (within 30 s of the laptop's) and tando version ($sv)" \
+  awk -F '\t' -v now="$(date +%s)" -v v="$sv" '$1 == "server" { f = 1; d = $2 - now; if (d < 0) d = -d; ok = (d <= 30 && $3 == v) } END { exit !(f && ok) }' "$E/mon.st"
+cpu1m() { srv 'sudo /opt/tando/bin/tando-agent status web' | awk -F '\t' '$1 == "app" && $26 ~ /^[0-9]+$/ { f = 1 } END { exit !f }'; }
+check "8b the app row of a running app has the last minute's cpu (per mille, 26th field)" t_until 150 cpu1m
+check "8c status <app> has the backup alert's threshold (backupcfg web 50 on)" grep -qx "backupcfg	web	50	on" "$E/mon.st"
+"$R" ls --json > "$E/mon.json" 2>&1
+check "8d ls --json: reachable, checked_at, server and client versions, skew, alerts and per-app alerts_firing" \
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["reachable"] is True and d["checked_at"] > 0 and d["server_version"] and abs(d["clock_skew_s"]) <= 30 and isinstance(d["alerts"], list) and all("alerts_firing" in a and "cpu_percent" in a for a in d["apps"])' "$E/mon.json"
 log "compared $N cases"
 srv 'sudo rm -rf /var/tmp/tando-status-cmp'
 t_done

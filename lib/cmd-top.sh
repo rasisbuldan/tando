@@ -56,7 +56,7 @@ cmd_top() {
   done
   for ((i = 0; i < ${#TH_NAME[@]}; i++)); do
     TH_ST[i]=new TH_ERR[i]="" TH_OKAT[i]=-1 TH_PID[i]="" TH_T0[i]=0 TH_DUE[i]=0 TH_CLK[i]=0
-    TH_LOAD[i]=0 TH_CPUS[i]=1 TH_MT[i]=0 TH_MU[i]=0 TH_DT[i]=0 TH_DU[i]=0 TH_NAPPS[i]=0 TH_NBAD[i]=0
+    TH_LOAD[i]=0 TH_CPUS[i]=1 TH_MT[i]=0 TH_MU[i]=0 TH_DT[i]=0 TH_DU[i]=0 TH_NAPPS[i]=0 TH_NBAD[i]=0 TH_NFIRE[i]=0 TH_FIRING[i]=""
   done
   TOP_KEYED=1 TOP_VIEW=main TOP_DETAIL=1 TOP_CDETAIL=0 TOP_MODAL="" SEL_APP="" SEL=0 TOP_DIRTY=1 AP_N=0
   D_APP="" D_NEED=1 D_DUE=0 D_REL=() D_HIST=() HV_ROWS=() HV_TOP=0 LOG_TOP=0 LOG_FOLLOW=1
@@ -193,7 +193,7 @@ top_take() {
 # fresh=1 for a new sample (cpu %, live graph points, detail sections); 0 to re-read the last.
 top_parse() {
   local i=$1 fresh=$2 f=${TH_GOOD[$1]} r v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15
-  local sect="" clk=0 ms=0 na=0 nbad=0 pv tv cv key
+  local sect="" clk=0 ms=0 na=0 nbad=0 pv tv cv key nfire=0 fl=""
   [ -n "$f" ] && [ -f "$f" ] || return 0
   # the server clock first (last row): cpu % and graph buckets use it
   while IFS=$TAB read -r r v1 v2; do
@@ -256,10 +256,13 @@ top_parse() {
           HV_ROWS[${#HV_ROWS[@]}]="$v2$TAB$v3$TAB$v4$TAB$v5$TAB$v6$TAB$v7$TAB$v8$TAB$v9$TAB$v10$TAB$v11$TAB$v12$TAB$v13"
         fi;;
       m) [ "$sect" = @metrics ] && [ "$v1" != 0 ] && top_graph_hist "$v1" "$v2" "$v3";;
+      alert) # app check state since detail; only plain words reach the list (it is word-split)
+        case $v1$v2 in *[!a-z0-9_.-]*) continue;; esac
+        [ "$v3" = firing ] && nfire=$((nfire + 1)) fl="$fl $v1:$v2";;
       mx) [ "$sect" = @metrics ] && [ "$v1" = none ] && G_NOMETRICS=1;;
     esac
   done < "$f"
-  TH_NAPPS[i]=$na TH_NBAD[i]=$nbad
+  TH_NAPPS[i]=$na TH_NBAD[i]=$nbad TH_NFIRE[i]=$nfire TH_FIRING[i]=$fl
   [ "$i" = "$TOP_H" ] && top_select_fix
   return 0
 }
@@ -566,6 +569,7 @@ top_host_frags() {
       ui_meter_v mem "$mu" "$mt" $bw "$mus/$UI_RET"; f+="  $UI_RET"
       f+="  ${UI_DIM}apps${UI_NC} ${TH_NAPPS[i]}"
       [ "${TH_NBAD[i]}" -gt 0 ] && f+=" ${UI_RED}(${TH_NBAD[i]} failed)${UI_NC}"
+      [ "${TH_NFIRE[i]:-0}" -gt 0 ] && { [ "${TH_NFIRE[i]}" = 1 ] && f+="  ${UI_RED}1 alert${UI_NC}" || f+="  ${UI_RED}${TH_NFIRE[i]} alerts${UI_NC}"; }
     else
       f="$nm  $UI_RET"
       if [ "${TH_OKAT[i]}" -ge 0 ]; then
@@ -579,12 +583,15 @@ top_host_frags() {
 
 # Apps table rows into UI_TROWS; stale data is shown without colour.
 top_apps_rows() {
-  local j st mem max cpu up rs bar memtxt stale=$1 name
+  local j st mem max cpu up rs bar memtxt stale=$1 name fx x
   UI_TROWS=()
   UI_TROWS[0]="APP${TAB}STATE${TAB}RELEASE${TAB}MEMORY${TAB}CPU${TAB}UP${TAB}RST${TAB}LINK"
   for ((j = APPS_TOP; j < AP_N && j < APPS_TOP + $2; j++)); do
     top_state_word "${AP_STATE[j]}" "${AP_REL[j]}" "${AP_RECIPE[j]}"; st=$UI_RET
     ui_badge_v "$st"; st=$UI_RET
+    # the checks firing for the app, red after its state (the alert rows of status)
+    fx=""; for x in ${TH_FIRING[TOP_H]:-}; do [ "${x%%:*}" = "${AP_NAME[j]}" ] && fx="${fx:+$fx,}${x#*:}"; done
+    [ -n "$fx" ] && st="$st ${UI_RED}$fx${UI_NC}"
     mem=${AP_MEM[j]} max=${AP_MAX[j]}
     is_num "$mem" || mem=0
     if is_num "$max" && [ "$max" -gt 0 ]; then
