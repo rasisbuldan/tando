@@ -74,3 +74,26 @@ export function shortId(id: string | null | undefined): string {
   if (!id) return DASH;
   return id.length > 12 ? `${id.slice(0, 4)}…${id.slice(-6)}` : id;
 }
+
+const nfi = new Intl.NumberFormat("en-GB", { maximumFractionDigits: 1 });
+/** a count or rate: 0.4, 12, 1.2k */
+export function fmtNum(n: number | null | undefined): string {
+  if (n == null) return DASH;
+  const a = Math.abs(n);
+  if (a >= 1e6) return `${nfi.format(n / 1e6)}M`;
+  if (a >= 1e3) return `${nfi.format(n / 1e3)}k`;
+  return a < 10 ? (Math.round(n * 100) / 100).toString() : nfi.format(n);
+}
+export const fmtPerSec = (n: number | null | undefined) => (n == null ? DASH : `${fmtNum(n)}/s`);
+export const fmtPerMin = (n: number | null | undefined) => (n == null ? DASH : `${fmtNum(n)}/min`);
+/** bytes down to single bytes: 800 B, 12 KB, 1.4 MB (rates and small sizes) */
+export function fmtBytesFine(n: number | null | undefined): string {
+  if (n == null) return DASH;
+  const a = Math.abs(n);
+  if (a < KB) return `${Math.round(n)} B`;
+  if (a < KB * KB) return `${nfi.format(n / KB)} KB`;
+  if (a < KB * KB * KB) return `${nfi.format(n / (KB * KB))} MB`;
+  return `${nfi.format(n / (KB * KB * KB))} GB`;
+}
+export const fmtBytesPerSec = (n: number | null | undefined) => (n == null ? DASH : `${fmtBytesFine(n)}/s`);
+export const fmtMsFine = (n: number | null | undefined) => (n == null ? DASH : n < 10 ? `${(Math.round(n * 100) / 100).toString()} ms` : `${Math.round(n)} ms`);

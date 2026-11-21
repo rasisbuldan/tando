@@ -195,7 +195,7 @@ export function chartDomain(range: RangeKey, serverNow: number | null | undefine
 }
 
 export type SeriesKey = "memory_bytes" | "cpu_percent" | "restarts" | "disk_bytes";
-export interface ChartPoint { t: number; v: number | null; w?: number | null } // w: an optional second series (5xx)
+export interface ChartPoint { t: number; v: number | null; w?: number | null; s?: (number | null)[] } // w: an optional second series (5xx); s: the lines of a multi-line chart
 /** buckets as points; null stays null (a gap), never zero and never interpolated */
 export function toPoints(series: MetricPoint[] | undefined, key: SeriesKey): ChartPoint[] {
   return (series ?? []).map((p) => ({ t: p.t, v: p[key] ?? null }));

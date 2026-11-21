@@ -6,15 +6,18 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RangeTabs } from "@/components/ui/tabs";
-import { ChartCard, prefetchCharts } from "@/components/chart-card";
+import { prefetchCharts } from "@/components/chart-card";
+import { HostSections } from "@/components/host-sections";
+import { ServerStudioButton } from "@/components/studio";
+import { studioTarget } from "@/lib/studio";
 import { Tip } from "@/components/ui/tooltip";
 import { Command, Mono, MetricCard, SshTarget } from "@/components/bits";
 import { HostActions, ProgressPanel } from "@/components/actions";
 import { Empty, Freshness, Loading, PageHeader, Section, SectionError } from "@/components/panel";
 import { refreshAll, snapshotPoller, useDemand, useNowMs, usePoller } from "@/lib/resources";
-import { appRows, chartDomain, cpuMax, describe, headroom, hostPoints, lastValue, loadMax, memoryTicks, niceMax, RANGE_S, roundTicks, skewNote, sshTarget, type RangeKey } from "@/lib/shape";
+import { appRows, headroom, skewNote, sshTarget, type RangeKey } from "@/lib/shape";
 import { DASH, fmtBytes, fmtDur, fmtLoad, fmtPct, fmtTime, pctOf } from "@/lib/format";
-import type { DoctorResult, HostMetrics, HostStatus, Snapshot } from "@/lib/types";
+import type { DoctorResult, HostStatus } from "@/lib/types";
 
 function Gauge({ pct, label }: { pct: number | null; label: string }) {
   const w = pct == null ? 0 : Math.max(0, Math.min(100, pct));
@@ -24,38 +27,6 @@ function Gauge({ pct, label }: { pct: number | null; label: string }) {
       <rect width="100" height="8" fill="currentColor" />
       <rect width={w} height="8" className={kind} fill="currentColor" />
     </svg>
-  );
-}
-
-/** Load, CPU, Memory, Disk over the range: the host's per-minute samples (tando-metrics) */
-function HostCharts({ m, d, range }: { m: HostMetrics; d: Snapshot; range: RangeKey }) {
-  const domain = useMemo(() => chartDomain(range, d.server_now, m), [range, d.server_now, m]);
-  const load = useMemo(() => hostPoints(m.series, "load"), [m]);
-  const cpu = useMemo(() => hostPoints(m.series, "cpu_percent"), [m]);
-  const mem = useMemo(() => hostPoints(m.series, "memory_used_bytes"), [m]);
-  const disk = useMemo(() => hostPoints(m.series, "disk_used_bytes"), [m]);
-  const cpus = d.system?.cpus ?? null;
-  const memTotal = lastValue(m.series, "memory_total_bytes") ?? d.system?.memory_total_bytes ?? null;
-  const diskTotal = lastValue(m.series, "disk_total_bytes") ?? d.system?.disk_total_bytes ?? null;
-  const loadY = loadMax(describe(load).max, cpus);
-  const loadTicks = useMemo(() => roundTicks(loadY), [loadY]);
-  const cpuY = cpuMax(describe(cpu).max);
-  const cpuTicks = useMemo(() => roundTicks(cpuY), [cpuY]);
-  const memY = memTotal ?? niceMax(describe(mem).max);
-  const memT = useMemo(() => memoryTicks(memY), [memY]);
-  const diskY = diskTotal ?? niceMax(describe(disk).max);
-  const diskT = useMemo(() => memoryTicks(diskY), [diskY]);
-  const common = { range, span: RANGE_S[range], metrics: m, deploys: 0, kind: "area" as const, domain, syncId: "host" };
-  return (
-    <div className="grid grid-cols-1 gap-3 min-[1280px]:grid-cols-2">
-      <ChartCard {...common} title="Load" name="Load" points={load} yMax={loadY} yTicks={loadTicks} color="var(--chart-1)" fmt={fmtLoad}
-        limit={cpus} limitLabel={cpus ? `${cpus} ${cpus === 1 ? "core" : "cores"}` : undefined} />
-      <ChartCard {...common} title="CPU" name="CPU" points={cpu} yMax={cpuY} yTicks={cpuTicks} color="var(--chart-2)" fmt={fmtPct} />
-      <ChartCard {...common} title="Memory" name="Memory" points={mem} yMax={memY} yTicks={memT} color="var(--chart-3)" fmt={fmtBytes}
-        limit={memTotal} limitLabel={memTotal ? `total ${fmtBytes(memTotal)}` : undefined} />
-      <ChartCard {...common} title="Disk" name="Disk" points={disk} yMax={diskY} yTicks={diskT} color="var(--chart-4)" fmt={fmtBytes}
-        limit={diskTotal} limitLabel={diskTotal ? `total ${fmtBytes(diskTotal)}` : undefined} />
-    </div>
   );
 }
 
@@ -79,6 +50,7 @@ export default function ServerPage() {
   const memPct = pctOf(s?.memory_used_bytes, s?.memory_total_bytes);
   const hostAlerts = d?.alerts ?? [];
   const hm = d?.host_metrics ?? null;
+  const dbApp = studioTarget(d?.apps);
   useEffect(() => { if (hm) prefetchCharts(); }, [hm]);
 
   const runDoctor = (
@@ -93,7 +65,7 @@ export default function ServerPage() {
         title={<Mono className="text-xl font-semibold">{host}</Mono>}
         badge={v ? (v.reachable ? <Badge kind="ok">reachable</Badge> : <Badge kind="fail">not answering</Badge>) : undefined}
         meta={d ? <><SshTarget target={sshTarget(d)} className="mr-2 align-middle" />tando {d.server_version ?? DASH} · {skew ?? "clock ok"}{s?.uptime_s ? ` · up ${fmtDur(s.uptime_s)}` : ""}</> : undefined}
-        actions={<><HostActions host={host} />{runDoctor}</>}
+        actions={<>{dbApp && v?.reachable && <ServerStudioButton host={host} app={dbApp} />}<HostActions host={host} />{runDoctor}</>}
       />
       <ProgressPanel host={host} app="" />
       <Freshness st={st} />
@@ -104,7 +76,7 @@ export default function ServerPage() {
       )}
       {d && s && (
         <>
-          <Section title="Load and memory">
+          <Section title="Now">
             <div className="grid grid-cols-1 gap-3 min-[641px]:grid-cols-2 min-[1024px]:grid-cols-4">
               <MetricCard label="Load (1 min)" value={fmtLoad(s.load_1)} sub={`5 min ${fmtLoad(s.load_5)} · 15 min ${fmtLoad(s.load_15)}`} />
               <MetricCard label="CPUs" value={s.cpus ?? DASH} sub={s.cpus && s.load_1 != null ? `load ${fmtPct((s.load_1 / s.cpus) * 100)} of capacity` : undefined} />
@@ -114,8 +86,8 @@ export default function ServerPage() {
           </Section>
           <Section title="History">
             <div className="mb-4"><RangeTabs label="Range" value={range} onChange={setRange} items={["1h", "24h", "7d"] as RangeKey[]} /></div>
-            {hm ? <HostCharts m={hm} d={d} range={range} /> : <Empty>No history yet. The server samples once a minute once tando-metrics runs (tando host setup).</Empty>}
-            <p className="mt-2 mb-0 text-xs text-muted-foreground">Load is the 1-minute average; the dashed line is the number of cores. CPU is the share of all cores. Disk is the filesystem that holds /var/lib/tando. Times are the server's clock, GMT.</p>
+            {hm ? <HostSections m={hm} d={d} range={range} /> : <Empty>No history yet. The server samples once a minute once tando-metrics runs (tando host setup).</Empty>}
+            <p className="mt-2 mb-0 text-xs text-muted-foreground">Load is the 1-minute average; the dashed line is the number of cores. CPU is the share of all cores; steal is time the hypervisor kept. Disk is the filesystem that holds /var/lib/tando. Times are the server's clock, GMT.</p>
           </Section>
           <Section title="Disk">
             <Card>

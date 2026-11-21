@@ -15,7 +15,9 @@
 #
 # --json (for a program, tando-dash): no browser and no box; one line {"url","port","sid"} on
 # stdout when the studio answers, and the session ends when this command's stdin reaches EOF (the
-# program that started it closed the pipe or died), as Ctrl-C would end it.
+# program that started it closed the pipe or died), as Ctrl-C would end it. With the always-on
+# studio the same forward serves more codes: a line "mint <app>" on stdin prints one more JSON line
+# (studio_mint_line); tando-dash keeps one forward per server and mints one code per click.
 #
 # Test hooks (test/e2e-studio.sh): TANDO_STUDIO_TEST="hb=1 idle-s=3 timeout=2" (the studio's
 # heartbeat, idle time in seconds and statement limit), TANDO_STUDIO_HB (seconds between this
@@ -99,6 +101,25 @@ studio_pick() {
   valid_app "$APP" || die "bad app name (a-z, 0-9, -; 2-24 characters)"
 }
 
+# studio_mint_line line: --json, a line "mint <app>" on stdin: a fresh one-time code for that app on
+# the forward that is up (the same port), as one more JSON line on stdout; {"error":"..."} when it
+# cannot. Anything else on stdin is ignored. One forward serves any number of codes (tando-dash).
+studio_mint_line() {
+  local a=${1#mint } mport out code probe
+  [ "$a" != "$1" ] || return 0
+  if ! valid_app "$a"; then printf '{"error":"bad app name"}\n'; return 0; fi
+  mport=$(cat "$TMPD/studio.port" 2> /dev/null)
+  case "$mport" in ''|*[!0-9]*) printf '{"error":"the forward is not up yet"}\n'; return 0;; esac
+  out=$TMPD/code.mint
+  if ! (agent sudo db-studio-code "$a" "$mport" "$HOST") < /dev/null > "$out" 2> /dev/null; then
+    printf '{"error":"the studio on %s gave no code"}\n' "$HOST"; return 0
+  fi
+  code=$(sed -n 's/^code=\([A-Za-z0-9_-]*\) .*/\1/p' "$out" | head -1)
+  probe=$(sed -n 's/^code=.* probe=\([A-Za-z0-9_-]*\) .*/\1/p' "$out" | head -1)
+  if [ -z "$code" ] || [ -z "$probe" ]; then printf '{"error":"the studio on %s gave no code"}\n' "$HOST"; return 0; fi
+  printf '{"url":"http://127.0.0.1:%s/#c=%s&app=%s","port":%s,"sid":"%s"}\n' "$mport" "$code" "$a" "$mport" "$probe"
+}
+
 # studio_service json noopen: the server's always-on studio (docs/STUDIO.md). A one-time code
 # from the agent for this login, this app and this computer's port; a forward of that port to
 # this login's socket on the server, on an ssh connection of its own; the browser. The forward
@@ -112,7 +133,7 @@ studio_service() {
   trap 'studio_end; exit 129' HUP
   if [ -n "$json" ]; then   # stdin's EOF (the program that started this is gone) ends the forward
     exec 4<&0
-    ( while IFS= read -r t; do :; done; kill -TERM $$ 2> /dev/null ) <&4 > /dev/null 2>&1 &
+    ( while IFS= read -r t; do studio_mint_line "$t"; done; kill -TERM $$ 2> /dev/null ) <&4 2> /dev/null &
     STUDIO_WATCH=$!
     exec 4<&-
   fi
@@ -150,6 +171,7 @@ studio_service() {
   done
   local url="http://127.0.0.1:$port/#c=$code&app=$APP" opened="open it in your browser (the link works once)"
   if [ -n "$json" ]; then
+    printf '%s\n' "$port" > "$TMPD/studio.port"   # (the watcher mints on this port)
     printf '{"url":"%s","port":%s,"sid":"%s"}\n' "$url" "$port" "$probe"   # (checked words and digits only)
   else
     if [ -z "$noopen" ] && open_url "$url"; then opened="opened"; fi
