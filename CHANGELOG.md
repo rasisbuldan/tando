@@ -15,6 +15,8 @@ first, grouped by area.
   started after a crash stops what an earlier one left (pid and command line checked).
 - Added: `tando db studio --json`: one JSON line `{url, port, sid}` instead of the box and the
   browser, and the session ends when stdin closes (for programs such as the dashboard).
+- `tando jobs run`: a run by hand reports its own result. A timer start that came as it ended (and was
+  correctly skipped as not due) could be shown as "failed (exec-condition)" for a run that succeeded.
 - `tando menubar`: "Open status in Terminal" opens the live view (`--watch 5`, refreshing until
   Ctrl-C) instead of printing once.
 - Added (dashboard add-on): the web app's writes: Deploy, Roll back (to the target, or "Roll back to

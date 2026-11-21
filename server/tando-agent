@@ -6009,11 +6009,24 @@ cmd_job_run() {
     done
     [[ -n $out ]] && while IFS= read -r l; do san_v "$l"; echo "log=$SAN"; done <<< "$out"
   fi
-  echo "result=$(systemctl show -P Result "$u")"
-  echo "status=$(systemctl show -P ExecMainStatus "$u")"
+  # this run's result is the history line its own job-end wrote (started at t0 or later): the unit's
+  # Result belongs to its LAST start, and a timer start that came as this run ended is skipped by
+  # job-due ("exec-condition") and would be printed as this run's (seen with a 20 s schedule).
+  # systemd's own answer only when the history has no line of this run (an older unit, no hook)
+  local res="" st="" hs hd hr hc
+  if [[ -f $D/jobhist/$n ]]; then
+    while IFS=$'\t' read -r hs hd hr hc _; do
+      [[ $hs =~ ^[0-9]+$ ]] && ((hs >= t0 / 10 - 1)) && { res=$hr st=$hc; }
+    done < <(tail -n 5 "$D/jobhist/$n")
+  fi
+  if [[ -z $res || $res == exec-condition ]]; then
+    res=$(systemctl show -P Result "$u") st=$(systemctl show -P ExecMainStatus "$u")
+  fi
+  echo "result=$res"
+  echo "status=$st"
   echo "timeout=$(systemctl show -P TimeoutStartUSec "$u")"
   echo "secs=$(el "$t0")"
-  [[ $(systemctl show -P Result "$u") == success ]] || AUDIT_RESULT=1
+  [[ $res == success ]] || AUDIT_RESULT=1
   return 0
 }
 

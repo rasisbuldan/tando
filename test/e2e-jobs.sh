@@ -289,6 +289,12 @@ check "J8d resume: the timer is back, and the 12 s it was off were not made up (
   eval '[ "$(srv "systemctl is-enabled tando-jb_job-pz.timer; systemctl is-active tando-jb_job-pz.timer" | tr "\n" " ")" = "enabled active " ] && [ -z "$offsched" ]'
 t_until 30 eval '[ "$(srv "sudo cat $AD/jobhist/pz | wc -l")" -gt "$runs0" ]'
 check "J8e and it runs at its next time again" eval '[ "$(srv "sudo cat $AD/jobhist/pz | wc -l")" -gt "$runs0" ]'
+# a timer start that comes right as a run by hand ends is skipped by job-due, and that skip was
+# printed as the run by hand's result ("failed (exec-condition)"). Forced here: while 10 runs by
+# hand go on, the server keeps starting the job's unit (each start that is not due is skipped)
+srv "sudo sh -c 'for i in \$(seq 1 400); do systemctl start --no-block tando-jb_job-pz.service; sleep 0.05; done' > /dev/null 2>&1 &"
+bad=0; for k in 1 2 3 4 5 6 7 8 9 10; do J jobs run pz > "$E/pz-race.$k" 2>&1 || bad=$((bad + 1)); grep -q 'exec-condition' "$E/pz-race.$k" && bad=$((bad + 1)); done
+check "J8e2 10 runs by hand while skipped timer starts come and go each report their own result (failures: $bad)" test "$bad" = 0
 J jobs pause nosuch > "$E/pause-no.out" 2>&1; rc=$?
 check "J8f pausing a job that does not exist fails and says so (rc=$rc)" eval '[ $rc != 0 ] && grep -q "has no job nosuch" "$E/pause-no.out"'
 J jobs pause pz > /dev/null 2>&1
