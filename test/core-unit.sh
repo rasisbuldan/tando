@@ -234,5 +234,42 @@ check "U9e configure refuses unless --force" eval 'sed -n "/^cmd_configure() {/,
 oa() { "$BASH" -c 'eval "$1"; C_priority=$2; oom_adj' _ "$(agent_fn oom_adj | sed 's/\${C\[priority\]:-}/${C_priority:-}/')" "$1"; }
 check "U9f priority: high 100, default 500, low 900" eq "$(oa high) $(oa '') $(oa low)" "100 500 900"
 
+# ---- U10 jobs: the default spread is a sixth of the job's period, at most 10 minutes (100 apps'
+# hourly jobs started within 15 s), each timer at a fixed offset; at most job_slots runs at once
+# host-wide (job-begin waits for a slot, job-end gives it back). (systemd-analyze, date: stubs; a
+# time is "@<epoch>")
+sf() { # first-epoch second-epoch -> the spread
+  # shellcheck disable=SC2016
+  "$BASH" -c 'eval "$1"; JOB_SPREAD=15 JOB_SPREAD_MAX=600
+    systemd-analyze() { printf "  Next elapse: x\n     (in UTC): @%s\n     Iter. #2: x\n     (in UTC): @%s\n" "$A1" "$A2"; }
+    date() { local x=$2; echo "${x#@}"; }
+    job_spread_for "*:00"' _ "$(agent_fn job_spread_for)"
+}
+check "U10a hourly: 10 minutes" eq "$(A1=3600 A2=7200 sf)" 600
+check "U10b every 15 minutes: 150 s" eq "$(A1=900 A2=1800 sf)" 150
+check "U10c daily: still at most 10 minutes" eq "$(A1=86400 A2=172800 sf)" 600
+# shellcheck disable=SC2016
+check "U10i a server in UTC (no \"(in UTC)\" lines): the same" eq "$("$BASH" -c 'eval "$1"; JOB_SPREAD=15 JOB_SPREAD_MAX=600
+    systemd-analyze() { printf "  Next elapse: @900\n     From now: x\n     Iter. #2: @1800\n"; }
+    date() { local x=$2; echo "${x#@}"; }; job_spread_for "*:0/15"' _ "$(agent_fn job_spread_for)")" 150
+check "U10d timers get a fixed offset (FixedRandomDelay)" grep -q "RandomizedDelaySec=%s.nFixedRandomDelay=yes" "$ROOT/server/tando-agent"
+js() { # function args... (slots: $T/jobslots; units in $T/busy run)
+  # shellcheck disable=SC2016
+  R=$T "$BASH" -c 'eval "$1"; shift; job_busy() { grep -qx "$1" "$R/busy"; }; now() { date +%s; }; JS=2; "$@"' _ \
+    "$(agent_fn job_slots job_slot_take job_slot_give | sed 's/\${H\[job_slots\]:-}/${JS:-}/')" "$@"
+}
+rm -rf "${T:?}/jobslots"; printf 'a.service\nb.service\n' > "$T/busy"
+js job_slot_take a.service; js job_slot_take b.service
+js job_slot_take c.service > /dev/null 2>&1 & jp=$!
+sleep 2   # (proves c waits: both slots are held by runs going on)
+check "U10e a third run waits while both slots are held" kill -0 "$jp"
+js job_slot_give a.service
+t_wait() { local i=0; while kill -0 "$jp" 2> /dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done; ! kill -0 "$jp" 2> /dev/null; }
+check "U10f ... and gets the slot a run gave back" t_wait
+check "U10g ... which now names it" eval 'cat "$T"/jobslots/*/unit | grep -qx c.service'
+printf 'c.service\n' > "$T/busy"   # b's run ended without its job-end
+check "U10h a slot whose run is over is taken over" eval 'js job_slot_take d.service && grep -qx d.service "$T/jobslots/2/unit"'
+kill "$jp" 2> /dev/null
+
 echo "core-unit: $n checks, $nf failed"
 [ "$nf" = 0 ]

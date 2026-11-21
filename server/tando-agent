@@ -2231,6 +2231,7 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
     case $kv in
       port_min=*|port_max=*|preflight_min=*|preflight_max=*)
         [[ ${kv#*=} =~ ^[0-9]{4,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
+      job_slots=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,2}$ ]] || die "bad job_slots: 1 to 999 job runs at once"; H[job_slots]=${kv#*=};;
       mem_overcommit=*) [[ ${kv#*=} =~ ^[0-9]{1,2}(\.[0-9]{1,2})?$ ]] || die "bad mem_overcommit: like 1.5 (0: no check)"; H[mem_overcommit]=${kv#*=};;
       uid_min=*|uid_max=*)   # the band of new app users' ids (new_uid); apps made before keep theirs
         [[ ${kv#*=} =~ ^[1-9][0-9]{3,4}$ ]] && ((${kv#*=} >= 1000 && ${kv#*=} <= 59999)) || die "bad ${kv%%=*}: 1000 to 59999"
@@ -6016,7 +6017,23 @@ job_unit() { echo "tando-${A}_job-$1"; }   # name -> unit name without .service/
 # job_busy unit: a run of the job is going on (a oneshot is "activating" while it runs, and
 # "deactivating" while its job-end hook runs: is-active says neither)
 job_busy() { case $(systemctl show -P ActiveState "$1" 2> /dev/null) in activ*|deactivating|reloading) return 0;; esac; return 1; }
-JOB_SPREAD=15      # seconds a job's start is spread over (RandomizedDelaySec), unless job_spread says otherwise
+JOB_SPREAD=15      # seconds a job's start is spread over when its period is unknown (job_spread sets it)
+JOB_SPREAD_MAX=600 # the default spread: a sixth of the job's period, at most this (hourly: 10 min)
+# job_spread_for calendar: the default spread of a job (seconds): a sixth of the time between its
+# next two runs, at most JOB_SPREAD_MAX. 100 apps' hourly jobs then start over 10 minutes, not in
+# the same 15 s (each timer at its own fixed offset: FixedRandomDelay)
+job_spread_for() {
+  local t
+  local o; o=$(systemd-analyze calendar --iterations=2 "$1" 2> /dev/null)
+  # (the "(in UTC)" lines are there only when the server's zone is not UTC)
+  t=$(sed -n 's/^ *(in UTC): //p' <<< "$o" | head -2)
+  [[ $t == ?*$'\n'?* ]] || t=$(sed -n 's/^ *Next elapse: //p; s/^ *Iter\. #2: //p' <<< "$o" | head -2)
+  [[ $t == ?*$'\n'?* ]] || { echo "$JOB_SPREAD"; return 0; }
+  t=$(( $(date -d "$(tail -1 <<< "$t")" +%s 2> /dev/null || echo 0) - $(date -d "$(head -1 <<< "$t")" +%s 2> /dev/null || echo 0) ))
+  ((t > 0)) || { echo "$JOB_SPREAD"; return 0; }
+  t=$((t / 6)); ((t > JOB_SPREAD_MAX)) && t=$JOB_SPREAD_MAX
+  echo "$t"
+}
 JOB_TIMEOUT=3600   # seconds a job may run unless job_timeout or job.<name>.timeout says otherwise
 # old_job_owner unit: the app a unit of the form before belongs to, from the line its service file
 # was written with (ExecStart=<agent> run-job <app> <name>, which no other app's unit has); fails
@@ -6047,8 +6064,8 @@ sync_jobs() {
     fi
     to=${_jobs[$k.timeout]:-${_jobs[job_timeout]:-$JOB_TIMEOUT}}
     [[ $to =~ ^[1-9][0-9]{0,4}$ ]] || to=$JOB_TIMEOUT
-    sp=${_jobs[$k.spread]:-${_jobs[job_spread]:-$JOB_SPREAD}}
-    [[ $sp =~ ^[0-9]{1,4}$ ]] || sp=$JOB_SPREAD
+    sp=${_jobs[$k.spread]:-${_jobs[job_spread]:-}}
+    [[ $sp =~ ^[0-9]{1,4}$ ]] || sp=$(job_spread_for "$cal")
     ms=${_jobs[$k.missed]:-${_jobs[job_missed]:-run}}; per=true; [[ $ms == skip ]] && per=false
     want+="$n "
     b=$(job_unit "$n"); f=/etc/systemd/system/$b
@@ -6067,7 +6084,7 @@ sync_jobs() {
              echo "# end"
            } > "$f.service.new" && [[ $(tail -1 "$f.service.new") == "# end" ]] &&
            { printf '[Unit]\nDescription=tando job timer %s %s\n\n[Timer]\nOnCalendar=%s\nAccuracySec=1s\nPersistent=%s\n' "$A" "$n" "$cal" "$per"
-             ((sp > 0)) && printf 'RandomizedDelaySec=%s\n' "$sp"
+             ((sp > 0)) && printf 'RandomizedDelaySec=%s\nFixedRandomDelay=yes\n' "$sp"
              printf '\n[Install]\nWantedBy=timers.target\n'
            } > "$f.timer.new" && [[ $(tail -1 "$f.timer.new") == WantedBy=timers.target ]]; }; then
       rm -f "$f.service.new" "$f.timer.new"
@@ -6171,10 +6188,46 @@ job_unpause() { # name: the job is no longer paused
 # failing hook never changes the job's result). They keep the history of the job: one line per run
 # in $D/jobhist/<name> (start, seconds, result, exit status, the journal cursor its output started
 # after; never the output itself), the last 50 runs, whatever the journal has rotated away.
+# job slots: at most job_slots runs of jobs (all apps together; host.conf, default the number of
+# CPUs, at least 2) at once. A run waits in job-begin for a slot ($R/jobslots/<i>, made with mkdir:
+# atomic), holds it until its job-end, and takes over one whose run has ended without a job-end
+# (its unit no longer runs, or it is this same unit: a unit runs once at a time). The wait counts
+# in the job's timeout.
+job_slots() {
+  local k=${H[job_slots]:-}
+  [[ $k =~ ^[1-9][0-9]{0,2}$ ]] || { k=$(nproc 2> /dev/null || echo 2); ((k < 2)) && k=2; }
+  echo "$k"
+}
+job_slot_take() { # unit
+  local k i d u t
+  [[ -d $R/jobslots ]] || mkdir -m 700 "$R/jobslots" 2> /dev/null
+  k=$(job_slots)
+  while :; do
+    for ((i = 1; i <= k; i++)); do
+      d=$R/jobslots/$i
+      if mkdir "$d" 2> /dev/null; then echo "$1" > "$d/unit"; return 0; fi
+      u=$(cat "$d/unit" 2> /dev/null)
+      if [[ -z $u ]]; then   # (just made by another run: its unit comes in a moment)
+        t=$(stat -c %Y "$d" 2> /dev/null) || continue
+        (( $(now) - t > 10 )) || continue
+      elif [[ $u != "$1" ]] && job_busy "$u"; then continue; fi
+      echo "$1" > "$d/unit"; return 0     # (its run is over: taken over)
+    done
+    sleep 1
+  done
+}
+job_slot_give() { # unit
+  local d
+  for d in "$R"/jobslots/*/; do
+    [[ $(cat "$d/unit" 2> /dev/null) == "$1" ]] && rm -rf "${d:?}"
+  done
+  return 0
+}
 cmd_job_begin() {
   need_root; app "$1"
   local n=${2:-} cur
   [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ ]] || return 0
+  job_slot_take "$(job_unit "$n").service"
   job_jsync
   cur=$(job_cursor "$(job_unit "$n").service")
   job_hist_dir || return 0
@@ -6186,6 +6239,7 @@ cmd_job_end() {
   [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ ]] || return 0
   # a time skipped by job-due is no run: nothing in the history
   [[ $res == exec-condition ]] && return 0
+  job_slot_give "$(job_unit "$n").service"
   job_hist_dir || return 0
   f=$D/jobhist/$n; t1=$(ds)
   echo "$t1" > "$f.end"   # (when this run ended, in tenths of a second: job-due)
