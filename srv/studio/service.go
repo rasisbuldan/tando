@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	TokenIdle     = 12 * time.Hour   // a token unused this long is gone
+	TokenIdle     = 12 * time.Hour    // a token unused this long is gone
 	HelperIdle    = 120 * time.Second // a helper exits after this long without a request
 	HelpersPerApp = 2
 	HelpersAll    = 4
