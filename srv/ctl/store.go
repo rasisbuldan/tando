@@ -1,6 +1,8 @@
 package ctl
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,11 +27,18 @@ import (
 //
 //	store.lock            held for a moment while a record is looked up or written
 //	seq                   the last sequence number given to a request
-//	req/<id>.json         the record: the request's digest, app, seq, state (pending|done) and,
+//	key                   32 random bytes: the key of the digests (HMAC), never leaves the node
+//	req/<ns>/<id>.json    the record: the request's digest, app, seq, state (pending|done) and,
 //	                      when done, the response; written (fsynced) before the request runs
-//	req/<id>.lock         held by the process running the request, for as long as it runs: a
+//	req/<ns>/<id>.lock    held by the process running the request, for as long as it runs: a
 //	                      retry waits on it; a pending record whose lock nobody holds was cut off
-//	queue/<app>/<seq>-<id>  a request of that app waiting or running; removed when it is done
+//	queue/<app>/<seq>-<ns>+<id>  a request of that app waiting or running; removed when it is done
+//
+// <ns> is the principal's namespace (write, read, app-<app>): ids, quotas and eviction are per
+// principal, so one certificate can neither claim nor push out another's request ids. A
+// namespace holds at most Cap records; past it the oldest done ones older than Recent go, and
+// when none may go the request is refused (busy), never a record of another principal.
+// Requests refused before they did anything (bad_request, not_found) are not kept.
 //
 // A retry with the same id and the same request gets the first response, waiting for it while
 // the first is still running; the same id with a different request is refused (conflict). Done
@@ -39,13 +49,16 @@ import (
 
 const (
 	Retention  = 7 * 24 * time.Hour
-	MaxRecords = 20000
+	MaxRecords = 20000          // per namespace (Store.Cap)
+	Recent     = 24 * time.Hour // a done record younger than this is never pushed out
 	pruneEvery = 10 * time.Minute
 )
 
 // Store is the request store in Dir.
 type Store struct {
 	Dir string
+	NS  string // the principal's namespace: write, read, app-<app>
+	Cap int    // records per namespace (0: MaxRecords)
 	Now func() time.Time
 	// Poll is how often a request waiting for its turn looks again (0: 100 ms).
 	Poll time.Duration
@@ -63,11 +76,12 @@ type record struct {
 	Response *Response `json:"response,omitempty"`
 }
 
-// Digest identifies a request's content: verb, app and arguments (compacted). The arguments can
-// hold secrets (env values): only this hash is kept.
-func Digest(r Request) string {
-	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00", r.Verb, r.App)
+// Digest identifies a request's content: principal namespace, verb, app and arguments
+// (compacted), as an HMAC with the node's key. The arguments can hold secrets (env values): only
+// this keyed hash is kept, so a copy of the store does not allow guessing them offline.
+func Digest(key []byte, ns string, r Request) string {
+	h := hmac.New(sha256.New, key)
+	fmt.Fprintf(h, "%s\x00%s\x00%s\x00", ns, r.Verb, r.App)
 	var args []byte
 	if len(r.Args) > 0 {
 		var v any
@@ -88,8 +102,42 @@ func (s *Store) now() time.Time {
 
 func (s *Store) path(p ...string) string { return filepath.Join(append([]string{s.Dir}, p...)...) }
 
+func (s *Store) cap() int {
+	if s.Cap > 0 {
+		return s.Cap
+	}
+	return MaxRecords
+}
+
+func (s *Store) rec(id string) string { return s.path("req", s.NS, id+".json") }
+func (s *Store) lck(id string) string { return s.path("req", s.NS, id+".lock") }
+func (s *Store) qname(seq int64, id string) string {
+	return fmt.Sprintf("%016d-%s+%s", seq, s.NS, id)
+}
+
+var nsRe = regexp.MustCompile(`^(write|read|app-[a-z][a-z0-9-]{1,30})$`)
+
+// key is the node's digest key (made on first use).
+func (s *Store) key() ([]byte, error) {
+	p := s.path("key")
+	if b, err := os.ReadFile(p); err == nil && len(b) == 32 {
+		return b, nil
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return nil, err
+	}
+	if err := atomicfile.Write(p, b, atomicfile.Mode(0o600)); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
 func (s *Store) init() error {
-	for _, d := range []string{s.Dir, s.path("req"), s.path("queue")} {
+	if !nsRe.MatchString(s.NS) {
+		return errors.New("bad namespace")
+	}
+	for _, d := range []string{s.Dir, s.path("req"), s.path("req", s.NS), s.path("queue")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}
@@ -101,7 +149,7 @@ func (s *Store) init() error {
 }
 
 func (s *Store) load(id string) (record, bool) {
-	b, err := os.ReadFile(s.path("req", id+".json"))
+	b, err := os.ReadFile(s.rec(id))
 	if err != nil {
 		return record{}, false
 	}
@@ -117,7 +165,7 @@ func (s *Store) save(r record) error {
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(s.path("req", r.ID+".json"), append(b, '\n'), atomicfile.Mode(0o600))
+	return atomicfile.Write(s.rec(r.ID), append(b, '\n'), atomicfile.Mode(0o600))
 }
 
 func (s *Store) nextSeq() (int64, error) {
@@ -136,20 +184,29 @@ func (s *Store) Do(req Request, wait time.Duration, run func() Response) Respons
 	if err := s.init(); err != nil {
 		return fail(req, "internal", "the request store cannot be written: "+err.Error())
 	}
-	dg := Digest(req)
 	sl, err := lock.Acquire(s.path("store.lock"), 30*time.Second)
 	if err != nil {
 		return fail(req, "busy", errBusyStore.Error()+": try again")
 	}
+	key, err := s.key()
+	if err != nil {
+		sl.Release()
+		return fail(req, "internal", "the request store cannot be written: "+err.Error())
+	}
+	dg := Digest(key, s.NS, req)
 	rec, seen := s.load(req.RequestID)
 	if seen {
 		sl.Release()
 		if rec.Digest != dg {
 			return fail(req, "conflict", "request_id "+req.RequestID+" was used for a different request ("+rec.Verb+"): use a new id")
 		}
-		return s.await(req, rec, wait)
+		return s.await(req, rec, wait, run)
 	}
-	held, err := lock.Acquire(s.path("req", req.RequestID+".lock"), 0)
+	if !s.room() {
+		sl.Release()
+		return fail(req, "busy", fmt.Sprintf("this principal has %d request records from the last %s: try again later", s.cap(), Recent))
+	}
+	held, err := lock.Acquire(s.lck(req.RequestID), 0)
 	if err != nil {
 		sl.Release()
 		return fail(req, "busy", "request "+req.RequestID+" is being started by another session: try again")
@@ -163,14 +220,14 @@ func (s *Store) Do(req Request, wait time.Duration, run func() Response) Respons
 	q := ""
 	if err == nil && req.App != "" {
 		qd := s.path("queue", req.App)
-		q = filepath.Join(qd, fmt.Sprintf("%016d-%s", seq, req.RequestID))
+		q = filepath.Join(qd, s.qname(seq, req.RequestID))
 		if err = os.MkdirAll(qd, 0o700); err == nil {
 			err = os.WriteFile(q, nil, 0o600)
 		}
 	}
 	sl.Release()
 	if err != nil {
-		os.Remove(s.path("req", req.RequestID+".json"))
+		os.Remove(s.rec(req.RequestID))
 		return fail(req, "internal", "the request store cannot be written: "+err.Error())
 	}
 	s.waitTurn(req.App, seq)
@@ -178,7 +235,9 @@ func (s *Store) Do(req Request, wait time.Duration, run func() Response) Respons
 	resp.RequestID = req.RequestID
 	rec.State, rec.Finished, rec.Response = "done", s.now().Unix(), &resp
 	if sl, err = lock.Acquire(s.path("store.lock"), 5*time.Minute); err == nil {
-		if err := s.save(rec); err != nil {
+		if resp.Error != nil && (resp.Error.Code == "bad_request" || resp.Error.Code == "not_found") {
+			os.Remove(s.rec(rec.ID)) // refused before it did anything: nothing to keep
+		} else if err := s.save(rec); err != nil {
 			resp.Warning = "the result could not be stored (" + err.Error() + "): a retry with this id reports it interrupted"
 		}
 		if q != "" {
@@ -191,16 +250,16 @@ func (s *Store) Do(req Request, wait time.Duration, run func() Response) Respons
 }
 
 // await waits for a pending record's runner and returns the stored response.
-func (s *Store) await(req Request, rec record, wait time.Duration) Response {
+func (s *Store) await(req Request, rec record, wait time.Duration, run func() Response) Response {
 	if rec.State != "done" {
-		l, err := lock.Acquire(s.path("req", req.RequestID+".lock"), wait)
+		l, err := lock.Acquire(s.lck(req.RequestID), wait)
 		if err != nil {
 			return fail(req, "pending", "request "+req.RequestID+" is still running: ask again with the same request_id")
 		}
 		l.Release()
 		r, ok := s.load(req.RequestID)
-		if !ok {
-			return fail(req, "internal", "the record of request "+req.RequestID+" is gone")
+		if !ok { // the first was refused before it did anything (not kept): this one is checked anew
+			return s.Do(req, wait, run)
 		}
 		rec = r
 	}
@@ -230,7 +289,7 @@ func replay(r Response) Response { r.Replayed = true; return r }
 
 func (s *Store) unqueue(r record) {
 	if r.App != "" {
-		os.Remove(s.path("queue", r.App, fmt.Sprintf("%016d-%s", r.Seq, r.ID)))
+		os.Remove(s.path("queue", r.App, s.qname(r.Seq, r.ID)))
 	}
 }
 
@@ -248,12 +307,13 @@ func (s *Store) waitTurn(app string, seq int64) {
 		ents, _ := os.ReadDir(s.path("queue", app))
 		blocked := false
 		for _, e := range ents {
-			n, id, ok := strings.Cut(e.Name(), "-")
+			n, rest, ok := strings.Cut(e.Name(), "-")
+			ns, id, ok2 := strings.Cut(rest, "+")
 			q, err := strconv.ParseInt(n, 10, 64)
-			if !ok || err != nil || q >= seq {
+			if !ok || !ok2 || err != nil || q >= seq || !nsRe.MatchString(ns) || !ValidRequestID(id) {
 				continue
 			}
-			if lock.Held(s.path("req", id+".lock")) {
+			if lock.Held(s.path("req", ns, id+".lock")) {
 				blocked = true
 				break
 			}
@@ -266,8 +326,48 @@ func (s *Store) waitTurn(app string, seq int64) {
 	}
 }
 
-// prune removes done records older than Retention, then the oldest done ones over MaxRecords
-// (at most every pruneEvery; under the store lock).
+// room: the namespace may take one more record; when it is full, its oldest done records older
+// than Recent go first (under the store lock). Other namespaces are never touched.
+func (s *Store) room() bool {
+	ents, _ := os.ReadDir(s.path("req", s.NS))
+	n := 0
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), ".json") {
+			n++
+		}
+	}
+	if n < s.cap() {
+		return true
+	}
+	type done struct {
+		id  string
+		fin int64
+	}
+	var old []done
+	now := s.now()
+	for _, e := range ents {
+		id, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok {
+			continue
+		}
+		if r, ok := s.load(id); ok && r.State == "done" && now.Sub(time.Unix(r.Finished, 0)) > Recent {
+			old = append(old, done{id, r.Finished})
+		}
+	}
+	sort.Slice(old, func(i, j int) bool { return old[i].fin < old[j].fin })
+	for _, d := range old {
+		if n < s.cap() {
+			break
+		}
+		if s.drop(s.NS, d.id) {
+			n--
+		}
+	}
+	return n < s.cap()
+}
+
+// prune removes done records older than Retention in every namespace (at most every pruneEvery;
+// under the store lock).
 func (s *Store) prune() {
 	mark := s.path("pruned")
 	if fi, err := os.Stat(mark); err == nil && s.now().Sub(fi.ModTime()) < pruneEvery {
@@ -276,39 +376,31 @@ func (s *Store) prune() {
 	os.WriteFile(mark, nil, 0o600)
 	now := s.now()
 	os.Chtimes(mark, now, now)
-	ents, _ := os.ReadDir(s.path("req"))
-	type done struct {
-		id  string
-		fin int64
-	}
-	var keep []done
-	for _, e := range ents {
-		id, ok := strings.CutSuffix(e.Name(), ".json")
-		if !ok {
+	nss, _ := os.ReadDir(s.path("req"))
+	for _, d := range nss {
+		ns := d.Name()
+		if !d.IsDir() || !nsRe.MatchString(ns) {
 			continue
 		}
-		r, ok := s.load(id)
-		if !ok || r.State != "done" {
-			continue
-		}
-		if now.Sub(time.Unix(r.Finished, 0)) > Retention {
-			s.drop(id)
-			continue
-		}
-		keep = append(keep, done{id, r.Finished})
-	}
-	if len(keep) > MaxRecords {
-		sort.Slice(keep, func(i, j int) bool { return keep[i].fin < keep[j].fin })
-		for _, d := range keep[:len(keep)-MaxRecords] {
-			s.drop(d.id)
+		o := &Store{Dir: s.Dir, NS: ns}
+		ents, _ := os.ReadDir(s.path("req", ns))
+		for _, e := range ents {
+			id, ok := strings.CutSuffix(e.Name(), ".json")
+			if !ok {
+				continue
+			}
+			if r, ok := o.load(id); ok && r.State == "done" && now.Sub(time.Unix(r.Finished, 0)) > Retention {
+				s.drop(ns, id)
+			}
 		}
 	}
 }
 
-func (s *Store) drop(id string) {
-	if lock.Held(s.path("req", id+".lock")) {
-		return
+func (s *Store) drop(ns, id string) bool {
+	if lock.Held(s.path("req", ns, id+".lock")) {
+		return false
 	}
-	os.Remove(s.path("req", id+".json"))
-	os.Remove(s.path("req", id+".lock"))
+	os.Remove(s.path("req", ns, id+".json"))
+	os.Remove(s.path("req", ns, id+".lock"))
+	return true
 }

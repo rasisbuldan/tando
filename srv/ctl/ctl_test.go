@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,7 +94,7 @@ func TestAllowed(t *testing.T) {
 }
 
 func newStore(t *testing.T) *Store {
-	return &Store{Dir: filepath.Join(t.TempDir(), "ctl"), Poll: 5 * time.Millisecond}
+	return &Store{Dir: filepath.Join(t.TempDir(), "ctl"), NS: "write", Poll: 5 * time.Millisecond}
 }
 
 func req(id, verb, app string, args string) Request {
@@ -151,12 +152,13 @@ func TestStoreSameIDConcurrent(t *testing.T) {
 	// the same arguments in another order are the same request
 	a := req("req-00000002", "app.env.set", "shop", `{"vars":{"A":"1","B":"2"}}`)
 	b := req("req-00000002", "app.env.set", "shop", `{"vars":{"B":"2","A":"1"}}`)
-	if Digest(a) != Digest(b) {
+	k := []byte("0123456789abcdef0123456789abcdef")
+	if Digest(k, "write", a) != Digest(k, "write", b) {
 		t.Error("digest depends on key order")
 	}
 	// the stored record holds no argument values (env values are secrets)
 	s.Do(a, time.Minute, func() Response { return Response{OK: true} })
-	data, _ := os.ReadFile(filepath.Join(s.Dir, "req", "req-00000002.json"))
+	data, _ := os.ReadFile(filepath.Join(s.Dir, "req", "write", "req-00000002.json"))
 	if bytes.Contains(data, []byte(`"1"`)) || bytes.Contains(data, []byte("vars")) {
 		t.Errorf("record holds arguments: %s", data)
 	}
@@ -184,12 +186,13 @@ func TestStorePendingAndInterrupted(t *testing.T) {
 	// a crash: the record says pending, nobody runs it
 	c := req("req-crash-001", "app.stop", "shop", "")
 	s.init()
-	rec := record{ID: c.RequestID, Digest: Digest(c), Verb: c.Verb, App: c.App, Seq: 99, State: "pending"}
+	key, _ := s.key()
+	rec := record{ID: c.RequestID, Digest: Digest(key, "write", c), Verb: c.Verb, App: c.App, Seq: 99, State: "pending"}
 	if err := s.save(rec); err != nil {
 		t.Fatal(err)
 	}
 	os.MkdirAll(filepath.Join(s.Dir, "queue", "shop"), 0o700)
-	os.WriteFile(filepath.Join(s.Dir, "queue", "shop", "0000000000000099-req-crash-001"), nil, 0o600)
+	os.WriteFile(filepath.Join(s.Dir, "queue", "shop", "0000000000000099-write+req-crash-001"), nil, 0o600)
 	x := s.Do(c, time.Minute, func() Response { t.Error("ran a cut-off request again"); return Response{} })
 	if x.Error == nil || x.Error.Code != "interrupted" || !x.Replayed {
 		t.Errorf("cut off: %+v", x)
@@ -234,7 +237,7 @@ func TestStoreOrderPerApp(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); do("shop-first-1", "shop", true) }()
-	for !lock.Held(filepath.Join(s.Dir, "req", "shop-first-1.lock")) {
+	for !lock.Held(filepath.Join(s.Dir, "req", "write", "shop-first-1.lock")) {
 		time.Sleep(time.Millisecond)
 	}
 	wg.Add(1)
@@ -365,5 +368,71 @@ func TestServe(t *testing.T) {
 	}
 	if len(logs) == 0 || !strings.Contains(logs[0], "ctl write serial=7 key=cp verb=app.env.set app=shop request_id=env-0000001 result=ok") {
 		t.Errorf("log %q", logs)
+	}
+}
+
+// F2: request ids, quotas and eviction are per principal. An app's certificate filling its own
+// namespace never pushes out the write principal's records (a retry of those must not run
+// again), and it is refused (busy) once all its own records are recent.
+func TestStorePerPrincipal(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ctl")
+	now := time.Unix(1_800_000_000, 0)
+	clock := func() time.Time { return now }
+	w := &Store{Dir: dir, NS: "write", Now: clock, Cap: 3}
+	a := &Store{Dir: dir, NS: "app-shop", Now: clock, Cap: 3}
+	var runs atomic.Int32
+	ok := func() Response { runs.Add(1); return Response{OK: true} }
+	rb := req("rollback-0001", "app.rollback", "shop", "")
+	if x := w.Do(rb, time.Minute, ok); !x.OK || runs.Load() != 1 {
+		t.Fatal(x)
+	}
+	// the same id under another principal is its own request (no squatting, no replay)
+	if x := a.Do(rb, time.Minute, ok); !x.OK || x.Replayed || runs.Load() != 2 {
+		t.Errorf("app principal, same id: %+v", x)
+	}
+	for i := 0; i < 2; i++ {
+		if x := a.Do(req(fmt.Sprintf("flood-%07d", i), "app.restart", "shop", ""), time.Minute, ok); !x.OK {
+			t.Fatalf("flood %d: %+v", i, x)
+		}
+	}
+	x := a.Do(req("flood-0000099", "app.restart", "shop", ""), time.Minute, ok)
+	if x.Error == nil || x.Error.Code != "busy" {
+		t.Errorf("full namespace, all recent: %+v", x)
+	}
+	n := runs.Load()
+	if x := w.Do(rb, time.Minute, ok); !x.Replayed || runs.Load() != n {
+		t.Errorf("the write principal's retry ran again: %+v", x)
+	}
+	// a day later the app's own oldest records make room; the write record is still there
+	now = now.Add(Recent + time.Hour)
+	if x := a.Do(req("flood-0000100", "app.restart", "shop", ""), time.Minute, ok); !x.OK {
+		t.Errorf("after a day: %+v", x)
+	}
+	if _, ok := w.load("rollback-0001"); !ok {
+		t.Error("the write principal's record was evicted")
+	}
+}
+
+// a request refused before it did anything is not kept: the same id with a fixed request runs
+func TestStoreKeepsNoRefusal(t *testing.T) {
+	s := newStore(t)
+	r := req("fix-me-00001", "app.restart", "shop", "")
+	if x := s.Do(r, time.Minute, func() Response { return fail(r, "bad_request", "args") }); x.Error == nil {
+		t.Fatal(x)
+	}
+	if _, ok := s.load(r.RequestID); ok {
+		t.Error("a refused request was kept")
+	}
+	if x := s.Do(r, time.Minute, func() Response { return Response{OK: true} }); !x.OK || x.Replayed {
+		t.Errorf("second try: %+v", x)
+	}
+}
+
+// the digest is keyed: the same request under another key (another node) does not match
+func TestDigestKeyed(t *testing.T) {
+	r := req("env-00000001", "app.env.set", "shop", `{"vars":{"PIN":"1234"}}`)
+	if Digest([]byte("k1"), "write", r) == Digest([]byte("k2"), "write", r) ||
+		Digest([]byte("k1"), "write", r) == Digest([]byte("k1"), "app-shop", r) {
+		t.Error("digest ignores the key or the principal")
 	}
 }

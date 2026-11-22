@@ -109,7 +109,7 @@ func (c *Ctl) Serve(ctx context.Context, id Ident, in []byte, w io.Writer) int {
 		v := verbs[r.Verb]
 		do := func() Response { return c.run(ctx, v, r) }
 		if v.write {
-			st := &Store{Dir: c.Dir, Now: c.Env.Now}
+			st := &Store{Dir: c.Dir, Now: c.Env.Now, NS: Namespace(id)}
 			resp = st.Do(r, v.timeout+time.Minute, do)
 		} else {
 			resp = do()
@@ -137,6 +137,14 @@ func (c *Ctl) Serve(ctx context.Context, id Ident, in []byte, w io.Writer) int {
 		return 0
 	}
 	return 1
+}
+
+// Namespace is the principal's part of the request store: write, read or app-<app>.
+func Namespace(id Ident) string {
+	if id.Mode == ModeApp {
+		return "app-" + id.App
+	}
+	return string(id.Mode)
 }
 
 func appSuffix(id Ident) string {
