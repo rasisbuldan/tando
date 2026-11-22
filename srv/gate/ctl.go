@@ -250,6 +250,10 @@ func ParseCAKey(line string) (string, bool) {
 	if len(fields) != caTypes[f[0]] || string(fields[0]) != f[0] || (f[0] == "ssh-ed25519" && len(fields[1]) != 32) {
 		return "", false
 	}
+	// an RSA CA of at least 3072 bits (the modulus, without its sign byte)
+	if f[0] == "ssh-rsa" && len(bytes.TrimLeft(fields[2], "\x00"))*8 < 3072 {
+		return "", false
+	}
 	return f[0] + " " + f[1], true
 }
 
@@ -385,18 +389,60 @@ func (g *Gate) ctlKRL(w *out.Writer, data []byte) error {
 		return err
 	}
 	defer os.Remove(tmp)
-	// an unreadable list would make sshd refuse every certificate: only a KRL ssh-keygen reads,
-	// or an empty file (revokes nothing)
-	if _, err := g.Env.Run.Output(context.Background(), run.Cmd{Argv: []string{"ssh-keygen", "-Q", "-l", "-f", tmp},
-		Timeout: 30 * time.Second}); err != nil && len(data) > 0 {
-		return die("not an OpenSSH key revocation list (ssh-keygen -k makes one): %s", clean(err.Error()))
+	cur := filepath.Join(dir, "revoked.krl")
+	entries := 0
+	if len(data) == 0 {
+		// one wrong path must not take back every revocation: an empty list replaces a list with
+		// entries only when asked by name (ctl_krl=empty)
+		if fi, err := os.Stat(cur); err == nil && fi.Size() > 0 && !g.krlEmpty {
+			return die("this would empty the revocation list (it has entries): to un-revoke everything, ctl_krl=empty")
+		}
+	} else {
+		// an unreadable list would make sshd refuse every certificate: only a KRL ssh-keygen reads
+		o, err := g.Env.Run.Output(context.Background(), run.Cmd{Argv: []string{"ssh-keygen", "-Q", "-l", "-f", tmp},
+			Timeout: 30 * time.Second})
+		if err != nil {
+			return die("not an OpenSSH key revocation list (ssh-keygen -k makes one): %s", clean(err.Error()))
+		}
+		// serials and key ids are revoked per CA: a list made for another CA revokes nothing here
+		fo, _ := g.Env.Run.Output(context.Background(), run.Cmd{Argv: []string{"ssh-keygen", "-l", "-f", filepath.Join(dir, "ca.pub")},
+			Timeout: 30 * time.Second})
+		ff := strings.Fields(string(fo))
+		var why string
+		entries, why = krlEntries(o, ff)
+		if why != "" {
+			return die("%s", why)
+		}
 	}
 	if err := os.Rename(tmp, filepath.Join(dir, "revoked.krl")); err != nil {
 		return err
 	}
 	w.KV("ok", "1")
-	w.KV("bytes", fmt.Sprint(len(data)))
+	w.KV("entries", fmt.Sprint(entries))
 	return nil
+}
+
+// krlEntries reads `ssh-keygen -Q -l` of a list: how many entries it has; why not when it has
+// sections for certificate authorities and none is this node's (fp: `ssh-keygen -l` of ca.pub).
+func krlEntries(listing []byte, fp []string) (int, string) {
+	n, sections, ours := 0, 0, false
+	for l := range strings.SplitSeq(string(listing), "\n") {
+		l = strings.TrimSpace(l)
+		if rest, ok := strings.CutPrefix(l, "# CA key "); ok {
+			sections++
+			if f := strings.Fields(rest); len(f) == 2 && len(fp) > 1 && f[1] == fp[1] {
+				ours = true
+			}
+			continue
+		}
+		if l != "" && !strings.HasPrefix(l, "#") {
+			n++
+		}
+	}
+	if sections > 0 && !ours {
+		return n, "this revocation list names certificates of another CA, not this node's (ssh-keygen -k -s <the CA's .pub>)"
+	}
+	return n, ""
 }
 
 func (g *Gate) ctlOff(w *out.Writer) error {

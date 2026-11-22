@@ -99,9 +99,13 @@ settle
 ctl w "$INV"
 check "C11 other certificates of the CA still work" ok
 : > "$K/empty.krl"
-"$SSH" 'sudo -n /opt/tando/bin/tando-gate admin ctl-krl' < "$K/empty.krl" > /dev/null 2>&1
+"$SSH" 'sudo -n /opt/tando/bin/tando-gate admin ctl-krl' < "$K/empty.krl" > /dev/null 2>&1; rc=$?
 ctl v "$INV"
-check "C12 control: with an empty list the same certificate works again (C10 was the list)" ok
+check "C12a an empty file does not replace a list with entries unless asked (ctl_krl=empty)" eval '[ $rc != 0 ] && denied'
+settle
+"$R" host setup test public_port="$T_HTTP_PORT" ctl_krl=empty > "$E/setup2b.log" 2>&1
+ctl v "$INV"
+check "C12 control: with ctl_krl=empty the same certificate works again (C10 was the list)" ok
 "$SSH" 'sudo -n /opt/tando/bin/tando-gate admin ctl-krl' < "$K/revoked.krl" > /dev/null 2>&1
 printf 'garbage' > "$K/bad.krl"
 "$SSH" 'sudo -n /opt/tando/bin/tando-gate admin ctl-krl' < "$K/bad.krl" > /dev/null 2>&1; rc=$?

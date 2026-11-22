@@ -337,3 +337,51 @@ func TestParseCert(t *testing.T) {
 		}
 	}
 }
+
+// F5: an empty list replaces one with entries only when asked by name; a list for another CA
+// is refused
+func TestCtlKRL(t *testing.T) {
+	g := ctlGate(t)
+	krl := filepath.Join(g.ctlDir(), "revoked.krl")
+	write(t, krl, "KRL-with-entries")
+	empty := filepath.Join(t.TempDir(), "empty")
+	write(t, empty, "")
+	f, _ := os.Open(empty)
+	g.Stdin = f
+	var b bytes.Buffer
+	if err := g.CtlAdmin(out.New(&b), "ctl-krl"); err == nil || !strings.Contains(err.Error(), "ctl_krl=empty") {
+		t.Errorf("emptied without asking: %v", err)
+	}
+	if data, _ := os.ReadFile(krl); string(data) != "KRL-with-entries" {
+		t.Error("the list changed")
+	}
+	f.Seek(0, 0)
+	g.krlEmpty = true
+	if err := g.CtlAdmin(out.New(&b), "ctl-krl"); err != nil {
+		t.Errorf("ctl_krl=empty: %v", err)
+	}
+	if data, _ := os.ReadFile(krl); len(data) != 0 {
+		t.Error("not emptied")
+	}
+	f.Close()
+
+	listing := "# KRL version 0\n# CA key ssh-ed25519 SHA256:other\nserial: 99\nserial: 100\n"
+	if _, why := krlEntries([]byte(listing), []string{"256", "SHA256:ours", "ca"}); why == "" {
+		t.Error("a list for another CA was accepted")
+	}
+	if n, why := krlEntries([]byte(strings.Replace(listing, "SHA256:other", "SHA256:ours", 1)), []string{"256", "SHA256:ours", "ca"}); why != "" || n != 2 {
+		t.Errorf("our CA: %d %q", n, why)
+	}
+	if n, why := krlEntries([]byte("# KRL version 0\nhash: SHA256:abc\n"), []string{"256", "SHA256:ours"}); why != "" || n != 1 {
+		t.Errorf("keys only: %d %q", n, why)
+	}
+}
+
+func TestParseCAKeyRSASize(t *testing.T) {
+	if _, ok := ParseCAKey("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDQ+bei0eMOq4OtS446cTcHjpY0MwVi4PQmTeMuJ/vwVhNQOk9wTetA48oxQTdQlEo76agNi2UDYGIi1yJFM7E1fQplKj5Vmaj4p1lUDgIrET65lJFr3v45OgFLKfkJpc6AGW47RN31HChQdl4bUpWbwvuPxYXyrdZN4O4kea1SKeEISzwda2pS5pUNgYKlpWPERbDoKdKoDGmHeRPyLzTkynyD23ABWWsBjJ5EHSATDSjg0GnIR5+Hj75eE4G09S28xZQ43E4SbTRg7bk8nMQiOGTlUhm/lzTQGa0/RFFRdV2vLOwRGv8JRlihSeZpJbAn1ndV7ky6fZ2V0NWXdTF7"); ok {
+		t.Error("a 2048-bit RSA CA was accepted")
+	}
+	if _, ok := ParseCAKey("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC+mJa+8gFvcIlhd+fCT+dY8JVb8hAHL5u8RlFS6ffX+hefMd7a9gHRiJ+dEnJpo04G2/WYewaBWAVMQGWja5O5YAva6eg0Pc6RuJ510ZzmqGO3KS9st4x1krKaF239ex3fQb8v4bGDrBmee6GtwBfnhzHMKBEPyEFLaYhoGG76wMOvXpWiNFQRYJzVA5X6KRddmzdBeGtn+tMMKquowF9NUVILN6RBi6axZVARcHww0s8M1p7SM3x02+PuQQxxtk3eyOnGuHQGc7a/oZ8t5z613RhsvIGSJ9L5ijzKHtif5FIwgLxLktCfgZHo5FzUXSznSUbleEMGSuQ+0sqq6My/nOdJZQ0llYfFWr+8LcwjhUT0XY8ezChaTn0w3gLWh884y9K+syN86K1u9JAuqwVYv7KXeXwPMZ1A7LsTklD9pXjRuEt14RehTcNSiwMcc05VCXxgTIacdRzP4YmSlSzvFCl61QtMS+5GhfJV5sTvIw2ZPRC40xMG/Mrt+Nq0Dic="); !ok {
+		t.Error("a 3072-bit RSA CA was refused")
+	}
+}
