@@ -97,8 +97,15 @@ func (m Metrics) sampleApps(ctx context.Context, now int64, names []string, prev
 			d = usec // the unit restarted: its counter began again
 		}
 		restarts := props[i]["NRestarts"]
-		if _, err := strconv.ParseUint(restarts, 10, 64); err != nil {
+		nr, err := strconv.ParseUint(restarts, 10, 64)
+		if err != nil {
 			restarts = "0"
+		} else if st, _ := apps.State(m.Env.Root, a); st["restarts_lost"] != "" {
+			// systemd counts from 0 again once tando's recover starts an app it gave up on; the
+			// agent keeps what it had (restarts_lost), so a crash loop stays in the column
+			if lost, err := strconv.ParseUint(st["restarts_lost"], 10, 32); err == nil {
+				restarts = strconv.FormatUint(nr+lost, 10)
+			}
 		}
 		sl := readSlice(dir, p, seen)
 		e, err := m.appendLine(a, now, p, fmt.Sprintf("%d\t%d\t%d\t%s\t%s\t%s", now, mem, d, restarts, stateLetter(props[i]["ActiveState"]), sl.line))

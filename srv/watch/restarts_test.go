@@ -59,3 +59,28 @@ func TestRestartsJournalOncePerChange(t *testing.T) {
 		t.Errorf("after a new state: %d reads, want 2", n)
 	}
 }
+
+// A crash loop that systemd gave up on (start limit) and that tando's recover started again
+// between two runs: systemd's NRestarts begins at 0 with that start, so the loop's restarts are
+// in the state's restarts_lost (the agent's restarts_keep) and still counted, and still alert.
+func TestRestartsLostToRecoverAreCounted(t *testing.T) {
+	f := newFakeHost(t)
+	f.settings("restarts_max=3")
+	f.app("web")
+	f.ticks(2)
+	f.write("opt/apps/web/state", "current=20261114-170102\nphase=idle\nrestarts_lost=10\n")
+	f.unit("tando-web.service", "active", "running", "0")
+	f.tick()
+	if f.st("web.nr") != "10" {
+		t.Errorf("restarts before recover's start: nr %q, want 10", f.st("web.nr"))
+	}
+	if f.st("web.down.st") == "" || f.st("web.down.det") == "" {
+		t.Errorf("no crash-loop finding: down %q %q", f.st("web.down.st"), f.st("web.down.det"))
+	}
+	// a deploy or tando restart: the agent clears restarts_lost, as systemd clears NRestarts
+	f.write("opt/apps/web/state", "current=20261114-170102\nphase=idle\n")
+	f.ticks(2)
+	if f.st("web.nr") != "0" {
+		t.Errorf("after the count went: nr %q, want 0", f.st("web.nr"))
+	}
+}

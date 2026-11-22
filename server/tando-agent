@@ -251,7 +251,9 @@ app_perms() { # the metadata group, its members, the modes of the app's files
   local g=tando-m-$A f du
   if meta_group_ok; then
     # its gid from new_uid: never one of a destroyed app (retired), so no leftover file is this group's
-    getent group "$g" > /dev/null || groupadd --system -g "$(new_uid)" "$g" || die "groupadd $g failed"
+    if ! getent group "$g" > /dev/null; then
+      uid_lock; groupadd --system -g "$(new_uid)" "$g" || die "groupadd $g failed"; exec 14>&-
+    fi
     id "${AU:-tando-$A}" &> /dev/null && usermod -aG "$g" "${AU:-tando-$A}"   # adopted apps keep their user
     du=$(deploy_user) && usermod -aG "$g" "$du"
   else
@@ -362,6 +364,13 @@ drop_release() {
 # a later app) while the band has others; when only retired ones are left they are used again,
 # oldest first. Apps made before keep their ids.
 UID_MIN=30000 UID_MAX=39999
+# uid_lock: new_uid and the groupadd or useradd that takes its id, one at a time on the host (fd
+# 14; the caller closes it). Two new apps at once picked the same free id: the second groupadd
+# failed ("GID already exists") and its deploy with it.
+uid_lock() {
+  lockfile "$R/.uid.lock"; exec 14>"$R/.uid.lock"
+  flock -w 120 14 || die "another app is being created on this server and takes too long ($R/.uid.lock); try again"
+}
 new_uid() {
   local u lo=${H[uid_min]:-$UID_MIN} hi=${H[uid_max]:-$UID_MAX} used ret=" "
   [[ $lo =~ ^[0-9]{3,9}$ && $hi =~ ^[0-9]{3,9}$ ]] && ((lo <= hi)) || { lo=$UID_MIN hi=$UID_MAX; }
@@ -537,6 +546,8 @@ hold_secs() {
 restart_app() {
   if [[ -n ${S[stopped]:-}${S[down]:-} ]]; then
     if has_unit; then
+      if [[ -n ${S[down]:-} && -z ${S[stopped]:-} ]]; then restarts_keep
+      elif [[ -n ${S[restarts_lost]:-} ]]; then st restarts_lost ""; fi
       systemctl reset-failed "tando-$A" 2> /dev/null
       fp ra.restart && svc_restart || return 1
     fi
@@ -552,6 +563,8 @@ restart_app() {
   fi
   write_caddy || return 1
   has_unit || return 0
+  # (a restart begins systemd's count again: the restarts kept for it go with it)
+  [[ -z ${S[restarts_lost]:-} ]] || st restarts_lost ""
   systemctl reset-failed "tando-$A" 2> /dev/null
   # no Caddy reload while requests wait for the app (hold_window_start says why)
   local rc=0
@@ -563,6 +576,17 @@ restart_app() {
     hold_window_end "${C[port]:-0}" "tando-$A.service" "$(hold_secs)" ) < /dev/null > /dev/null 2>&1 &
   exec 11>&-
   return $rc
+}
+# restarts_keep: before an app systemd gave up on (down) starts again. That start begins
+# systemd's NRestarts at 0, and a crash loop between two runs of tando-watch was then neither
+# alerted on nor in the restarts metric. Its count, plus this start, is kept in the state
+# (restarts_lost; srv/watch and srv/metrics add it to NRestarts) until the next restart or deploy.
+restarts_keep() {
+  local n l=${S[restarts_lost]:-0}
+  n=$(systemctl show -P NRestarts "tando-$A" 2> /dev/null)
+  [[ $n =~ ^[0-9]{1,6}$ ]] || n=0
+  [[ $l =~ ^[0-9]{1,8}$ ]] || l=0
+  st restarts_lost $((l + n + 1))
 }
 # stop_app: the stopped page at once, then the process stops; the unit is disabled, so a reboot
 # keeps it stopped. S[stopped] must be set (and saved) by the caller first
@@ -1427,9 +1451,25 @@ op_trailer() {
   # (job units that could not be written: not done; recovery syncs them again, tando-watch asks)
   { fp "$kind.jobs" && jobs_follow; } || { echo "tando-agent: the job units of $A could not be updated yet: recovery retries" >&2; return 1; }
   [[ $kind == deploy && $res != ok ]] && fp "$kind.drop" && drop_release "$id"
+  unit_boot
   st outcome_done "$o"      # (recover need not look at it again)
 }
 
+# unit_boot: the app's unit is enabled (started at boot) while a release is live and the app is
+# not stopped, and disabled while none is: a first deploy that failed, an app whose every release
+# went, left a unit that failed at every boot. (configure enables none before the first release.)
+# (Its link in multi-user.target.wants is looked at, not systemctl: no fork on every operation.
+# An idle app is started by its socket, an adopted one keeps what adopt set.)
+unit_boot() {
+  has_unit && ! idle_app && [[ -z ${C[adopted_from]:-} && -f /etc/systemd/system/tando-$A.service ]] || return 0
+  local w=/etc/systemd/system/multi-user.target.wants/tando-$A.service
+  if [[ -n ${S[current]:-} ]]; then
+    [[ -n ${S[stopped]:-} || -e $w ]] || systemctl enable -q "tando-$A"
+  elif [[ -e $w ]]; then
+    systemctl disable -q "tando-$A"
+  fi
+  return 0
+}
 # releases_by_seq: release ids, oldest first, in the order they were deployed (S[seq_<id>], given at
 # activate; the clock does not matter). Releases without a number sort first, by name
 releases_by_seq() {
@@ -2838,6 +2878,15 @@ ports_used() {
   done
   echo "$used"
 }
+# app_port: C[port] and C[preflight_port] of an app that has none, from the host's ranges (under
+# the ports lock, fd 8)
+app_port() {
+  local p PR_LO PR_HI PF_LO PF_HI
+  port_ranges
+  p=$(port_pick "$PR_LO" "$PR_HI" "$PF_LO" "$PF_HI") ||
+    die "no free port in $PR_LO-$PR_HI (or pre-flight port in $PF_LO-$PF_HI): widen them with tando host setup <host> port_max=<port>, or remove an app"
+  C[port]=${p% *} C[preflight_port]=${p#* }
+}
 # port_pick lo hi plo phi: the port of a new app from lo-hi and its pre-flight port from plo-phi
 # (prints "port preflight"; fails when either range has none free). Neither is any app's port or
 # pre-flight port (its preflight_port, else port + 100 for apps made before preflight_port: a
@@ -3086,10 +3135,10 @@ cmd_configure() {
     flock -w 120 8 || die "another app is being created on this server and takes too long ($R/.ports.lock); try again"
     # another `tando up` of this same app created it while this one waited
     [[ -f $D/app.conf ]] && die "another tando up created $A a moment ago; run this one again (it then deploys to it)"
-    port_ranges
-    p=$(port_pick "$PR_LO" "$PR_HI" "$PF_LO" "$PF_HI") ||
-      die "no free port in $PR_LO-$PR_HI (or pre-flight port in $PF_LO-$PF_HI): widen them with tando host setup <host> port_max=<port>, or remove an app"
-    C[port]=${p% *} C[preflight_port]=${p#* } C[created]=$(now)
+    # (a static app gets none: Caddy serves its files, nothing of it listens; app_port gives it
+    # one if a later deploy makes it a process)
+    [[ ${C[recipe]:-} == static ]] || app_port
+    C[created]=$(now)
     # what an earlier app of this name left (an interrupted destroy: no app.conf, no user, not a
     # creation in progress) is removed first, so the new app starts with no old state or history
     if [[ -d $D && ! -f $D/.creating ]] && ! id "tando-$A" &> /dev/null; then rm -rf "${D:?}"; fi
@@ -3097,10 +3146,11 @@ cmd_configure() {
     if ! id "tando-$A" &> /dev/null; then
       # its group first, with the same id from the band: useradd --user-group gave the group a
       # system gid (under 1000), which destroy did not retire (userdel removes the group first)
-      local nu; nu=$(new_uid)
+      local nu; uid_lock; nu=$(new_uid)
       getent group "tando-$A" > /dev/null || groupadd --system -g "$nu" "tando-$A" || die "groupadd tando-$A failed"
       useradd --system -g "tando-$A" --no-create-home --home-dir /nonexistent -u "$nu" \
         --shell /usr/sbin/nologin "tando-$A" || die "useradd failed"
+      exec 14>&-
     fi
     install -d -m 755 -o root -g root "$D" "$D/releases"
     install -d -m 755 -o "$owner" "$D/incoming"
@@ -3116,6 +3166,20 @@ cmd_configure() {
     : > "$D/history.tsv"
     save "$D/state" S && save "$D/app.conf" C || die "could not write the app's files (disk full?)"
     rm -f "$D/.creating"
+    # (both given back now: the rest of a new app's configure, its units, Caddy site and a
+    # daemon-reload, took long enough with many apps that parallel new apps waited over 60 s here)
+    flock -u 8; exec 3>&-
+  elif [[ ${C[recipe]:-} != static && ! ${C[port]:-} =~ ^[0-9]+$ ]]; then
+    # a static app (no port) that becomes a process: its port and pre-flight port now, kept in
+    # app.conf at once (the pre-flight of this release listens on it, and the next app's pick
+    # must see them)
+    lockfile "$R/.ports.lock"; exec 8>"$R/.ports.lock"
+    flock -w 120 8 || die "another app is being created on this server and takes too long ($R/.ports.lock); try again"
+    app_port
+    local -A PC=()
+    # shellcheck disable=SC2034  # PC is read by load and save through their namerefs
+    { load "$D/app.conf" PC; PC[port]=${C[port]} PC[preflight_port]=${C[preflight_port]}; }
+    save "$D/app.conf" PC || die "could not write the app's files (disk full?)"
     flock -u 8
   fi
   for k in "${!C[@]}"; do   # drop jobs (and their timeouts) no longer configured
@@ -3149,7 +3213,7 @@ cmd_configure() {
   applied=$( { for k in "${!C[@]}"; do conf_key "$k" || printf '%s=%s\n' "$k" "${C[$k]}"; done | sort
                cat "$D/confs/$conf" "$AGENT"; } | cksum | cut -d' ' -f1)
   if ((!new)) && [[ ${S[applied]:-} == "$applied" ]] && [[ -f /etc/caddy/tando/$A.caddy || ${C[caddy]:-} == external ]]; then
-    echo "port=${C[port]}"; echo "link=$(link)"; echo "created=0"; echo "changed=0"; echo "conf=$conf"
+    echo "port=${C[port]:-}"; echo "link=$(link)"; echo "created=0"; echo "changed=0"; echo "conf=$conf"
     AUDIT_VERB=""   # nothing changed (every deploy asks): nothing to record
     return 0
   fi
@@ -3178,9 +3242,11 @@ cmd_configure() {
   # (not marked applied on failure: the next deploy tries again)
   fw_sync || die "the per-app loopback rules could not be loaded (above), so $A was not deployed: tando doctor"
   systemctl daemon-reload
-  has_unit && [[ -z ${S[stopped]:-} ]] && systemctl enable -q "tando-$A"
+  # enabled (started at boot) once a release is live: a first deploy that fails leaves no unit that
+  # fails at every boot (op_trailer enables it when that first release is verified)
+  has_unit && [[ -z ${S[stopped]:-} && -n ${S[current]:-} ]] && systemctl enable -q "tando-$A"
   st applied "$applied"
-  echo "port=${C[port]}"; echo "link=$(link)"; echo "created=$new"; echo "changed=1"; echo "conf=$conf"
+  echo "port=${C[port]:-}"; echo "link=$(link)"; echo "created=$new"; echo "changed=1"; echo "conf=$conf"
 }
 
 # activate <app> <token> <build s> <upload s>: start a detached activation, print its id
@@ -3475,7 +3541,7 @@ cmd_run_activation() {
   # pre-flight: run the new release on a spare port beside the live app
   t=$(ds); st phase preflight
   preflight_static
-  local spare=${C[preflight_port]:-$((C[port] + 100))} unit="tando-$A-pre-$id" args=() x
+  local spare=${C[preflight_port]:-$((${C[port]:-0} + 100))} unit="tando-$A-pre-$id" args=() x
   # another process answering on the spare port could pass the pre-flight in the new release's place
   has_unit && ss -Hltn "sport = :$spare" | grepq . && fail "pre-flight port $spare is in use by another process"
   while IFS= read -r x; do args+=(-p "$x"); done < <(props "$spare" preflight)
@@ -3626,7 +3692,7 @@ run_release() {
   # timeout, by systemd (TERM, then KILL after 10 s), so it holds when this agent is killed too
   out=$(systemd-run --wait --collect --unit="$unit" "${args[@]}" -p "Description=tando release command $A $id" \
     -p "WorkingDirectory=$rel" -p "RuntimeMaxSec=$to" -p TimeoutStopSec=10 \
-    -E "PORT=${C[port]}" -E "TANDO_RELEASE=$id" "$AGENT" exec-release "$A" "$rel" 2>&1 < /dev/null)
+    -E "PORT=${C[port]:-}" -E "TANDO_RELEASE=$id" "$AGENT" exec-release "$A" "$rel" 2>&1 < /dev/null)
   res=$(sed -n 's/.*Finished with result: //p' <<< "$out" | head -1)
   [[ $res == success ]] && return 0
   systemctl reset-failed "$unit" 2> /dev/null     # (a failed unit can outlive --collect: seen after a timeout)
@@ -4058,7 +4124,7 @@ rec_reap() {
 }
 # rec_service: the app runs, is stopped or shows its down page as the state says
 rec_service() {
-  [[ -n ${S[current]:-} ]] || return 0
+  [[ -n ${S[current]:-} ]] || { unit_boot; return 0; }
   if ! has_unit; then write_caddy; return 0; fi
   # an adopted app whose unit is not enabled: adopt undo is giving it back (it disables tando's
   # unit first, under adopt's own lock) or did; nothing here may start it again
@@ -5506,7 +5572,7 @@ cmd_shell() {
   [[ ${C[recipe]:-} == python && -d $D/current/.venv ]] && p+=(-E "VIRTUAL_ENV=$D/current/.venv" -E "PATH=$D/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
   audit_done 0
   # the app's own port for curl (binding it stays denied); no history file in shared/
-  p+=(-E "PORT=${C[port]}" -E HISTFILE=/dev/null -E "TERM=${TERM:-xterm}" -p "WorkingDirectory=$D/current")
+  p+=(-E "PORT=${C[port]:-}" -E HISTFILE=/dev/null -E "TERM=${TERM:-xterm}" -p "WorkingDirectory=$D/current")
   if [[ -n $qf ]]; then
     # the command as a credential (/run/credentials/<unit>/cmd, the unit's user only): no argv of
     # sudo, systemd-run or bash carries it; the file goes when the unit stops
@@ -5689,7 +5755,7 @@ app_row() { # name of the array with this unit's systemctl fields
   [[ -n ${S[down]:-} ]] && state=failed
   [[ -n ${S[stopped]:-} ]] && state=stopped   # stopped by the user (tando stop); inactive = it died
   [[ ${S[phase]:-idle} != idle ]] && state=deploying
-  row app "$A" "$state" "${C[port]}" "${S[current]:-}" "${S[status_${S[current]:-x}]:-}" \
+  row app "$A" "$state" "${C[port]:-}" "${S[current]:-}" "${S[status_${S[current]:-x}]:-}" \
     "$mem" "$max" "$cpu" "${_u[NRestarts]:-0}" "$up" "$(link)" "${C[recipe]:-}" \
     "${C[backup]:-off}" "${S[last_backup]:-}" "${C[database]:-}" ${LG[$A]:-- - - -} "$(app_domains)" \
     "${C[cpu]:--}" "${C[tasks]:-1024}" "${C[max_conns]:-256}" "${C[max_requests]:--}" "$(cpu_minute)"
@@ -6069,7 +6135,7 @@ env_finish() {
 # env_preflight file: the current release with this env file on the pre-flight port, health-checked
 # (PROBE_WHY on failure; the app's output in activation.log)
 env_preflight() {
-  local cand=$1 spare=${C[preflight_port]:-$((C[port] + 100))} unit="tando-$A-envcheck-$$" args=() x rc=0
+  local cand=$1 spare=${C[preflight_port]:-$((${C[port]:-0} + 100))} unit="tando-$A-envcheck-$$" args=() x rc=0
   local rel=$D/releases/${S[current]}
   [[ -d $rel ]] || return 0   # (nothing to try it with: the restart's own check decides)
   ss -Hltn "sport = :$spare" | grepq . && { PROBE_WHY="pre-flight port $spare is in use"; return 1; }
@@ -6085,7 +6151,8 @@ env_preflight() {
 
 # env_staged op app: env set/unset/ls of an app that is not on this server yet
 # staged_lock: env set of apps not created yet, and the first configure that takes their values,
-# one at a time (fd 3, $R/staged/.lock, root only; held to the end of the verb)
+# one at a time (fd 3, $R/staged/.lock, root only; env set holds it to the end of the verb, a
+# configure until the app's files are written)
 staged_lock() {
   install -d -m 700 -o root -g root "$R/staged" || die "could not create $R/staged"
   exec 3>"$R/staged/.lock"; chmod 600 "$R/staged/.lock"

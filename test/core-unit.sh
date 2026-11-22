@@ -351,5 +351,100 @@ check "U12h an app whose pool does not grow deploys on a server already over" \
 check "U12i ... and one that grows it is refused" \
   eval 'pgpool 21 30 database=postgres,db_pool=20 database=postgres database=postgres | grep -q "over the 22"'
 
+# ---- U13 a new app's user and its metadata group take their ids under one host lock (uid_lock):
+# two `tando up` of new apps at once picked the same free id and the second groupadd failed
+# ("GID already exists"). (flock, groupadd, new_uid and the rest: stubs; $T/calls in order)
+ap() {
+  : > "$T/calls"
+  # shellcheck disable=SC2016
+  R=$T "$BASH" -c 'eval "$1"; getent() { return 2; }; lockfile() { :; }; new_uid() { echo 30001; }
+    flock() { echo "flock $*" >> "$R/calls"; }; groupadd() { echo "groupadd $*" >> "$R/calls"; }
+    usermod() { :; }; id() { return 1; }; deploy_user() { return 1; }; chown() { :; }; chmod() { :; }
+    touch() { :; }; install() { :; }; meta_mode() { :; }; die() { echo "die $*" >> "$R/calls"; exit 1; }
+    A=a1 D=$R/a1; app_perms' _ "$(agent_fn meta_group_ok uid_lock)" 2> /dev/null   # (app_perms comes with meta_group_ok's lines)
+  tr '\n' ';' < "$T/calls"
+}
+check "U13a the metadata group's id is picked under the uid lock" eval 'ap | grep -q "^flock -w 120 14;groupadd "'
+check "U13b configure picks the app user's id under the uid lock" eval \
+  'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "uid_lock; nu=\$(new_uid)"'
+check "U13c a new app's configure gives back the staged lock with the ports lock, not at its end" eval \
+  'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "flock -u 8; exec 3>&-"'
+
+# ---- U14 unit_boot: an app's unit is enabled (started at boot) only while a release is live, so
+# a first deploy that failed leaves no unit that fails at every boot; an app that has none is
+# disabled (recover does it for those left by an older tando). Never for a stopped, idle (its
+# socket starts it) or static app. (systemctl: a stub; /etc is moved into $T; ${C[k]} and ${S[k]}
+# become ${C_k} and ${S_k}: this runs under bash 3.2, which has no associative arrays)
+na() { sed -e 's/\${\([CS]\)\[\([a-z_]*\)\]/${\1_\2/g' -e "s#/etc/#$T/etc/#g"; }
+ub() { # current stopped recipe idle_stop wants(0|1) -> the systemctl calls
+  rm -rf "${T:?}/etc"; mkdir -p "$T/etc/systemd/system/multi-user.target.wants"; : > "$T/calls"
+  : > "$T/etc/systemd/system/tando-a1.service"
+  [ "$5" = 1 ] && : > "$T/etc/systemd/system/multi-user.target.wants/tando-a1.service"
+  # shellcheck disable=SC2016
+  R=$T "$BASH" -c 'eval "$1"; systemctl() { echo "$*" >> "$R/calls"; }; A=a1
+    S_current=$2 S_stopped=$3 C_recipe=$4 C_idle_stop=$5; unit_boot' _ \
+    "$(agent_fn unit_boot has_unit | na)" "$1" "$2" "$3" "$4"   # (idle_app comes with has_unit's lines)
+  tr '\n' ';' < "$T/calls"
+}
+check "U14a no release live, enabled: disabled" eq "$(ub "" "" node "" 1)" "disable -q tando-a1;"
+check "U14b a release live, not enabled: enabled" eq "$(ub r1 "" node "" 0)" "enable -q tando-a1;"
+check "U14c a release live, enabled: nothing" eq "$(ub r1 "" node "" 1)" ""
+check "U14d no release, not enabled: nothing" eq "$(ub "" "" node "" 0)" ""
+check "U14e a stopped app is not enabled" eq "$(ub r1 1 node "" 0)" ""
+check "U14f an idle app (its socket starts it) is not enabled" eq "$(ub r1 "" node 6h 0)" ""
+check "U14g a static app has no unit" eq "$(ub "" "" static "" 1)" ""
+check "U14h configure enables the unit only with a live release" eval \
+  'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep "systemctl enable" | grep -q "S\[current\]"'
+check "U14i a verified operation's trailer runs unit_boot, and so does recover for an app with no release" eval \
+  'sed -n "/^op_trailer() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "^  unit_boot" &&
+   sed -n "/^rec_service() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "S\[current\]:-} \]\] || { unit_boot"'
+
+# ---- U15 restarts_keep: an app systemd gave up on (down) that tando starts again loses its
+# NRestarts (systemd begins again at 0), and tando-watch saw neither the crash loop nor its
+# restarts. Its count plus that start is kept in the state's restarts_lost, added up over loops.
+# (systemctl: a stub answering NRestarts; st: prints what it would save)
+rk() { # NRestarts restarts_lost -> what st saves
+  # shellcheck disable=SC2016
+  "$BASH" -c 'eval "$1"; systemctl() { echo "$NR"; }; st() { echo "$*"; }; A=a1
+    S_restarts_lost=$3; NR=$2 restarts_keep' _ "$(agent_fn restarts_keep | na)" "$1" "$2"
+}
+check "U15a the restarts of the loop plus the start are kept" eq "$(rk 4 "")" "restarts_lost 5"
+check "U15b ... added to those kept before" eq "$(rk 4 2)" "restarts_lost 7"
+check "U15c an unreadable count keeps the start" eq "$(rk "" 2)" "restarts_lost 3"
+check "U15d restart_app keeps them for a down app and clears them on any other restart" eval \
+  'sed -n "/^restart_app() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "then restarts_keep" &&
+   sed -n "/^restart_app() {/,/^}/p" "$ROOT/server/tando-agent" | grep -c "st restarts_lost \"\"" | grep -qx 2'
+
+# ---- U16 agent (lib/common.sh): a failed agent call ends the command with a message and the box
+# closed where the user sees it, also when the call's stdout is a file (configure's): under
+# parallel deploys, configure failed with nothing on stderr and the deploy ended with no word.
+# (agent_raw: a stub that fails; its stderr file empty, or with the server's line)
+ag() { # [server-line] -> what reached stdout|what reached stderr
+  rm -rf "${T:?}/ag"; mkdir -p "$T/ag"
+  [ -z "${1:-}" ] || echo "$1" > "$T/ag/err"
+  # shellcheck disable=SC2016
+  TMPD=$T/ag "$BASH" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; agent_raw() { return 1; }
+    TANDO_COLOR=never ui_init 60; HOST=h; ui_box_open "deploy a" h > /dev/null; agent sudo configure a > "$TMPD/cfg"' _ "$ROOT" 2> "$T/ag/stderr"
+  printf '%s|%s' "$(tr -d '\n' < "$T/ag/cfg")" "$(tr '\n' ' ' < "$T/ag/stderr")"
+}
+check "U16a an agent that failed silently is named, and the box closes on stderr, not into the call's file" \
+  eval 'ag | grep -q "^|tando: the server ended .configure. with status 1 and gave no reason.*╰"'
+check "U16b the server's own reason: no second message" eval 'ag "x" | grep -q "^|╰" '
+
+# ---- U17 upload: an rsync whose ssh session the server turned away (sshd MaxSessions on a shared
+# connection, parallel deploys) sent nothing and is tried again, not reported as a failed upload.
+# (rsync: a stub refused N times; agent_raw, ssh_wrapper, sleep: stubs)
+up1() { # refusals -> the number of rsync runs and upload's status
+  rm -rf "${T:?}/up"; mkdir -p "$T/up/stage"
+  # shellcheck disable=SC2016
+  TMPD=$T/up "$BASH" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/deploy.sh"
+    agent_raw() { echo token=abc; }; ssh_wrapper() { :; }; sleep() { :; }; phase_line() { :; }; box_say() { :; }
+    rsync() { echo x >> "$TMPD/runs"; [ "$(wc -l < "$TMPD/runs")" -gt "$N" ] && return 0
+      echo "mux_client_request_session: session request failed: Session open refused by peer"; return 255; }
+    APP=a HOST=h TARGET=u@h STAGE=$TMPD/stage N=$2; (upload) > /dev/null 2>&1; rc=$?; echo "$(wc -l < "$TMPD/runs" | tr -d " ") $rc"' _ "$ROOT" "$1"
+}
+check "U17a a refused session: rsync is run again and the upload goes on" eq "$(up1 2)" "3 0"
+check "U17b refused every time: it gives up after 6 runs" eq "$(up1 99)" "6 1"
+
 echo "core-unit: $n checks, $nf failed"
 [ "$nf" = 0 ]
