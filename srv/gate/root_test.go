@@ -915,3 +915,91 @@ func TestNewUIDBand(t *testing.T) {
 		t.Errorf("%v", err)
 	}
 }
+
+// A previews key (tando ci setup --previews): root mode refuses it every verb on the app itself;
+// key-add records the scope and key-ls shows it.
+func TestRootPreviewsKey(t *testing.T) {
+	h := newHost(t)
+	write(t, filepath.Join(h.g.home("alpha"), "keys"), keyLine(hKey, tFP, 1700000000, tPub, "admin")[:len(keyLine(hKey, tFP, 1700000000, tPub, "admin"))-1]+"\tpreviews\n")
+	for _, v := range []string{"begin", "end", "activate", "receive"} {
+		if err := h.g.Root([]string{"alpha", v}); err == nil || !strings.Contains(err.Error(), "deploys previews of alpha only") {
+			t.Errorf("%s with a previews key: %v", v, err)
+		}
+	}
+	if a := h.argvs(); len(a) != 0 {
+		t.Errorf("ran %q", a)
+	}
+	// an unknown scope word restricts too
+	write(t, filepath.Join(h.g.home("alpha"), "keys"), keyLine(hKey, tFP, 1700000000, tPub, "admin")[:len(keyLine(hKey, tFP, 1700000000, tPub, "admin"))-1]+"\tx\n")
+	if err := h.g.Root([]string{"alpha", "begin"}); err == nil || !strings.Contains(err.Error(), "deploys previews of alpha only") {
+		t.Errorf("begin with a key of an unknown scope: %v", err)
+	}
+}
+
+func TestAdminKeyAddPreviews(t *testing.T) {
+	h := newHost(t)
+	h.g.Caller.SudoUser = "admin"
+	write(t, filepath.Join(h.g.home("alpha"), "keys"), "")
+	h.stdin(tPub + " tando-ci-alpha\n")
+	if err := h.g.Admin([]string{"key-add", "alpha", "previews"}); err != nil {
+		t.Fatal(err)
+	}
+	o := h.out()
+	id := strings.TrimPrefix(strings.SplitN(o, "\n", 2)[0], "keyid=")
+	keys := string(must(os.ReadFile(filepath.Join(h.g.home("alpha"), "keys"))))
+	if !strings.Contains(o, "\nscope=previews\n") || !strings.HasSuffix(keys, "\tadmin\tpreviews\n") || keyScope([]byte(keys), id) != ScopePreviews {
+		t.Errorf("stdout %q, keys %q", o, keys)
+	}
+	os.Truncate(filepath.Join(h.dir, "stdout"), 0)
+	h.g.Stdout.Seek(0, 0)
+	h.g.Admin([]string{"key-ls", "alpha"})
+	if l := h.out(); !strings.HasSuffix(l, "\tadmin\tpreviews\n") {
+		t.Errorf("key-ls %q", l)
+	}
+	h.stdin(tPub + "\n")
+	if err := h.g.Admin([]string{"key-add", "alpha", "everything"}); err == nil {
+		t.Error("key-add took an unknown mode")
+	}
+}
+
+// a preview of alpha (its app.conf and deploy user's home), holding a copy of alpha's keys
+func addPreview(t *testing.T, h *host, pv string) {
+	write(t, filepath.Join(h.g.appDir(pv), "app.conf"), "recipe=node\npreview_of=alpha\n")
+	os.MkdirAll(filepath.Join(h.g.home(pv), ".ssh"), 0o711)
+	write(t, filepath.Join(h.g.home(pv), "keys"), string(must(os.ReadFile(filepath.Join(h.g.home("alpha"), "keys")))))
+}
+
+// a revoke that cannot update a preview's copy fails and names it (the rest is still revoked)
+func TestKeyRevokePreviewFails(t *testing.T) {
+	h := newHost(t)
+	h.g.Caller.SudoUser = "admin"
+	addPreview(t, h, "alpha-ok")
+	addPreview(t, h, "alpha-bad")
+	kb := filepath.Join(h.g.home("alpha-bad"), "keys")
+	os.Remove(kb)
+	os.MkdirAll(filepath.Join(kb, "x"), 0o755) // (a directory: the copy cannot be written)
+	h.stdin(hKey + "\n")
+	err := h.g.Admin([]string{"key-revoke", "alpha"})
+	if err == nil || !strings.Contains(err.Error(), "tando-d-alpha-bad") || strings.Contains(err.Error(), "tando-d-alpha-ok") {
+		t.Fatalf("revoke: %v", err)
+	}
+	if b := must(os.ReadFile(filepath.Join(h.g.home("alpha-ok"), "keys"))); len(b) != 0 {
+		t.Errorf("alpha-ok keeps %q", b)
+	}
+	if b := must(os.ReadFile(filepath.Join(h.g.home("alpha"), "keys"))); len(b) != 0 {
+		t.Errorf("alpha keeps %q", b)
+	}
+}
+
+// removing the app (destroy) empties its previews' copies of its keys
+func TestAdminRemoveEmptiesPreviewKeys(t *testing.T) {
+	h := newHost(t)
+	h.g.Caller.SudoUser = "admin"
+	addPreview(t, h, "alpha-pr")
+	if err := h.g.Admin([]string{"remove", "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if b := must(os.ReadFile(filepath.Join(h.g.home("alpha-pr"), "keys"))); len(b) != 0 {
+		t.Errorf("the preview keeps the keys of a removed app: %q", b)
+	}
+}

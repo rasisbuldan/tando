@@ -50,10 +50,34 @@ func (g *Gate) Admin(args []string) error {
 		return die("no such app: %s", app)
 	}
 	var err error
+	// every change of a key list (an app's, and its previews' copies) under one lock: a copy read
+	// before a revoke and written after it would bring a revoked key back
+	switch verb {
+	case "key-add", "key-revoke", "preview-keys", "remove":
+		kl, lerr := g.keysLock()
+		if lerr != nil {
+			return lerr
+		}
+		if kl != nil {
+			defer kl.Release()
+		}
+	}
 	switch verb {
 	case "key-add":
-		rotate := len(args) > 2 && args[2] == "rotate"
-		err = g.keyAdd(w, app, rotate)
+		mode := ""
+		if len(args) > 2 {
+			mode = args[2]
+		}
+		switch mode {
+		case "", "rotate", ScopePreviews:
+		default:
+			return die("key-add: rotate or previews only")
+		}
+		scope := ""
+		if mode == ScopePreviews {
+			scope = ScopePreviews
+		}
+		err = g.keyAdd(w, app, mode == "rotate", scope)
 	case "key-ls":
 		err = g.keyLs(w, app)
 	case "key-revoke":
@@ -68,7 +92,16 @@ func (g *Gate) Admin(args []string) error {
 	case "receive":
 		return g.adminReceive(app, args[2:])
 	case "remove":
+		// the keys of the app go: its previews' copies too (tando-agent destroys the previews of
+		// an app first; one left behind, or made since, keeps no key of an app that is gone)
+		var ids []string
+		if data, rerr := os.ReadFile(filepath.Join(g.home(app), "keys")); rerr == nil {
+			ids = keyIDs(data)
+		}
 		if err = g.removeUser(app); err == nil {
+			if g.previewOf(app) == "" {
+				err = g.syncPreviews(app, ids)
+			}
 			w.KV("removed", "tando-d-"+app)
 		}
 	default:
@@ -138,7 +171,8 @@ func (g *Gate) hostKeys(w *out.Writer) {
 }
 
 // keyAdd registers a public key (stdin: one ssh-ed25519 line); rotate: and revokes all others.
-func (g *Gate) keyAdd(w *out.Writer, app string, rotate bool) error {
+// scope: "" (the key deploys the app) or ScopePreviews (only the app's previews).
+func (g *Gate) keyAdd(w *out.Writer, app string, rotate bool, scope string) error {
 	line, ok := readPiece(bufio.NewReader(g.Stdin), 600)
 	if !ok && line == "" {
 		return die("no public key on stdin")
@@ -178,7 +212,7 @@ func (g *Gate) keyAdd(w *out.Writer, app string, rotate bool) error {
 	if who == "" {
 		who = "root"
 	}
-	b.WriteString(keyLine(id, fp, g.now(), pub, who))
+	b.WriteString(keyLineScope(id, fp, g.now(), pub, who, scope))
 	if err := atomicfile.Write(kf, b.Bytes(), atomicfile.Mode(0o600)); err != nil {
 		return err
 	}
@@ -189,13 +223,16 @@ func (g *Gate) keyAdd(w *out.Writer, app string, rotate bool) error {
 		g.endLeaseOf(app, revoked)
 		g.evictUser(app)
 	}
-	g.syncPreviews(app, revoked)
+	serr := g.syncPreviews(app, revoked)
 	w.KV("keyid", id)
 	w.KV("fingerprint", fp)
 	w.KV("user", "tando-d-"+app)
 	w.KV("revoked", strconv.Itoa(len(revoked)))
+	if scope != "" {
+		w.KV("scope", scope)
+	}
 	g.hostKeys(w)
-	return nil
+	return serr
 }
 
 // keyLs lists the keys: id, fingerprint, created, last deploy (or -), who added it.
@@ -206,12 +243,16 @@ func (g *Gate) keyLs(w *out.Writer, app string) error {
 		return nil
 	}
 	for _, l := range bashread.Lines(data) {
-		f := bashread.Fields(l, 5)
+		f := bashread.Fields(l, 6)
 		if !validKeyID(f[0]) {
 			continue
 		}
 		used := kv(filepath.Join(h, "state", "used-"+f[0]), "used")
-		w.Row("key", f[0], f[1], f[2], used, f[4])
+		if keyScope(data, f[0]) != "" {
+			w.Row("key", f[0], f[1], f[2], used, f[4], ScopePreviews)
+		} else {
+			w.Row("key", f[0], f[1], f[2], used, f[4])
+		}
 	}
 	return nil
 }
@@ -252,9 +293,9 @@ func (g *Gate) keyRevoke(w *out.Writer, app string) error {
 		g.endLeaseOf(app, ids)
 	}
 	g.evictUser(app)
-	g.syncPreviews(app, ids)
+	serr := g.syncPreviews(app, ids)
 	w.KV("revoked", strconv.Itoa(n))
-	return nil
+	return serr
 }
 
 // endLeaseOf: the lease of a revoked key ends with it (tando-agent end, with the token root

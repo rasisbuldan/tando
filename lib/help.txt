@@ -445,14 +445,15 @@ usage: tando recipes
 What tando init detects, how each recipe runs and what it needs on the server.
 
 @@ ci
-flags: -a= -H= --ref= --repo= --branch= --node= --env= --force --remove
+flags: -a= -H= --ref= --repo= --branch= --node= --env= --force --remove --previews
 subs: setup=0 rotate=0 ls=0 revoke=1 github=0 hook=0
-usage: tando ci setup | rotate | ls | revoke <id|SHA256:...|all>
+usage: tando ci setup [--previews] | rotate | ls | revoke <id|SHA256:...|all>
 usage: tando ci github [--ref TAG|SHA] [--repo URL] [--branch B] [--node N] [--env NAME]
 usage:                 [--force]
 usage: tando ci hook [--branch B] [--force] | tando ci hook --remove
 Deploy keys for CI, run by the admin in the app's directory. setup creates a
-key that can deploy only this app and prints the CI secrets once; github writes
+key that can deploy only this app (with --previews: only its previews, never
+the app itself) and prints the CI secrets once; github writes
 .github/workflows/deploy.yml; hook installs a git pre-push hook. See docs/CI.md.
 
 @@ preview
@@ -462,12 +463,13 @@ usage: tando preview up [--branch B] [--ttl 7d]
 usage: tando preview ls [--json] | tando preview rm [--branch B]
 A temporary copy of the app for a branch, at <app>-<branch> on its own link
 (from the branch name; a name that had to change gets a short checksum, so
-two branches never share one). It has the parent's settings and env, no
+two branches never share one). It has the parent's settings, no
 database, no jobs, no backups, and stops after 6h without a request. It is
 removed after preview_ttl (default 7d) by the server. up deploys this
 directory to it (again to update it); rm removes it now; ls lists them.
-Secrets a preview must not get: preview_skip = NAME, NAME in tando.conf.
-In CI the same works with the deploy key (tando ci setup): docs/CI.md.
+Its env: only what preview_env = NAME, NAME in tando.conf lists (never
+DATABASE_URL); no release command unless preview_release = on.
+In CI: a key for previews only (tando ci setup --previews): docs/CI.md.
 Example: tando preview up --branch feature/login
 
 @@ alerts

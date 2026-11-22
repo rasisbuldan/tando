@@ -403,8 +403,11 @@ done
 
 e2e-ci section 11 covers preview apps through the gate (the key makes, deploys and removes
 `alpha-<branch>` only; attacks on other names and apps; revoke and rotate reach the previews; expiry
-sweep); e2e-data D11d-D11n the restore drill (counts, live data untouched, a corrupt backup fails
-and alerts through the state, the schedule and `backup_drill=off`); e2e-cli PV1-PV10 the preview
+sweep), section 12 the previews key, the creation race (fault point pv.checked) and a destroyed
+parent; e2e-data D11d-D11r the restore drill (counts, live data untouched, an app's index function
+and `format()` in its dump never run as a superuser, a corrupt backup fails and alerts through the
+state, another app's database and an unmarked `tdrill_` database are never dropped, an archive
+larger than the free disk is refused, the schedule and `backup_drill=off`); e2e-cli PV1-PV10 the preview
 names. e2e-ci section 10 is the regression for the receiver's unit name: `TANDO_CI_RACE_N` (200) uploads
 back to back in one lease, and a quarter as many rounds of begin, upload, end (an upload right
 after `end`); 10d/10e: after `end` returns nothing more is written into `incoming/` and the

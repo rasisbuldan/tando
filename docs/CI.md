@@ -34,6 +34,7 @@ data: give a CI-deployed app only secrets you would also give your CI (see below
 | activate A (pre-flight, switch, verify, auto-rollback) | yes | yes, only its own frozen upload | no |
 | deploy-status, status, releases, history of A | yes | yes (no app log lines, no other app's rows) | no |
 | make, deploy to and remove previews `A-<name>` of A (`tando preview`) | yes | yes, only names `A-<slug>`; a preview has no previews | no |
+| the same with a previews key (`tando ci setup --previews`) | yes | previews and A's status only: begin, receive, activate and end of A itself are refused | no |
 | `rollback`, `rollback <id>` | yes | **no** | no |
 | `up`/`configure` (start command, health, memory, jobs, unit, Caddy) | yes | **no** | no |
 | `env set/unset/ls`, `logs`, `start/stop/restart`, `unlock`, `backup *`, `db *`, `destroy` | yes | **no** | no |
@@ -201,16 +202,26 @@ Writes `.github/workflows/deploy.yml` from `templates/github-deploy.yml`:
 
 ## Preview apps from CI
 
-A pull request can get its own app, `<app>-<branch>` (docs/PREVIEWS.md), with the same deploy key:
-no new secret, no admin login. The key may make and remove previews named `<app>-<name>` of its
-own app and deploy to them, nothing else: the gate checks the name in the request, in root mode and
-in the agent, and the preview gets a deploy user of its own holding the same keys (revoking or
-rotating the key ends the previews' sessions too). Limits: 10 previews per app, 7 days (`preview_ttl`
-in tando.conf), `preview_skip` names the secrets a preview does not get; the app name has at most 18
-characters. The environment `tando-deploy` holds the key, so restrict it as for deploys, but
-allow pull request branches (not only `main`); a preview of a pull request from a fork has no access
-to the secrets anyway, and a branch that can read the key can run code as the app: restrict who may
-open branches.
+A pull request can get its own app, `<app>-<branch>` (docs/PREVIEWS.md). Use a key made for
+that, never the production key:
+
+```
+tando ci setup --previews      # a key that may only make, deploy to and remove alpha-<name>
+```
+
+It may make and remove previews named `<app>-<name>` of its own app and deploy to them, and read
+the app's status; root mode refuses it every verb of a deploy of the app itself, so whoever can
+read it (any branch) can never deploy production. The gate checks the preview's name in the
+request, in root mode and in the agent, and the preview gets a deploy user of its own holding
+copies of the app's keys (revoking or rotating a key ends the previews' sessions too). Store it in
+a GitHub environment of its own, `tando-preview`, that allows pull request branches. **The
+production key stays in `tando-deploy`, limited to `main`**: never widen that environment to other
+branches, since a branch that can read a key can run code as the app with that key's rights.
+
+A preview gets none of the app's env unless the app's `preview_env` names it (never the database
+URLs), and no release command unless `preview_release = on` (docs/PREVIEWS.md). Limits: 10
+previews per app, 7 days (`preview_ttl` in tando.conf); the app name has at most 18 characters.
+A pull request from a fork has no access to the secrets anyway.
 
 ```yaml
 # .github/workflows/preview.yml (tando ci github writes deploy.yml; this one is added by hand)
@@ -227,7 +238,7 @@ jobs:
   preview:
     if: github.event.pull_request.head.repo.full_name == github.repository   # not from forks
     runs-on: ubuntu-24.04
-    environment: tando-deploy          # TANDO_DEPLOY_KEY TANDO_HOST TANDO_PORT TANDO_KNOWN_HOSTS
+    environment: tando-preview         # the key of tando ci setup --previews; TANDO_HOST TANDO_PORT TANDO_KNOWN_HOSTS
     steps:
       - uses: actions/checkout@v4
         with: { persist-credentials: false }

@@ -4,7 +4,7 @@
 #   tando preview ls [--json]                  the previews of this app
 #   tando preview rm [--branch B]              remove one now
 # The server makes the preview from the parent's own settings (tando-agent preview-up): no database,
-# no jobs, no backups, idle_stop on, the parent's env (minus preview_skip), an expiry. With a CI deploy
+# no jobs, no backups, idle_stop on, no release command (unless preview_release = on), only the env names the parent lists in preview_env (minus preview_skip), an expiry. With a CI deploy
 # key (TANDO_DEPLOY_KEY) the same calls go through the gate, which allows only <app>-<name> of the
 # key's own app. bash 3.2.
 
@@ -76,7 +76,7 @@ preview_up() {
   link=$K_link
   if [ "$K_created" = 1 ]; then
     note "preview $pv of $parent: no database, no jobs, no backups; stops after ${C_idle_stop:-6h} idle; expires $(preview_when "$K_expires")"
-    note "its env: copied $K_env_copied variable(s) of $parent$([ "${K_env_skipped:-0}" = 0 ] || printf ', left out %s' "$K_env_skipped"); secrets it must not get: preview_skip = NAME in tando.conf, then tando deploy"
+    note "its env: copied $K_env_copied variable(s) of $parent$([ "${K_env_skipped:-0}" = 0 ] || printf ', left out %s' "$K_env_skipped"): only what preview_env = NAME, NAME in tando.conf lists (never DATABASE_URL); no release command unless preview_release = on"
   else
     note "preview $pv exists: expiry now $(preview_when "$K_expires"); deploying to it"
   fi

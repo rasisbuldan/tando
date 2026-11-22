@@ -14,14 +14,19 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 
 - Preview apps: `tando preview up [--branch B] [--ttl 7d]` deploys this project as
   `<app>-<branch>` (24 characters at most; a checksum keeps two branches apart) on its own link:
-  the parent's settings and env (minus `preview_skip`), no database, jobs or backups, `idle_stop`
-  6h, removed by the server after `preview_ttl` (default 7d). `preview ls` and `preview rm` list
-  and remove them. A CI deploy key of the app may make, deploy to and remove previews of its own
-  app only (new gate verbs and two more exact sudo commands; run `tando host setup` once); a
-  GitHub Actions example is in docs/CI.md. Design: docs/PREVIEWS.md.
+  the parent's settings, no database, jobs or backups, no release command (unless
+  `preview_release = on`), only the env names the parent lists in `preview_env` (never its
+  database URLs; minus `preview_skip`), `idle_stop` 6h, removed by the server after `preview_ttl`
+  (default 7d). `preview ls` and `preview rm` list and remove them; destroying an app destroys its
+  previews. A CI deploy key of the app may make, deploy to and remove previews of its own app only
+  (new gate verbs and two more exact sudo commands; run `tando host setup` once), and
+  `tando ci setup --previews` makes a key that may do only that, never deploy the app: the key for
+  pull requests, so the production key stays limited to `main`. A GitHub Actions example is in
+  docs/CI.md. Design: docs/PREVIEWS.md.
 - Restore drill: `tando backup drill [app]` restores the newest backup into a throwaway database
-  and directory on the server, checks file and table counts and `pg_restore`'s exit, reports and
-  removes the copy (the live data is never touched). The server does it monthly after the backup
+  (`tdrill_<app>`, as the app's own role, no PUBLIC access) and directory on the server, checks
+  file and table counts and `pg_restore`'s exit, reports and removes the copy (the live data is
+  never touched; it checks both disks first, by the archive's real size). The server does it monthly after the backup
   queue (`backup_drill = monthly|off` in `tando host setup`); `backup ls` shows the last result,
   `doctor` warns and an alert fires when a drill fails.
 - Isolation: limits on what apps share (docs/COMMANDS.md, "Limits and load").

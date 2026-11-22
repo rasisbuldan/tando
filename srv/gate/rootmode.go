@@ -73,8 +73,14 @@ func (g *Gate) Root(args []string) (err error) {
 		return err
 	}
 	g.keyID = s.KeyID
-	if !g.keyActive(app, s.KeyID) {
+	keys, kerr := os.ReadFile(filepath.Join(g.home(app), "keys"))
+	if kerr != nil || !keyActive(keys, s.KeyID) {
 		return die("this key is not registered (revoked?)")
+	}
+	// a previews key (tando ci setup --previews) makes and removes previews of its app, and deploys
+	// to them as their own deploy user: never anything of the app itself
+	if keyScope(keys, s.KeyID) != "" && verb != "preview-up" && verb != "preview-rm" && g.previewOf(app) == "" {
+		return die("this key deploys previews of %s only (%s-<name>), not %s itself", app, app, app)
 	}
 	who := "ci-" + s.KeyID
 	switch verb {

@@ -40,7 +40,9 @@ Limits
   body_max        largest request body, over it a 413: 100MB, 2GB, off (default 100MB)
   priority        high or low: killed last or first when memory runs out
   preview_ttl     how long a preview app lives, like 7d, 12h (default 7d; tando preview)
+  preview_env     env names a preview gets: API_BASE, FEATURE_FLAGS (default none; never DATABASE_URL)
   preview_skip    env names a preview does not get: STRIPE_SECRET_KEY, SMTP_PASSWORD
+  preview_release on: a preview runs the release command (migrations) too (default off)
   tmp_size        the app's /tmp and /var/tmp, in memory (default 64M)
   io              disk read and write MB/s, 1-99999 (default none)
   disk            disk share for the disk alerts, like 2G; not a hard quota (default 8G)

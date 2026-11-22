@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"tando/srv/internal/atomicfile"
 	"tando/srv/internal/bashread"
 	"tando/srv/internal/fsinfo"
+	"tando/srv/internal/lock"
 	"tando/srv/internal/out"
 	"tando/srv/internal/valid"
 )
@@ -60,29 +62,53 @@ func (g *Gate) mirrorKeys(parent, pv string) error {
 	return g.writeKeys(pv)
 }
 
-// syncPreviews: the app's keys changed (added, revoked, rotated): its previews' deploy users get
-// the same list; keys that went (ids) end their leases and every session of the preview users.
-func (g *Gate) syncPreviews(parent string, ids []string) {
+// keysLock is the gate's one lock over every key list (an app's and its previews' copies):
+// key-add, key-revoke, the mirror of a new preview and remove hold it, so a copy read before a
+// revoke can never be written after it. nil (and no error) before the gate is installed.
+func (g *Gate) keysLock() (*lock.Lock, error) {
+	if _, err := os.Stat(g.P.CI); os.IsNotExist(err) {
+		return nil, nil
+	}
+	l, err := lock.Acquire(filepath.Join(g.P.CI, ".keys.lock"), 60*time.Second)
+	if err != nil {
+		return nil, die("another change of deploy keys takes too long; try again")
+	}
+	return l, nil
+}
+
+// syncPreviews: the app's keys changed (added, revoked, rotated, or the app is gone): its
+// previews' deploy users get the same list; keys that went (ids) end their leases and every
+// session of the preview users. The caller holds keysLock. A preview user that could not be
+// updated is an error naming it (it may still accept a key that went); the others are updated.
+func (g *Gate) syncPreviews(parent string, ids []string) error {
+	data, err := os.ReadFile(filepath.Join(g.home(parent), "keys"))
+	if err != nil && !os.IsNotExist(err) {
+		return die("could not read the keys of %s: its previews were not updated", parent)
+	}
 	ents, _ := os.ReadDir(g.P.CI)
+	var bad []string
 	for _, e := range ents {
 		pv := e.Name()
 		if !ValidPreview(parent, pv) || g.previewOf(pv) != parent ||
 			!fsinfo.RegularFollow(filepath.Join(g.appDir(pv), "app.conf")) {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(g.home(parent), "keys"))
-		if err != nil {
-			data = nil
+		werr := atomicfile.Write(filepath.Join(g.home(pv), "keys"), data, atomicfile.Mode(0o600))
+		if werr == nil {
+			werr = g.writeKeys(pv)
 		}
-		if err := atomicfile.Write(filepath.Join(g.home(pv), "keys"), data, atomicfile.Mode(0o600)); err != nil {
-			continue
+		if werr != nil {
+			bad = append(bad, "tando-d-"+pv)
 		}
-		g.writeKeys(pv)
-		if len(ids) > 0 {
+		if len(ids) > 0 || werr != nil {
 			g.endLeaseOf(pv, ids)
 			g.evictUser(pv)
 		}
 	}
+	if len(bad) > 0 {
+		return die("could not update the keys of preview user(s) %s: they may still accept the old key (run it again, or tando preview rm)", strings.Join(bad, ", "))
+	}
+	return nil
 }
 
 // rootPreview is root mode's preview-up / preview-rm of the deploy user of app (through its exact
@@ -107,7 +133,15 @@ func (g *Gate) rootPreview(app, verb string) error {
 		return Exit{1}
 	}
 	if verb == "preview-up" {
-		if err := g.mirrorKeys(app, pv); err != nil {
+		kl, err := g.keysLock()
+		if err != nil {
+			return err
+		}
+		err = g.mirrorKeys(app, pv)
+		if kl != nil {
+			kl.Release()
+		}
+		if err != nil {
 			return err
 		}
 	}

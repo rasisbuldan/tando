@@ -678,12 +678,13 @@ Example: `tando version -H vps`
 ## CI
 
 ### ci
-`tando ci setup | rotate | ls | revoke <id|SHA256:...|all>`
+`tando ci setup [--previews] | rotate | ls | revoke <id|SHA256:...|all>`
 `tando ci github [--ref TAG|SHA] [--repo URL] [--branch B] [--node N] [--env NAME] [--force]`
 `tando ci hook [--branch B] [--force]` · `tando ci hook --remove`
-Flags: `-a -H --ref --repo --branch --node --env --force --remove`. A subcommand is required.
+Flags: `-a -H --ref --repo --branch --node --env --force --remove --previews`. A subcommand is required.
 Run by the admin in the app's directory. `setup` creates a deploy key for this app only and prints
-the CI secrets once; `rotate` replaces every key; `github` writes `.github/workflows/deploy.yml`;
+the CI secrets once (`--previews`: a key that may only make, deploy to and remove the app's
+previews, never deploy the app itself: the one for pull requests, docs/CI.md); `rotate` replaces every key; `github` writes `.github/workflows/deploy.yml`;
 `hook` installs a git pre-push hook. See docs/CI.md. `--env` is not in help.txt's usage
 (docs/DEV-NOTES.md, mismatch 5).
 Example: `tando ci setup > ci-secrets.txt`
@@ -695,11 +696,13 @@ A temporary copy of the app for a branch, at `<app>-<branch>` (24 characters at 
 added when the branch name had to change) on its own link. `up` makes it on the server from the
 parent's settings, then deploys this directory to it (again to update it; it renews the expiry):
 no database, no jobs, no backups, no domains, `idle_stop` 6h unless the parent has its own, the
-parent's env at that moment minus `preview_skip`. Removed by the server after `preview_ttl`
+no release command unless the parent has `preview_release = on`, and of the parent's env at that
+moment only the names its `preview_env` lists (minus `preview_skip`; never `DATABASE_URL`,
+`DATABASE_URL_DIRECT` or a value naming the parent's database or directory). Removed by the server after `preview_ttl`
 (default 7d, hourly sweep) or by `rm`. The branch is `--branch`, else CI's (`GITHUB_HEAD_REF`,
 `GITHUB_REF_NAME`), else the checkout's. With a CI deploy key the same commands work for previews of
 the key's own app (docs/CI.md). `ls` lists the previews of this app. Design: docs/PREVIEWS.md.
-tando.conf: `preview_ttl = 3d`, `preview_skip = STRIPE_SECRET_KEY, SMTP_PASSWORD`.
+tando.conf: `preview_ttl = 3d`, `preview_env = API_BASE, FEATURE_FLAGS`, `preview_release = on`.
 Example: `tando preview up --branch feature/login`
 
 ## More

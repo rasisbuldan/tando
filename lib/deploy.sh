@@ -47,6 +47,8 @@ configure() {
     [ -n "${C_priority:-}" ] && printf 'priority=%s\n' "$C_priority"
     [ -n "${C_preview_ttl:-}" ] && printf 'preview_ttl=%s\n' "$C_preview_ttl"
     [ -n "${C_preview_skip:-}" ] && printf 'preview_skip=%s\n' "$C_preview_skip"
+    [ -n "${C_preview_env:-}" ] && printf 'preview_env=%s\n' "$C_preview_env"
+    [ -n "${C_preview_release:-}" ] && printf 'preview_release=%s\n' "$C_preview_release"
     [ -n "${C_tmp_size:-}" ] && printf 'tmp_size=%s\n' "$C_tmp_size"
     [ -n "${C_io:-}" ] && printf 'io=%s\n' "$C_io"
     [ -n "${C_disk:-}" ] && printf 'disk=%s\n' "$C_disk"

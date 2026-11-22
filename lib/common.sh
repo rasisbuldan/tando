@@ -401,7 +401,7 @@ C_workers=""       # worker.<name> = <command> and their .memory, .stop_timeout 
 C_release="" C_release_shell="" C_release_timeout=""   # the release command (lib/deploy.sh; checked by the server too)
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
 C_idle_stop=""     # scale to zero: stop after this long without a connection (10m, 30s, 2h, off)
-C_preview_ttl="" C_preview_skip=""   # previews: how long one lives (7d), env names it does not get (docs/COMMANDS.md "Preview apps")
+C_preview_ttl="" C_preview_skip="" C_preview_env="" C_preview_release=""   # previews: how long one lives (7d), env names it gets and does not get, its release command (docs/PREVIEWS.md)
 C_response_timeout="" C_body_max="" C_cold_timeout=""   # Caddy's limits per request (checked by the server too)
 C_priority=""   # high or low: who the OOM killer takes last or first (checked by the server too)
 C_tmp_size="" C_io="" C_disk=""   # /tmp's size, disk MB/s, disk share for alerts (checked by the server too)
@@ -664,6 +664,10 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       preview_ttl) C_preview_ttl=$v
         case $v in [1-9][smhd]|[1-9][0-9][smhd]|[1-9][0-9][0-9][smhd]|[1-9][0-9][0-9][0-9][smhd]) ;;
           *) die "$f:$n: preview_ttl is a time like 7d, 12h or 90m (got \"$v\")";; esac;;
+      preview_env) C_preview_env=$(printf '%s' "$v" | tr ' ' ',' | tr -s ',')
+        case $C_preview_env in ""|*[!A-Za-z0-9_,]*|[0-9,]*|*,) die "$f:$n: preview_env is env names, like API_BASE, FEATURE_FLAGS (got \"$v\")";; esac;;
+      preview_release) C_preview_release=$v
+        case $v in on|off) ;; *) die "$f:$n: preview_release is on or off (got \"$v\")";; esac;;
       preview_skip) C_preview_skip=$(printf '%s' "$v" | tr ' ' ',' | tr -s ',')
         case $C_preview_skip in ""|*[!A-Za-z0-9_,]*|[0-9,]*|*,) die "$f:$n: preview_skip is env names, like STRIPE_SECRET_KEY, SMTP_PASSWORD (got \"$v\")";; esac;;
       response_timeout) C_response_timeout=$v

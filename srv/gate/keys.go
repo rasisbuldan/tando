@@ -13,7 +13,11 @@ import (
 
 // The key list, CI/<app>/keys (root 600), one line per key:
 //
-//	<key id>\t<SHA256:fingerprint>\t<created, epoch>\t<ssh-ed25519 AAAA...>\t<who added it>
+//	<key id>\t<SHA256:fingerprint>\t<created, epoch>\t<ssh-ed25519 AAAA...>\t<who added it>[\t<scope>]
+//
+// scope: none for a key that deploys the app, "previews" for one that may only make, deploy to and
+// remove the app's previews (tando ci setup --previews): root mode refuses it every verb on the app
+// itself.
 //
 // and authorized_keys (root:tando-keys 640), rebuilt from it, one line per key:
 //
@@ -52,9 +56,36 @@ func ParsePublicKey(line string) (pub, fp string, err error) {
 // awkFields splits like awk -F'\t' (one tab, one separator).
 func awkFields(l string) []string { return strings.Split(l, "\t") }
 
+// ScopePreviews is the scope of a key that may only make, deploy to and remove previews.
+const ScopePreviews = "previews"
+
 // keyLine is one line of the key list.
 func keyLine(id, fp string, created int64, pub, who string) string {
 	return fmt.Sprintf("%s\t%s\t%d\t%s\t%s\n", id, fp, created, pub, who)
+}
+
+// keyLineScope is keyLine with a scope ("" is keyLine).
+func keyLineScope(id, fp string, created int64, pub, who, scope string) string {
+	if scope == "" {
+		return keyLine(id, fp, created, pub, who)
+	}
+	return fmt.Sprintf("%s\t%s\t%d\t%s\t%s\t%s\n", id, fp, created, pub, who, scope)
+}
+
+// keyScope is the scope of key id in the key list: "" (deploys the app), "previews", or
+// "previews" too for any other word (an unknown scope never widens what a key may do).
+func keyScope(keys []byte, id string) string {
+	for _, l := range bashread.LinesAll(keys) {
+		f := awkFields(l)
+		if f[0] != id {
+			continue
+		}
+		if len(f) < 6 || f[5] == "" {
+			return ""
+		}
+		return ScopePreviews
+	}
+	return ScopePreviews
 }
 
 // AuthorizedKeys renders authorized_keys from the key list: one line per key whose id and
@@ -63,7 +94,7 @@ func keyLine(id, fp string, created int64, pub, who string) string {
 func AuthorizedKeys(keys []byte, gate, app string) []byte {
 	var b bytes.Buffer
 	for _, l := range bashread.Lines(keys) {
-		f := bashread.Fields(l, 5)
+		f := bashread.Fields(l, 6)
 		id, pub := f[0], f[3]
 		if !validKeyID(id) || !pubRe.MatchString(pub) {
 			continue

@@ -3071,6 +3071,8 @@ cmd_configure() {
   # the settings first; then, for an existing app, its lock before app.conf is read: a domain add
   # or another configure in between would otherwise be overwritten by this one's stale copy
   local input; input=$(cat)
+  # (a preview being made: an app of that name made in the meantime is not taken over)
+  [[ -n ${CONF_CREATE_ONLY:-} && -f $D/app.conf ]] && die "$A was created by another command a moment ago; it is not taken over"
   if [[ -f $D/app.conf ]]; then
     [[ $'\n'$input$'\n' == *$'\n'check=1$'\n'* ]] || lock
     load "$D/app.conf" C
@@ -3097,7 +3099,7 @@ cmd_configure() {
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" "C[priority]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" "C[db_pool]" "C[db_direct]" \
     "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]" "C[idle_stop]" \
-    "C[tmp_size]" "C[io]" "C[disk]" "C[response_timeout]" "C[body_max]" "C[cold_timeout]" "C[preview_skip]" "C[preview_ttl]"
+    "C[tmp_size]" "C[io]" "C[disk]" "C[response_timeout]" "C[body_max]" "C[cold_timeout]" "C[preview_skip]" "C[preview_ttl]" "C[preview_env]" "C[preview_release]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -3119,6 +3121,8 @@ cmd_configure() {
       compress) [[ $v =~ ^(on|off)$ ]] || die "compress must be on or off";;
       # previews (docs/COMMANDS.md "Preview apps"): the parent's rules, and a preview's own marks
       preview_skip) [[ $v =~ ^[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*)*$ && ${#v} -le 500 ]] || die "bad preview_skip: $v (env names, comma separated)";;
+      preview_env) [[ $v =~ ^[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*)*$ && ${#v} -le 1000 ]] || die "bad preview_env: $v (env names, comma separated)";;
+      preview_release) [[ $v == on || $v == off ]] || die "bad preview_release: $v (on or off)";;
       preview_ttl) preview_secs "$v" > /dev/null && (($(preview_secs "$v") <= 7776000)) || die "bad preview_ttl: $v (like 7d or 12h; 90 days at most)";;
       preview_of) valid_app "$v" || die "bad preview_of: $v";;
       preview_expires) [[ $v =~ ^[0-9]{9,11}$ ]] || die "bad preview_expires: $v";;
@@ -3289,7 +3293,7 @@ cmd_configure() {
     lockfile "$R/.ports.lock"; exec 8>"$R/.ports.lock"
     flock -w 120 8 || die "another app is being created on this server and takes too long ($R/.ports.lock); try again"
     # another `tando up` of this same app created it while this one waited
-    [[ -f $D/app.conf ]] && die "another tando up created $A a moment ago; run this one again (it then deploys to it)"
+    [[ -f $D/app.conf ]] && die "another tando up created $A a moment ago; run this one again${CONF_CREATE_ONLY:+ with another name}"
     port_ranges
     p=$(port_pick "$PR_LO" "$PR_HI" "$PF_LO" "$PF_HI") ||
       die "no free port in $PR_LO-$PR_HI (or pre-flight port in $PF_LO-$PF_HI): widen them with tando host setup <host> port_max=<port>, or remove an app"
@@ -4871,8 +4875,34 @@ cmd_backup_all() {
 # drill_tables, drill_rows, drill_secs). The live data and the live database are never touched.
 # The host's monthly run (tando-drill.timer, backup_drill = monthly|off in host.conf) is
 # backup-drill-all: after the backup queue, inside the same window, one app at a time.
-drill_pg() { (cd / && exec runuser -u postgres -- ${H[postgres_version]:+env "PGCLUSTER=${H[postgres_version]}/main"} "$@"); }
-drill_dbname() { printf 'tando_drill_%s' "${1//-/_}"; }
+# drill_dbname app: the throwaway database. Not tando_<...>: that is every app's own database
+# (db_role), so no app (drill-foo has tando_drill_foo) can ever own this name. It is also marked
+# (DRILL_MARK, a comment on it) and owned by the app's role: a database of this name that is not
+# both is never dropped, the drill refuses instead
+drill_dbname() { printf 'tdrill_%s' "${1//-/_}"; }
+DRILL_MARK="tando restore drill"
+# drill_db_state db role -> none | ours | foreign
+drill_db_state() {
+  local r
+  r=$(pgsql -c "SELECT pg_catalog.pg_get_userbyid(d.datdba) || '|' || coalesce(pg_catalog.shobj_description(d.oid, 'pg_database'), '') FROM pg_catalog.pg_database d WHERE d.datname = '$1'") || { echo foreign; return; }
+  if [[ -z $r ]]; then echo none
+  elif [[ $r == "$2|$DRILL_MARK" ]]; then echo ours
+  else echo foreign; fi
+}
+# drill_db_drop db role: drops it only when it is a drill database of this app (or is not there)
+drill_db_drop() {
+  case $(drill_db_state "$1" "$2") in
+    none) return 0;;
+    ours) pgsql -c "DROP DATABASE IF EXISTS $1 WITH (FORCE)" > /dev/null 2>&1;;
+    *) return 1;;
+  esac
+}
+# drill_free path need_kb: the filesystem of path has need_kb free, and 256 MB to spare after it
+drill_free() {
+  local free; free=$(df -Pk "$1" 2> /dev/null | awk 'NR == 2 { print $4 }')
+  [[ $free =~ ^[0-9]+$ ]] || return 0
+  ((free >= $2 + 262144))
+}
 # drill_record result id why: the outcome in the state (under the app's lock, held only for this)
 drill_record() {
   lock 600
@@ -4881,9 +4911,14 @@ drill_record() {
     drill_tables "${DR_TABLES:-}" drill_rows "${DR_ROWS:-}" drill_secs "${DR_SECS:-}"
   exec 9>&-
 }
+# The database part runs as the app's own role, as the live restore does: the dump is the app's,
+# so every object in it (an index on an app function, a SECURITY DEFINER function, a function
+# named like a built-in) is the app's to define, and must never run with more than the app's
+# rights. The superuser only creates the empty database (owned by the role, no PUBLIC access, the
+# role's temp limit lifted in it alone, as a restore needs) and drops it.
 cmd_backup_drill() { # app [id]
   need_root; app "$1"
-  local id=${2:-} dir t0 tmp="" dbn="" rc why="" nf tf ntab ttab free need
+  local id=${2:-} dir t0 tmp="" dbn="" rc why="" nf tf ntab ttab need dbneed=0 pgdir dbstate
   has_backup_data || die "$A has no data or database: there is nothing to drill"
   [[ -z $id ]] && id=$(bk_order | head -1)
   DR_FILES="" DR_TABLES="" DR_ROWS="" DR_SECS=""
@@ -4893,11 +4928,26 @@ cmd_backup_drill() { # app [id]
   valid_backup "$id" && offsite_fetch "$id"
   valid_backup "$id" && [[ -d $BK/$A/$id ]] || die "no such backup: $id"
   dir=$BK/$A/$id; t0=$(now)
-  # room for it: the data is unpacked beside the live data, so the disk must hold it twice over
-  need=$(du -sk "$dir" | cut -f1); need=$((need * 3 + 16384))
-  free=$(df -Pk "$R/apps" | awk 'NR == 2 { print $4 }')
-  if [[ $free =~ ^[0-9]+$ ]] && ((free < need)); then
-    why="not enough free disk space to unpack the backup ($((need / 1024)) MB needed)"
+  # room for it: what the archive lists (its real size, however well it compressed), unpacked
+  # beside the live data; the database as large as the live one, where PostgreSQL keeps its data.
+  # Each disk keeps 256 MB to spare: a full disk would take every app down, PostgreSQL first
+  need=0
+  if [[ -f $dir/data.tar.gz ]]; then
+    need=$(tar -tvzf "$dir/data.tar.gz" 2> /dev/null | awk '$1 ~ /^[-h]/ { s += $3 } END { printf "%.0f", s / 1024 + 1 }')
+    [[ $need =~ ^[0-9]+$ ]] || why="the data archive cannot be read (tar failed)"
+  fi
+  if [[ -z $why && -f $dir/db.dump ]]; then
+    dbneed=$(pgsql -c "SELECT pg_catalog.pg_database_size('$(db_role)') / 1024" 2> /dev/null)
+    [[ $dbneed =~ ^[0-9]+$ ]] || dbneed=$(du -sk "$dir/db.dump" | awk '{ print $1 * 4 }')
+    pgdir=$(pgsql -c "SHOW data_directory" 2> /dev/null)
+  fi
+  if [[ -z $why ]]; then
+    if [[ -n ${pgdir:-} && -d $pgdir && $(df -P "$pgdir" | awk 'NR == 2 { print $1 }') != $(df -P "$R/apps" | awk 'NR == 2 { print $1 }') ]]; then
+      drill_free "$R/apps" "$need" || why="not enough free disk space to unpack the backup ($((need / 1024)) MB and 256 MB to spare needed)"
+      [[ -n $why ]] || drill_free "$pgdir" "$dbneed" || why="not enough free disk space for PostgreSQL to restore the database ($((dbneed / 1024)) MB and 256 MB to spare needed)"
+    else
+      drill_free "$R/apps" "$((need + dbneed))" || why="not enough free disk space to restore the backup ($(((need + dbneed) / 1024)) MB and 256 MB to spare needed)"
+    fi
   fi
   if [[ -z $why && -f $dir/data.tar.gz ]]; then
     tmp=$D/shared/.drill-$$
@@ -4912,26 +4962,35 @@ cmd_backup_drill() { # app [id]
     fi
   fi
   if [[ -z $why && -f $dir/db.dump ]]; then
+    db_creds
     dbn=$(drill_dbname "$A")
-    if ! { pgsql -c "DROP DATABASE IF EXISTS $dbn" && pgsql -c "CREATE DATABASE $dbn"; } > /dev/null 2>&1; then
+    dbstate=$(drill_db_state "$dbn" "$DB_ROLE")
+    if [[ $dbstate == foreign ]]; then
+      why="a database $dbn exists that is not a restore drill of $A: it was left as it is (drop it by hand if it is not needed)"
+      dbn=""
+    elif ! { drill_db_drop "$dbn" "$DB_ROLE" && pgsql -c "CREATE DATABASE $dbn OWNER $DB_ROLE" &&
+             pgsql -c "REVOKE ALL ON DATABASE $dbn FROM PUBLIC" -c "GRANT CONNECT, TEMPORARY ON DATABASE $dbn TO $DB_ROLE" \
+               -c "COMMENT ON DATABASE $dbn IS '$DRILL_MARK'" -c "ALTER ROLE $DB_ROLE IN DATABASE $dbn SET temp_file_limit = -1"; } > /dev/null 2>&1; then
       why="could not create the throwaway database $dbn"
     else
-      ttab=$(drill_pg pg_restore -l < "$dir/db.dump" 2> /dev/null | awk '$4 == "TABLE" && $5 != "DATA" && $5 != "ATTACH" { n++ } END { print n + 0 }')
-      timeout 3600 runuser -u postgres -- ${H[postgres_version]:+env "PGCLUSTER=${H[postgres_version]}/main"} \
-        pg_restore --no-owner --no-acl -d "$dbn" < "$dir/db.dump" > /dev/null 2> "$D/.drill.err"; rc=$?
+      ttab=$(as_app_pg pg_restore -l < "$dir/db.dump" 2> /dev/null | awk '$4 == "TABLE" && $5 != "DATA" && $5 != "ATTACH" { n++ } END { print n + 0 }')
+      # (its messages may hold rows of the app's data: only the exit code is kept)
+      as_app_pg timeout 3600 pg_restore --no-owner --no-acl -h 127.0.0.1 -U "$DB_ROLE" -d "$dbn" < "$dir/db.dump" > /dev/null 2>&1; rc=$?
       if ((rc != 0)); then
-        why="pg_restore exited with $rc: $(head -c 150 "$D/.drill.err" | tr '\n' ' ')"
+        why="pg_restore exited with $rc (run it by hand on a copy of backup $id to see why)"
       else
-        ntab=$(pgsql -d "$dbn" -c "SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')")
+        # counted as the app's role too, with nothing of the app's on the search path
+        ntab=$(as_app_pg psql -X -q -At -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$DB_ROLE" -d "$dbn" \
+          -c "SET search_path = pg_catalog" -c "SELECT pg_catalog.count(*) FROM pg_catalog.pg_tables WHERE schemaname OPERATOR(pg_catalog.<>) ALL (ARRAY['pg_catalog', 'information_schema']::pg_catalog.name[])" < /dev/null 2> /dev/null)
         DR_TABLES=$ntab
-        DR_ROWS=$(pgsql -d "$dbn" -c "SELECT coalesce(sum((xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint), 0) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')")
+        DR_ROWS=$(as_app_pg psql -X -q -At -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$DB_ROLE" -d "$dbn" \
+          -c "SET search_path = pg_catalog" -c "SELECT COALESCE(pg_catalog.sum((pg_catalog.xpath('/row/c/text()', pg_catalog.query_to_xml(pg_catalog.format('select pg_catalog.count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint), 0) FROM pg_catalog.pg_tables WHERE schemaname OPERATOR(pg_catalog.<>) ALL (ARRAY['pg_catalog', 'information_schema']::pg_catalog.name[])" < /dev/null 2> /dev/null)
         [[ $ntab =~ ^[0-9]+$ ]] && ((ntab >= ttab)) || why="the dump lists $ttab tables and ${ntab:-no} were restored"
       fi
-      rm -f "$D/.drill.err"
     fi
   fi
-  # the throwaway copies go, whatever happened
-  [[ -n $dbn ]] && pgsql -c "DROP DATABASE IF EXISTS $dbn" > /dev/null 2>&1
+  # the throwaway copies go, whatever happened (the database only when it is this drill's)
+  [[ -n $dbn ]] && { drill_db_drop "$dbn" "$DB_ROLE" || echo "tando-agent: could not drop the throwaway database $dbn" >&2; }
   [[ -n $tmp ]] && as_app rm -rf "$tmp"
   DR_SECS=$(($(now) - t0))
   if [[ -z $why ]]; then
@@ -5017,6 +5076,11 @@ preview_secs() { # 7d, 12h, 30m, 90s -> seconds
   local n=${BASH_REMATCH[1]}
   case ${BASH_REMATCH[2]} in s) echo "$n";; m) echo $((n * 60));; h) echo $((n * 3600));; d) echo $((n * 86400));; esac
 }
+# preview_env_parents name value parent: the variable leads to the parent's own data (never copied)
+preview_env_parents() {
+  case $1 in DATABASE_URL|DATABASE_URL_DIRECT|DATABASE_PATH|TANDO_DATA_DIR|PORT|HOME) return 0;; esac
+  [[ $2 == *"tando_${3//-/_}"* || $2 == *"$R/apps/$3/"* || $2 == *"$R/apps/$3" ]]
+}
 valid_preview_name() { # parent preview
   [[ $2 == "$1"-* ]] && valid_app "$2" && [[ ${2#"$1"-} =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
 }
@@ -5057,6 +5121,11 @@ cmd_preview_up() { # parent preview [ttl]
   [[ -n $ttl ]] || ttl=${PC[preview_ttl]:-7d}
   secs=$(preview_secs "$ttl") || die "bad preview ttl: $ttl (like 7d, 12h, 90m)"
   ((secs <= 7776000)) || die "a preview lives 90 days at most (got $ttl)"
+  # the name check, the count and the creation under one host lock: two calls at once never make
+  # more than PREVIEW_MAX; configure creates only (CONF_CREATE_ONLY), so an app an admin made under
+  # this name in between is never taken over
+  lockfile "$R/.previews.lock"; exec 12>"$R/.previews.lock"
+  flock -w 120 12 || die "another preview is being made on this server and takes too long; try again"
   if [[ -f $R/apps/$pv/app.conf ]]; then
     load "$R/apps/$pv/app.conf" XC
     [[ ${XC[preview_of]:-} == "$parent" ]] || die "$pv exists and is not a preview of $parent: choose another branch name"
@@ -5067,9 +5136,13 @@ cmd_preview_up() { # parent preview [ttl]
     local np=0 pf
     for pf in "$R"/apps/*/app.conf; do grepq -x "preview_of=$parent" "$pf" 2> /dev/null && np=$((np + 1)); done
     ((np < PREVIEW_MAX)) || die "$parent has $np previews already (at most $PREVIEW_MAX): tando preview rm removes one; they also expire"
+    fp pv.checked
     sf=$(mktemp) || die "could not make a temporary file"
     {
-      conf_text PC | grep -Ev '^(job\.|database=|backup=|idle_stop=|db_|job_timeout=|job_spread=|job_missed=)'
+      # the release command (migrations) only when the parent says preview_release = on: with the
+      # parent's external database or services in the env it would change those
+      if [[ ${PC[preview_release]:-off} == on ]]; then conf_text PC; else conf_text PC | grep -Ev '^release(_shell|_timeout)?='; fi |
+        grep -Ev '^(job\.|database=|backup=|idle_stop=|db_|job_timeout=|job_spread=|job_missed=|preview_)'
       echo "backup=off"
       case ${PC[recipe]:-node} in static|container) ;;
         *) k=${PC[idle_stop]:-6h}; [[ $k == off || -z $k ]] && k=6h; echo "idle_stop=$k";; esac
@@ -5077,15 +5150,21 @@ cmd_preview_up() { # parent preview [ttl]
     } > "$sf"
     # (the redirections inside the subshell: on the subshell itself bash keeps the original fds in 10 and 11,
     # and configure's lock on the Caddy sites uses fd 11. PATH: the gate runs the agent with a short one)
-    ( exec < "$sf" > /dev/null; export PATH=/usr/local/sbin:/usr/local/bin:$PATH; cmd_configure "$pv" ) ||
+    # (fd 12 closed in it: the lock stays this process's, never a child's that outlives it)
+    ( exec < "$sf" > /dev/null 12>&-; export PATH=/usr/local/sbin:/usr/local/bin:$PATH CONF_CREATE_ONLY=1; cmd_configure "$pv" ) ||
       { rm -f "$sf"; die "could not create the preview $pv"; }
     rm -f "$sf"
-    # the parent's env, minus what it marked preview_skip (and what the server sets itself)
+    # the parent's env: only what the parent lists in preview_env (none by default: a branch nobody
+    # reviewed runs on a public link), minus preview_skip, and never what reaches the parent's own
+    # data: its database URLs (also with an external database), the paths the server sets, a value
+    # naming its database role or its directory
     skip=",${PC[preview_skip]:-},"
     app "$parent"; local -A E=(); env_load E
     # shellcheck disable=SC2034  # PE is read by env_save through its nameref
     for k in "${!E[@]}"; do
-      if [[ $skip == *",$k,"* ]] || protected_key "$k"; then skipped=$((skipped + 1)); else PE[$k]=${E[$k]}; copied=$((copied + 1)); fi
+      if [[ ,${PC[preview_env]:-}, == *",$k,"* && $skip != *",$k,"* ]] && ! preview_env_parents "$k" "${E[$k]}" "$parent"; then
+        PE[$k]=${E[$k]}; copied=$((copied + 1))
+      else skipped=$((skipped + 1)); fi
     done
     app "$pv"
     env_save PE || die "could not write the env of $pv (disk full?)"
@@ -5125,6 +5204,8 @@ cmd_preview_sweep() {
     e=$(sed -n 's/^preview_expires=//p' "$f")
     [[ $e =~ ^[0-9]+$ ]] && ((e <= t)) || continue
     a=${f%/app.conf}; a=${a##*/}
+    # (only a preview by its name too: <parent>-<slug> of an app that preview_of names)
+    valid_preview_name "$(sed -n 's/^preview_of=//p' "$f" | head -1)" "$a" || continue
     if "$AGENT" destroy "$a" purge > /dev/null 2>&1; then n=$((n + 1)); else bad=$((bad + 1)); echo "tando-agent: could not remove the expired preview $a" >&2; fi
   done
   echo "removed=$n"; echo "failed=$bad"
@@ -6017,7 +6098,19 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
   fi
   app "$1"
   [[ -n ${C[adopted_from]:-} ]] && die "$A was adopted from ${C[adopted_from]}.service: use tando adopt undo"
-  local purge=${2:-} id f
+  local purge=${2:-} id f pv
+  # its previews go first: they hold copies of its keys and env, and an app made later under its
+  # name must not find them
+  if [[ $purge != plan && -z ${C[preview_of]:-} ]]; then
+    for f in "$R"/apps/*/app.conf; do
+      [[ -f $f ]] && grepq -x "preview_of=$A" "$f" || continue
+      pv=${f%/app.conf}; pv=${pv##*/}
+      valid_preview_name "$A" "$pv" || continue
+      "$AGENT" destroy "$pv" purge > /dev/null ||
+        die "could not remove the preview $pv of $A; nothing of $A was removed (tando destroy -a $pv, then again)"
+      echo "preview_destroyed=$pv"
+    done
+  fi
   if [[ $purge == plan ]]; then   # what there is to remove, for the question the client asks
     echo "releases=$(find "$D/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)"
     echo "env=$(grep -c . "$D/env")"

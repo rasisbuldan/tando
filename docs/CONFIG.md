@@ -83,7 +83,9 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 | `io` | number | none | MB/s | Read and write bandwidth on the disk of the app's directory, 1 to 99999 (only where the cgroup io controller is). | `io = 50` |
 | `disk` | size | host `app_max_mb` (8192 MB) | `M`, `G` | The app's disk share (files and database) for the `disk_warn` (80%) and `disk` alerts. Not a hard quota. | `disk = 2G` |
 | `preview_ttl` | time | `7d` | `s`, `m`, `h`, `d` | How long a preview app of this app (`tando preview up`) lives before the server removes it, at most 90 days. | `preview_ttl = 3d` |
-| `preview_skip` | env names | none | | Variables of this app's env a preview does not get (secrets): names separated by commas or spaces. The rest is copied once when the preview is made (docs/PREVIEWS.md). | `preview_skip = STRIPE_SECRET_KEY, SMTP_PASSWORD` |
+| `preview_env` | env names | none | | Variables of this app's env a preview gets, copied once when it is made: names separated by commas or spaces. Nothing else is copied; never `DATABASE_URL`, `DATABASE_URL_DIRECT`, the paths the server sets, or a value naming this app's database or directory (docs/PREVIEWS.md). | `preview_env = API_BASE, FEATURE_FLAGS` |
+| `preview_skip` | env names | none | | Variables a preview never gets, even when `preview_env` names them. | `preview_skip = STRIPE_SECRET_KEY, SMTP_PASSWORD` |
+| `preview_release` | `on` or `off` | `off` | | Whether a preview runs this app's `release` command (migrations) on its deploys. Off: a branch nobody reviewed never migrates what the env points at. | `preview_release = on` |
 | `idle_stop` | time or `on` or `off` | `off` | `s`, `m`, `h` | Scale to zero: stop the app's web process after this long without a request and start it on the next one (`on` is `6h`). Only the web process stops; workers and scheduled jobs keep running. Not for `static` sites or containers. The first request after idle waits while the app starts; no down alert is raised while it is idle (docs/COMMANDS.md, "Scale to zero"). | `idle_stop = 10m` |
 
 ## Assets

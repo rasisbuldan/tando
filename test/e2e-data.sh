@@ -431,17 +431,41 @@ check "D11b status shows the database and the last backup" \
 # D11d. the restore drill: the newest backup restored into a throwaway database and directory
 # shellcheck disable=SC2034  # (read in the check's eval)
 page_before=$(page)
+# what an app can put in its own dump to get more than its own rights when the drill restores it as
+# a superuser: an index on its function (run as the table's owner during the restore), and a
+# function named like a built-in that the row count would call (format(text, name, name) beats
+# pg_catalog's VARIADIC one). Both only fail inside a drill database, never in the live one
+psql_in tando_notes "$pw" tando_notes > "$E/probe.out" <<'SQL'
+CREATE FUNCTION public.drill_probe(x int) RETURNS int LANGUAGE plpgsql IMMUTABLE AS $$
+BEGIN
+  IF current_database() LIKE '%drill%' THEN
+    IF (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user) THEN RAISE EXCEPTION 'PROBE the drill restores as a superuser'; END IF;
+    IF has_database_privilege('public', current_database(), 'CONNECT') THEN RAISE EXCEPTION 'PROBE the drill database is open to PUBLIC'; END IF;
+  END IF;
+  RETURN x;
+END $$;
+CREATE TABLE drill_probe_t (x int);
+INSERT INTO drill_probe_t VALUES (1);
+CREATE INDEX drill_probe_i ON drill_probe_t (public.drill_probe(x));
+CREATE FUNCTION public.format(f text, a name, b name) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+  IF current_database() LIKE '%drill%' THEN RAISE EXCEPTION 'PROBE the drill called the app''s format()'; END IF;
+  RETURN pg_catalog.format(f, a, b);
+END $$;
+SQL
+cat "$E/probe.out" >&2
 "$R" backup now > /dev/null 2>&1
 LIVE_SQL="SELECT coalesce(sum((xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint), 0) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')"
 live_before=$(echo "$LIVE_SQL" | pgsu tando_notes | tail -1)
 "$R" backup drill > "$E/drill.out" 2>&1; rc=$?
 live_after=$(echo "$LIVE_SQL" | pgsu tando_notes | tail -1)
-check "D11d backup drill restores the newest backup and reports it (rc=$rc)" \
+cat "$E/drill.out" >&2
+check "D11d backup drill restores the newest backup and reports it (rc=$rc; it holds an index on an app function and an app format())" \
   eval 'test $rc = 0 && grep -q "tables, $live_before rows" "$E/drill.out" && grep -q "drill .*ok" "$E/drill.out"'
 check "D11e ... the live database was not touched (rows $live_before -> $live_after) and the live data stays" \
   eval 'test "$live_before" = "$live_after" && test "$live_before" -ge 1 && test "$(page)" = "$page_before"'
 check "D11f ... the throwaway database and directory are gone" \
-  eval 'test "$(echo "select count(*) from pg_database where datname like '"'"'tando_drill%'"'"'" | pgsu postgres | tail -1)" = 0 &&
+  eval 'test "$(echo "select count(*) from pg_database where datname like '"'"'%drill%'"'"'" | pgsu postgres | tail -1)" = 0 &&
         test "$(srv "sudo ls -A /opt/tando/apps/notes/shared | grep -c drill")" = 0'
 "$R" backup ls > "$E/bkls.out" 2>&1; "$R" backup ls --json > "$E/bkls.json" 2>&1
 check "D11g backup ls shows the last drill (text and --json)" \
@@ -459,12 +483,41 @@ check "D11j a backup that does not restore: the drill fails, names why and exits
   eval 'test $rc != 0 && grep -q "drill .*failed" "$E/drill-bad.out" && grep -q "pg_restore" "$E/drill-bad.out"'
 check "D11k ... the failure is in the state (the alert reads it), the throwaway database is gone, doctor warns" \
   eval 'srv "sudo grep -qx drill_result=fail /opt/tando/apps/notes/state" &&
-        test "$(echo "select count(*) from pg_database where datname like '"'"'tando_drill%'"'"'" | pgsu postgres | tail -1)" = 0 &&
+        test "$(echo "select count(*) from pg_database where datname like '"'"'%drill%'"'"'" | pgsu postgres | tail -1)" = 0 &&
         srv "sudo $AGENT doctor" 2> /dev/null | grep "app notes" | grep -q "restore drill failed"'
 srv "sudo rm -rf $BK/notes/$idb"
 "$R" backup now > /dev/null 2>&1; "$R" backup drill > "$E/drill-ok2.out" 2>&1
 check "D11l the next drill that works clears it" \
   eval 'srv "sudo grep -qx drill_result=ok /opt/tando/apps/notes/state" && ! srv "sudo $AGENT doctor" 2> /dev/null | grep "app notes" | grep -q "restore drill"'
+# D11o. the throwaway database is never another app's: an app drill-notes has tando_drill_notes
+echo "CREATE DATABASE tando_drill_notes" | pgsu postgres > /dev/null
+echo "CREATE TABLE keep (x int); INSERT INTO keep VALUES (1);" | pgsu tando_drill_notes > /dev/null
+"$R" backup drill > "$E/drill-o.out" 2>&1; rc=$?
+check "D11o a drill of notes (rc=$rc) leaves tando_drill_notes alone (the database of an app drill-notes)" \
+  test "$(echo 'SELECT count(*) FROM keep' | pgsu tando_drill_notes | tail -1)" = 1
+echo "DROP DATABASE tando_drill_notes" | pgsu postgres > /dev/null
+# D11p. a database with the drill's own name that a drill did not make: never dropped, the drill fails
+echo "CREATE DATABASE tdrill_notes" | pgsu postgres > /dev/null
+echo "CREATE TABLE keep (x int); INSERT INTO keep VALUES (1);" | pgsu tdrill_notes > /dev/null
+"$R" backup drill > "$E/drill-p.out" 2>&1; rc=$?
+cat "$E/drill-p.out" >&2
+check "D11p a database tdrill_notes not made by a drill: the drill fails (rc=$rc), says why and leaves it" \
+  eval 'test $rc != 0 && grep -q "not a restore drill" "$E/drill-p.out" && test "$(echo "SELECT count(*) FROM keep" | pgsu tdrill_notes | tail -1)" = 1'
+echo "DROP DATABASE tdrill_notes" | pgsu postgres > /dev/null
+# D11q. an archive that unpacks far larger than it is (it compressed well): the listed size counts,
+# and a disk that cannot hold it (with 256 MB to spare) is refused before anything is unpacked
+"$R" backup now > "$E/bk-big.out" 2>&1
+idg=$(sed -n 's/^backed up [a-z0-9-]*: \([^ ]*\).*/\1/p' "$E/bk-big.out")
+freek=$(srv "df -Pk /opt/tando/apps | awk 'NR == 2 { print \$4 }'")
+srv "sudo sh -c 'd=\$(mktemp -d) && truncate -s $((freek + 1048576))K \$d/big && tar -C \$d -cSzf $BK/notes/$idg/data.tar.gz big && rm -rf \$d'"
+"$R" backup drill > "$E/drill-q.out" 2>&1; rc=$?
+cat "$E/drill-q.out" >&2
+check "D11q a backup that unpacks to more than the free disk: refused before unpacking (rc=$rc)" \
+  eval 'test $rc != 0 && grep -q "not enough free disk space" "$E/drill-q.out" && test "$(srv "sudo ls -A /opt/tando/apps/notes/shared | grep -c drill")" = 0'
+srv "sudo rm -rf $BK/notes/$idg"
+"$R" backup drill > /dev/null 2>&1
+check "D11r ... and the drill of the newest good backup works again" srv "sudo grep -qx drill_result=ok /opt/tando/apps/notes/state"
+echo "DROP TABLE drill_probe_t; DROP FUNCTION public.drill_probe(int); DROP FUNCTION public.format(text, name, name);" | psql_in tando_notes "$pw" tando_notes > /dev/null
 
 # D12. retention: 7 daily plus 4 weekly
 srv "for d in \$(seq 1 40); do i=\$(date -u -d \"-\$d days\" +%Y%m%d)-030000-daily; sudo mkdir -p $BK/notes/\$i;
