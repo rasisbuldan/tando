@@ -997,11 +997,12 @@ apps awake at once), its workers whole.
 once. Host setup `awake_max=` caps the idle apps awake at once: `auto` (the default) is as many as
 fit at their `memory` caps into what admission allows (RAM x `mem_overcommit`) beside the always-on
 apps' caps (at least 1; no cap with `mem_overcommit=0`); `off` or a number. A wake over the cap
-stops the awake idle app that was woken longest ago and has had no open connection to its port
-for a while (Caddy closes its unused one after 30 s) and has been awake at least 60 s. When no
-such app exists the wake that came in still starts (its request is already waiting), and Caddy
-answers every other idle app's cold requests at once with 503 and `Retry-After: 60` until one is
-free (checked every 30 s). Why not always stop the least recently used app: under a crawl that
+stops the awake idle app that was woken longest ago, has been awake at least 60 s and has had
+no traffic on any connection to its port for 60 s (an idle keep-alive keeps nothing awake). When
+no such app exists the wake is refused before the app starts (the unit's `ExecCondition`: the
+unit stays inactive, not failed, and is not marked down; that request gets an error page), and
+Caddy answers every idle app's cold requests at once with 503 and `Retry-After: 60` until one is
+free (checked every 30 s). tando's own starts (a deploy, `tando restart`) are never refused. Why not always stop the least recently used app: under a crawl that
 thrashes, each wake stopping an app someone is using; a 503 to the crawler costs nothing, and a
 busy app is never stopped for another. `wake_rate=` (default 30) caps the wakes of one app a
 minute: over it, that app's cold requests get the same 503 for a minute. The markers are in
@@ -1012,11 +1013,13 @@ minute: over it, that app's cold requests get the same 503 for a minute. The mar
 For a server shared by people who do not trust each other (a hosting operator's node). A profile
 is a named set of limits on the server: `tando host setup <host> profile.small=memory=256M,cpu=25%,tasks=256,workers=0,job_timeout=600,job_every=15m,mail_out=off`.
 An app with `profile = small` in its tando.conf gets them as ceilings: a setting over one refuses
-the deploy and says which (`memory = 512M is over 256M`), and `cpu`, `tasks` and `job_timeout` are
-mandatory (the profile's value when the app sets none). The app's slice holds its web process,
+the deploy and says which (`memory = 512M is over 256M`), and `memory`, `cpu`, `tasks` and
+`job_timeout` are mandatory (the profile's value when the app sets none; the client sends
+`memory = 256M` when tando.conf has none, so set `memory` within the profile). The app's slice holds its web process,
 workers and jobs, so the CPU and task limits cover all of them; the slice and job units take the
 profile's ceilings again when they are written (a rollback to a release from before the profile
-does not raise them). `workers=N` allows at most N workers (0: none: a worker runs while an idle
+does not raise them): CPU, tasks, memory, the number of workers, job timeouts, jobs more frequent
+than `job_every` (left out), and outbound mail (the profile's `off` wins). `workers=N` allows at most N workers (0: none: a worker runs while an idle
 app sleeps), `job_every=` refuses a job scheduled more often, `mail_out=off` closes outbound mail.
 The profile, `bind_ip` and `egress_ip` are the admin's: a deploy key (`tando ci`) cannot change
 or remove them. `tando-agent status` shows the profile as the app row's last column. Changing a
@@ -1033,7 +1036,12 @@ profile on the server applies to each app at its next deploy.
   file. The conntrack mark is tando's: another tool that uses the mark conflicts.
 - `egress_ip = 192.0.2.10` (or `192.0.2.10,2001:db8::10`): the app's outbound connections leave
   from that address of the server (SNAT by its user in nftables). One address of each family; a
-  family without one leaves from the server's default address. Not for container apps yet.
+  family without one leaves from the server's default address. Not for container apps yet. An
+  address is one app's: another app cannot set it, and other apps' packets sent from it (a socket
+  bound to it) are dropped (counter `app_egress`).
+- `profile`, `bind_ip` and `egress_ip` stay as they are when a tando.conf leaves them out;
+  `profile = none` (or `bind_ip = none`, `egress_ip = none`) clears one, for the admin. A preview
+  takes its parent's profile and none of its addresses.
 - `bind_ip = 192.0.2.11`: the app's site is served only on that address of the server. It must not
   be the server's main address (every other site is served there, and Caddy serves only the bound
   sites on a bound address). With HTTPS, Caddy 2.6 cannot open HTTP/3's UDP port on one address
@@ -1042,7 +1050,10 @@ profile on the server applies to each app at its next deploy.
 - Container apps (`recipe = container`): their packets leave from slirp4netns and conmon, which
   run as root inside the app's unit, so the rules by user do not see them. The same rules match
   the app's slice (`socket cgroupv2`) in the chain `containers`, loaded after the main rules and
-  again at each start of the app (a slice made again has a new id; at boot no slice exists). The
+  again at each start of any unit of the app (the app, its pre-flight, its env check: their
+  `ExecStartPre=+tando-agent fw-ctr <app>`, which fails the unit unless the rules are loaded:
+  fail closed), and after every (re)start of nftables (`tando-firewall.service`'s
+  `ExecStartPost`). A slice made again has a new id; at boot no slice exists. The
   metadata address refusal is counted in `app_meta` (also for directory apps).
 - The `cpu_sustained` alert: the app's slice above `cpu_pct` % (default 90) of its CPU limit (of
   one core without one) for `cpu_for` minutes (default 30) in a row; not counted while a deploy,
