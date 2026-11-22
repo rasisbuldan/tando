@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
-import { Bell, LayoutDashboard, PanelLeft, Rocket, Monitor, Moon, Sun } from "lucide-react";
+import { Bell, ChevronRight, LayoutDashboard, PanelLeft, Rocket, Monitor, Moon, Sun } from "lucide-react";
 import { Dot } from "./ui/badge";
 import { Tip } from "./ui/tooltip";
 import { Menu, MenuContent, MenuItem, MenuTrigger } from "./ui/dropdown-menu";
@@ -53,10 +53,14 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
   const treeRef = useRef<HTMLDivElement>(null);
   const [theme, setTheme] = useState<Theme>(getTheme);
   const g = useMemo(() => sidebarGroups(hosts), [hosts]);
+  // Server, Apps and Database fold; which are folded is remembered per browser (the rail shows everything)
+  const [folded, setFolded] = useState<string[]>(() => { try { const v = JSON.parse(lsGet("tando-sidebar-folded") ?? "[]"); return Array.isArray(v) ? v : []; } catch { return []; } });
+  const shut = (k: string) => !collapsed && folded.includes(k);
+  const fold = (k: string) => setFolded((f) => { const n = f.includes(k) ? f.filter((x) => x !== k) : [...f, k]; lsSet("tando-sidebar-folded", JSON.stringify(n)); return n; });
 
   // one role=tree, flat: Up/Down move, Home/End jump, Enter opens
   const onKey = (e: KeyboardEvent) => {
-    const items = Array.from(treeRef.current?.querySelectorAll<HTMLElement>("[role=treeitem]") ?? []);
+    const items = Array.from(treeRef.current?.querySelectorAll<HTMLElement>("[role=treeitem]") ?? []).filter((el) => !el.closest("[hidden]"));
     const i = items.indexOf(document.activeElement as HTMLElement);
     if (i < 0) return;
     const cur = items[i];
@@ -86,8 +90,15 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
 
   const alertCount = g.firing ? { n: g.firing, firing: true } : g.pending ? { n: g.pending, firing: false } : undefined;
 
-  const head = (t: string) => (
-    <div className={cn("mt-4 mb-1 px-2 text-[11px] leading-4 font-semibold tracking-[0.04em] text-muted-foreground uppercase", collapsed && "px-0 text-center")}>{collapsed ? "·" : t}</div>
+  const head = (k: string, t: string, n = 0, firing = false) => collapsed ? (
+    <div className="mt-4 mb-1 px-0 text-center text-[11px] leading-4 font-semibold text-muted-foreground">·</div>
+  ) : (
+    <button type="button" aria-expanded={!shut(k)} aria-controls={`sb-${k}`} onClick={() => fold(k)}
+      className="hov inset-focus mt-4 mb-1 flex h-6 w-full items-center gap-1 rounded-md px-2 text-[11px] leading-4 font-semibold tracking-[0.04em] text-muted-foreground uppercase hover:text-foreground">
+      <ChevronRight size={12} strokeWidth={2} aria-hidden="true" className={cn("shrink-0 transition-transform", !shut(k) && "rotate-90")} />
+      <span>{t}</span>
+      {shut(k) && n > 0 && <span className={cn("ml-auto text-xs leading-4 font-medium normal-case tracking-normal", firing ? "text-fail" : "text-warn")}>{n}</span>}
+    </button>
   );
 
   const body = (
@@ -103,7 +114,8 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
         {page("/", "Overview", LayoutDashboard)}
         {page("/deploys", "Deploys", Rocket)}
         {page("/alerts", "Alerts", Bell, alertCount)}
-        {head("Server")}
+        {head("server", "Server", g.servers.reduce((t, r) => t + (r.firing || r.pending), 0), g.servers.some((r) => r.firing > 0))}
+        <div id="sb-server" role="group" hidden={shut("server")}>
         {hosts === null && !collapsed && <div aria-busy="true" className="h-16" />}
         {g.servers.map((r) => {
           const n = r.firing || r.pending, to = `/s/${encodeURIComponent(r.host)}`;
@@ -121,7 +133,9 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
           );
         })}
         {hosts !== null && g.servers.length === 0 && !collapsed && <p className="m-0 px-2 text-[13px] text-muted-foreground">No servers. Add one with <code>tando host add</code>.</p>}
-        {g.apps.length > 0 && head("Apps")}
+        </div>
+        {g.apps.length > 0 && head("apps", "Apps", g.apps.reduce((t, a) => t + a.n, 0), true)}
+        <div id="sb-apps" role="group" hidden={shut("apps")}>
         {g.apps.map((a) => {
           const to = `/s/${encodeURIComponent(a.host)}/${a.app}`;
           return (
@@ -138,8 +152,11 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
             </Tip>
           );
         })}
-        {g.dbs.length > 0 && head("Database")}
+        </div>
+        {g.dbs.length > 0 && head("database", "Database")}
+        <div id="sb-database" role="group" hidden={shut("database")}>
         {g.dbs.map((d) => <DbRow key={d.host + "/" + d.app} host={d.host} app={d.app} showHost={g.multi} collapsed={collapsed} />)}
+        </div>
       </div>
       <div className={cn("flex h-12 shrink-0 items-center gap-2 border-t border-border px-3", collapsed && "justify-center px-0")}>
         <Menu>

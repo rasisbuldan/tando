@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router";
+import { Link, useParams, useSearchParams } from "react-router";
+import { cn } from "@/lib/cn";
 import { Play } from "lucide-react";
 import { AppsTable } from "@/components/apps-table";
 import { Badge } from "@/components/ui/badge";
@@ -30,8 +31,12 @@ function Gauge({ pct, label }: { pct: number | null; label: string }) {
   );
 }
 
+const TABS = [["overview", "Overview"], ["apps", "Apps"], ["metrics", "Metrics"]] as const;
+
 export default function ServerPage() {
   const { host = "" } = useParams();
+  const [sp] = useSearchParams();
+  const tab = TABS.some(([k]) => k === sp.get("tab")) ? sp.get("tab")! : "overview";
   const [range, setRange] = useState<RangeKey>("24h");
   const st = usePoller(snapshotPoller(host, undefined, range));
   const nowS = Math.floor(useNowMs(30000) / 1000);
@@ -74,7 +79,22 @@ export default function ServerPage() {
       {v && !v.reachable && (
         <div className="mb-4"><SectionError message={`${host} not answering: ${v.error ?? "ssh failed"}. Check ssh access, then retry.${d ? ` Showing data from ${fmtTime(v.fetchedAtS)}.` : ""}`} onRetry={refreshAll} /></div>
       )}
-      {d && s && (
+      <div role="tablist" aria-label="Server" className="mb-4 flex h-10 items-end gap-4 overflow-x-auto border-b border-border">
+        {TABS.map(([k, label]) => (
+          <Link key={k} to={k === "overview" ? `/s/${encodeURIComponent(host)}` : `/s/${encodeURIComponent(host)}?tab=${k}`} role="tab" aria-selected={tab === k}
+            className={cn("hov inset-focus flex h-10 items-center border-b-2 text-[13px] leading-5 font-medium whitespace-nowrap", tab === k ? "border-foreground text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>{label}</Link>
+        ))}
+      </div>
+      {tab === "metrics" && d && s && (
+        <>
+          <Section title="History">
+            <div className="mb-4"><RangeTabs label="Range" value={range} onChange={setRange} items={["1h", "24h", "7d"] as RangeKey[]} /></div>
+            {hm ? <HostSections m={hm} d={d} range={range} /> : <Empty>No history yet. The server samples once a minute once tando-metrics runs (tando host setup).</Empty>}
+            <p className="mt-2 mb-0 text-xs text-muted-foreground">Load is the 1-minute average; the dashed line is the number of cores. CPU is the share of all cores; steal is time the hypervisor kept. Disk is the filesystem that holds /var/lib/tando. Times are the server's clock, GMT.</p>
+          </Section>
+        </>
+      )}
+      {tab === "overview" && d && s && (
         <>
           <Section title="Now">
             <div className="grid grid-cols-1 gap-3 min-[641px]:grid-cols-2 min-[1024px]:grid-cols-4">
@@ -84,11 +104,6 @@ export default function ServerPage() {
               <MetricCard label="Headroom" value={hr ? fmtPct(hr.pct) : DASH} sub={hr ? `caps ${fmtBytes(hr.capBytes)} of ${fmtBytes(hr.ramBytes)} RAM` : "no memory caps"} />
             </div>
           </Section>
-          <Section title="History">
-            <div className="mb-4"><RangeTabs label="Range" value={range} onChange={setRange} items={["1h", "24h", "7d"] as RangeKey[]} /></div>
-            {hm ? <HostSections m={hm} d={d} range={range} /> : <Empty>No history yet. The server samples once a minute once tando-metrics runs (tando host setup).</Empty>}
-            <p className="mt-2 mb-0 text-xs text-muted-foreground">Load is the 1-minute average; the dashed line is the number of cores. CPU is the share of all cores; steal is time the hypervisor kept. Disk is the filesystem that holds /var/lib/tando. Times are the server's clock, GMT.</p>
-          </Section>
           <Section title="Disk">
             <Card>
               <div className="mb-2 flex items-center justify-between text-[13px]"><span>{fmtPct(diskPct)}<span className="text-muted-foreground"> · {fmtBytes(s.disk_used_bytes)} of {fmtBytes(s.disk_total_bytes)}</span></span><span className="text-muted-foreground">full in {DASH}</span></div>
@@ -97,7 +112,7 @@ export default function ServerPage() {
           </Section>
         </>
       )}
-      {d && (
+      {tab === "overview" && d && (
         <Section title="Alerts">
           {hostAlerts.length === 0 ? <Empty>No alerts firing.</Empty> : (
             <ul className="m-0 list-none divide-y divide-border overflow-hidden rounded-lg border border-border bg-card p-0">
@@ -112,6 +127,8 @@ export default function ServerPage() {
           )}
         </Section>
       )}
+      {tab === "overview" && (
+        <>
       <Section title="Doctor" aside={doctor.result && !doctor.error ? <span className="text-xs text-muted-foreground">last run {fmtTime(doctor.result.ran_at ? Date.parse(doctor.result.ran_at) / 1000 : null)}</span> : null}>
         {doctor.error ? <SectionError message={`${doctor.error.message}`} onRetry={doctor.run} />
           : !doctor.result ? <Empty>Not run yet. <Command cmd={`tando doctor ${host}`} /></Empty>
@@ -141,7 +158,9 @@ export default function ServerPage() {
             </ul>
           )}
       </Section>
-      {d && <Section title="Apps"><AppsTable rows={rows} nowS={nowS} alertsByHost={alertsByHost} showServer={false} /></Section>}
+        </>
+      )}
+      {tab === "apps" && d && <Section title="Apps"><AppsTable rows={rows} nowS={nowS} alertsByHost={alertsByHost} showServer={false} /></Section>}
     </>
   );
 }
