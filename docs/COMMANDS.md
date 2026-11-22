@@ -608,7 +608,7 @@ default 14100-14999; the ranges must not overlap or hold 2019 or 5432), `uid_min
 (new app users' ids, default 30000-39999), `mem_overcommit=` (default 1.5; 0 turns the check off),
 `idle_awake=` (0-100, default 20: admission counts an app with `idle_stop` at 2 MB plus this % of its memory),
 `job_slots=`, `backup_window=HH:MM-HH:MM` (default 01:00-05:00, the server's time),
-`backup_jobs=1|2` (backups at once, default 1), `log_budget=` (all apps' logs together, default
+`backup_jobs=1` to `4` (backups at once, default 1), `log_budget=` (all apps' logs together, default
 `auto`: 20% of the log file system). Without `apps_domain`, links use
 `<ip-with-dashes>.sslip.io` (an outside service). `--deploy` and `--insecure-test` are not in the
 usage (docs/DEV-NOTES.md, mismatch 7). `care=on|off`: host care's security updates (on by default where tando
