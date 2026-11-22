@@ -74,8 +74,9 @@ check "N11 probe header root 600, site files root:caddy 640" \
 # and sends at most dns_rate DNS packets a second; its journald runs in its slice.
 check "K1a alpha's /tmp is a tmpfs of 64M ($(x 'df --output=fstype,size /tmp | tail -1' | tr -s ' '))" \
   eval 'x "df --output=fstype,size /tmp | tail -1" | grep -q "^tmpfs *65536$"'
-o=$(x 'head -c 80M /dev/zero > /tmp/big 2>&1; echo rc=$?; rm -f /tmp/big')
-check "K1b writing 80 MB into it fails, full (ENOSPC) ($(echo $o | cut -c1-100))" eval 'echo "$o" | grep -q "No space left" && echo "$o" | grep -q "rc=1"'
+o=$(x 'head -c 80M /dev/zero > /tmp/big; echo rc=$? size=$(stat -c %s /tmp/big); rm -f /tmp/big')
+check "K1b writing 80 MB into it fails, full at 64M (ENOSPC) ($(echo $o | cut -c1-140))" \
+  eval 'echo "$o" | grep -q "No space left" && echo "$o" | grep -q "rc=1 size=67108864"'
 check "K1c alpha's journald runs in alpha's slice ($(srv 'systemctl show -P ControlGroup systemd-journald@tando-alpha')): its log flood counts against alpha" \
   eval 'srv "systemctl show -P ControlGroup systemd-journald@tando-alpha" | grep -q "/tando.slice/tando-alpha.slice/"'
 ctr() { srv "sudo nft list counter inet tando $1" | sed -n 's/.*packets \([0-9]*\).*/\1/p'; }
@@ -94,12 +95,12 @@ JS
 # lint: allow RL06 alpha's own /tmp (a tmpfs of its unit), no other user can reach it
 x "echo $(base64 < "$E/k2.js" | tr -d '\n') | base64 -d > /tmp/k2.js; node /tmp/k2.js" > "$E/k2b.out" &
 xp=$!; sleep 1
-bv=$(get bravo); wait $xp
+bv=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://bravo.localhost:$HP/"); wait $xp
 o=$(cat "$E/k2b.out"); c1=$(ctr app_conn)
 check "K2b alpha opens 40 connections at once: at most 20 connect, the rest refused ($o; counter ${c0:-?} -> ${c1:-?})" \
   eval 'ok=$(echo "$o" | sed -n "s/.*ok=\([0-9]*\).*/\1/p"); [ -n "$ok" ] && [ "$ok" -le 20 ] && [ "$ok" -ge 10 ] &&
         echo "$o" | grep -q "bad=[1-9]" && [ "${c1:-0}" -gt "${c0:-0}" ]'
-check "K2c bravo answers through Caddy meanwhile ($bv): Caddy's connections are not alpha's" eval 'echo "$bv" | grep -q "^bravo"'
+check "K2c bravo answers through Caddy meanwhile ($bv): Caddy's connections are not alpha's" test "$bv" = 200
 d0=$(ctr app_dns)
 x 'for i in $(seq 40); do echo q > /dev/udp/127.0.0.53/53; done 2> /dev/null; echo sent' > /dev/null
 d1=$(ctr app_dns)
