@@ -24,6 +24,7 @@ Read in this order if you are new.
 | [DEV-NOTES.md](DEV-NOTES.md) | Where the docs and the code differ (for developers) |
 | [TESTING.md](TESTING.md) | How to run the test suites |
 | [RELEASING.md](RELEASING.md) | How a release is made |
+| [release-notes/0.3.0.md](release-notes/0.3.0.md) | What is new in 0.3.0, upgrade steps, things to check before deploying database apps |
 | [SECURITY-REVIEW-CI.md](SECURITY-REVIEW-CI.md), [SECURITY-REVIEW-2.md](SECURITY-REVIEW-2.md), [FAULT-REVIEW.md](FAULT-REVIEW.md), [VERIFY.md](VERIFY.md) | Review reports on security and faults |
 | [CODE-REVIEW.md](CODE-REVIEW.md), [UX-REVIEW.md](UX-REVIEW.md), [UX-REVIEW-2.md](UX-REVIEW-2.md) | Review reports on code and usability |
 
