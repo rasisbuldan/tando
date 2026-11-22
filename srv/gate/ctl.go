@@ -8,9 +8,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -506,6 +509,25 @@ func (g *Gate) installDrop(want []byte) error {
 // another way in for any of them).
 var ctlConns = []string{"127.0.0.1", "10.11.12.13", "203.0.113.10"}
 
+// nodeAddrs: the node's own addresses (a Match Address or LocalAddress block may name one of
+// them), besides ctlConns; at most 16, no loopback or link-local.
+func (g *Gate) nodeAddrs() []string {
+	if g.Addrs != nil {
+		return g.Addrs()
+	}
+	var r []string
+	as, _ := net.InterfaceAddrs()
+	for _, a := range as {
+		if n, ok := a.(*net.IPNet); ok && n.IP.IsGlobalUnicast() && len(r) < 16 {
+			ip := n.IP.String()
+			if !slices.Contains(ctlConns, ip) {
+				r = append(r, ip)
+			}
+		}
+	}
+	return r
+}
+
 // ctlCheck: what sshd will do for tando-ctl, all files and drop-ins together, is the drop-in's
 // (certificates of the CA, principals from the gate, no other way in). Run by ctl-setup, by
 // `tando-gate admin ctl-check` (tando doctor) and by every host setup while the mode is on.
@@ -523,7 +545,7 @@ func (g *Gate) ctlCheck() error {
 	if len(ports) == 0 {
 		ports = []string{"22"}
 	}
-	for _, a := range ctlConns {
+	for _, a := range append(append([]string{}, ctlConns...), g.nodeAddrs()...) {
 		for _, port := range ports {
 			spec := "user=" + ctlUser + ",host=" + a + ",addr=" + a + ",laddr=" + a + ",lport=" + port
 			o, err := g.Env.Run.Output(context.Background(), run.Cmd{Argv: []string{"sshd", "-T", "-C", spec}, Timeout: 30 * time.Second})
@@ -567,7 +589,22 @@ func ctlEffective(t []byte, gate, dir string) string {
 	got := map[string]string{}
 	for l := range strings.SplitSeq(string(t), "\n") {
 		k, v, _ := strings.Cut(strings.TrimSpace(l), " ")
-		got[strings.ToLower(k)] = v
+		k = strings.ToLower(k)
+		got[k] = v
+		// the environment a session may get: nothing that sets or accepts the variable the
+		// certificate record travels in (ExposeAuthInfo's SSH_USER_AUTH)
+		switch k {
+		case "setenv":
+			if strings.Contains(v, "SSH_USER_AUTH") {
+				return "setenv " + v
+			}
+		case "acceptenv":
+			for _, p := range strings.Fields(v) {
+				if ok, _ := path.Match(p, "SSH_USER_AUTH"); ok {
+					return "acceptenv " + p
+				}
+			}
+		}
 	}
 	for _, w := range want {
 		v, ok := got[w.k]

@@ -268,6 +268,18 @@ func TestCtlEffective(t *testing.T) {
 			t.Errorf("%s: %q", to, why)
 		}
 	}
+	if why := ctlEffective([]byte(good+"setenv SSH_USER_AUTH=/tmp/x\n"), gate, dir); why != "setenv SSH_USER_AUTH=/tmp/x" {
+		t.Errorf("setenv: %q", why)
+	}
+	// acceptenv patterns that match SSH_USER_AUTH (the others, LANG, LC_*, are fine)
+	for _, p := range []string{"*", "SSH_*", "SSH_USER_AUTH", "SSH_USER_A?TH"} {
+		if why := ctlEffective([]byte(good+"acceptenv LANG\nacceptenv "+p+"\n"), gate, dir); why != "acceptenv "+p {
+			t.Errorf("acceptenv %s: %q", p, why)
+		}
+	}
+	if why := ctlEffective([]byte(good+"acceptenv LANG\nacceptenv LC_*\nsetenv LC_ALL=C\nsetenv LANG=C\n"), gate, dir); why != "" {
+		t.Errorf("harmless env: %s", why)
+	}
 	// an sshd without GSSAPI does not print it: fine
 	if why := ctlEffective([]byte(strings.Replace(good, "gssapiauthentication no\n", "", 1)), gate, dir); why != "" {
 		t.Errorf("no gssapi line: %s", why)
@@ -426,5 +438,29 @@ func TestParseCAKeyRSASize(t *testing.T) {
 	}
 	if _, ok := ParseCAKey("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC+mJa+8gFvcIlhd+fCT+dY8JVb8hAHL5u8RlFS6ffX+hefMd7a9gHRiJ+dEnJpo04G2/WYewaBWAVMQGWja5O5YAva6eg0Pc6RuJ510ZzmqGO3KS9st4x1krKaF239ex3fQb8v4bGDrBmee6GtwBfnhzHMKBEPyEFLaYhoGG76wMOvXpWiNFQRYJzVA5X6KRddmzdBeGtn+tMMKquowF9NUVILN6RBi6axZVARcHww0s8M1p7SM3x02+PuQQxxtk3eyOnGuHQGc7a/oZ8t5z613RhsvIGSJ9L5ijzKHtif5FIwgLxLktCfgZHo5FzUXSznSUbleEMGSuQ+0sqq6My/nOdJZQ0llYfFWr+8LcwjhUT0XY8ezChaTn0w3gLWh884y9K+syN86K1u9JAuqwVYv7KXeXwPMZ1A7LsTklD9pXjRuEt14RehTcNSiwMcc05VCXxgTIacdRzP4YmSlSzvFCl61QtMS+5GhfJV5sTvIw2ZPRC40xMG/Mrt+Nq0Dic="); !ok {
 		t.Error("a 3072-bit RSA CA was refused")
+	}
+}
+
+// R2: a Match block on the node's own address is looked at too
+func TestCtlCheckNodeAddress(t *testing.T) {
+	g := ctlGate(t)
+	g.Addrs = func() []string { return []string{"198.51.100.7"} }
+	good := "authenticationmethods publickey\npubkeyauthentication yes\npasswordauthentication no\n" +
+		"kbdinteractiveauthentication no\nhostbasedauthentication no\n" +
+		"authorizedkeysfile none\nauthorizedkeyscommand none\ntrustedusercakeys " + g.ctlDir() + "/ca.pub\n" +
+		"revokedkeys " + g.ctlDir() + "/revoked.krl\nauthorizedprincipalsfile none\n" +
+		"authorizedprincipalscommand " + g.P.Gate + " ctl-principals %s %i\n" +
+		"authorizedprincipalscommanduser tando-keys\nforcecommand none\nexposeauthinfo yes\ndisableforwarding yes\npermittty no\n"
+	g.Env.Run = &fakeRun{out: func(a []string) ([]byte, error) {
+		if len(a) == 2 {
+			return []byte("port 22\n"), nil
+		}
+		if strings.Contains(a[3], "addr=198.51.100.7,") {
+			return []byte(strings.Replace(good, "forcecommand none", "forcecommand /bin/sh", 1)), nil
+		}
+		return []byte(good), nil
+	}}
+	if err := g.ctlCheck(); err == nil || !strings.Contains(err.Error(), "from 198.51.100.7") {
+		t.Fatalf("%v", err)
 	}
 }
