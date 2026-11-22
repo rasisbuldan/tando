@@ -32,6 +32,8 @@ type AppInfo struct {
 	Current    string `json:"current,omitempty"`
 	LastGood   string `json:"last_good,omitempty"`
 	Phase      string `json:"phase,omitempty"`
+	Hold       string `json:"hold,omitempty"`       // held (app.hold): pause or suspend
+	HoldSince  int64  `json:"hold_since,omitempty"` // when, unix seconds
 	AllocMB    int64  `json:"alloc_mb"`
 	WorkersMB  int64  `json:"alloc_workers_mb"`
 	AdmittedMB int64  `json:"admitted_mb"`
@@ -79,6 +81,10 @@ func (c *Ctl) appInfos(ctx context.Context, names []string, h map[string]string)
 			Current: out.Clean(st["current"]), LastGood: out.Clean(st["last_good"]), Phase: out.Clean(st["phase"]),
 			AllocMB: web, WorkersMB: workers, AdmittedMB: usage.Admitted(conf, ia), CPU: out.Clean(conf["cpu"]),
 			Awake24h: awake[a]}
+		if h := st["hold"]; h != "" {
+			ai.Hold = out.Clean(h)
+			ai.HoldSince, _ = strconv.ParseInt(st["hold_since"], 10, 64)
+		}
 		if t, mem, cpu, ok := c.lastSample(a); ok {
 			mb, ms := mem>>20, cpu/1000
 			ai.MemMB, ai.CPUms, ai.SampledAt = &mb, &ms, t

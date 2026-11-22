@@ -98,6 +98,7 @@ func Allowed(id Ident, r *Request) *Error {
 // Serve answers one request: it writes the response and returns the exit status (0: ok).
 func (c *Ctl) Serve(ctx context.Context, id Ident, in []byte, w io.Writer) int {
 	start := c.Env.Now()
+	ctx = withIdent(ctx, id)
 	r, perr := Parse(in)
 	var resp Response
 	switch {
