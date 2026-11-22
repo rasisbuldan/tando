@@ -29,7 +29,7 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 |---|---|---|---|---|---|
 | `app` | name | the directory name (`tando init`) | | The app's name on the server: starts with a lower case letter, then lower case letters, digits and `-`; 2 to 24 characters (the server makes a group `tando-m-<app>`, and a group name stops at 32). | `app = shop` |
 | `host` | text | the only registered server | | The server (`tando host ls`) this project deploys to; `-H` overrides it. | `host = vps` |
-| `recipe` | choice | detected by `tando init` | | How the app is built and run: `node`, `next`, `static`, `python` or `container`. | `recipe = next` |
+| `recipe` | choice | detected by `tando init` | | How the app is built and run: `node`, `next`, `static`, `python`, `container` or `workerd` (the Workers API, one workerd process per app; opt-in, docs/COMMANDS.md "Workers apps"). | `recipe = next` |
 | `node` | number | `.nvmrc`, then `engines.node`, then the current LTS | major version | The Node.js major the server installs and runs the app with. | `node = 24` |
 
 ## Build
@@ -87,6 +87,7 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 | `preview_skip` | env names | none | | Variables a preview never gets, even when `preview_env` names them. | `preview_skip = STRIPE_SECRET_KEY, SMTP_PASSWORD` |
 | `preview_release` | `on` or `off` | `off` | | Whether a preview runs this app's `release` command (migrations) on its deploys. Off: a branch nobody reviewed never migrates what the env points at. | `preview_release = on` |
 | `idle_stop` | time or `on` or `off` | `off` | `s`, `m`, `h` | Scale to zero: stop the app's web process after this long without a request and start it on the next one (`on` is `6h`). Only the web process stops; workers and scheduled jobs keep running. Not for `static` sites or containers. The first request after idle waits while the app starts; no down alert is raised while it is idle (docs/COMMANDS.md, "Scale to zero"). | `idle_stop = 10m` |
+| `node_lite` | `true` or `false` | `false` | | V8's `--lite-mode` for the app's `node` (recipes `node`, `next`): no optimizing JIT, a few MB less memory once warm, slower under load. For small, low-traffic apps. `tando init` never sets it (docs/COMMANDS.md, "node_lite"). | `node_lite = true` |
 
 ## Assets
 

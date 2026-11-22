@@ -28,6 +28,14 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   node's CA with the mode's principal, or nothing; `tando doctor` and every host setup check that
   sshd still admits `tando-ctl` by certificate only. Request ids, quotas and eviction are per
   principal. The laptop CLI is unchanged.
+- New: `node_lite = true` in tando.conf (node and next recipes, opt-in, never written by
+  `tando init`): V8's `--lite-mode`: a few MB less warm (25.1 to 23.1 MB PSS measured on a
+  hello-world Express app; the audit's 24 to 13 MB RSS was not reproduced), slower under load (docs/COMMANDS.md, "node_lite").
+- New: `recipe = workerd`, opt-in, for apps written for the Workers API (a `fetch` handler).
+  One workerd process per app under the app's unit and limits, a pinned workerd installed by
+  `tando up` (checksum-verified), env variables as bindings. `tando init` suggests it for a
+  `wrangler.toml` project. No Node APIs beyond nodejs_compat, no file system (docs/COMMANDS.md,
+  "Workers apps").
 - bench: `bench/fleet.sh` (100-app fleet and reboot test on a real server), `bench/rebuild-drill.sh` (rebuild and offsite restore drill) and `bench/container-egress.sh` (container apps bypass the per-uid network rules: measured, fix proposed); docs/THREAT-MODEL.md.
 - Preview apps: `tando preview up [--branch B] [--ttl 7d]` deploys this project as
   `<app>-<branch>` (24 characters at most; a checksum keeps two branches apart) on its own link:
@@ -196,6 +204,14 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   `127.0.0.1:<port>`; other links open in the default browser. The menu bar reads `tando-dash`'s
   `ls-all.json` when it is fresher than its interval, instead of running `tando ls --all --json`.
   "Open status in Terminal" uses the live view, `tando status --follow`.
+- Origin mode, for a server behind a CDN or edge proxy: `tando host setup <host> origin=cloudflare`
+  (or `origin=custom:<ranges>`). Caddy (2.7+; refused with a message on older) trusts the client
+  address the edge forwards only from the edge's ranges, so the app's `X-Real-IP` and the request
+  log show the visitor, not the edge; the per-client firewall limits exempt the edge; an optional
+  `origin_lock=on` answers ports 80/443 only to the edge (ssh is never touched); the Cloudflare
+  ranges are refreshed daily with the last good list kept and an alert after three failures;
+  `origin_cert=`/`origin_key=` serve an origin certificate from files. Off unless set. Docs:
+  docs/COMMANDS.md "Behind an edge: origin mode". Suite `e2e-origin`.
 
 ### New: the dashboard add-on (not in the main archive)
 

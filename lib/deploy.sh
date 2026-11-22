@@ -40,6 +40,7 @@ configure() {
     [ -n "${C_max_requests:-}" ] && printf 'max_requests=%s\n' "$C_max_requests"
     [ -n "${C_stop_timeout:-}" ] && printf 'stop_timeout=%s\n' "$C_stop_timeout"
     [ -n "${C_hold:-}" ] && printf 'hold=%s\n' "$C_hold"
+    [ -n "${C_node_lite:-}" ] && printf 'node_lite=%s\n' "$C_node_lite"
     [ -n "${C_idle_stop:-}" ] && printf 'idle_stop=%s\n' "$C_idle_stop"
     [ -n "${C_response_timeout:-}" ] && printf 'response_timeout=%s\n' "$C_response_timeout"
     [ -n "${C_body_max:-}" ] && printf 'body_max=%s\n' "$C_body_max"

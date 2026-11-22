@@ -65,6 +65,14 @@ case_ vite-vue "static|$B|dist|||true" "detected: Vite + Vue (vite in package.js
 case_ vite-react "static|$B|build|||true" "detected: Vite + React (vite in package.json, react-router-dom"
 case_ vite-svelte "static|$B|dist|||" "detected: Vite + Svelte (vite in package.json, package-lock.json)"
 case_ astro-static "static|$B|dist|||" "detected: Astro (static) (astro in package.json"
+# Workers API apps: wrangler config (its main), or an entry that exports a fetch handler and
+# starts no server
+case_ workerd-hello "workerd|||src/index.js||" "detected: Cloudflare Workers (wrangler.toml, main src/index.js), build: none, start: src/index.js, output: ."
+n=$((n + 1)); rm -rf "${T:?}/wb"; mkdir -p "$T/wb"
+printf 'export default {\n  async fetch(req) { return new Response("hi"); },\n};\n' > "$T/wb/index.js"
+(cd "$T/wb" && "$ROOT/bin/tando" init < /dev/null) > "$T/wb.out" 2>&1
+grep -qx 'recipe = workerd' "$T/wb/tando.conf" 2> /dev/null && grep -qx 'start = index.js' "$T/wb/tando.conf" ||
+  bad "workerd (no wrangler config): not detected from  export default { fetch }: $(tr '\n' ' ' < "$T/wb.out")"
 # Node SSR frameworks
 case_ astro-node "node|$B||HOST=127.0.0.1 node dist/server/entry.mjs|true|" "detected: Astro (SSR) (@astrojs/node in package.json"
 case_ nuxt "node|$B|.output|node server/index.mjs||" "detected: Nuxt (nuxt in package.json, package-lock.json), build: npm run build, start: node server/index.mjs, output: .output"
