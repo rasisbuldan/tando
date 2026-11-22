@@ -140,8 +140,10 @@ t1=$(since)
 check "C22 an app certificate restarts its app (request_id restart-0001)" eval 'ok && [ "$t1" != "$t0" ] && [ "$(jv "d[\"result\"][\"healthy\"]")" = 1 ]'
 ctl a '{"v":1,"verb":"app.restart","app":"shop","request_id":"restart-0001"}'
 check "C23 the same request id again: the stored response, nothing restarted" eval 'ok && [ "$(jv "d[\"replayed\"]")" = True ] && [ "$(since)" = "$t1" ]'
-ctl w '{"v":1,"verb":"app.stop","app":"shop","request_id":"restart-0001"}'
-check "C24 the same id for another request is refused (conflict)" eval '[ "$(code)" = conflict ] && [ "$("$SSH" "systemctl is-active tando-shop.service")" = active ]'
+ctl a '{"v":1,"verb":"app.stop","app":"shop","request_id":"restart-0001"}'
+check "C24 the same id for another request of the same principal is refused (conflict)" eval '[ "$(code)" = conflict ] && [ "$("$SSH" "systemctl is-active tando-shop.service")" = active ]'
+ctl r '{"v":1,"verb":"app.status","app":"shop","request_id":"restart-0001"}'
+check "C24b another principal's request with that id is its own (ids are per principal)" ok
 audits() { "$SSH" 'sudo grep -c "env-set" /var/log/tando/audit.log' 2> /dev/null || echo 0; }
 n0=$(audits)
 J='{"v":1,"verb":"app.env.set","app":"shop","request_id":"env-par-0001","args":{"vars":{"GREETING":"hi there"}}}'

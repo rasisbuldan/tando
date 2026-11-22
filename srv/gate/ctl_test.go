@@ -2,6 +2,7 @@ package gate
 
 import (
 	"bytes"
+	"embed"
 	"encoding/base64"
 	"os"
 	"path/filepath"
@@ -95,8 +96,28 @@ func TestParseCAKey(t *testing.T) {
 
 // (a ctl login, the test process as its root mode)
 // the test runs as the ctl user (the SSH_USER_AUTH file must be the login's own)
+//
+//go:embed testdata/ctl/*.pub
+var ctlFixtures embed.FS
+
+func fixture(t *testing.T, name string) []byte {
+	b, err := ctlFixtures.ReadFile("testdata/ctl/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// (as root, in the Linux test container, the ctl user is 995 and the auth file is chowned to it)
+func ctlUID() int {
+	if os.Getuid() == 0 {
+		return 995
+	}
+	return os.Getuid()
+}
+
 var (
-	cuid  = os.Getuid()
+	cuid  = ctlUID()
 	cu    = strconv.Itoa(cuid)
 	cuids = cu + " " + cu + " " + cu + " " + cu
 )
@@ -112,12 +133,11 @@ func ctlTree(t *testing.T, g *Gate, loginCmd string, loginUIDs string, cert ...s
 	if c != "" {
 		g.P.AuthTmp = t.TempDir()
 		auth := filepath.Join(g.P.AuthTmp, "sshauth.abc123")
-		pub, err := os.ReadFile(filepath.Join("testdata", "ctl", c+"-cert.pub"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		f := strings.Fields(string(pub))
+		f := strings.Fields(string(fixture(t, c+"-cert.pub")))
 		write(t, auth, "publickey "+f[0]+" "+f[1]+"\n")
+		if os.Getuid() == 0 {
+			os.Chown(auth, cuid, cuid)
+		}
 		env = "SSH_USER_AUTH=" + auth
 	}
 	sessionTree(t, g, func(p map[string]any) {
@@ -130,7 +150,7 @@ func ctlGate(t *testing.T) *Gate {
 	g, _ := testGate(t)
 	write(t, g.P.Passwd, "root:x:0:0::/root:/bin/bash\ntando-ctl:x:"+cu+":"+cu+"::"+filepath.Join(g.P.Root, "ctl")+":"+g.P.Gate+
 		"\ntando-d-alpha:x:990:990::"+filepath.Join(g.P.CI, "alpha")+":"+g.P.Gate+"\n")
-	ca, _ := os.ReadFile(filepath.Join("testdata", "ctl", "ca.pub"))
+	ca := fixture(t, "ca.pub")
 	write(t, filepath.Join(g.P.Root, "ctl", "ca.pub"), string(ca))
 	write(t, filepath.Join(g.appDir("alpha"), "app.conf"), "port=4100\n")
 	in := filepath.Join(t.TempDir(), "in")
@@ -323,7 +343,7 @@ func TestCtlRootNeedsTheCertificate(t *testing.T) {
 }
 
 func TestParseCert(t *testing.T) {
-	pub, _ := os.ReadFile(filepath.Join("testdata", "ctl", "app-cert.pub"))
+	pub := fixture(t, "app-cert.pub")
 	f := strings.Fields(string(pub))
 	blob, _ := base64.StdEncoding.DecodeString(f[1])
 	c, ok := ParseCert(blob)
