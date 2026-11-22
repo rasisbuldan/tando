@@ -178,6 +178,15 @@ check "C34 a write certificate destroys the app" eval 'ok && ! "$SSH" "test -e /
 ctl a '{"v":1,"verb":"app.status","app":"shop"}'
 check "C35 the app's principal no longer logs in once the app is gone" denied
 settle
+check "C37 the sshd check passes as set up (tando-gate admin ctl-check, as tando doctor runs it)" \
+  "$SSH" 'sudo -n /opt/tando/bin/tando-gate admin ctl-check | grep -qx ctl=ok'
+# another drop-in, read first, that would let tando-ctl in by password: the check must see it
+"$SSH" 'printf "Match User tando-ctl\n\tPasswordAuthentication yes\n\tAuthenticationMethods any\n" | sudo tee /etc/ssh/sshd_config.d/01-other.conf > /dev/null'
+"$SSH" 'sudo -n /opt/tando/bin/tando-gate admin ctl-check' > "$E/check.out" 2>&1; rc=$?
+"$SSH" 'sudo -n /opt/tando/bin/tando-agent doctor' > "$E/doctor.out" 2>&1
+check "C38 an sshd file that opens another way in for tando-ctl is caught (ctl-check fails, doctor says so)" eval '
+  [ $rc != 0 ] && grep -q "authenticationmethods any" "$E/check.out" && grep -q "control plane" "$E/doctor.out" && grep "control plane" "$E/doctor.out" | grep -q fail'
+"$SSH" 'sudo rm -f /etc/ssh/sshd_config.d/01-other.conf'
 "$R" host setup test public_port="$T_HTTP_PORT" ctl_ca=off > "$E/setup3.log" 2>&1
 ctl w "$INV"
 check "C36 host setup ctl_ca=off: the write certificate no longer logs in" denied

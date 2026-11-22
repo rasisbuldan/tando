@@ -7,12 +7,14 @@ ctl/verbs.go releases	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent rele
 daemon/daemon.go runShow	systemctl	systemctl show -P ActiveState <param unit: callers pass constants or validated values>
 gate/admin.go install	useradd	useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment "tando sshd reads CI keys as this user" -- tando-keys
 gate/ctl.go Ctl	sudo	sudo -n -- tando-gate ctl-root
+gate/ctl.go ctlCheck	sshd	sshd -T
+gate/ctl.go ctlCheck	sshd	sshd -T -C user=tando-ctl,host=<..>
 gate/ctl.go ctlKRL	ssh-keygen	ssh-keygen -Q -l -f <valid:joined path .../.revoked.krl.new>
+gate/ctl.go ctlKRL	ssh-keygen	ssh-keygen -l -f <valid:joined path .../ca.pub>
 gate/ctl.go ctlSetup	ssh-keygen	ssh-keygen -l -f <valid:joined path .../ca.pub>
 gate/ctl.go ctlSetup	useradd	useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment "tando sshd reads CI keys as this user" -- tando-keys
 gate/ctl.go ctlSetup	useradd	useradd --system --user-group --no-create-home --home-dir <value-of:--home-dir:dir> --shell <value-of:--shell:g.P.Gate> --comment "tando control plane" -- tando-ctl
 gate/ctl.go ctlSetup	usermod	usermod -p * -- tando-ctl
-gate/ctl.go installDrop	sshd	sshd -T -C user=tando-ctl,host=localhost,addr=127.0.0.1
 gate/ctl.go installDrop	sshd	sshd -t
 gate/ctl.go reloadSSHD	systemctl	systemctl reload ssh
 gate/ctl.go reloadSSHD	systemctl	systemctl reload sshd
@@ -144,4 +146,4 @@ watch/verbs_install.go systemctl	systemctl	systemctl enable -q tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl reset-failed tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl start tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl try-restart tandod.service
-# positions: 637 constant, 55 prefixed, 3 int, 62 validated, 6 value of an option, 13 after --, 0 other
+# positions: 641 constant, 56 prefixed, 3 int, 63 validated, 6 value of an option, 13 after --, 0 other
