@@ -179,6 +179,14 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   `127.0.0.1:<port>`; other links open in the default browser. The menu bar reads `tando-dash`'s
   `ls-all.json` when it is fresher than its interval, instead of running `tando ls --all --json`.
   "Open status in Terminal" uses the live view, `tando status --follow`.
+- Origin mode, for a server behind a CDN or edge proxy: `tando host setup <host> origin=cloudflare`
+  (or `origin=custom:<ranges>`). Caddy (2.7+; refused with a message on older) trusts the client
+  address the edge forwards only from the edge's ranges, so the app's `X-Real-IP` and the request
+  log show the visitor, not the edge; the per-client firewall limits exempt the edge; an optional
+  `origin_lock=on` answers ports 80/443 only to the edge (ssh is never touched); the Cloudflare
+  ranges are refreshed daily with the last good list kept and an alert after three failures;
+  `origin_cert=`/`origin_key=` serve an origin certificate from files. Off unless set. Docs:
+  docs/COMMANDS.md "Behind an edge: origin mode". Suite `e2e-origin`.
 
 ### New: the dashboard add-on (not in the main archive)
 

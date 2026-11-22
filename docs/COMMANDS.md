@@ -615,7 +615,7 @@ nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Setting
 80/443: `rate_limit=on|off|auto` (auto: on when tando owns Caddy), `conn_limit=N` (connections at
 once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections per second, burst
 3x; default 100), and per app's user `conn_out=N` (connections at once, default 2048), `dns_rate=N`
-(DNS packets a second, default 200), `stream_close_delay=5m` (how long a Caddy reload leaves websockets and event streams open, Caddy 2.7+) ("Limits and load"). Scale (docs/ARCHITECTURE.md, "Many apps on one server"): `port_min=`,
+(DNS packets a second, default 200), `origin=cloudflare|custom:<ranges>|off`, `origin_lock=on|off`, `origin_cert=`/`origin_key=` ("Behind an edge: origin mode"), `stream_close_delay=5m` (how long a Caddy reload leaves websockets and event streams open, Caddy 2.7+) ("Limits and load"). Scale (docs/ARCHITECTURE.md, "Many apps on one server"): `port_min=`,
 `port_max=` (app ports, default 4100-4999), `preflight_min=`, `preflight_max=` (pre-flight ports,
 default 14100-14999; the ranges must not overlap or hold 2019 or 5432), `uid_min=`, `uid_max=`
 (new app users' ids, default 30000-39999), `mem_overcommit=` (default 1.5; 0 turns the check off),
@@ -836,6 +836,7 @@ the next deploy; per host with `tando host setup <host> key=value`.
 | `tmp_size =` | 64M | the app's `/tmp` and `/var/tmp`: each a tmpfs of its own, counted in its memory (not a directory on the disk every app shares; a venv or container build keeps a private /tmp on disk) | writes fail with "No space left on device" |
 | `io =` | none | MB/s of reads and of writes on the disk of the app's directory (`IORead/WriteBandwidthMax`; only where the cgroup io controller is) | the app's disk I/O is slowed |
 | `disk =` | host `app_max_mb` | the app's disk share for alerts (`2G`, `500M`): its files and database | alert `disk_warn` (low) from 80%, `disk` over it; no hard quota |
+| host `origin=` (with `conn_limit`) | off | behind an edge: the edge's ranges are exempt from the per-address limits (they cannot see visitors) | per-app limits stay; see "Behind an edge: origin mode" |
 | host `conn_out=` | 2048 | TCP and UDP connections one app's user holds at once (the kernel's connection table is the host's) | further connects are refused at once (`ECONNREFUSED`) |
 | host `dns_rate=` | 200 | DNS packets a second one app's user sends (burst 2x), the resolver all apps share | further lookups fail at once |
 | (`db_pool` x 20) | 100 | connections one app's user holds to pgbouncer and PostgreSQL together (pgbouncer's 5000 client slots are every app's) | further connects are refused |
@@ -847,6 +848,68 @@ system of /opt/tando reserves (often 5%) go to group `tando-core` too (PostgreSQ
 in it; root always has them): an app that fills the disk leaves the database and Caddy room. The
 running PostgreSQL and Caddy get the group at their next restart. The `tando doctor` row "app
 limits" counts what the per-app rules refused.
+
+### Behind an edge: origin mode
+
+For a server whose web traffic comes through a CDN or an edge proxy (Cloudflare is the built-in
+example). Off by default; nothing below changes without `origin=`. Without it, every visitor
+looks like the edge: the app's `X-Real-IP`, the request log, and the per-client limits all see
+the edge's few addresses.
+
+```
+tando host setup <host> origin=cloudflare            # the published list, refreshed daily
+tando host setup <host> origin=custom:203.0.113.0/24,2001:db8::/32   # your edge's own ranges
+tando host setup <host> origin_lock=on               # 80/443 only from the edge (see below)
+tando host setup <host> origin_cert=/path/cert.pem origin_key=/path/key.pem
+tando host setup <host> origin=off                   # back to normal (origin_lock=off first)
+```
+
+- **The one trust rule.** A client address in a header (`CF-Connecting-IP` for `cloudflare`,
+  `X-Forwarded-For` for `custom:`) is believed only when the connection itself comes from the
+  edge's ranges. Caddy makes that decision (`servers { trusted_proxies static ... }`, strict
+  right-to-left parsing for `X-Forwarded-For`) and everything else reads its answer: the
+  request log's `client_ip`, the `X-Real-IP` header your app gets, and tando's request
+  statistics (they read the log). The same headers from any other address are ignored: the
+  app gets that address. Read the visitor from `X-Real-IP`; `CF-Connecting-IP` itself reaches
+  the app as sent and is only true when the request came through the edge.
+- **Caddy 2.7 or later.** Older Caddy (Ubuntu's package is 2.6) cannot tell which headers to
+  believe, so `origin=` is refused with a message, and nothing is changed. Install Caddy from its
+  official repository first (https://caddyserver.com/docs/install), then run the setup again.
+  There is no fallback on 2.6: a hand-made one would trust headers from anyone.
+- **Per-client limits.** The kernel firewall only sees the edge's address, so the per-address
+  `conn_limit`/`conn_rate` rules exempt the edge's ranges (every visitor would share one
+  budget). The per-app limits (`max_conns`, `max_requests`, ...) stay as they are. Limit
+  visitors at the edge itself (its rate rules); tando cannot see them.
+- **`origin_lock=on`.** Ports 80 and 443 answer only the edge's ranges; any other address gets
+  no answer (dropped). ssh and everything else are untouched, and so is the server's own
+  loopback (health checks, an app calling its own link). Turn it on only after you have seen
+  the edge reach the server (it needs the edge's DNS and a working origin); `origin_lock=off`
+  undoes it. Visitors that bypass the edge (a direct `curl` to the server's address) stop working
+  by design; tando doctor's row "origin" says the lock is on.
+- **The ranges.** `cloudflare`: tando starts from a built-in copy of the published list and
+  `tando-origin.timer` refreshes it daily from the published address lists over HTTPS (there is
+  no published checksum: the trust is the HTTPS connection to the edge's own site). A list that
+  does not parse completely, has a catch-all range (anything wider than IPv4 /8 or IPv6 /16), has
+  too few ranges, or that Caddy refuses is thrown away: the last good list stays in use, the
+  failure is counted, and the third failure in a row is an alert (host alerts channel) and a
+  warning in `tando doctor`. To refresh now: `sudo systemctl start tando-origin.service` on the
+  server. The ranges are in `/opt/tando/origin.ranges`.
+  `custom:` ranges are yours and are not refreshed.
+- **TLS behind the edge.** Two ways, both fine with the edge's "full" or "strict" mode:
+  1. *Caddy's own certificates* (`tls=auto`): Caddy asks the CA over HTTP-01, which reaches
+     the server through the edge on port 80 (keep the edge forwarding `/.well-known/acme-challenge/`
+     unchanged, and the lock allows it, as it comes from the edge). Nothing more to set.
+  2. *An origin certificate from files* (`origin_cert=`/`origin_key=`, paths of PEM files already
+     on the server, a key without a password). tando checks they belong together, installs them in
+     `/etc/caddy/origin/` (key `root:caddy` 0640) and every HTTPS site of every app serves them
+     (no CA, no HTTP-01, so it works with the lock on and an edge that does not forward the
+     challenge). Run the setup again with new files to renew; `origin_cert=off` stops using them.
+  With the edge on "flexible" (plain HTTP to the server) use `tls=off`.
+- **Custom hostnames through the edge** (a SaaS-style product that forwards customer names as
+  SNI) need a catch-all certificate on the server; use `origin_cert=` with a wildcard.
+
+The suite `test/e2e-origin.sh` has a second container as the edge and checks the spoofing cases
+(a header from a non-edge address, in both modes) and the lock.
 
 ### Scale to zero: idle_stop
 

@@ -1087,7 +1087,8 @@ caddy_proxy() {
   # the probe secret (skips the request log) is Caddy's and root's: never handed to an app
   echo "		header_up -X-Tando-Probe"
   # the visitor's address, not one the client sent (Caddy replaces X-Forwarded-For itself)
-  echo "		header_up X-Real-IP {remote_host}"
+  # (origin mode: the address Caddy decided on, a forwarded one only from the edge's ranges)
+  if origin_on && caddy_ge 2 7; then echo "		header_up X-Real-IP {client_ip}"; else echo "		header_up X-Real-IP {remote_host}"; fi
   # at most this many connections to the app at once; more requests wait in Caddy (within
   # lb_try_duration) instead of each visitor connection opening one more to a small app
   local mc=${C[max_conns]:-256}; [[ $mc =~ ^[1-9][0-9]{0,4}$ ]] || mc=256
@@ -1147,6 +1148,11 @@ write_caddy() {
   # internal, the other a public certificate), the site is a snippet imported by two blocks
   [[ -n ${C[domains]:-} && ( ${H[tls]:-off} == internal && $dt == auto || ${H[tls]:-off} == auto && $dt == internal ) ]] &&
     split=1
+  # origin_cert: one certificate from files for every HTTPS name of the site (no CA, no split)
+  local otl=""
+  if [[ ${H[origin_cert]:-} == yes && -f $ORIGIN_DIR/cert.pem ]] && [[ ${H[tls]:-off} != off || ( -n ${C[domains]:-} && $dt != off ) ]]; then
+    otl=1 split=""
+  fi
   # the fingerprinted files of this and the kept releases (assets_link): their URL prefixes are
   # answered from $D/assets, a miss by the app. Not while the stopped or down page answers.
   local mounts="" acc="" m
@@ -1159,7 +1165,8 @@ write_caddy() {
   fi
   {
     if [[ -n $split ]]; then echo "(tando-site-$A) {"; else echo "$name {"; fi
-    [[ -z $split && ( ${H[tls]:-off} == internal || ( -n ${C[domains]:-} && $dt == internal ) ) ]] && echo "	tls internal"
+    if [[ -n $otl ]]; then origin_tls
+    elif [[ -z $split && ( ${H[tls]:-off} == internal || ( -n ${C[domains]:-} && $dt == internal ) ) ]]; then echo "	tls internal"; fi
     # request log for every state of the site; headers and query strings are left out
     [[ -x $LOGS ]] && "$LOGS" caddy-log "$A"
     # compression (compress = off turns it off): Caddy's encode handler wraps every answer of the
@@ -1309,7 +1316,7 @@ write_caddy() {
     fi
     for d in $redirs; do
       if [[ $dt == off ]]; then echo "http://${d%>*} {"; else echo "${d%>*} {"; fi
-      [[ $dt == internal ]] && echo "	tls internal"
+      if [[ -n $otl && $dt != off ]]; then origin_tls; elif [[ $dt == internal ]]; then echo "	tls internal"; fi
       if [[ $dt == off ]]; then echo "	redir http://${d#*>}{uri} permanent"; else echo "	redir https://${d#*>}{uri} permanent"; fi
       echo "}"
     done
@@ -2402,6 +2409,215 @@ caddy_timeouts() {
   echo "timeouts set now"
 }
 
+# ---- origin mode: a host behind a CDN or edge proxy ------------------------------------------
+#
+# host setup origin=cloudflare | origin=custom:<cidr,cidr> (off by default), origin_lock=on|off,
+# origin_cert= / origin_key= (docs/COMMANDS.md, "Behind an edge").
+#
+# THE TRUST RULE, all of it: a client address forwarded in a header (CF-Connecting-IP, or
+# X-Forwarded-For) is believed only when the TCP connection itself comes from an address in
+# $ORIGIN_RANGES. Caddy (2.7+) makes that decision (global `servers { trusted_proxies static
+# <ranges> }`, caddy_origin below) and everything else only reads its result: the request log's
+# client_ip, the X-Real-IP header an app gets ({client_ip}, caddy_proxy), tando's metrics (they
+# read the log). Nothing in tando parses a forwarded header itself, and a header sent by any other
+# connection is ignored. The firewall cannot see visitors behind an edge, only the edge: its
+# per-client limits exempt the edge's ranges (rate_limit_rules); origin_lock drops web traffic
+# from every other address. The ranges: cloudflare = the published list (the built-in copy below
+# seeds it; tando-origin.timer refreshes it, origin_update), custom = the operator's own.
+ORIGIN_RANGES=$R/origin.ranges      # one CIDR a line; never empty while origin is on
+ORIGIN_STATUS=$R/origin.status      # the updater's last result (fails=, last_ok=, last_error=)
+ORIGIN_DIR=/etc/caddy/origin        # origin_cert / origin_key, installed from the operator's files
+ORIGIN_CF="173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18
+108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15
+104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32
+2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32"
+# origin_on: origin mode is set and there are ranges to trust (without ranges nothing is trusted)
+origin_on() { [[ ${H[origin]:-off} != off && -s $ORIGIN_RANGES ]]; }
+# origin_cidr_ok x: an address or range, not a catch-all: IPv4 /8 to /32, IPv6 /16 to /128
+origin_cidr_ok() {
+  local a=${1%/*} p=""
+  [[ $1 == */* ]] && p=${1#*/}
+  if [[ $a =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+    ((10#${BASH_REMATCH[1]} <= 255 && 10#${BASH_REMATCH[2]} <= 255 && 10#${BASH_REMATCH[3]} <= 255 && 10#${BASH_REMATCH[4]} <= 255)) || return 1
+    [[ -z $p ]] || { [[ $p =~ ^[0-9]{1,2}$ ]] && ((10#$p >= 8 && 10#$p <= 32)); }
+  elif [[ $a == *:* && $a =~ ^[0-9a-fA-F:]+$ ]]; then
+    [[ -z $p ]] || { [[ $p =~ ^[0-9]{1,3}$ ]] && ((10#$p >= 16 && 10#$p <= 128)); }
+  else return 1; fi
+}
+# origin_headers: where a trusted edge puts the client's address, best first
+origin_headers() { if [[ ${H[origin]:-} == cloudflare ]]; then echo "CF-Connecting-IP X-Forwarded-For"; else echo "X-Forwarded-For"; fi; }
+# caddy_origin: the lines in Caddyfile's global block that make Caddy trust the ranges (and only
+# them); every line tando adds ends in "# tando-origin", so a change or origin=off removes exactly
+# those. They go inside an existing `servers {` block (Caddy refuses two), else in one of their own.
+# Validated before it replaces the file (renamed in one step: a deploy's validation never sees half).
+# Strict: with X-Forwarded-For, Caddy reads from the right and skips trusted addresses, so a value
+# the visitor put on the left is never the answer. Returns 1 (message on stderr) when Caddy refuses.
+caddy_origin() {
+  local f=/etc/caddy/Caddyfile t mode=own rg
+  [[ -f $f ]] || return 0
+  if ! origin_on && ! grep -q '# tando-origin' "$f"; then return 0; fi
+  t=$(mktemp "$f.tando-new.XXXXXX") || return 1
+  grep -v '# tando-origin' "$f" | grepq '^[[:space:]]*servers[[:space:]]*{[[:space:]]*$' && mode=into
+  rg=$(paste -sd' ' "$ORIGIN_RANGES" 2> /dev/null)
+  awk -v on="$(origin_on && echo 1)" -v mode="$mode" -v rg="$rg" -v hd="$(origin_headers)" -v adm="admin unix/$CADDY_SOCK" '
+    /# tando-origin/ { next }
+    function lines(ind,   m) { m = " # tando-origin"
+      print ind "trusted_proxies static " rg m; print ind "trusted_proxies_strict" m; print ind "client_ip_headers " hd m }
+    { print }
+    on == "1" && !d { l = $0; sub(/^[[:space:]]+/, "", l); sub(/[[:space:]]+$/, "", l)
+      if (mode == "into" && l ~ /^servers[[:space:]]*\{$/) { lines("\t\t"); d = 1 }
+      else if (mode == "own" && l == adm) { print "\tservers { # tando-origin"; lines("\t\t"); print "\t} # tando-origin"; d = 1 } }
+    END { if (on == "1" && !d) exit 3 }' "$f" > "$t" || { rm -f "$t"; echo "tando-agent: origin: could not place the trusted proxies in the Caddyfile (is there a global block?)" >&2; return 1; }
+  if cmp -s "$t" "$f"; then rm -f "$t"; return 0; fi
+  if ! caddy validate --config "$t" --adapter caddyfile &> /dev/null; then
+    rm -f "$t"; echo "tando-agent: origin: Caddy rejects the trusted proxies (sudo caddy validate --config /etc/caddy/Caddyfile); the Caddyfile is unchanged" >&2; return 1
+  fi
+  chmod --reference="$f" "$t" 2> /dev/null; chown --reference="$f" "$t" 2> /dev/null
+  mv -f "$t" "$f"
+}
+# origin_configure: host setup's origin settings (before the Caddyfile and the sites are written).
+# ORIGIN_NEW=1 when origin= was given in this run: cloudflare then starts from the built-in list again.
+origin_configure() {
+  local o=${H[origin]:-off} c
+  if [[ $o == off ]]; then
+    [[ ${H[origin_lock]:-off} == on ]] && die "origin_lock=on needs origin=cloudflare or origin=custom:<ranges>"
+    return 0
+  fi
+  caddy_ge 2 7 || die "origin mode needs Caddy 2.7 or later (this server has ${CADDY_V:-an older one}; Ubuntu's package is older): install Caddy from its official repository (https://caddyserver.com/docs/install), then run tando host setup <host> origin=${o%%:*} again. Nothing was changed"
+  case $o in
+    cloudflare)
+      if [[ ${ORIGIN_NEW:-} == 1 || ! -s $ORIGIN_RANGES ]]; then
+        # shellcheck disable=SC2086 # (the list is words)
+        printf '%s\n' $ORIGIN_CF > "$ORIGIN_RANGES.tmp" && mv -f "$ORIGIN_RANGES.tmp" "$ORIGIN_RANGES"
+      fi;;
+    custom:*)
+      : > "$ORIGIN_RANGES.tmp"
+      for c in $(tr ',' ' ' <<< "${o#custom:}"); do printf '%s\n' "$c" >> "$ORIGIN_RANGES.tmp"; done
+      mv -f "$ORIGIN_RANGES.tmp" "$ORIGIN_RANGES";;
+  esac
+  chmod 644 "$ORIGIN_RANGES"
+}
+# origin_cert_install <cert> <key>: Caddy serves these files instead of asking a CA (the edge
+# connects over HTTPS to the origin with its "full" or "strict" mode). Both must be there and match.
+OC_CHANGED=0
+origin_cert_install() {
+  local c=$1 k=$2 a b
+  [[ -n $c && -n $k ]] || die "origin_cert and origin_key go together (paths of files on this server)"
+  [[ -r $c ]] || die "origin_cert: cannot read $c (copy the certificate to the server first)"
+  [[ -r $k ]] || die "origin_key: cannot read $k (copy the key to the server first)"
+  a=$(openssl x509 -in "$c" -noout -pubkey 2> /dev/null | sha256sum) || die "origin_cert: $c is not a PEM certificate"
+  b=$(openssl pkey -in "$k" -pubout 2> /dev/null | sha256sum) || die "origin_key: $k is not a PEM key (without a password)"
+  [[ $a == "$b" ]] || die "the certificate and the key do not match: nothing was installed"
+  install -d -m 750 -o root -g caddy "$ORIGIN_DIR" || die "could not make $ORIGIN_DIR"
+  cmp -s "$c" "$ORIGIN_DIR/cert.pem" && cmp -s "$k" "$ORIGIN_DIR/key.pem" && return 0
+  install -m 644 -o root -g caddy "$c" "$ORIGIN_DIR/.cert.new" && install -m 640 -o root -g caddy "$k" "$ORIGIN_DIR/.key.new" &&
+    mv -f "$ORIGIN_DIR/.cert.new" "$ORIGIN_DIR/cert.pem" && mv -f "$ORIGIN_DIR/.key.new" "$ORIGIN_DIR/key.pem" ||
+    die "could not install the origin certificate in $ORIGIN_DIR"
+  OC_CHANGED=1
+}
+# origin_tls: the site's `tls` line for the origin certificate (when one is installed)
+origin_tls() { echo "	tls $ORIGIN_DIR/cert.pem $ORIGIN_DIR/key.pem"; }
+
+# origin_update: refresh the cloudflare ranges (tando-origin.timer, daily). From the published list
+# over HTTPS only; it must parse completely (no junk, no catch-all, enough ranges) or nothing
+# changes: the last good list stays, failures are counted, and the third in a row is an alert.
+# TANDO_ORIGIN_LIST_BASE replaces the list's address (tests only: the timer never sets it).
+origin_status_set() { # key=value ...
+  local -A OS=(); local kv
+  load "$ORIGIN_STATUS" OS
+  for kv; do OS[${kv%%=*}]=${kv#*=}; done
+  save "$ORIGIN_STATUS" OS
+}
+origin_fail() { # reason
+  local -A OS=(); local n
+  load "$ORIGIN_STATUS" OS
+  n=$(( ${OS[fails]:-0} + 1 ))
+  origin_status_set "fails=$n" "last_error=$1"
+  echo "tando-agent: origin: the ranges were not updated ($n in a row; the last good list stays): $1" >&2
+  # the third failure, and every tenth after it, is one alert
+  if ((n == 3 || (n > 3 && n % 10 == 3))); then A=host watch_notice monitor origin "the edge's address ranges could not be refreshed $n times in a row ($1): the last good list stays; tando doctor shows it"; fi
+  return 1
+}
+origin_update() {
+  local base=${TANDO_ORIGIN_LIST_BASE:-https://www.cloudflare.com} v4 v6 new n4 n6 x old
+  local -a px=(--proto '=https' --tlsv1.2)
+  [[ -n ${TANDO_ORIGIN_LIST_BASE:-} ]] && px=()
+  v4=$(curl -fsS -m 30 ${px[@]+"${px[@]}"} "$base/ips-v4" 2>&1) || { origin_fail "could not fetch $base/ips-v4"; return 1; }
+  v6=$(curl -fsS -m 30 ${px[@]+"${px[@]}"} "$base/ips-v6" 2>&1) || { origin_fail "could not fetch $base/ips-v6"; return 1; }
+  new=$(printf '%s\n%s\n' "$v4" "$v6" | tr -d '\r' | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u)
+  while read -r x; do origin_cidr_ok "$x" || { origin_fail "the list has a line that is not a usable range: ${x:0:40}"; return 1; }; done <<< "$new"
+  n4=$(grep -c '\.' <<< "$new"); n6=$(grep -c ':' <<< "$new")
+  ((n4 >= 3 && n6 >= 1 && n4 + n6 <= 500)) || { origin_fail "the list looks wrong ($n4 IPv4 and $n6 IPv6 ranges)"; return 1; }
+  old=$(LC_ALL=C sort -u "$ORIGIN_RANGES" 2> /dev/null)
+  if [[ $new == "$old" ]]; then origin_status_set fails=0 "last_ok=$(now)" last_error= "ranges=$((n4 + n6))"; echo "origin: ranges unchanged ($((n4 + n6)))"; return 0; fi
+  caddy_try_lock || { origin_fail "$WC_WHY"; return 1; }
+  cp -p "$ORIGIN_RANGES" "$ORIGIN_RANGES.old" 2> /dev/null
+  printf '%s\n' "$new" > "$ORIGIN_RANGES.tmp" && mv -f "$ORIGIN_RANGES.tmp" "$ORIGIN_RANGES" && chmod 644 "$ORIGIN_RANGES"
+  if caddy_origin && caddy_reload; then
+    fw_sync || echo "tando-agent: origin: the firewall rules could not be reloaded (they hold the old ranges until the next host setup)" >&2
+    rm -f "$ORIGIN_RANGES.old"; exec 11>&-
+    origin_status_set fails=0 "last_ok=$(now)" last_error= "ranges=$((n4 + n6))"; echo "origin: ranges updated ($((n4 + n6)))"; return 0
+  fi
+  # Caddy refused the new list: the old one again
+  mv -f "$ORIGIN_RANGES.old" "$ORIGIN_RANGES" 2> /dev/null; caddy_origin; caddy_reload; exec 11>&-
+  origin_fail "Caddy did not accept the new list"; return 1
+}
+cmd_origin_update() {
+  need_root; host_lock; load "$R/host.conf" H
+  if [[ ${H[origin]:-off} != cloudflare ]]; then echo "origin: nothing to update (origin=${H[origin]:-off}; only origin=cloudflare has a published list)"; return 0; fi
+  origin_update || exit 1   # (the dispatcher exits 0 after a handler: the timer's unit must fail)
+}
+# origin_sched_install: the daily refresh, only while origin=cloudflare
+origin_sched_install() {
+  WIC_CHANGED=0
+  if [[ ${H[origin]:-off} != cloudflare ]]; then
+    if [[ -f /etc/systemd/system/tando-origin.timer ]]; then
+      systemctl disable -q --now tando-origin.timer 2> /dev/null
+      rm -f /etc/systemd/system/tando-origin.timer /etc/systemd/system/tando-origin.service
+      systemctl daemon-reload
+    fi
+    return 0
+  fi
+  write_if_changed /etc/systemd/system/tando-origin.service <<EOF
+[Unit]
+Description=tando: refresh the edge's address ranges (origin mode)
+
+[Service]
+Type=oneshot
+ExecStart=$AGENT origin-update
+EOF
+  write_if_changed /etc/systemd/system/tando-origin.timer <<EOF
+[Unit]
+Description=tando: refresh the edge's address ranges daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  ((WIC_CHANGED)) && systemctl daemon-reload
+  systemctl -q is-enabled tando-origin.timer 2> /dev/null && systemctl -q is-active tando-origin.timer ||
+    systemctl enable -q --now tando-origin.timer
+  return 0
+}
+# origin_doctor: one row for tando doctor
+origin_doctor() {
+  [[ ${H[origin]:-off} == off ]] && return 0
+  local -A OS=(); local n="" lock=off d
+  load "$ORIGIN_STATUS" OS
+  [[ -s $ORIGIN_RANGES ]] && n=$(grep -c . "$ORIGIN_RANGES")
+  [[ ${H[origin_lock]:-off} == on ]] && lock=on
+  d="${H[origin]%%:*}: ${n:-0} ranges trusted; lock $lock"
+  [[ ${OS[last_ok]:-} =~ ^[0-9]+$ ]] && d+="; refreshed $(( ($(now) - OS[last_ok]) / 3600 )) h ago"
+  if [[ -z $n ]]; then row check fail origin "origin=${H[origin]} but no ranges: nothing is trusted and, with the lock on, nothing can connect (tando host setup <host> origin=...)"
+  elif ! caddy_ge 2 7; then row check fail origin "needs Caddy 2.7 or later (this is ${CADDY_V:-old}): the forwarded address is not used"
+  elif ((${OS[fails]:-0} >= 3)); then row check warn origin "$d; ${OS[fails]} failed refreshes in a row, the last good list stays (${OS[last_error]:-unknown})"
+  else row check ok origin "$d"; fi
+}
+
 # On its default 127.0.0.1:2019 Caddy's admin API answers any local process: an app could rewrite
 # the live config and take over another app's domain. It moves to a unix socket in a directory
 # only caddy (and root) can enter. Other loopback services stay reachable by uid only where
@@ -2457,26 +2673,55 @@ caddy_admin_private() {
 # probes, an app's requests to itself through Caddy) is never limited; sshd's port is not touched.
 # Counters rl_conn and rl_rate show in doctor.
 rate_limit_rules() {
-  local cl=${H[conn_limit]:-200} cr=${H[conn_rate]:-100}
+  local cl=${H[conn_limit]:-200} cr=${H[conn_rate]:-100} rl=1 lock=0 edge=0 r el
   case ${H[rate_limit]:-auto} in
-    off) return 0;;
-    auto) declare -F caddy_ours > /dev/null && caddy_ours 2> /dev/null || return 0;;
+    off) rl=0;;
+    auto) declare -F caddy_ours > /dev/null && caddy_ours 2> /dev/null || rl=0;;
   esac
+  # origin mode: every visitor arrives from an edge address, so per-address limits would punish
+  # all of them together: the edge's ranges are exempt (the per-app limits still apply; limit
+  # visitors at the edge). origin_lock: web ports answer the edge's ranges only.
+  origin_on && edge=1
+  ((edge)) && [[ ${H[origin_lock]:-off} == on ]] && lock=1
+  ((rl || lock)) || return 0
   [[ $cl =~ ^[1-9][0-9]{0,5}$ ]] || cl=200; [[ $cr =~ ^[1-9][0-9]{0,5}$ ]] || cr=100
   local m6='ip6 saddr & ffff:ffff:ffff:ffff::' p='tcp dport { 80, 443 } ct state new'
-  echo "  set rl4c { type ipv4_addr; size 65535; flags dynamic; }"
-  echo "  set rl6c { type ipv6_addr; size 65535; flags dynamic; }"
-  echo "  set rl4r { type ipv4_addr; size 65535; flags dynamic,timeout; timeout 1m; }"
-  echo "  set rl6r { type ipv6_addr; size 65535; flags dynamic,timeout; timeout 1m; }"
-  echo "  counter rl_conn {}"
-  echo "  counter rl_rate {}"
+  if ((rl)); then
+    echo "  set rl4c { type ipv4_addr; size 65535; flags dynamic; }"
+    echo "  set rl6c { type ipv6_addr; size 65535; flags dynamic; }"
+    echo "  set rl4r { type ipv4_addr; size 65535; flags dynamic,timeout; timeout 1m; }"
+    echo "  set rl6r { type ipv6_addr; size 65535; flags dynamic,timeout; timeout 1m; }"
+    echo "  counter rl_conn {}"
+    echo "  counter rl_rate {}"
+  fi
+  if ((edge)); then
+    for r in 4 6; do
+      echo "  set edge$r {"
+      echo "    type ipv${r}_addr; flags interval;"
+      if [[ $r == 4 ]]; then el=$(grep -v ':' "$ORIGIN_RANGES"); else el=$(grep ':' "$ORIGIN_RANGES"); fi
+      el=$(paste -sd, <<< "$el" | sed 's/,/, /g')
+      [[ -z $el ]] || echo "    elements = { $el }"
+      echo "  }"
+    done
+    echo "  counter origin_drop {}"
+  fi
   echo "  chain input {"
   echo "    type filter hook input priority -5; policy accept;"
   echo "    iifname \"lo\" accept"
-  echo "    $p add @rl4c { ip saddr ct count over $cl } counter name rl_conn reject with tcp reset"
-  echo "    $p add @rl6c { $m6 ct count over $cl } counter name rl_conn reject with tcp reset"
-  echo "    $p update @rl4r { ip saddr limit rate over $cr/second burst $((cr * 3)) packets } counter name rl_rate drop"
-  echo "    $p update @rl6r { $m6 limit rate over $cr/second burst $((cr * 3)) packets } counter name rl_rate drop"
+  if ((lock)); then
+    echo "    tcp dport { 80, 443 } ip saddr != @edge4 counter name origin_drop drop"
+    echo "    tcp dport { 80, 443 } ip6 saddr != @edge6 counter name origin_drop drop"
+  fi
+  if ((rl)); then
+    if ((edge)); then
+      echo "    $p ip saddr @edge4 accept"
+      echo "    $p ip6 saddr @edge6 accept"
+    fi
+    echo "    $p add @rl4c { ip saddr ct count over $cl } counter name rl_conn reject with tcp reset"
+    echo "    $p add @rl6c { $m6 ct count over $cl } counter name rl_conn reject with tcp reset"
+    echo "    $p update @rl4r { ip saddr limit rate over $cr/second burst $((cr * 3)) packets } counter name rl_rate drop"
+    echo "    $p update @rl6r { $m6 limit rate over $cr/second burst $((cr * 3)) packets } counter name rl_rate drop"
+  fi
   echo "  }"
 }
 
@@ -2643,7 +2888,7 @@ host_lock() {
 }
 cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=yes|no] [ufw=no] ...
   need_root
-  local kv a logkv=() swap=auto ufw=yes feats=() got="" before pgss=0
+  local kv a logkv=() swap=auto ufw=yes feats=() got="" before pgss=0 oc="" ok="" ocoff=0
   mkdir -p "$R/apps"
   host_lock
   load "$R/host.conf" H
@@ -2684,6 +2929,17 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
       app_max_mb=*) [[ ${kv#*=} =~ ^[0-9]{2,9}$ ]] || die "bad app_max_mb"; H[app_max_mb]=${kv#*=};;
       rate_limit=on|rate_limit=off|rate_limit=auto) H[rate_limit]=${kv#*=};;   # per-client limits (fw_sync)
       conn_limit=*|conn_rate=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
+      origin=off) H[origin]=off; ORIGIN_NEW=1;;
+      origin=cloudflare) H[origin]=cloudflare; ORIGIN_NEW=1;;
+      origin=custom:*)   # the edge's own ranges (docs/COMMANDS.md "Behind an edge")
+        [[ -n ${kv#*:} ]] || die "bad origin: custom: needs ranges, like origin=custom:203.0.113.0/24,2001:db8::/32"
+        for a in $(tr ',' ' ' <<< "${kv#*:}"); do origin_cidr_ok "$a" || die "bad origin range: $a (an address or a range, IPv4 /8 to /32, IPv6 /16 to /128)"; done
+        H[origin]=${kv#*=}; ORIGIN_NEW=1;;
+      origin=*) die "bad origin: off, cloudflare or custom:<ranges>";;
+      origin_lock=on|origin_lock=off) H[origin_lock]=${kv#*=};;
+      origin_cert=off) oc="" ok="" ocoff=1;;
+      origin_cert=*) oc=${kv#*=};;
+      origin_key=*) ok=${kv#*=};;
       stream_close_delay=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,3}[smh]$ ]] || die "bad stream_close_delay (like 5m, 30s, 1h)"; H[stream_close_delay]=${kv#*=};;
       conn_out=*|dns_rate=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;   # per app (fw_sync)
       ci_max_mb=*|ci_max_files=*|ci_max_file_mb=*)   # upload limits of deploy keys (tando-gate)
@@ -2723,6 +2979,9 @@ EOF
 
   step config run
   mkdir -p /etc/caddy/tando
+  origin_configure   # (refuses before anything is written: Caddy too old, a lock without an origin)
+  if ((ocoff)); then H[origin_cert]=off
+  elif [[ -n $oc$ok ]]; then origin_cert_install "$oc" "$ok"; H[origin_cert]=yes; fi
   before=$(cksum < /etc/caddy/Caddyfile 2> /dev/null)
   grep -q '^import /etc/caddy/tando/\*\.caddy' /etc/caddy/Caddyfile 2>/dev/null ||
     printf '\nimport /etc/caddy/tando/*.caddy\n' >> /etc/caddy/Caddyfile
@@ -2734,6 +2993,8 @@ EOF
   chmod 644 "$R/host.conf"
   caddy_admin_private
   local fallback tmo; fallback=$(caddy_fallback); tmo=$(caddy_timeouts); tmo+="; $(caddy_memory)"
+  caddy_origin || die "origin mode: the Caddyfile was not changed (above)"
+  origin_on && tmo+="; origin ${H[origin]%%:*}: $(grep -c . "$ORIGIN_RANGES") ranges trusted"
   if [[ $before != "$(cksum < /etc/caddy/Caddyfile)" ]]; then
     caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile &> /dev/null ||
       die "the Caddyfile does not validate: sudo caddy validate --config /etc/caddy/Caddyfile on the server shows why"
@@ -2858,6 +3119,8 @@ EOF
   backup_sched_install || die "could not enable the backup queue (tando-backups.timer)"
   drill_sched_install || die "could not set up the restore drill timer (tando-drill.timer)"
   caddy_install_staged || die "$WC_WHY; the sites are as they were: run tando host setup again once that is fixed"
+  ((OC_CHANGED)) && { caddy_reload || die "Caddy did not load the new origin certificate: ${CADDY_ERR:-}"; }
+  origin_sched_install || die "could not set up the origin ranges timer (tando-origin.timer)"
   fw_sync || die "the per-app loopback rules could not be loaded (above); run tando host setup again"
   step apps ok "$n app$( ((n == 1)) || echo s); $CORE_DETAIL"
   echo ok=1
@@ -3055,6 +3318,7 @@ cmd_doctor() {
   elif [[ ${H[rate_limit]:-auto} != off ]]; then
     row check warn "client limits" "no per-client connection limits (other sites on this Caddy): tando host setup <host> rate_limit=on"
   fi
+  origin_doctor
   if grep -q '^import /etc/caddy/tando/\*\.caddy' /etc/caddy/Caddyfile 2>/dev/null; then
     row check ok "caddy import" "/etc/caddy/tando/*.caddy"
   else row check fail "caddy import" "missing from /etc/caddy/Caddyfile"; fi
@@ -7998,6 +8262,7 @@ case $verb in
   backup-run) cmd_backup_run "$@";;
   backup-all) cmd_backup_all;;   # the backup queue (tando-backups.service)
   backup-drill) cmd_backup_drill "$@";;
+  origin-update) cmd_origin_update;;   # the daily refresh of the edge's ranges (tando-origin.service)
   backup-drill-all) cmd_backup_drill_all;;   # the monthly drills (tando-drill.service)
   preview-up) cmd_preview_up "$@";;
   preview-ls) cmd_preview_ls "$@";;
