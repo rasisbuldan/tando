@@ -6,6 +6,12 @@ first, grouped by area.
 
 ## Unreleased
 
+Highlights: a server holds 100 apps and more; a dashboard add-on (web app, installed on the
+laptop); an always-on database studio; cloud-style monitoring of the server, the apps and their
+databases; scale to zero; faster deploys. Several defaults change: read "On upgrade" first.
+
+### New
+
 - Deploys: a deploy no longer waits out the soak of the release before it (back-to-back deploys
   took the rest of that soak, up to 30 s, on top of their own time). It supersedes it: the soak
   ends at once, that release stays live until the new one switches and is recorded as
@@ -15,231 +21,221 @@ first, grouped by area.
   first two seconds (they waited up to 0.5 s between polls), asking systemd for the unit's state
   in one call every fourth poll. State writes during a deploy fork less (the metadata group is
   looked up once per process, a temp file is made with its group and mode in one step).
-- New: `idle_stop = 6h` in tando.conf (scale to zero; `on` = 6h): the app's web process stops
-  after that long without a request and its next request starts it (workers and jobs run on) (systemd socket activation and systemd-socket-proxyd
-  behind Caddy; the first request waits about 0.1-0.3 s for a small app). `tando ls` says
-  `idle`; the monitor and the per-minute recovery do not wake it. Not for static sites,
-  containers (docs/COMMANDS.md, "Scale to zero").
 - Scale: a server holds 100 apps and more (tuned for 4 vCPU / 8 GB). Upgrade with
-  `tando host setup <host>`; apps keep their ports, users and settings.
-  - Ports: the app range is 4100-4999 (was 4100-4199: app 101 was refused), set with `port_min=`
-    and `port_max=`; a new app's pre-flight port comes from its own range, 14100-14999
-    (`preflight_min=`, `preflight_max=`), kept as `preflight_port`. A server still on the old
-    default range is widened by host setup.
-  - Users: new app users get ids from 30000-39999 (`uid_min=`, `uid_max=`), not 200-999, which
-    ran out after about 250 apps made over a server's life.
+  `tando host setup <host>`; apps keep their ports, users and settings. docs/ARCHITECTURE.md,
+  "Many apps on one server".
   - Restarts of different apps no longer wait for each other (the hold window's lock is shared).
   - A job's start and end read only its app's journal, not every app's.
   - Host setup reloads systemd and Caddy once for all apps, and only when something changed (it
     took minutes with 100 apps).
-  - Memory: a deploy that raises an app's memory caps over RAM x 1.5 (`mem_overcommit=`) is refused
-    unless `--force`. New `priority = high|low` in tando.conf.
-  - Jobs: the default spread is a sixth of the period (hourly: 10 minutes), at a fixed offset per
-    timer; at most `job_slots` runs at once on the server.
-  - Backups: one queue for the whole server (`tando-backups.timer`, 01:00-05:00, one backup at a
-    time; `backup_window=`, `backup_jobs=`) instead of a timer per app at midnight.
+  - Memory: a deploy that raises an app's memory caps over RAM x 1.5 (`mem_overcommit=`, 0 turns
+    it off) is refused unless `--force`. New `priority = high|low` in tando.conf.
+  - Jobs: at most `job_slots` runs at once on the server (default the number of CPUs, at least 2).
   - Logs: `log_budget=` (default 20% of the disk) is split across the apps' default log caps;
     `tando doctor` compares the caps with it.
-
-- Changed: `tando ls` (and `ls --all`, per server) above 50 apps shows a summary: the count per
-  state and only the apps that are down or have an alert firing; `--all-rows` lists every app;
-  `--json` is unchanged. The rows are built in one awk pass instead of several forks per app:
-  100 apps rendered in 0.9 s before, 0.1 s now (200: 1.8 s, 0.17 s).
-- Changed: tandod's 5 s live ring keeps 16 bytes per app per point (interned names and states,
-  the latest point whole) instead of about 165: an hour of 200 apps is 2.3 MiB, not 22 MiB;
-  GOMEMLIMIT stays 20MiB. The socket answers are unchanged.
-- Changed (dashboard add-on): the database studio opens directly. A click on "Database" in the
-  sidebar, "Open database" or the Server page's "Database studio" opens the studio in a new tab
-  with no dialog; tando-dash keeps one lazy ssh forward per server (closed after 30 min without a
-  click) and mints a fresh one-time link for each click. The confirmation, Stop, the per-app slot
-  and the Idempotency-Key of the old per-session studio are gone. `tando db studio --json` accepts
-  a line `mint <app>` on stdin and answers with one more JSON line (a fresh code on the same port).
-- Added (dashboard add-on): the Server page is a cloud-VM monitoring tab: sections CPU, Memory,
-  Disk, Network, Pressure and Monitoring cost (20 charts: stacked CPU, swap, IOPS, throughput,
-  latency, TCP, pressure, tandod's own cost, ...) that fold and draw when scrolled to; the app
-  Overview shows throttled %, OOM kills, tasks against the limit and memory pressure; apps with a
-  database get a Database tab (connections, transactions, rows, cache hit, deadlocks, temp files,
-  long transactions, size and growth, top queries).
-- PostgreSQL for 100 apps on one server: `tando host setup` sizes it from the server's RAM
-  (max_connections 100 and shared_buffers 15% on 8 GB, instead of 20 and 32 MB) and runs one
-  pgbouncer for all apps (127.0.0.1:6432, transaction pooling, `db_pool` server connections per
-  app, default 5). An app's `DATABASE_URL` points at pgbouncer from its next deploy;
-  `db_direct = true` keeps PostgreSQL itself (LISTEN/NOTIFY, session advisory locks, session SET,
-  prepared statements on old drivers). New `DATABASE_URL_DIRECT` (always PostgreSQL itself) is the
-  release command's `DATABASE_URL`. A deploy is refused when the apps' `db_pool` together would
-  pass max_connections. On a server whose apps already have databases, new memory settings wait
-  for `tando host setup <host> --pg-restart` (asked first; a restart drops every app's
-  connections for seconds); setup and `tando doctor` say so. `tando db` shows how the app
-  connects (docs/COMMANDS.md, "Database connections and pgbouncer").
-- Fixed: a new app could get another app's pre-flight port (its port + 100) as its own port once
-  the port range was widened past 100 ports (what the docs advise when it is used up): that app's
-  every deploy and env change then failed with "pre-flight port in use", and the loopback rules let
-  its user reach the new app. A new app's port and its pre-flight port are now no other app's port
-  or pre-flight port, whether that app runs or not (also `tando adopt`'s pre-flight port).
-- Fixed: two deploys started at once from one project directory whose deploy lock was left by a
-  killed deploy could both take it over and build into the same `.tando/stage`; now one does and
-  the other says another deploy is running.
-- Fixed: a laptop that slept (or a CI runner that stalled) through a deploy's activation woke up to
-  "the activation has not finished" and exit status 1, though the release had gone live: the client
-  now asks for the result before it gives up at its deadline.
-- Added: `tando host rename <old> <new>`. It renames a server on this laptop (the hosts file, the
-  app cache, the last-used server, `tando go`'s answers, `host =` in the current project's
-  tando.conf), refused while a deploy or another change runs on it. The old name stays an alias,
-  so a tando.conf or script that still says it works with a note; `tando host rename --drop-alias
-  <old>` removes it. Nothing on the server stores the laptop's name for it.
-- Added: the server's address and ssh user in `--json` (`address`, `user` in `ls`, `ls --all`,
-  `status`, `alerts`, `snapshot`, also for a server that did not answer), as registered.
+- `idle_stop = 6h` in tando.conf (scale to zero; `on` = 6h): the app's web process stops after that
+  long without a request and its next request starts it (workers and jobs run on); systemd socket
+  activation and systemd-socket-proxyd behind Caddy, so the first request waits about 0.1-0.3 s
+  for a small app. `tando ls` says `idle`; the monitor and the per-minute recovery do not wake it.
+  Not for static sites or containers (docs/COMMANDS.md, "Scale to zero").
+- PostgreSQL for 100 apps: `tando host setup` sizes it from the server's RAM (max_connections 100
+  and shared_buffers 15% on 8 GB, instead of 20 and 32 MB) and runs one pgbouncer for all apps
+  (127.0.0.1:6432, transaction pooling, `db_pool` server connections per app, default 5). New
+  `DATABASE_URL_DIRECT` (always PostgreSQL itself) is the release command's `DATABASE_URL`. A deploy
+  is refused when the apps' `db_pool` together would pass max_connections. `tando db` shows how the
+  app connects (docs/COMMANDS.md, "Database connections and pgbouncer").
+- `tando host setup <host> --pg-stat-statements` turns on PostgreSQL's `pg_stat_statements` (asks
+  first: PostgreSQL restarts once). Then the top 10 normalized statements of each app's database
+  are in `tando snapshot`, latest only (`<app>.dbtop`, 0600).
 - Database studio: one always-on service per server instead of a program per ssh session
   (docs/STUDIO.md). `tando host setup` installs `tando-studio.service` (a front as root with
   CAP_SETUID/CAP_SETGID only, unix sockets only, MemoryMax 128M; idle it holds no database
   connection) and removes what the per-session studios left. Each app is served by its own helper
   process as the app's user with the app's role, started on the first request and ended after 2
   minutes unused; the guarantees are the same code as before (read-only, scope guard, limits).
-  `tando db studio [app]` now mints a one-time link and forwards a port; Ctrl-C ends the forward,
-  not the studio. The page has a switcher for the server's apps with a database, and the link can
-  name the app (`#c=<code>&app=<app>`). `--stop` ends every session of the server (a restart).
-  A new client against an older server uses the old per-session studio; an older client against a
-  new server is told to update. Not yet: the dashboard still opens the studio through
-  `tando db studio --json` with its confirm dialog.
+  `tando db studio [app]` mints a one-time link and forwards a port; Ctrl-C ends the forward, not
+  the studio. The page has a switcher for the server's apps with a database, and the link can name
+  the app (`#c=<code>&app=<app>`). `--stop` ends every session of the server (a restart). A new
+  client against an older server uses the old per-session studio; an older client against a new
+  server is told to update.
+- `tando db studio --json`: one JSON line `{url, port, sid}` instead of the box and the browser;
+  the session ends when stdin closes. A line `mint <app>` on stdin answers with one more JSON line
+  (a fresh code on the same port). For programs such as the dashboard.
+- Monitoring, cloud-style: each minute's sample also writes `host.x` (CPU user/system/iowait/steal,
+  memory available and cached, swap used and in/out, PSI cpu/memory/io, IOPS, throughput, latency
+  and busy share of the disk holding /var/lib/tando, network bytes/errors/drops of the default
+  route, TCP established and retransmits, OOM kills, inodes, uptime) and `tandod.x` (tandod's CPU,
+  memory, faults, refaults, programs started, readers' requests); an app's line gains its slice's
+  CPU throttling, OOM kills, tasks and task limit, memory pressure. The host's CPU (% of all
+  cores) and the disk used/total of the file system holding /var/lib/tando are new columns at the
+  end of `host.tsv` (older lines read as gaps); each app's disk (its directory, data and journal
+  namespace, walked in-process at most every 15 minutes within a 500 ms budget per minute) goes
+  into `<app>.disk`. `tando-metrics read host.x` and `read tandod.x` return them.
+  `tando snapshot --json --range R` returns `host_metrics` (load, cpu, memory, disk, `extended`,
+  `monitoring`: one array per series); an app's series gains `disk_bytes`, `throttled_pct`,
+  `oom_kills`, `tasks`, `tasks_max`, `memory_pressure_pct`. New alert `monitor_cost`: silent for
+  the first 7 days of data, then over 2x the monitoring's normal CPU a minute (minutes without
+  readers), never above 1% of a core. Steal and swap-in are shown only; the existing inode, memory
+  pressure, swap, OOM and connection alerts are unchanged.
+- Monitoring, databases (apps with `database = postgres`), in the one `psql` a minute tando-watch
+  already ran (no new connection): sessions by state against `max_connections`, commits and
+  rollbacks, rows, cache hit, deadlocks, temporary files, conflicts, the oldest transaction and
+  longest idle-in-transaction, `age(datfrozenxid)`, the size every 5 minutes (was 10), and the
+  server's checkpoints and WAL bytes (PostgreSQL 16 and older, 17 and newer). One line a minute in
+  `/var/lib/tando/metrics/<app>.db`; `tando-metrics read-db`; `tando snapshot --json --app A` gains
+  `database.series`, `database.latest` and `database.top_queries`. New alerts: `db_deadlock` (a new
+  deadlock), `db_wrap` (50% of the transaction IDs towards wraparound) and `db_wrap_warn` (low,
+  25%). The new statements run before the connections statement with a 500 ms statement timeout, so
+  they cannot make "PostgreSQL does not answer" fire; the `psql` call may now take 10 s (was 8 s).
+- Live views every 5 s. tandod keeps a second loop beside the minute's checks (srv/live): every 5 s
+  each app's memory, CPU, tasks and unit state and the host's load, memory, CPU and disk, from the
+  cgroup v2 files, /proc and the bus connection it already has; no program started, no file
+  written, an hour kept in memory (16 bytes per app per point: 2.3 MiB for 200 apps), the alert
+  rules untouched (still per minute). `tando status --follow` and `tando ls --follow` show it over
+  one ssh session that stays open (`tando-agent status-follow`); an older server, or one without
+  tandod or cgroup v2, is polled every 5 s instead. docs/MONITORING.md, "Live views".
+- `tando snapshot --json [-H host | --all] [--app A --range 1h|24h|7d]`: everything a dashboard
+  shows of a server in one ssh exec per host: apps with `state_reason`, the `system` object (load
+  1/5/15, memory, disk, cpus, uptime), the server's clock and skew, versions, alerts; with `--app`
+  its releases, history with the deployer, metrics over the range (every bucket present, null where
+  no sample, restarts as per-bucket deltas) and health. Servers in parallel, each with a timeout;
+  one that did not answer is `reachable: false`. `--follow` sends a line every 5 s over one ssh
+  session.
+- `--json` for `doctor`, `jobs`, `requests` (with a series per bucket: requests and 5xx) and
+  `backup ls`; `series` per hour in `errors --json` and `health --json`; `history` (the last 8
+  events) in `alerts --json`; `state_reason` and `system` in `ls` and `status --json`; `address`
+  and `user` (the server as registered, also for one that did not answer) in `ls`, `ls --all`,
+  `status`, `alerts` and `snapshot`. test/json-contract.sh checks every `--json` against a schema
+  in test/fixtures/json.
+- The agent verb `env-names` (key names only, not audited as a reveal, refused to a deploy key);
+  `tando env ls --names`, and `env ls --json`, use it, so no value leaves the server.
+- `tando host rename <old> <new>` renames a server on this laptop (the hosts file, the app cache,
+  the last-used server, `tando go`'s answers, `host =` in the current project's tando.conf),
+  refused while a deploy or another change runs on it. The old name stays an alias, so a tando.conf
+  or script that still says it works with a note; `tando host rename --drop-alias <old>` removes
+  it. Nothing on the server stores the laptop's name for it.
+- The audit line's `from` says `dashboard` for changes made from the tando dashboard
+  (`TANDO_FROM=dashboard`); `tando releases` sends the app's last deploy origin as an `origin` row
+  and `tando snapshot --app` has `app.origin`. A deploy key's `releases` never carries that row
+  (the gate keeps the release rows only; tested).
+- `tando menubar` (macOS): "Open dashboard" (⌘D) opens the dashboard add-on in a window of its own
+  (WKWebView, one window, size remembered, ⌘R reloads, ⌘W closes), starting `tando-dash` if none
+  runs; "Install dashboard…" shows the command when the add-on is missing. The window only shows
+  `127.0.0.1:<port>`; other links open in the default browser. The menu bar reads `tando-dash`'s
+  `ls-all.json` when it is fresher than its interval, instead of running `tando ls --all --json`.
+  "Open status in Terminal" uses the live view, `tando status --follow`.
 
-- Added: cloud-style host and app series, and what the monitoring costs. Each minute's sample
-  also writes `host.x` (CPU user/system/iowait/steal, memory available and cached, swap used and
-  in/out, PSI cpu/memory/io, IOPS, throughput, latency and busy share of the disk holding
-  /var/lib/tando, network bytes/errors/drops of the default route, TCP established and
-  retransmits, OOM kills, inodes, uptime) and `tandod.x` (tandod's CPU, memory, faults,
-  refaults, programs started, readers' requests), and an app's line gains its slice's CPU
-  throttling, OOM kills, tasks and task limit, memory pressure. `tando-metrics read host.x` and
-  `read tandod.x` return them; `tando snapshot --json --range R` returns
-  `host_metrics.extended` and `host_metrics.monitoring` (one array per series) and an app's
-  series gains `throttled_pct`, `oom_kills`, `tasks`, `tasks_max`, `memory_pressure_pct`. New
-  alert `monitor_cost`: silent for the first 7 days of data, then over 2x the monitoring's normal
-  CPU a minute (minutes without readers), never above 1% of a core. Steal and swap-in are shown
-  only; the existing inode, memory pressure, swap, OOM and connection alerts are unchanged.
-- Added: database monitoring like Cloud SQL and RDS, for apps with `database = postgres`, in the
-  one `psql` a minute tando-watch already ran (no new connection): sessions by state against
-  `max_connections`, commits and rollbacks, rows, cache hit, deadlocks, temporary files,
-  conflicts, the oldest transaction and longest idle-in-transaction, `age(datfrozenxid)`, the size
-  every 5 minutes (was 10), and the server's checkpoints and WAL bytes (statements chosen by
-  `server_version_num`: PostgreSQL 16 and older, 17 and newer). One line a minute in
-  `/var/lib/tando/metrics/<app>.db`; `tando-metrics read-db`; `tando snapshot --json --app A`
-  gains `database.series`, `database.latest` and `database.top_queries`. New alerts:
-  `db_deadlock` (a new deadlock), `db_wrap` (50% of the transaction IDs towards wraparound) and
-  `db_wrap_warn` (low, 25%). The new statements run before the connections statement with a
-  500 ms statement timeout, so they cannot make "PostgreSQL does not answer" fire; the `psql`
-  call may now take 10 s (was 8 s).
-- Added: `tando host setup <host> --pg-stat-statements` turns on PostgreSQL's
-  `pg_stat_statements` (asks first: PostgreSQL restarts once). Then the top 10 normalized
-  statements of each app's database are in `tando snapshot`, latest only (`<app>.dbtop`, 0600).
-- Faster: a deploy follows its activation with one `deploy-status` call per phase (the server
-  answers when the phase changes: `deploy-status <app> <id> wait=<phase>`, in tando-status and the
-  deploy key's gate) instead of a poll every 0.5 s. The client sees "live" when it happens, not up
-  to half a second later, and makes fewer ssh calls: 17 to 11 for a 5 s activation, 29 to 12 for
-  `deploy --wait` with a 10 s soak (about 70 to 13 with the default 30 s). An older server is
-  polled as before. `tando restart`, `start`, `stop`, `rollback`, `env set` return when the
-  server answers instead of at the next quarter-second tick (0.1-0.25 s each).
-- Added: live views every 5 s. tandod keeps a second loop beside the minute's checks (srv/live):
-  every 5 s each app's memory, CPU, tasks and unit state and the host's load, memory, CPU and disk,
-  from the cgroup v2 files, /proc and the bus connection it already has; no program started, no file
-  written, an hour kept in memory, the alert rules untouched (still per minute). `tando status
-  --follow` and `tando ls --follow` show it over one ssh session that stays open (the server pushes
-  a frame every 5 s: `tando-agent status-follow`); an older server, or one without tandod or cgroup
-  v2, is polled every 5 s instead. docs/MONITORING.md, "Live views".
-- Added (dashboard add-on): live refresh every 5 s while a page is visible: one `tando snapshot
-  --json --follow` per server (new: a line every 5 s over one ssh session) answers the polls; an
-  app's page lays the live row over its own snapshot. The follow ends 30 s after the page is hidden.
-- `tando menubar`: an app's "Open status in Terminal" uses `tando status --follow`.
-- Monitoring, lighter (slice 1): tandod's `MemoryMax` is 160M instead of 64M. At 64M its cgroup
-  evicted the page cache of the journals and programs it reads every minute and read them again
-  (on a real server: about 300 MB a minute of re-reads); its own memory still stays under 20 MB.
-  `tando host setup` rewrites the unit of an existing server and restarts tandod.
+### New: the dashboard add-on (not in the main archive)
+
+- `tando addon install dashboard | uninstall dashboard | status` and `tando dashboard`. The add-on
+  is installed from its own release asset (`tando-dash-<v>-<os>-<arch>.tar.gz`, universal on macOS),
+  checked against its SHA-256 (refused on a mismatch or without a checksum), into
+  `~/.local/lib/tando-dash/<v>/` with `~/.local/bin/tando-dash`; macOS quarantine is removed only
+  from the verified files. Uninstall removes the binary, its links, `dash.lock` and the cache files.
+  `scripts/release-dashboard.sh` builds the web app and `tando-dash` (darwin universal with lipo,
+  linux amd64 and arm64; static, `-trimpath`, stripped) into reproducible archives with `.sha256`
+  (`--check` builds twice and compares the bytes); the main archive has nothing of `addons/`.
+- The web app (`addons/dashboard/web`: React, Vite, Tailwind, Recharts in a lazy chunk): sidebar,
+  Overview, Deploys and Alerts pages, and an app page with Overview, Logs, Traffic, Jobs, Env,
+  What changed and Deploys tabs. Bundle budgets and design rules are checked by
+  `test/dashboard-test.sh`.
+- Live: while a page is visible it refreshes every 5 s from one `tando snapshot --json --follow`
+  per server; the follow ends 30 s after the page is hidden.
+- Writes: Deploy (from the folder tando recorded as the app's last deploy origin; off with the
+  reason when tando has no record of it or another machine deployed last), Roll back (to the
+  target, or per release), Restart, Stop/Start and Set variable (Env tab; the value in a password
+  field, sent once in the request body and on stdin, never stored or logged). A confirmation names
+  the action, app and server and shows the command; one Idempotency-Key per action (a retry reuses
+  it, a double click sends once); one write per app at a time ("busy: ..." in the CLI's words);
+  progress streams as Server-Sent Events from the write's output (Last-Event-ID resume), the
+  outcome is read back from the server, and the panel reattaches after a reload or a tando-dash
+  restart.
+- The database studio opens directly: a click on "Database" in the sidebar, "Open database" or the
+  Server page's "Database studio" opens the studio in a new tab with no dialog; tando-dash keeps one
+  lazy ssh forward per server (closed after 30 min without a click) and mints a fresh one-time link
+  for each click.
+- The Server page is a cloud-VM monitoring tab: sections CPU, Memory, Disk, Network, Pressure and
+  Monitoring cost (20 charts: stacked CPU, swap, IOPS, throughput, latency, TCP, pressure,
+  tandod's own cost, ...) that fold and draw when scrolled to, over 1h/24h/7d. The app Overview
+  shows throttled %, OOM kills, tasks against the limit, memory pressure and a Disk chart; apps with
+  a database get a Database tab (connections, transactions, rows, cache hit, deadlocks, temp files,
+  long transactions, size and growth, top queries).
+
+### On upgrade: changed defaults and behaviour
+
+Run `tando host setup <host>` on each server after updating tando; it applies the items below.
+Steps and checks: docs/release-notes/0.3.0.md.
+
+- PostgreSQL moves to pgbouncer on the app's next deploy. An app's `DATABASE_URL` then points at
+  pgbouncer (transaction pooling); `LISTEN`/`NOTIFY`, session advisory locks, session `SET` and
+  prepared statements on old drivers do not survive that: set `db_direct = true` for such an app
+  (it keeps PostgreSQL itself). Setup says how many apps are still direct. Apps are not touched
+  until they deploy; a rollback keeps the current URL.
+- PostgreSQL's memory settings (sized from RAM) wait on a server whose apps already have databases
+  for `tando host setup <host> --pg-restart` (asked first; a restart drops every app's connections
+  for seconds); setup and `tando doctor` say so. A server with no app database yet restarts by
+  itself.
+- Ports: the app range is 4100-4999 (was 4100-4199: app 101 was refused), set with `port_min=` and
+  `port_max=`; a new app's pre-flight port comes from its own range, 14100-14999 (`preflight_min=`,
+  `preflight_max=`), kept as `preflight_port`. A server still on the old default range is widened by
+  host setup. The loopback rules that keep apps off each other's ports cover both ranges and pgbouncer's
+  port (6432); a service of yours on one of these ports needs another.
+- Users: new app users get ids from 30000-39999 (`uid_min=`, `uid_max=`), not 200-999, which ran out
+  after about 250 apps made over a server's life. Existing apps keep theirs.
+- Logs: the default journal cap of an app is min(256M, 5% of the disk, its share of `log_budget`)
+  instead of min(2G, 5%). On a disk of 40 GB or more an app without `log_max` could keep 2 GB of
+  journal, and every scan of it mapped those files. The next `tando host setup` or deploy trims
+  such a journal to the new cap (oldest first); an explicit `log_max` is kept. Host setup and
+  deploys now also trim a journal that is over its cap while its config is unchanged.
+- tandod's `MemoryMax` is 160M instead of 64M. At 64M its cgroup evicted the page cache of the
+  journals and programs it reads every minute and read them again (on a real server: about 300 MB
+  a minute of re-reads); its own memory stays under 20 MB. `tando host setup` rewrites the unit of
+  an existing server and restarts tandod.
+- Backups: one queue for the whole server (`tando-backups.timer`, 01:00-05:00 server time, one
+  backup at a time; `backup_window=`, `backup_jobs=`) instead of a timer per app at midnight. A
+  backup not started before the window's end is reported and waits for the next night; widen
+  the window or raise `backup_jobs` (1 to 4) for a server with many apps.
+- Jobs: the default start spread is a sixth of the period at most 10 minutes (hourly: 10 minutes),
+  at a fixed offset per timer, instead of 15 s. `job_spread` still sets it, 0 starts jobs on the
+  second.
+- Database studio: `tando host setup` installs `tando-studio.service` (see New). An older tando on
+  the laptop is told to update before it can open the studio.
+- `tando ls` (and `ls --all`, per server) above 50 apps shows a summary: the count per state and
+  only the apps that are down or have an alert firing; `--all-rows` lists every app; `--json` is
+  unchanged.
+
+### Faster
+
+- `tando ls` rows are built in one awk pass instead of several forks per app: 100 apps rendered in
+  0.9 s before, 0.1 s now (200: 1.8 s, 0.17 s).
+- A deploy follows its activation with one `deploy-status` call per phase (the server answers when
+  the phase changes: `deploy-status <app> <id> wait=<phase>`) instead of a poll every 0.5 s. The
+  client sees "live" when it happens and makes fewer ssh calls: 17 to 11 for a 5 s activation, 29
+  to 12 for `deploy --wait` with a 10 s soak (about 70 to 13 with the default 30 s). An older
+  server is polled as before. `tando restart`, `start`, `stop`, `rollback` and `env set` return
+  when the server answers instead of at the next quarter-second tick (0.1-0.25 s each).
 - Monitoring: how an app last ended (`last: exit status 3`) is read from the system journal only
   when the app restarted or its state changed, never for a stopped or static app. A stopped or
   failed app used to start a `journalctl` over the whole system journal every minute.
-- Logs: the default journal cap of an app is min(256M, 5% of the disk) instead of min(2G, 5%).
-  On a disk of 40 GB or more an app without `log_max` could keep 2 GB of journal, and every scan
-  of it mapped those files. The next `tando host setup` or deploy trims such a journal to the new
-  cap (oldest first); an explicit `log_max` is kept. Host setup and deploys now also trim a journal
-  that is over its cap while its config is unchanged (before, the trim ran only when the config
-  changed and the app's journald was running, and its failure was ignored).
-- Added: host and per-app resource history. `tando-metrics` samples the host's CPU (% of all cores,
-  from /proc/stat) and the disk used/total of the file system holding /var/lib/tando each minute,
-  as new columns at the end of `host.tsv` (older lines read as gaps), and each app's disk (its
-  directory, data and journal namespace, walked in-process at most every 15 minutes within a
-  500 ms budget per minute) into `<app>.disk`. `tando snapshot --json --range R` without `--app`
-  returns `host_metrics` (load, cpu, memory, disk); an app's series gains `disk_bytes`.
-- Added (dashboard add-on): the Server page has Load, CPU, Memory and Disk charts (1h/24h/7d; the
-  cores and the totals as dashed lines), host cards link to it, and App Overview has a Disk chart.
 
-- Added (dashboard add-on): the database studio from the dashboard. A "Database" row under each app
-  with a database in the sidebar and "Open database" in the app header; every open is confirmed,
-  then the studio's own page opens in a new browser window (the Mac window hands it to the default
-  browser). One dashboard studio per server (the other server slot stays free for the terminal),
-  "open · Stop" in the sidebar while it runs, the row closes when the studio ends on its own. The
-  child never outlives tando-dash: stdin EOF ends it, shutdown stops its group, and a tando-dash
-  started after a crash stops what an earlier one left (pid and command line checked).
-- Added: `tando db studio --json`: one JSON line `{url, port, sid}` instead of the box and the
-  browser, and the session ends when stdin closes (for programs such as the dashboard).
-- `tando jobs run`: a run by hand reports its own result. A timer start that came as it ended (and was
-  correctly skipped as not due) could be shown as "failed (exec-condition)" for a run that succeeded.
-- `tando menubar`: "Open status in Terminal" opens the live view (`--watch 5`, refreshing until
-  Ctrl-C) instead of printing once.
-- Added (dashboard add-on): the web app's writes: Deploy, Roll back (to the target, or "Roll back to
-  this" per release), Restart, Stop/Start and Set variable (Env tab; the value in a password field,
-  sent once in the request body, never stored). A confirmation names the action, app and server and
-  shows the command; one Idempotency-Key per action (a retry after a network error reuses it, a
-  double click sends once); a progress panel streams the output (Last-Event-ID resume), shows the
-  server's outcome, 409 with what runs and since when, a replay, and reattaches after a reload
-  (sessionStorage holds the key and app only). Deploy is off with the reason when tando has no
-  record of the app's folder or another machine deployed it last (`/api/ping` says `client`). The
-  Deploys page reads `/api/history` per server instead of one snapshot per app.
-- Security: a deploy key's `releases` never carries the app's `origin` row (the gate keeps the
-  release rows only; now tested).
+### Fixed
 
-- Added (dashboard add-on): writes in tando-dash: deploy (from the folder tando recorded as the
-  app's last deploy origin; refused for another machine's, a missing or a foreign folder), rollback
-  (to the target or a release), stop, start, restart and env set (the value on stdin only). Progress
-  as Server-Sent Events from the write's output file (`/api/action/stream`, Last-Event-ID resume);
-  the outcome read back from the server (history, state), also for a write that ran while tando-dash
-  restarted; "busy: ..." in the CLI's words when another operation holds the app. Read endpoints for
-  the app pages: jobs, requests, errors, env names, env log, alerts, history.
-- Added: the audit line's `from` says `dashboard` for changes made from the tando dashboard
-  (`TANDO_FROM=dashboard` in the CLI's environment); `tando releases` sends the app's last deploy
-  origin as an `origin` row, and `tando snapshot --app` has `app.origin`.
-- Added: `tando addon install dashboard | uninstall dashboard | status` and `tando dashboard`. The
-  dashboard add-on is installed from its own release asset (`tando-dash-<v>-<os>-<arch>.tar.gz`,
-  universal on macOS), checked against its SHA-256 (refused on a mismatch or without a checksum),
-  into `~/.local/lib/tando-dash/<v>/` with `~/.local/bin/tando-dash`; macOS quarantine is removed only
-  from the verified files. Uninstall removes the binary, its links, `dash.lock` and the cache files.
-- Added: `scripts/release-dashboard.sh` builds the web app and `tando-dash` (darwin universal with
-  lipo, linux amd64 and arm64; static, `-trimpath`, stripped) into reproducible archives with
-  `.sha256`; `--check` builds twice and compares the bytes. The main archive still has nothing of `addons/`.
-- Added (macOS): the menu bar app's "Open dashboard" (⌘D): a window of its own (WKWebView, one window,
-  size remembered, ⌘R reload, ⌘W closes the window) that starts `tando-dash` if none runs and asks it
-  for a fresh one-time link; "Install dashboard…" shows the command when the add-on is missing. The
-  window only shows `127.0.0.1:<port>`; other links open in the default browser. The menu bar also
-  reads `tando-dash`'s `ls-all.json` when it is fresher than its interval, instead of running
-  `tando ls --all --json`.
-
-- Added (dashboard add-on, not in the main archive): the web app, `addons/dashboard/web` (React, Vite,
-  Tailwind, Recharts in a lazy chunk): sidebar, Overview, Server page, App page with the Overview
-  and Deploys tabs; the other pages are placeholders. Bundle budgets and design rules are checked
-  by `test/dashboard-test.sh`.
-- Added: `tando snapshot --json [-H host | --all] [--app A --range 1h|24h|7d]`, everything a
-  dashboard shows of a server in one ssh exec per host: apps with `state_reason`, the `system`
-  object (load 1/5/15, memory, disk, cpus, uptime), the server's clock and skew, versions, alerts;
-  with `--app` its releases, history with the deployer (the audit log's who), metrics over the
-  range (every bucket present, null where no sample, restarts as per-bucket deltas) and health.
-  Servers in parallel, each with a timeout; one that did not answer is `reachable: false`.
-- Added: the agent verb `env-names` (key names only, not audited as a reveal, refused to a deploy
-  key); `tando env ls --names`, and `env ls --json`, use it, so no value leaves the server.
-- Added: `--json` for `doctor`, `jobs`, `requests` (with a series per bucket: requests and 5xx)
-  and `backup ls`; `series` per hour in `errors --json` (tando-logs sends each group's hourly
-  counts) and `health --json`; `history` (the last 8 events) in `alerts --json`; `state_reason`
-  and `system` in `ls` and `status --json`.
-- Fixed: `tando alerts --json` and `tando requests --json` stopped with "unknown argument" (the
-  flag reached the subcommand).
-- Tests: test/json-contract.sh (run by ui-test) checks every `--json` against a key:type schema
-  in test/fixtures/json on a stub ssh, with samples for the dashboard's own tests.
+- A new app could get another app's pre-flight port (its port + 100) as its own port once the port
+  range was widened past 100 ports: that app's every deploy and env change then failed with
+  "pre-flight port in use", and the loopback rules let its user reach the new app. A new app's port
+  and its pre-flight port are now no other app's port or pre-flight port, whether that app runs or
+  not (also `tando adopt`'s pre-flight port).
+- Two deploys started at once from one project directory whose deploy lock was left by a killed
+  deploy could both take it over and build into the same `.tando/stage`; now one does and the other
+  says another deploy is running.
+- A laptop that slept (or a CI runner that stalled) through a deploy's activation woke up to "the
+  activation has not finished" and exit status 1, though the release had gone live: the client now
+  asks for the result before it gives up at its deadline.
+- `tando jobs run`: a run by hand reports its own result. A timer start that came as it ended (and
+  was correctly skipped as not due) could be shown as "failed (exec-condition)" for a run that
+  succeeded.
+- `tando alerts --json` and `tando requests --json` stopped with "unknown argument" (the flag
+  reached the subcommand).
 
 ## 0.2.2 - 2026-11-21
 

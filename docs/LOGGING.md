@@ -83,11 +83,14 @@ system) still applies to every namespace, so even a misconfigured cap cannot fil
 **Defaults that cannot fill a small disk.** The built-in `log_max` is 256M, but an app without its
 own (and without a host default) gets min(256M, 5% of the file system that holds the journals):
 256 MB on a 5 GB disk or larger, about 100 MB on a 2 GB one. An explicit `log_max` is used as written.
-Up to 0.2 the default was min(2G, 5%): 2G on a 40 GB disk, and journald held one chatty app's
+Up to 0.2.2 the default was min(2G, 5%): 2G on a 40 GB disk, and journald held one chatty app's
 journal at that cap (2.1 GB beside other apps' 8-16 MB), which every scan and query of that app
 then mapped. The next `tando host setup` (or deploy) writes the new cap and trims such a journal
 to it, oldest files first. The request log's default budget did not change (it is still computed
-from min(2G, 5%)).
+from min(2G, 5%)). On a server with many apps the host's `log_budget` (default 20% of the file
+system) is split too: an app's default journal cap is also at most 4/5 of the budget divided by
+the number of apps (100 apps on 80 GB: 128M each), the request log's budget a quarter of that.
+`tando host setup <host> log_budget=<size>` sets it.
 `tando doctor` ("log caps") adds up every app's journal cap and request log budget, subtracts what
 they already hold, and warns when they could still grow by more than the free space. `tando status
 -a <app>` shows it as `logs 6.4 MB of 2.0 GB, keeps 30 d` (disk use of journal and request log, the

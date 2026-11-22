@@ -88,8 +88,9 @@ the same agent skips the rest), `domain-add <app> <domain> <www>`, `domain-rm`, 
 (token on stdin; the older form with the token as second argument still works), `rollback [id]`,
 `recover`, `env-set/-unset/-ls` (stdin), `start/stop/restart`, `unlock`, `destroy [purge|plan]`,
 `backup-run <kind>`, `backup-ls`, `backup-cat`, `backup-restore`, `db-url`, `db-psql`,
-`db-studio <app> ro <sid> <idle-min> <port> <host>` (the studio, for as long as its ssh session:
-relays only its `ready` and `stopped` lines), `db-studio-ls [app]` (`database=`, `installed=`, then
+`db-studio <app> ro <sid> <idle-min> <port> <host>` (the older per-session studio, for as long as its
+ssh session, still used against a server without the studio service: relays only its `ready` and
+`stopped` lines), `db-studio-ls [app]` (`database=`, `installed=`, then
 `studio <app> <sid12> <started> <mode> <admin>` rows; without an app also `app <name> <database 0|1>
 <bytes> <state>` rows for the client's picker), `db-studio-stop [app]` (`stopped=N`),
 `shell <app> [hex command]` (a shell, or one command, as the app's user in its sandbox: its env,
@@ -446,8 +447,8 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
     itself defined that reads a catalog in its body is called by its own name and is not seen
     (as for set_config); a type or domain of the app's over regclass the same; it refuses by
     name, so an app column or table called `pg_x` or `lo_x` is refused too (`tando db psql`
-    reads them). One connection, at
-    most 2 studios per host. CI deploy keys cannot start it: the client, the gate's grammar, their
+    reads them). One connection; at most 2
+    helper processes per app and 4 in all (docs/STUDIO.md). CI deploy keys cannot start it: the client, the gate's grammar, their
     sudo rule and sshd's DisableForwarding refuse, and the agent refuses SUDO_USER tando-d-*.
   - **One app.** The app comes only from the root agent verb's argument; the credential file
     holds that app's role, and the API has no field for a database, role or connection string
