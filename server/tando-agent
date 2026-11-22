@@ -2577,9 +2577,17 @@ fw_sync() {
     done
     echo "  }"
     if dn_is; then
+      # each app node holds at most data_conn_per_node connections at once (its root is bound by no
+      # per-app rule): one node cannot take every pre-auth slot of PostgreSQL and pgbouncer
+      local cpn=${H[data_conn_per_node]:-500}; [[ $cpn =~ ^[1-9][0-9]{0,4}$ ]] || cpn=500
       echo "  counter data_refused {}"
+      echo "  counter data_capped {}"
+      echo "  set dn4c { type ipv4_addr; size 65535; flags dynamic; }"
+      echo "  set dn6c { type ipv6_addr; size 65535; flags dynamic; }"
       echo "  chain data_in {"
       echo "    type filter hook input priority 0; policy accept;"
+      echo "    iifname != \"lo\" tcp dport { 5432, 6432 } ct state new add @dn4c { ip saddr ct count over $cpn } counter name data_capped reject with tcp reset"
+      echo "    iifname != \"lo\" tcp dport { 5432, 6432 } ct state new add @dn6c { ip6 saddr ct count over $cpn } counter name data_capped reject with tcp reset"
       [[ -z $dn4 ]] || echo "    iifname != \"lo\" ip saddr { $dn4 } tcp dport { 5432, 6432 } accept"
       [[ -z $dn6 ]] || echo "    iifname != \"lo\" ip6 saddr { $dn6 } tcp dport { 5432, 6432 } accept"
       echo "    iifname != \"lo\" tcp dport { 5432, 6432 } counter name data_refused reject with tcp reset"
@@ -2703,6 +2711,9 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
       pg_stat_statements=yes) pgss=1;;   # tando host setup --pg-stat-statements (asked first: a restart)
       pg_restart=yes) PG_RESTART_OK=1;;   # tando host setup --pg-restart (asked first): pg_tune may restart
       pg_max_connections=auto) unset 'H[pg_max_connections]';;
+      data_pool_max=*|data_conn_per_node=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,4}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
+      data_temp_max=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,5}[MG]$ ]] || die "bad data_temp_max (like 8G)"; H[data_temp_max]=${kv#*=};;
+      data_timeout_max=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,4}[smh]$ ]] || die "bad data_timeout_max (like 1h)"; H[data_timeout_max]=${kv#*=};;
       role=data) H[role]=data; [[ " ${feats[*]-} " == *" postgres "* ]] || feats+=(postgres);;   # a data node (docs/DATA-NODE.md)
       data_cert=/*) dcert=${kv#*=};; data_key=/*) dkey=${kv#*=};; data_ca=/*) dca=${kv#*=};;   # its own certificates (paths on the server)
       pg_max_connections=*) [[ ${kv#*=} =~ ^[1-9][0-9]{1,3}$ ]] && ((${kv#*=} >= 20)) || die "bad pg_max_connections (20 to 9999, or auto)"
@@ -2856,6 +2867,9 @@ EOF
 
   # the service drop-in, the sizing, pgbouncer, every app's role limits (a step of its own: the
   # client counts it when the server has PostgreSQL or this setup installs it)
+  # a data node: firewall and certificates before the database step opens anything (dn_setup again
+  # after it: pgbouncer's pools)
+  dn_is && [[ ${H[postgres]:-} == yes ]] && { command -v nft > /dev/null || die "a data node needs nftables"; fw_sync || die "could not load the firewall rules"; dn_tls || die "could not make the data node's certificates (openssl)"; }
   if [[ ${H[postgres]:-} == yes ]]; then
     step database run
     pg_host_sync
@@ -3095,6 +3109,7 @@ cmd_doctor() {
     row check ok "caddy import" "/etc/caddy/tando/*.caddy"
   else row check fail "caddy import" "missing from /etc/caddy/Caddyfile"; fi
   [[ ${H[postgres]:-} == yes ]] && pg_doctor
+  dn_is && dn_doctor
   if [[ -x $STUDIO ]]; then
     if systemctl is-active -q tando-studio.service; then
       row check ok "studio" "$(studio_rows | awk -F'\t' 'BEGIN { s = "running, no session" } { s = "running, " $2 " session(s), open: " ($3 == "-" ? "none" : $3) } END { print s }')"
@@ -5671,8 +5686,7 @@ pg_tune() {
   # a data node (docs/DATA-NODE.md): every address, TLS once its certificate is there (dn_tls);
   # pg_hba and the firewall decide who gets in
   if dn_is; then
-    listen='*'
-    [[ -s $DN_TLS/server.pem && -s $DN_TLS/server.key ]] &&
+    [[ -s $DN_TLS/server.pem && -s $DN_TLS/server.key ]] && listen='*' &&
       tls=$(printf "ssl = on\nssl_cert_file = '%s/server.pem'\nssl_key_file = '%s/server.key'\nssl_min_protocol_version = 'TLSv1.2'\npassword_encryption = 'scram-sha-256'" "$DN_TLS" "$DN_TLS")
   fi
   cat > "$conf.tmp" <<CONF
@@ -5770,10 +5784,11 @@ pgb_sync() {
     done < <(grep -H '^pool=' "$DN"/db/* 2> /dev/null)
     local listen=127.0.0.1 auth="auth_type = scram-sha-256"
     if dn_is; then
-      # every address, TLS for clients (required by hba.tando for every address but loopback)
-      listen='*'
-      [[ -s $DN_TLS/server.pem ]] &&
-        auth="auth_type = hba"$'\n'"auth_hba_file = $PGB_DIR/hba.tando"$'\n'"client_tls_sslmode = allow"$'\n'"client_tls_cert_file = $DN_TLS/server.pem"$'\n'"client_tls_key_file = $DN_TLS/server.key"$'\n'"client_tls_protocols = tlsv1.2,tlsv1.3"
+      # every address only with TLS and its hba (hostssl for every address but loopback); until the
+      # certificate is there, loopback only, as on any server: never plain passwords outside
+      auth="auth_type = hba"$'\n'"auth_hba_file = $PGB_DIR/hba.tando"
+      [[ -s $DN_TLS/server.pem && -s $DN_TLS/server.key ]] && listen='*' &&
+        auth+=$'\n'"client_tls_sslmode = allow"$'\n'"client_tls_cert_file = $DN_TLS/server.pem"$'\n'"client_tls_key_file = $DN_TLS/server.key"$'\n'"client_tls_protocols = tlsv1.2,tlsv1.3"
       [[ -f $PGB_DIR/hba.tando ]] || pgb_put "$PGB_DIR/hba.tando" <<< "host all all 127.0.0.1/32 scram-sha-256" || exit 1
     fi
     if [[ -n ${A:-} ]]; then me=$(db_role); pool[$me]=${C[db_pool]:-$DB_POOL}; fi
@@ -6143,6 +6158,8 @@ cmd_db_psql() { # interactive, over ssh -t; runs as the app user with the app's 
 # per app, the role's password (db-remote-set), and connects with sslmode=verify-full.
 # Records here: $DN/nodes/<name> (addr=), $DN/db/<app> (node=, pool=).
 DN=$R/data DN_TLS=/etc/tando-data DB_CA=$R/db-ca.pem
+# a statement that carries a password is never written to the server's log, not even when it fails
+DN_QUIET="SET log_statement = 'none'; SET log_min_error_statement = 'panic'; SET log_min_duration_statement = -1;"
 dn_is() { [[ ${H[role]:-} == data ]]; }
 valid_node() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]]; }
 valid_ip() { [[ $1 =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ || ( $1 =~ ^[0-9a-fA-F:]+$ && $1 == *:*:* ) ]]; }
@@ -6234,6 +6251,9 @@ dn_reload_tls() {
 # dn_setup (host setup role=data, after PostgreSQL is installed): the certificates, then the
 # listening sockets (pg_tune, pgb_sync read role=data), pg_hba and the firewall. DN_DETAIL: the line.
 dn_setup() {
+  # the firewall before anything listens beyond the loopback (no nft: no data node)
+  command -v nft > /dev/null || die "a data node needs nftables (its firewall), which host setup installs: run it again"
+  fw_sync || die "could not load the firewall rules"
   dn_tls || die "could not make the data node's certificates (openssl)"
   pg_tune || die "$PG_TUNE_ERR"
   ( pgb_sync ) || die "could not configure pgbouncer for the data node"
@@ -6243,6 +6263,29 @@ dn_setup() {
   fi
   [[ -n $DN_TLS_NEW ]] && { dn_reload_tls || die "PostgreSQL did not take the new certificate"; }
   dn_hba || die "could not write pg_hba.conf"
+  # the server certificate is made again 30 days before it expires (data-renew, daily), not only
+  # when setup or link run: an expired one would refuse every app node (verify-full)
+  write_if_changed /etc/systemd/system/tando-data-renew.service <<EOF || die "could not write the renewal unit"
+[Unit]
+Description=tando: renew the data node's server certificate before it expires
+
+[Service]
+Type=oneshot
+ExecStart=$AGENT data-renew
+EOF
+  write_if_changed /etc/systemd/system/tando-data-renew.timer <<EOF || die "could not write the renewal timer"
+[Unit]
+Description=tando: renew the data node's server certificate (daily check)
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  { systemctl daemon-reload && systemctl enable -q --now tando-data-renew.timer; } || die "could not enable tando-data-renew.timer"
   local n=0 p=0 f
   for f in "$DN"/nodes/*; do [[ -f $f ]] && n=$((n + 1)); done
   for f in "$DN"/db/*; do [[ -f $f ]] && p=$((p + 1)); done
@@ -6251,14 +6294,42 @@ dn_setup() {
   return 0
 }
 
+# data-renew (tando-data-renew.timer): a server certificate that expires within 30 days, or no
+# longer names the node's addresses, is made again and read by a reload
+cmd_data_renew() {
+  need_root; load "$R/host.conf" H
+  dn_is || return 0
+  dn_tls || die "could not renew the data node's certificate (openssl)"
+  [[ -n $DN_TLS_NEW ]] && { dn_reload_tls || die "PostgreSQL did not take the new certificate"; echo "renewed=1"; }
+  return 0
+}
+# dn_doctor: rows for tando doctor on a data node (the certificate's days left)
+dn_doctor() {
+  local end days
+  end=$(openssl x509 -noout -enddate -in "$DN_TLS/server.pem" 2> /dev/null | sed 's/^notAfter=//')
+  if [[ -z $end ]]; then row check fail "data node certificate" "missing: tando host setup <host> role=data makes it"; return 0; fi
+  days=$(( ($(date -d "$end" +%s) - $(now)) / 86400 ))
+  if ((days < 14)); then row check fail "data node certificate" "expires in $days days: tando host setup <host> renews it (a given certificate: replace it, data_cert=)"
+  elif ((days < 30)); then row check warn "data node certificate" "expires in $days days; $([[ ${H[data_tls]:-} == provided ]] && echo "a given certificate: replace it (data_cert=)" || echo "tando-data-renew.timer renews it")"
+  else row check ok "data node certificate" "$days days left$(systemctl is-enabled -q tando-data-renew.timer 2> /dev/null && echo "; renewed daily by tando-data-renew.timer")"; fi
+}
 # data-link <node> <addr> [data_addr]: an app node may connect from addr; prints the CA to pin
 # (ca=, base64) and the address it reaches this node by (addr=)
 cmd_data_link() {
   need_root; host_lock; load "$R/host.conf" H
   dn_is || die "<host> is not a data node: tando host setup <host> role=data"
-  local name=${1:-} addr=${2:-} via=${3:-}
+  local name=${1:-} addr=${2:-} via=${3:-} move="" old f
+  [[ ${4:-} == move=1 || $via == move=1 ]] && move=1; [[ $via == move=1 ]] && via=""
   valid_node "$name" || die "bad app node name: $name"
   valid_ip "$addr" || die "bad address of the app node: $addr (an IP address)"
+  # the same name at another address: its projects would follow the new server; only on purpose
+  old=$(sed -n 's/^addr=//p' "$DN/nodes/$name" 2> /dev/null)
+  if [[ -n $old && $old != "$addr" && -z $move ]]; then
+    for f in "$DN"/db/*; do
+      [[ -f $f ]] && grepq -x "node=$name" "$f" &&
+        die "app node $name is linked from $old and has projects here: linking $addr would hand them to that server. If it moved: tando host link ... --move"
+    done
+  fi
   [[ -z $via ]] || valid_ip "$via" || die "bad address of the data node: $via (an IP address)"
   [[ -n $via ]] || via=$(ip -o route get 1.1.1.1 2> /dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
   valid_ip "$via" || die "this node has no default route: give the address app nodes reach it by (data_addr=)"
@@ -6295,7 +6366,7 @@ cmd_data_unlink() {
 cmd_data_db() {
   need_root; load "$R/host.conf" H
   dn_is || die "<host> is not a data node: tando host setup <host> role=data"
-  local op=${1:-} app=${2:-} node=${3:-} kv pool=$DB_POOL st=30s it=5min tf=1GB new="" r d pw owner
+  local op=${1:-} app=${2:-} node=${3:-} kv pool=$DB_POOL st=30s it=5m tf=1G new="" r d pw owner
   [[ $op == ls ]] && { cmd_data_db_ls; return; }
   valid_app "$app" || die "invalid app name"
   valid_node "$node" || die "bad app node name: $node"
@@ -6303,13 +6374,19 @@ cmd_data_db() {
   for kv in "$@"; do
     case $kv in
       pool=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,2}$ ]] || die "bad $kv"; pool=${kv#*=};;
-      st=*|it=*) [[ ${kv#*=} =~ ^(0|[1-9][0-9]{0,8}(ms|s|min|h))$ ]] || die "bad $kv"; printf -v "${kv%%=*}" '%s' "${kv#*=}";;
-      tf=*) [[ ${kv#*=} =~ ^(-1|[1-9][0-9]{0,5}(MB|GB))$ ]] || die "bad $kv"; tf=${kv#*=};;
+      st=*) st=${kv#*=};; it=*) it=${kv#*=};; tf=*) tf=${kv#*=};;
       new=1) new=1;;
       *) die "bad setting: $kv";;
     esac
   done
   r=tando_${app//-/_} d=tdrill_${app//-/_}
+  # the limits are the tando.conf values the operator's client sends (never an app node's), in
+  # the data node's bounds (dn_policy): one project cannot take the connections, the disk or a
+  # statement without end from the others
+  if [[ $op == ensure ]]; then
+    dn_policy "$app" "$pool" "$st" "$it" "$tf" || die "$DN_WHY"
+    st=$DN_ST it=$DN_IT tf=$DN_TF
+  fi
   lockfile "$R/.data.lock"; exec 13>"$R/.data.lock"; flock -w 60 13 || die "another data-db call holds the lock"
   owner=$(sed -n 's/^node=//p' "$DN/db/$app" 2> /dev/null)
   case $op in
@@ -6318,11 +6395,11 @@ cmd_data_db() {
       [[ -z $owner || $owner == "$node" ]] || die "the database of $app here belongs to app node $owner (an app name is one project on a data node)"
       if [[ $(pgsql -c "SELECT 1 FROM pg_roles WHERE rolname = '$r'") != 1 ]]; then
         pw=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
-        pgsql <<< "CREATE ROLE $r WITH LOGIN PASSWORD '$pw';" || die "could not create role $r"
+        pgsql <<< "$DN_QUIET CREATE ROLE $r WITH LOGIN PASSWORD '$pw';" || die "could not create role $r"
         echo "created=1"
       elif [[ -n $new ]]; then
         pw=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
-        pgsql <<< "ALTER ROLE $r WITH LOGIN PASSWORD '$pw';" || die "could not set the password of $r"
+        pgsql <<< "$DN_QUIET ALTER ROLE $r WITH LOGIN PASSWORD '$pw';" || die "could not set the password of $r"
       fi
       local x
       for x in "$r" "$d"; do
@@ -6331,6 +6408,9 @@ cmd_data_db() {
         fi
         pgsql -c "REVOKE ALL ON DATABASE $x FROM PUBLIC" -c "GRANT CONNECT, TEMPORARY ON DATABASE $x TO $r" ||
           die "could not restrict database $x"
+        # (and its schema public: no USAGE for other roles either; the catalog itself, the names
+        # of databases and roles, stays readable to every role: docs/DATA-NODE.md)
+        pgsql -d "$x" -c "REVOKE ALL ON SCHEMA public FROM PUBLIC" > /dev/null || die "could not restrict the schema of $x"
       done
       pgsql -c "COMMENT ON DATABASE $d IS '$DRILL_MARK'" > /dev/null || die "could not mark $d"
       # the per-role limits (as db_limits on a single node; docs/CONFIG.md "Database limits")
@@ -6354,6 +6434,39 @@ cmd_data_db() {
       echo "dropped=$r";;
     *) die "data-db ensure|drop|ls";;
   esac
+}
+# dn_policy app pool st it tf (tando.conf forms: 30s, 5m, 1G): the data node's bounds, host setup
+# data_pool_max= (default 20 server connections a project), data_temp_max= (default 8G), and
+# timeouts that are never off and at most data_timeout_max= (default 1h). Every project's pool
+# plus its tool slots must fit in max_connections less the superuser's. Sets DN_ST DN_IT DN_TF
+# (PostgreSQL's forms) or DN_WHY.
+DN_POOL_MAX=20 DN_TEMP_MAX=8G DN_TIMEOUT_MAX=1h
+dn_secs() { local v=$1; case $v in *ms) echo $(( ${v%ms} / 1000 ));; *s) echo "${v%s}";; *m) echo $(( ${v%m} * 60 ));; *h) echo $(( ${v%h} * 3600 ));; esac; }
+dn_mb() { local v=$1; case $v in *M) echo "${v%M}";; *G) echo $(( ${v%G} * 1024 ));; esac; }
+dn_policy() {
+  local app=$1 pool=$2 pmax=${H[data_pool_max]:-$DN_POOL_MAX} tmax=${H[data_temp_max]:-$DN_TEMP_MAX} omax=${H[data_timeout_max]:-$DN_TIMEOUT_MAX} k v f sum=0 max p
+  DN_WHY=""
+  ((pool >= 1 && pool <= pmax)) || { DN_WHY="db_pool $pool is over the data node's limit of $pmax (host setup <host> data_pool_max=N)"; return 1; }
+  for k in ST:$3 IT:$4; do
+    v=${k#*:}; k=${k%%:*}
+    [[ $v == off ]] && { DN_WHY="the database timeouts cannot be off on a data node (db_statement_timeout, db_idle_tx_timeout)"; return 1; }
+    f=$(db_guc db_statement_timeout "$v") || { DN_WHY="bad database timeout: $v ($DB_GUC_HINT)"; return 1; }
+    (( $(dn_secs "$v") <= $(dn_secs "$omax") )) || { DN_WHY="a database timeout of $v is over the data node's $omax (host setup <host> data_timeout_max=)"; return 1; }
+    printf -v "DN_$k" '%s' "$f"
+  done
+  [[ $5 == off ]] && { DN_WHY="db_temp_limit cannot be off on a data node: its disk is every project's"; return 1; }
+  DN_TF=$(db_guc db_temp_limit "$5") || { DN_WHY="bad db_temp_limit: $5 ($DB_GUC_HINT)"; return 1; }
+  (( $(dn_mb "$5") <= $(dn_mb "$tmax") )) || { DN_WHY="db_temp_limit $5 is over the data node's $tmax (host setup <host> data_temp_max=)"; return 1; }
+  # every project's pool and tool slots in max_connections (this one's new pool counted)
+  for f in "$DN"/db/*; do
+    [[ -f $f && ${f##*/} != "$app" ]] || continue
+    p=$(sed -n 's/^pool=//p' "$f"); [[ $p =~ ^[0-9]+$ ]] || p=$DB_POOL
+    sum=$((sum + p + DB_TOOL_SLOTS))
+  done
+  sum=$((sum + pool + DB_TOOL_SLOTS))
+  max=$(pgsql -c "SELECT current_setting('max_connections')::int - current_setting('superuser_reserved_connections')::int" 2> /dev/null)
+  [[ $max =~ ^[0-9]+$ ]] && ((sum > max)) && { DN_WHY="the projects' pools would need $sum connections and the data node has $max (a larger node, or host setup <host> pg_max_connections=N)"; return 1; }
+  return 0
 }
 # data-db ls: one line per project: app, node, size, connections now, the role's limit
 cmd_data_db_ls() {
@@ -8419,7 +8532,7 @@ case $verb in
   db-url) cmd_db_url "$@";;
   db-psql) cmd_db_psql "$@";;
   db-info) cmd_db_info "$@";;
-  data-link) cmd_data_link "$@";; data-unlink) cmd_data_unlink "$@";; data-db) cmd_data_db "$@";;
+  data-link) cmd_data_link "$@";; data-unlink) cmd_data_unlink "$@";; data-db) cmd_data_db "$@";; data-renew) cmd_data_renew;;
   db-link) cmd_db_link "$@";; db-remote-set) cmd_db_remote_set "$@";;
   db-studio) cmd_db_studio "$@";; db-studio-ls) cmd_db_studio_ls "$@";; db-studio-stop) cmd_db_studio_stop "$@";;
   db-studio-code) cmd_db_studio_code "$@";; db-studio-lower) cmd_db_studio_lower "$@";;

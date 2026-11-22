@@ -327,13 +327,13 @@ tando backup offsite hosts lists the servers.
 Example: tando restore --from-host 3f9a01c2b7de --all -H newvps
 
 @@ host
-flags: --port= --key= --insecure-test --no-check --deploy --force --yes --json --watch= --all --now --updates --reboot --window= --tz= --lead= --even-with-other-sites --drop-alias --pg-stat-statements --pg-restart
+flags: --port= --key= --insecure-test --no-check --deploy --force --yes --json --watch= --all --now --updates --reboot --window= --tz= --lead= --even-with-other-sites --drop-alias --pg-stat-statements --pg-restart --move
 subs: add=2 ls=0 setup=1+ link=2-4 rm=1 rename=1-2 status=0-1 care=0-3 update=0-1 reboot=0-1 default=ls
 usage: tando host add <name> <user@address> [--port N] [--key FILE] [--yes] [--force]
 usage:                [--no-check] [--deploy] [--insecure-test]
 usage: tando host setup <name> [apps_domain=D] [tls=auto|internal|off] [setting=value ...]
 usage:                  [--pg-stat-statements] [--pg-restart] [--yes]
-usage: tando host link <app-node> <data-node> [app_addr=IP] [data_addr=IP]
+usage: tando host link <app-node> <data-node> [app_addr=IP] [data_addr=IP] [--move]
 usage: tando host ls
 usage: tando host rm <name>
 usage: tando host rename <old> <new> | rename --drop-alias <old>

@@ -74,8 +74,16 @@ configure() {
   kv_read "$TMPD/cfg" link port created changed exists current needs node domains \
     busy busy_phase busy_left busy_soak conf supersede db_remote db_node db_url db_pool db_st db_it db_tf
   # a database on a data node (docs/DATA-NODE.md): made or updated there before anything runs
-  if [ "${1:-}" != check ] && [ -n "$K_db_remote" ]; then
-    . "$TANDO_HOME/lib/datanode.sh"; db_remote_provision
+  # (a linked app node that stops reporting its data node, or asks for a local PostgreSQL, is
+  # refused: its databases are on the data node the link record names)
+  if [ -n "$K_db_remote" ] || { [ "$C_database" = postgres ] && [ -f "$CFG/links/$HOST" ]; }; then
+    . "$TANDO_HOME/lib/datanode.sh"
+    if [ "${1:-}" = check ]; then
+      case " $K_needs " in *" postgres "*) link_check "" "";; esac
+    else
+      [ -n "$K_db_remote" ] || link_check "" ""
+      db_remote_provision
+    fi
   fi
   # configure check: something holds the app now (a release soaking, a rollback, a backup); the
   # real configure waits for it, and configure_wait says so if it still does then

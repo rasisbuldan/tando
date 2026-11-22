@@ -179,6 +179,7 @@ cmd_host() {
           role=data)   # a data node: PostgreSQL for app nodes (docs/DATA-NODE.md); its step is "data"
             case "$feats " in *" postgres "*) ;; *) feats="$feats postgres";; esac; feats="$feats data";;
           data_cert=/*|data_key=/*|data_ca=/*) ;;
+          data_pool_max=*|data_temp_max=*|data_timeout_max=*|data_conn_per_node=*) ;;   # a data node's bounds
           pg_max_connections=auto|pg_max_connections=[1-9][0-9]|pg_max_connections=[1-9][0-9][0-9]|pg_max_connections=[1-9][0-9][0-9][0-9]) ;;
           *) usage_err "bad setting: $kv" host;;
         esac
@@ -391,6 +392,10 @@ cmd_destroy() {
   agent sudo destroy "$APP" plan < /dev/null > "$TMPD/o"   # stdin is for the answer
   kv_read "$TMPD/o" releases env data database backups jobs final db_remote db_node
   local dbr=$K_db_remote dbn=$K_db_node
+  # a database on a data node: where is the link record's to say, never the app node's report
+  if [ -n "$dbr" ] || { [ "$K_database" = postgres ] && [ -f "$CFG/links/$HOST" ]; }; then
+    . "$TANDO_HOME/lib/datanode.sh"; link_check "$dbr" "$dbn"; dbr=$LINK_DN
+  fi
   what="$(plural "${K_releases:-0}" release)"
   [ "${K_env:-0}" -gt 0 ] && what="$what, $(plural "$K_env" "env key")"
   [ -n "$K_data" ] && what="$what, its data ($(ui_bytes "$K_data"))"
@@ -405,7 +410,7 @@ cmd_destroy() {
   if [ -n "$K_backup" ]; then
     note "destroyed $K_destroyed; final backup ${K_backup##*/}: tando backup pull ${K_backup##*/} <file> -a $APP"
   else note "destroyed $K_destroyed"; fi
-  [ -z "$dbr" ] || { . "$TANDO_HOME/lib/datanode.sh"; db_remote_drop "$dbr" "$dbn"; }
+  [ -z "$dbr" ] || db_remote_drop
 }
 
 cmd_backup() {
