@@ -58,6 +58,10 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   Not for static sites or containers (docs/COMMANDS.md, "Scale to zero"). While idle its log
   namespace's journald stops too (about 1.1 MB; not while a worker or job of the app runs), and
   admission counts an idle_stop app at 2 MB plus `idle_awake` (20) % of its memory, not its cap.
+  Fixed: an idle_stop app woken more than five times in a minute was refused its next start
+  (systemd's start limit counted every wake), its wake socket then failed and visitors got 502
+  and the down page; a clean idle stop now resets the counter (its proxy and journald sync units
+  have no start limit of their own any more). The neighbours suite's N5-C/N6-C were this.
 - PostgreSQL for 100 apps: `tando host setup` sizes it from the server's RAM (max_connections 100
   and shared_buffers 15% on 8 GB, instead of 20 and 32 MB) and runs one pgbouncer for all apps
   (127.0.0.1:6432, transaction pooling, `db_pool` server connections per app, default 5). New

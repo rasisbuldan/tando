@@ -839,7 +839,8 @@ while the app goes on starting. (Caddy tells a cold start by `/run/tando-wake/<a
 app's unit makes once its port answers and removes when it stops.) A restart stops requests in flight.
 While it is idle its journald (the app's log namespace, about 1.1 MB) stops too, unless a worker,
 a job or a pre-flight of the app runs (they log there); the app's next start starts it again and
-no line is lost. An idle app costs about 2 MB. Admission counts it that way: its web process at
+no line is lost. A clean idle stop also resets the unit's start limit (5 starts in 60 s, which
+ends a crash loop), so an app woken often is never refused a start. An idle app costs about 2 MB. Admission counts it that way: its web process at
 2 MB plus `idle_awake` % of its `memory` (host setup `idle_awake=`, default 20: the share of such
 apps awake at once), its workers whole.
 ### Database connections and pgbouncer
