@@ -39,3 +39,4 @@ bench/raw/
 # --- OS ---
 .DS_Store
 test/server/.id_test.*
+bench/.fleet/

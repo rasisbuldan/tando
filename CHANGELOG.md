@@ -24,7 +24,7 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   node), the studio (TLS in its PostgreSQL client), `tando db` and destroy (drops the project on
   the data node) work against it; tandod watches PostgreSQL on the data node and not on the app
   node. Servers without a link change nothing.
-
+- bench: `bench/fleet.sh` (100-app fleet and reboot test on a real server), `bench/rebuild-drill.sh` (rebuild and offsite restore drill) and `bench/container-egress.sh` (container apps bypass the per-uid network rules: measured, fix proposed); docs/THREAT-MODEL.md.
 - Preview apps: `tando preview up [--branch B] [--ttl 7d]` deploys this project as
   `<app>-<branch>` (24 characters at most; a checksum keeps two branches apart) on its own link:
   the parent's settings, no database, jobs or backups, no release command (unless

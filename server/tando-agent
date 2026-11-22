@@ -5192,9 +5192,16 @@ drill_db_drop() {
 # drill_remote_empty db: every schema the app's role owns in its drill database on the data node
 # goes (public too, made again): the role cannot drop or create databases there
 drill_remote_empty() {
-  as_app_pg psql -X -q -At -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" -U "$DB_ROLE" -d "$1" \
-    -c "DO \$\$ DECLARE s name; BEGIN FOR s IN SELECT nspname FROM pg_namespace WHERE pg_has_role(nspowner, 'USAGE') AND nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' LOOP EXECUTE format('DROP SCHEMA %I CASCADE', s); END LOOP; END \$\$" \
-    -c "CREATE SCHEMA IF NOT EXISTS public" < /dev/null > /dev/null
+  # (the statement on stdin: systemd-run reads $ in its arguments, and a DO block needs $$)
+  as_app_pg psql -X -q -At -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" -U "$DB_ROLE" -d "$1" > /dev/null <<'SQL'
+DO $$ DECLARE s name; BEGIN
+  FOR s IN SELECT nspname FROM pg_namespace WHERE pg_has_role(nspowner, 'USAGE')
+    AND nspname NOT LIKE 'pg\_%' AND nspname <> 'information_schema' LOOP
+    EXECUTE format('DROP SCHEMA %I CASCADE', s);
+  END LOOP;
+END $$;
+CREATE SCHEMA IF NOT EXISTS public;
+SQL
 }
 # drill_free path need_kb: the filesystem of path has need_kb free, and 256 MB to spare after it
 drill_free() {
