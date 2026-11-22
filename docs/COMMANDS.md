@@ -816,6 +816,10 @@ the next deploy; per host with `tando host setup <host> key=value`.
 | `max_conns =` | 256 | Caddy's connections to the app | requests wait in Caddy for a free connection |
 | `max_requests =` | none (off) | requests in flight through Caddy | over it a request waits up to the hold and then gets `503` "<app> is busy ..." with `Retry-After: 5` |
 | `hold =` | 15, or `health_timeout` | seconds Caddy holds a request while the app (re)starts | after it the visitor gets 502; with `max_requests` also how long a request over the limit waits for its 503 |
+| `response_timeout =` | 60 (`off`: none) | seconds Caddy waits for the headers of the app's answer | `504` "<app> took too long to answer"; a websocket or event stream is not cut (its headers come at once), a long poll is: set `off` or more for it. Caddy sends the request again while the hold lasts, so keep `response_timeout` over `hold` (as the defaults are) or the app gets it more than once |
+| `body_max =` | 100MB (`off`: none) | the largest request body Caddy passes on | `413` "The request is too large for <app>" |
+| `cold_timeout =` | 30 | with `idle_stop`: seconds a visitor waits for the app to start | `503` "<app> is waking up" with `Retry-After: 5`; the app goes on starting |
+| (fixed) | 3 s | a connection to the app that does not open | held and tried again, like a restart (then 502 after the hold) |
 | `stop_timeout =` | 10 | seconds a stopping process may finish its requests | it is killed (requests it still had fail); Caddy holds new ones meanwhile |
 | host `conn_limit=` | 200 | connections at once per client address (IPv6: per /64) on ports 80/443 | further connections are reset |
 | host `conn_rate=` | 100 | new connections a second per client address, burst 3x | further SYNs are dropped: the client retries a second later |
@@ -850,8 +854,11 @@ group caddy) instead of its port. A connection there starts `tando-<app>_wake.se
 in the squeeze audit). `tando ls` shows such an app as `idle`; the monitor asks its health on its
 port only while it runs (a probe through Caddy would keep it awake) and raises no down alert while
 it is idle; the per-minute recovery leaves it idle. A deploy of an idle app starts the new release
-(it goes idle again later). Caddy keeps no pooled connection to it (`keepalive off`), so the
-timer starts with the last request. A restart stops requests in flight.
+(it goes idle again later). Caddy keeps an unused connection to it 30 s (or `idle_stop`, when
+shorter), so the timer starts up to 30 s after the last request. A visitor waits at most
+`cold_timeout` (30 s) for the app to start, then gets a 503 "waking up" page with `Retry-After: 5`
+while the app goes on starting. (Caddy tells a cold start by `/run/tando-wake/<app>.up`, which the
+app's unit makes once its port answers and removes when it stops.) A restart stops requests in flight.
 ### Database connections and pgbouncer
 
 Apps with `database = postgres` share one PostgreSQL. `tando host setup` sizes it from the
@@ -1017,6 +1024,9 @@ release, the kept ones), and as many free inodes as it has files; an upload over
 a new app reload Caddy's whole config; Caddy 2.6 finishes requests in flight but closes idle
 keep-alive connections of every site it serves (clients reconnect; one that sends on a connection
 being closed sees a reset). A deploy itself does not reload Caddy when the site did not change.
+A reload also ends the websockets and event streams of every app: at once on Caddy 2.6 (Ubuntu's
+package; it has no setting against it), 30 minutes later on Caddy 2.7 and later
+(`stream_close_delay 30m` in each site), so a client that reconnects keeps working either way.
 **Restarts under load:** an app that on SIGTERM only calls `server.close()` waits for every
 keep-alive connection, and Caddy keeps its connections busy under load: the old process lives until
 stop_timeout. Close idle connections too and answer with `Connection: close` from then on (see

@@ -508,10 +508,15 @@ app_unit() { if has_unit; then echo "tando-$A.service"; fi; }
 # (/run/tando-wake/<app>.sock, systemd's, group caddy) instead of its port; a connection there
 # starts tando-<app>_wake.service, systemd-socket-proxyd as the app's user, which needs
 # tando-<app>.service (StopWhenUnneeded: it stops when the proxy, idle for idle_stop, exits).
-# Requests wait in the socket's queue while the app starts (ExecStartPost: until its port answers).
+# Requests wait in the socket's queue while the app starts (ExecStartPost: until its port answers);
+# a visitor at most cold_timeout, then Caddy answers 503 "waking up" (write_caddy).
 # Only the web process scales down: workers and scheduled jobs are units of their own and run on.
 idle_app() { [[ -n ${C[idle_stop]:-} && ${C[idle_stop]} != off ]] && has_unit && [[ ${C[recipe]:-} != container ]]; }
-wake_sock() { echo "/run/tando-wake/$A.sock"; }
+WAKE_DIR=/run/tando-wake
+wake_sock() { echo "$WAKE_DIR/$A.sock"; }
+# wake_mark: there while an idle app's process runs and answers on its port (write_unit); Caddy
+# looks for it to tell a cold start (write_caddy)
+wake_mark() { echo "$WAKE_DIR/$A.up"; }
 # svc_restart: restart the app's process (an idle app: stop the proxy and the app, then start the
 # proxy, which starts the app and returns once its port answers)
 svc_restart() {
@@ -523,6 +528,29 @@ svc_restart() {
   fi
 }
 
+# caddy_ge major minor: the installed Caddy is that version or later. CADDY_V: its version
+# (2.6.2), asked once per run, kept in $R/.caddy-version with the binary's change time
+STREAM_CLOSE_DELAY=30m
+caddy_ge() {
+  if [[ -z ${CADDY_V:-} ]]; then
+    local b k="" ok; b=$(command -v caddy 2> /dev/null) && k=$(stat -Lc %Y-%s "$b" 2> /dev/null)
+    if [[ -n $k && -f $R/.caddy-version ]] && read -r ok CADDY_V < "$R/.caddy-version" && [[ $ok == "$k" && -n $CADDY_V ]]; then :
+    else
+      CADDY_V=$(caddy version 2> /dev/null | grep -o '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' | head -1)
+      [[ -n $k && -n $CADDY_V ]] && echo "$k $CADDY_V" > "$R/.caddy-version" 2> /dev/null
+    fi
+    CADDY_V=${CADDY_V:-0.0.0}
+  fi
+  local ma=${CADDY_V%%.*} mi=${CADDY_V#*.}; mi=${mi%%.*}
+  (( ma > $1 || (ma == $1 && mi >= $2) ))
+}
+# idle_keepalive: seconds Caddy keeps an unused connection to an idle app's proxy: 30, or the
+# app's idle_stop when shorter
+idle_keepalive() {
+  local t=${C[idle_stop]} n; [[ $t == on ]] && t=6h
+  n=${t%?}; case $t in *m) n=$((n * 60));; *h) n=$((n * 3600));; esac
+  ((n < 30)) && echo "$n" || echo 30
+}
 # hold_secs: how long Caddy holds a request of the app while it restarts (lb_try_duration): HOLD, or
 # the health timeout when longer. hold = (tando.conf) sets it: an app that starts in a second or two
 # can have a short hold, which is also how long a request over max_requests waits before its 503
@@ -880,9 +908,13 @@ write_unit() {
     idle_app && printf 'StopWhenUnneeded=yes\n'
     printf '\n[Service]\n'
     printf 'ExecStart=%s exec-app %s\n' "$AGENT" "$A"
-    # ready once its port answers (the proxy is ordered after it): up to health_timeout
-    idle_app && printf 'ExecStartPost=/bin/bash -c '"'"'for i in {1..%s}; do (exec 3<>/dev/tcp/127.0.0.1/%s) 2> /dev/null && exit 0; sleep 0.1; done; exit 1'"'"'\n' \
-      $(( ${C[health_timeout]:-60} * 10 )) "${C[port]}"
+    # ready once its port answers (the proxy is ordered after it): up to health_timeout. Then its
+    # mark (wake_mark, as root: +) tells Caddy it runs; it goes when the process stops
+    if idle_app; then
+      printf 'ExecStartPost=/bin/bash -c '"'"'for i in {1..%s}; do (exec 3<>/dev/tcp/127.0.0.1/%s) 2> /dev/null && exit 0; sleep 0.1; done; exit 1'"'"'\n' \
+        $(( ${C[health_timeout]:-60} * 10 )) "${C[port]}"
+      printf 'ExecStartPost=+/bin/touch %s\nExecStopPost=+/bin/rm -f %s\n' "$(wake_mark)" "$(wake_mark)"
+    fi
     printf 'WorkingDirectory=%s/current\nRestart=on-failure\nRestartSec=2\n' "$D"
     # stop_timeout (default 10 s): how long a stopping process may finish its requests before it
     # is killed; Caddy holds new requests meanwhile (an app that waits for every keep-alive
@@ -930,6 +962,46 @@ write_wake() {
   return 0
 }
 
+# caddy_proxy matcher upstream hold timeout: the app's reverse_proxy block of write_caddy (C, A).
+# hold: seconds a request is held while the app does not take connections (empty: not held);
+# timeout: seconds to wait for the headers of the answer (off: no limit)
+caddy_proxy() {
+  echo "	reverse_proxy ${1:+$1 }$2 {"
+  if [[ -n $3 ]]; then echo "		lb_try_duration ${3}s"; echo "		lb_try_interval 100ms"; fi
+  # the probe secret (skips the request log) is Caddy's and root's: never handed to an app
+  echo "		header_up -X-Tando-Probe"
+  # the visitor's address, not one the client sent (Caddy replaces X-Forwarded-For itself)
+  echo "		header_up X-Real-IP {remote_host}"
+  # at most this many connections to the app at once; more requests wait in Caddy (within
+  # lb_try_duration) instead of each visitor connection opening one more to a small app
+  local mc=${C[max_conns]:-256}; [[ $mc =~ ^[1-9][0-9]{0,4}$ ]] || mc=256
+  echo "		transport http {"
+  echo "			max_conns_per_host $mc"
+  echo "			dial_timeout 3s"
+  [[ $4 == off ]] || echo "			response_header_timeout ${4}s"
+  # an idle app (idle_stop): pooled connections close after 30 s without a request (or
+  # idle_stop, when shorter), so the proxy exits about idle_stop after the last request
+  if idle_app; then echo "			keepalive $(idle_keepalive)s"; fi
+  echo "		}"
+  # Caddy 2.7 and later end every websocket and event stream of every site at a reload (a new
+  # app, a site change of another app) unless this delay is set: they then end this long after
+  # it (the client reconnects then). Caddy 2.6 has no such setting: there a reload ends them at
+  # once (docs/COMMANDS.md "Limits and load")
+  if caddy_ge 2 7; then echo "		stream_close_delay $STREAM_CLOSE_DELAY"; fi
+  # load shedding, when max_requests is set: with that many in flight the app counts as full;
+  # a request beyond it waits at most lb_try_duration (the hold) and then gets the 503 "busy"
+  # page below. Caddy 2.6 has one retry loop for "full" and "restarting", so the 503 comes only
+  # after the hold: off by default (a burst then queues for a free connection instead, which
+  # served more under load tests); with a short `hold =` it is a fast shed. (unhealthy_request_
+  # count works only with fail_duration in 2.6; max_fails 1000: a failure never marks it down)
+  local mr=${C[max_requests]:-}
+  if [[ -n $3 && $mr =~ ^[1-9][0-9]{0,5}$ ]]; then
+    echo "		fail_duration 1s"
+    echo "		max_fails 1000"
+    echo "		unhealthy_request_count $mr"
+  fi
+  echo "	}"
+}
 # Caddy site for the app; validated before reload, the previous file restored on failure.
 # Returns 1 (WC_WHY says why, on stderr too) when it could not be written or Caddy refused it:
 # the previous site is then what Caddy runs, and the caller decides (a deploy rolls back).
@@ -1071,40 +1143,45 @@ write_caddy() {
       echo "	}"
     else
       [[ -n ${C[path]:-} ]] && echo "	redir / ${C[path]}"
-      # hold requests while the app restarts (at most HOLD each), so a deploy drops none
-      if idle_app; then echo "	reverse_proxy unix/$(wake_sock) {"   # (idle_stop: its wake socket)
-      else echo "	reverse_proxy 127.0.0.1:${C[port]} {"; fi
-      echo "		lb_try_duration $(hold_secs)s"
-      echo "		lb_try_interval 100ms"
-      # the probe secret (skips the request log) is Caddy's and root's: never handed to an app
-      echo "		header_up -X-Tando-Probe"
-      # the visitor's address, not one the client sent (Caddy replaces X-Forwarded-For itself)
-      echo "		header_up X-Real-IP {remote_host}"
-      # at most this many connections to the app at once; more requests wait in Caddy (within
-      # lb_try_duration) instead of each visitor connection opening one more to a small app
-      local mc=${C[max_conns]:-256}; [[ $mc =~ ^[1-9][0-9]{0,4}$ ]] || mc=256
-      echo "		transport http {"
-      echo "			max_conns_per_host $mc"
-      # (idle_stop: no pooled connection keeps the proxy busy, so it exits idle_stop after the last request)
-      idle_app && echo "			keepalive off"
-      echo "		}"
-      # load shedding, when max_requests is set: with that many in flight the app counts as full;
-      # a request beyond it waits at most lb_try_duration (the hold) and then gets the 503 "busy"
-      # page below. Caddy 2.6 has one retry loop for "full" and "restarting", so the 503 comes only
-      # after the hold: off by default (a burst then queues for a free connection instead, which
-      # served more under load tests); with a short `hold =` it is a fast shed. (unhealthy_request_
-      # count works only with fail_duration in 2.6; max_fails 1000: a failure never marks it down)
-      local mr=${C[max_requests]:-}
-      if [[ $mr =~ ^[1-9][0-9]{0,5}$ ]]; then
-        echo "		fail_duration 1s"
-        echo "		max_fails 1000"
-        echo "		unhealthy_request_count $mr"
+      # the largest request body Caddy passes on (body_max, default 100MB): a larger one is
+      # answered 413 by Caddy, so an upload flood fills neither the app nor Caddy's buffers
+      local bm=${C[body_max]:-100MB}
+      if [[ $bm != off ]]; then
+        [[ $bm == *B ]] || bm+=B
+        echo "	request_body {"; echo "		max_size $bm"; echo "	}"
       fi
-      echo "	}"
+      # a slow app ties up only its own requests: a connection that does not open in 3 s is an
+      # error (held and tried again like a restart), and an answer whose headers do not come
+      # within response_timeout (default 60 s; off: none) is a 504. A stream (websocket, server-
+      # sent events) is not cut by it: its headers come at once, its body may go on for hours
+      local rt=${C[response_timeout]:-60} up="127.0.0.1:${C[port]}" mark
+      idle_app && up="unix/$(wake_sock)"     # (idle_stop: its wake socket)
+      # an idle app that is not running (no <app>.up, which its unit makes once its port answers,
+      # write_unit): its request waits at most cold_timeout (default 30 s) for the app to start,
+      # then gets the 503 "waking up" page below while the app goes on starting. Not held or
+      # tried again: the wake socket always takes the connection
+      if idle_app; then
+        mark=$(wake_mark); mark=${mark##*/}
+        echo "	@tandocold not file {"; echo "		root ${WAKE_DIR}"; echo "		try_files $mark"; echo "	}"
+        caddy_proxy @tandocold "$up" "" "${C[cold_timeout]:-30}"
+      fi
+      # hold requests while the app restarts (at most HOLD each), so a deploy drops none
+      caddy_proxy "" "$up" "$(hold_secs)" "$rt"
       echo "	handle_errors {"
       echo "		@tandobusy expression {err.status_code} == 503"
       echo "		header @tandobusy Retry-After 5"
       echo "		respond @tandobusy \"$A is busy: too many requests at once, try again in a few seconds\" 503"
+      # over body_max: Caddy 2.6 reports a body over its Content-Length as 502, with the 413 inside
+      [[ $bm == off ]] || echo "		@tandobig expression \`{err.status_code} == 413 || {err.message}.contains(\"request body too large\")\`"
+      [[ $bm == off ]] || echo "		respond @tandobig \"The request is too large for $A (over ${bm})\" 413"
+      if idle_app; then   # (still not running: it was the cold wait that ran out)
+        echo "		@tandowake {"; echo "			expression {err.status_code} == 504"
+        echo "			not file {"; echo "				root ${WAKE_DIR}"; echo "				try_files $mark"; echo "			}"; echo "		}"
+        echo "		header @tandowake Retry-After 5"
+        echo "		respond @tandowake \"$A is waking up: try again in a few seconds\" 503"
+      fi
+      [[ $rt == off ]] || echo "		@tandoslow expression {err.status_code} == 504"
+      [[ $rt == off ]] || echo "		respond @tandoslow \"$A took too long to answer (over ${rt} seconds)\" 504"
       echo "	}"
     fi
     echo "}"
@@ -3020,7 +3097,7 @@ cmd_configure() {
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" "C[priority]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" "C[db_pool]" "C[db_direct]" \
     "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]" "C[idle_stop]" \
-    "C[tmp_size]" "C[io]" "C[disk]" "C[preview_skip]" "C[preview_ttl]"
+    "C[tmp_size]" "C[io]" "C[disk]" "C[response_timeout]" "C[body_max]" "C[cold_timeout]" "C[preview_skip]" "C[preview_ttl]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -3046,6 +3123,11 @@ cmd_configure() {
       preview_of) valid_app "$v" || die "bad preview_of: $v";;
       preview_expires) [[ $v =~ ^[0-9]{9,11}$ ]] || die "bad preview_expires: $v";;
       idle_stop) [[ $v =~ ^(on|off)$ || $v =~ ^[1-9][0-9]{0,3}[smh]$ ]] || die "bad idle_stop: $v (like 6h, 10m, 30s; on = 6h; off)";;
+      # Caddy's limits per request of the app (write_caddy): how long it waits for the answer's
+      # headers, the largest request body, and how long a visitor waits for an idle app to start
+      response_timeout) [[ $v == off || $v =~ ^[1-9][0-9]{0,4}$ ]] || die "bad response_timeout: $v (seconds, like 60, or off)";;
+      body_max) [[ $v == off || $v =~ ^[1-9][0-9]{0,5}[KMG]B?$ ]] || die "bad body_max: $v (a size like 100MB or 2GB, or off)";;
+      cold_timeout) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || die "bad cold_timeout: $v (seconds, 1 to 999)";;
       data) if [[ ${C[recipe]:-} == container ]]; then   # the volume's path inside the container
               [[ $v =~ ^(/[A-Za-z0-9_.-]+)+$ && $v != */../* ]] || die "bad data path: $v (like /data)"
             else
@@ -6733,10 +6815,10 @@ CONF_KEYS_A=(recipe image container_port build_memory start start_shell release 
   health path data writable backup database db_statement_timeout db_idle_tx_timeout db_temp_limit
   memory health_timeout soak cpu tasks max_conns max_requests stop_timeout hold log_max log_keep
   log_rate access_log request_log_max health_expect health_fails health_recover job_timeout job_spread
-  job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk)
+  job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk response_timeout body_max cold_timeout)
 CONF_KEYS=" ${CONF_KEYS_A[*]} "
 # what a record of the first agent that recorded every setting knew (conf=1 without keys=)
-CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk } job.* "
+CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk response_timeout body_max cold_timeout } job.* "
 conf_key() {
   case $1 in job.*|worker.*) return 0;; *[[:space:]]*|'') return 1;; esac
   [[ $CONF_KEYS == *" $1 "* ]]

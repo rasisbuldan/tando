@@ -402,6 +402,7 @@ C_release="" C_release_shell="" C_release_timeout=""   # the release command (li
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
 C_idle_stop=""     # scale to zero: stop after this long without a connection (10m, 30s, 2h, off)
 C_preview_ttl="" C_preview_skip=""   # previews: how long one lives (7d), env names it does not get (docs/COMMANDS.md "Preview apps")
+C_response_timeout="" C_body_max="" C_cold_timeout=""   # Caddy's limits per request (checked by the server too)
 C_priority=""   # high or low: who the OOM killer takes last or first (checked by the server too)
 C_tmp_size="" C_io="" C_disk=""   # /tmp's size, disk MB/s, disk share for alerts (checked by the server too)
 
@@ -665,6 +666,15 @@ conf_load() { # [file]; a file already loaded in this run is not read again
           *) die "$f:$n: preview_ttl is a time like 7d, 12h or 90m (got \"$v\")";; esac;;
       preview_skip) C_preview_skip=$(printf '%s' "$v" | tr ' ' ',' | tr -s ',')
         case $C_preview_skip in ""|*[!A-Za-z0-9_,]*|[0-9,]*|*,) die "$f:$n: preview_skip is env names, like STRIPE_SECRET_KEY, SMTP_PASSWORD (got \"$v\")";; esac;;
+      response_timeout) C_response_timeout=$v
+        { [ "$v" = off ] || { ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 99999 ]; }; } ||
+          die "$f:$n: response_timeout is seconds Caddy waits for an answer, like 60, or off (got \"$v\")";;
+      body_max) C_body_max=$v
+        n_=${v%B}; n_=${n_%[KMG]}
+        [ "$v" = off ] || { [ "$n_" != "${v%B}" ] && ui_int "$n_" && [ "$n_" -ge 1 ] && [ "$n_" -le 999999 ]; } ||
+          die "$f:$n: body_max is a size like 100MB or 2GB, or off (got \"$v\")";;
+      cold_timeout) C_cold_timeout=$v
+        ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 999 ] || die "$f:$n: cold_timeout is 1 to 999 seconds (got \"$v\")";;
       priority) C_priority=$v
         case $v in high|normal|low) ;; *) die "$f:$n: priority must be high, normal or low (got \"$v\")";; esac;;
       tmp_size) C_tmp_size=$v
