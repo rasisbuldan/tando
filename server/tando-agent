@@ -2457,7 +2457,7 @@ origin_v4int() { local IFS=.; set -- $1; echo $(( (10#$1 << 24) + (10#$2 << 16) 
 # (nft refuses a range with host bits, and a set that lists one twice or inside another needs auto-merge)
 origin_norm() {
   local a=${1%/*} p=32
-  [[ $1 == */* ]] && p=${1#*/}
+  [[ $1 == */* ]] && p=$((10#${1#*/}))   # (base 10: "/08" is 8, not a bad octal number)
   if [[ $a == *:* ]]; then [[ $1 == */* ]] || p=128; echo "${a,,}/$p"; return; fi
   local n; n=$(origin_v4int "$a")
   n=$(( n & ((0xFFFFFFFF << (32 - p)) & 0xFFFFFFFF) ))
@@ -2470,6 +2470,7 @@ origin_norm() {
 # public-unicast rule, only together with TANDO_ORIGIN_LIST_BASE: tests use private addresses.)
 origin_published_ok() {
   local a=${1%/*} p=${1#*/} n e b h
+  [[ $p =~ ^[0-9]{1,3}$ ]] || return 1; p=$((10#$p))   # (base 10: "/08" is 8, not a bad octal number)
   if [[ $a == *:* ]]; then
     ((p >= 28)) || return 1
     h=${a%%:*}; [[ -n $h && $h =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
