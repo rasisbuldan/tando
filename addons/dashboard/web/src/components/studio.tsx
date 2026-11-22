@@ -4,6 +4,7 @@
 import { useSyncExternalStore } from "react";
 import { Database, X } from "lucide-react";
 import { Button } from "./ui/button";
+import { Tip } from "./ui/tooltip";
 import { cn } from "@/lib/cn";
 import { studios } from "@/lib/studio";
 
@@ -15,18 +16,20 @@ function useOpening(host: string, app: string): boolean {
 
 const ROW = "hov inset-focus group relative flex h-8 w-full items-center gap-2 rounded-md text-[13px] leading-5 text-foreground hover:bg-muted";
 
-/** the sidebar row under an app: "Database" */
-export function StudioRow({ host, app }: { host: string; app: string }) {
+/** the sidebar's Database group: one row per app with a database; a click opens its studio */
+export function DbRow({ host, app, showHost, collapsed }: { host: string; app: string; showHost: boolean; collapsed: boolean }) {
   const opening = useOpening(host, app);
   return (
-    <button type="button" role="treeitem" data-level="studio" data-host={host} tabIndex={-1}
-      aria-label={`Database of ${app}${opening ? ", opening" : ""}`}
-      onClick={() => void studios().open(host, app)}
-      className={cn(ROW, "pl-9 pr-2 text-muted-foreground")}>
-      <Database size={14} strokeWidth={1.75} aria-hidden="true" className="shrink-0" />
-      <span className="truncate">Database</span>
-      {opening && <span className="ml-auto text-xs">opening…</span>}
-    </button>
+    <Tip text={collapsed ? `Database of ${app}` : ""} side="right">
+      <button type="button" role="treeitem" data-level="db" data-host={host} tabIndex={-1}
+        aria-label={`Database of ${app}${showHost ? ` on ${host}` : ""}, opens the studio${opening ? ", opening" : ""}`}
+        onClick={() => void studios().open(host, app)}
+        className={cn(ROW, "px-2", collapsed && "justify-center")}>
+        <Database size={14} strokeWidth={1.75} aria-hidden="true" className="mx-0.5 shrink-0 text-muted-foreground" />
+        {!collapsed && <span className="truncate">{app}{showHost && <span className="ml-1.5 text-xs text-muted-foreground">{host}</span>}</span>}
+        {!collapsed && <span className="ml-auto text-xs text-muted-foreground">{opening ? "opening…" : "studio"}</span>}
+      </button>
+    </Tip>
   );
 }
 

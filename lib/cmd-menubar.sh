@@ -3,13 +3,16 @@
 #
 # lib/cmd-menubar.sh: `tando menubar`, the macOS menu bar app (macos/menubar/*.swift). bash 3.2.
 # install compiles it with swiftc (Command Line Tools are enough), makes ~/Applications/tando.app
-# (LSUIElement: no Dock icon), signs it ad hoc, records which tando to run in
+# (LSUIElement: no Dock icon) and ~/Applications/tando Dashboard.app (the dashboard as its own
+# regular app: a WKWebView window on the system WebKit, macos/dashapp), signs it ad hoc, records which tando to run in
 # $CFG/menubar.conf and starts it at login with a LaunchAgent. The app only runs this tando
 # (`tando ls --all --json`) and requests the apps' links: no credentials, no listening socket.
 # TANDO_MENUBAR_NO_LAUNCHCTL=1 (tests): files only, launchctl is not called.
 
 MB_ID=local.tando.menubar
 MB_APP=$HOME/Applications/tando.app
+DA_ID=local.tando.dashboard
+DA_APP="$HOME/Applications/tando Dashboard.app"
 MB_PLIST=$HOME/Library/LaunchAgents/$MB_ID.plist
 MB_CONF=$CFG/menubar.conf
 MB_LOG=$HOME/Library/Logs/tando-menubar.log
@@ -30,7 +33,7 @@ cmd_menubar() {
     uninstall) mb_uninstall "$dry";;
     status) mb_status;;
     build) [ -n "$out" ] || die "menubar build: --out DIR (where tando.app goes)"
-           mb_build "$out/tando.app";;
+           mb_build "$out/tando.app"; mb_build_dash "$out/tando Dashboard.app";;
     *) die "menubar: unknown subcommand: $sub (tando menubar install|uninstall|status|build)";;
   esac
 }
@@ -49,21 +52,33 @@ mb_launcher() {
 }
 mb_version() { tr -d ' \n' < "$TANDO_HOME/VERSION" 2> /dev/null || echo 0; }
 
-# mb_build <dir/tando.app>: compile, bundle, sign ad hoc; the old bundle is replaced at the end
+# mb_build <dir/tando.app>: compile the menu bar app, bundle, sign ad hoc; the old bundle is
+# replaced at the end. mb_build_dash <dir/"tando Dashboard.app"> does the same for the dashboard app.
 mb_build() {
-  local app=$1 new src
+  local src=$TANDO_HOME/macos/menubar
   mb_darwin; mb_swiftc
-  src=$TANDO_HOME/macos/menubar
-  [ -f "$src/main.swift" ] && [ -f "$src/Model.swift" ] && [ -f "$src/DashModel.swift" ] && [ -f "$src/DashWindow.swift" ] || die "menubar: $src is missing (reinstall tando)"
+  [ -f "$src/main.swift" ] && [ -f "$src/Model.swift" ] && [ -f "$src/DashModel.swift" ] && [ -f "$src/DashCore.swift" ] && [ -f "$src/DashWindow.swift" ] || die "menubar: $src is missing (reinstall tando)"
+  mb_bundle "$1" "$MB_ID" tando tando-menubar menu "$src"/*.swift
+}
+mb_build_dash() {
+  local src=$TANDO_HOME/macos
+  mb_darwin; mb_swiftc
+  [ -f "$src/dashapp/main.swift" ] && [ -f "$src/menubar/DashCore.swift" ] || die "menubar: $src/dashapp is missing (reinstall tando)"
+  mb_bundle "$1" "$DA_ID" "tando Dashboard" tando-dashboard dash "$src/dashapp/main.swift" \
+    "$src/menubar/DashModel.swift" "$src/menubar/DashCore.swift" "$src/menubar/DashWindow.swift"
+}
+# mb_bundle <app> <bundle id> <name> <exe> <menu|dash> <swift files...>
+mb_bundle() {
+  local app=$1 id=$2 name=$3 exe=$4 kind=$5 new
+  shift 5
   mkdir -p "$(dirname "$app")" || die "menubar: cannot create $(dirname "$app")"
   new=$(dirname "$app")/.tando-app.$$
   rm -rf "$new"; mkdir -p "$new/Contents/MacOS" "$new/Contents/Resources" || die "menubar: cannot write $new"
-  if ! swiftc -swift-version 5 -O -module-name TandoMenubar -o "$new/Contents/MacOS/tando-menubar" \
-       "$src"/*.swift > "$TMPD/mb.err" 2>&1; then
+  if ! swiftc -swift-version 5 -O -module-name "${exe//-/_}" -o "$new/Contents/MacOS/$exe" "$@" > "$TMPD/mb.err" 2>&1; then
     rm -rf "$new"; sed 's/^/  /' "$TMPD/mb.err" | tail -20 >&2
-    die "menubar: the app did not compile (swiftc above)"
+    die "menubar: $name did not compile (swiftc above)"
   fi
-  mb_info_plist > "$new/Contents/Info.plist"
+  mb_info_plist "$id" "$name" "$exe" "$kind" > "$new/Contents/Info.plist"
   codesign --force -s - "$new" > "$TMPD/mb.err" 2>&1 ||
     { rm -rf "$new"; cat "$TMPD/mb.err" >&2; die "menubar: codesign (ad hoc) failed"; }
   rm -rf "$app"
@@ -71,21 +86,25 @@ mb_build() {
   echo "built $app ($(mb_version), signed ad hoc)"
 }
 
+# mb_info_plist <id> <name> <exe> <menu|dash>: the menu bar app is LSUIElement (no Dock icon); the
+# dashboard app is a regular app
 mb_info_plist() {
+  local ui="  <key>LSUIElement</key><true/>"
+  [ "$4" = menu ] || ui="  <key>NSHighResolutionCapable</key><true/>"
   cat << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleIdentifier</key><string>$MB_ID</string>
-  <key>CFBundleName</key><string>tando</string>
-  <key>CFBundleDisplayName</key><string>tando</string>
-  <key>CFBundleExecutable</key><string>tando-menubar</string>
+  <key>CFBundleIdentifier</key><string>$1</string>
+  <key>CFBundleName</key><string>$2</string>
+  <key>CFBundleDisplayName</key><string>$2</string>
+  <key>CFBundleExecutable</key><string>$3</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$(mb_version)</string>
   <key>CFBundleVersion</key><string>$(mb_version)</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <key>LSUIElement</key><true/>
+$ui
 </dict>
 </plist>
 EOF
@@ -138,8 +157,9 @@ mb_install() {
   if [ -n "$1" ]; then
     command -v swiftc > /dev/null 2>&1 || echo "(swiftc not found: install would stop here; xcode-select --install)"
     echo "tando menubar install would:"
-    echo "  compile $TANDO_HOME/macos/menubar/*.swift with swiftc"
+    echo "  compile $TANDO_HOME/macos/menubar/*.swift and macos/dashapp/*.swift with swiftc"
     echo "  create  $MB_APP (Info.plist with LSUIElement, signed ad hoc: codesign -s -)"
+    echo "  create  $DA_APP (the dashboard: a regular app with a Dock icon, signed ad hoc)"
     echo "  write   $MB_CONF (tando=$t; interval, timeout, notify kept or defaulted)"
     echo "  write   $MB_PLIST (LaunchAgent $MB_ID, RunAtLoad: starts at login)"
     echo "  run     launchctl bootstrap gui/$(id -u) $MB_PLIST"
@@ -147,6 +167,7 @@ mb_install() {
     return 0
   fi
   mb_build "$MB_APP"
+  mb_build_dash "$DA_APP"
   mkdir -p "$CFG" "$(dirname "$MB_PLIST")" "$(dirname "$MB_LOG")" || die "menubar: cannot create the directories"
   mb_conf "$t" || die "menubar: cannot write $MB_CONF"
   mb_agent_plist | write_file "$MB_PLIST" || die "menubar: cannot write $MB_PLIST"
@@ -167,7 +188,7 @@ mb_uninstall() {
   if [ -n "$1" ]; then
     echo "tando menubar uninstall would:"
     echo "  run     launchctl bootout gui/$(id -u)/$MB_ID"
-    for f in "$MB_PLIST" "$MB_APP" "$MB_CONF"; do [ -e "$f" ] && echo "  remove  $f"; done
+    for f in "$MB_PLIST" "$MB_APP" "$DA_APP" "$MB_CONF"; do [ -e "$f" ] && echo "  remove  $f"; done
     echo "Nothing was changed."
     return 0
   fi
@@ -178,6 +199,11 @@ mb_uninstall() {
     if grep -q "<string>$MB_ID</string>" "$MB_APP/Contents/Info.plist" 2> /dev/null; then
       rm -rf "$MB_APP"; echo "removed $MB_APP"; did=1
     else echo "left $MB_APP: it is not the tando menu bar app"; fi
+  fi
+  if [ -d "$DA_APP" ]; then
+    if grep -q "<string>$DA_ID</string>" "$DA_APP/Contents/Info.plist" 2> /dev/null; then
+      rm -rf "$DA_APP"; echo "removed $DA_APP"; did=1
+    else echo "left $DA_APP: it is not the tando dashboard app"; fi
   fi
   [ -f "$MB_CONF" ] && { rm -f "$MB_CONF"; echo "removed $MB_CONF"; did=1; }
   [ -n "$did" ] || echo "the menu bar app is not installed"
@@ -203,6 +229,7 @@ mb_status() {
   fi
   ui_box_open "tando menubar"
   ui_kv app "$st"
+  ui_kv dashboard "$([ -d "$DA_APP" ] && mb_tilde "$DA_APP" || echo "not installed (tando menubar install)")"
   ui_kv "at login" "$([ -f "$MB_PLIST" ] && mb_tilde "$MB_PLIST" || echo no)"
   ui_kv running "$run"
   ui_kv runs "$(mb_tilde "$(mb_conf_get tando -)")"

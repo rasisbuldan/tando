@@ -218,6 +218,8 @@ compare_all() {
   cmp_case 1d user info
   cmp_case 1e sudo history
   cmp_case 1f user history
+  cmp_case 1g sudo history 2   # a lone number is the count, over all apps
+  cmp_case 1h user history 0
   for a in $(apps); do
     k=$((k + 1))
     cmp_case "2.$k.a" sudo status "$a"

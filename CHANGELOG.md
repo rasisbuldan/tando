@@ -29,6 +29,11 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   never touched; it checks both disks first, by the archive's real size). The server does it monthly after the backup
   queue (`backup_drill = monthly|off` in `tando host setup`); `backup ls` shows the last result,
   `doctor` warns and an alert fires when a drill fails.
+- Dashboard on macOS: its own app, `~/Applications/tando Dashboard.app` (built by `tando menubar
+  install`): Dock icon, Cmd+Tab, Spotlight, standard menus (copy and paste work), a thin WKWebView on
+  the system WebKit. The menu bar's Open dashboard and `tando dashboard` open it. The dashboard's
+  left sidebar is now Overview / Deploys / Alerts, then Server, Apps (all servers, one list) and
+  Database (opens the studio directly); it and the page no longer scroll or bounce: only the main pane does.
 - Isolation: limits on what apps share (docs/COMMANDS.md, "Limits and load").
   - Kernel tables: one app's user holds at most `conn_out` (2048) connections at once, sends at
     most `dns_rate` (200) DNS packets a second, and holds at most 20 x `db_pool` (100)
@@ -277,6 +282,9 @@ Steps and checks: docs/release-notes/0.3.0.md.
 
 ### Fixed
 
+- Fixed: `tando history` for all apps (no `-a`) answered "invalid app name": a lone number is the
+  count, in the agent, tando-status and the shell fallback (old clients work too). The dashboard's
+  Deploys page works again.
 - A new app could get another app's pre-flight port (its port + 100) as its own port once the port
   range was widened past 100 ports: that app's every deploy and env change then failed with
   "pre-flight port in use", and the loopback rules let its user reach the new app. A new app's port

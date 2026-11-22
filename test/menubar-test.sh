@@ -82,6 +82,18 @@ check "B2 the bundle is a menu bar app (LSUIElement, no Dock icon) with a valid 
   eval 'plutil -lint "$APP/Contents/Info.plist" > /dev/null && grep -A0 "<key>LSUIElement</key><true/>" "$APP/Contents/Info.plist" > /dev/null'
 check "B3 the bundle is signed ad hoc" eval 'codesign -v "$APP" 2> /dev/null && codesign -dv "$APP" 2>&1 | grep -q "Signature=adhoc"'
 
+DAPP="$T/out/tando Dashboard.app"
+check "B4 tando menubar build also makes the dashboard app: a regular app (no LSUIElement), signed ad hoc, small binary" \
+  eval 'test -x "$DAPP/Contents/MacOS/tando-dashboard" && plutil -lint "$DAPP/Contents/Info.plist" > /dev/null &&
+        ! grep -q LSUIElement "$DAPP/Contents/Info.plist" && grep -q "<string>local.tando.dashboard</string>" "$DAPP/Contents/Info.plist" &&
+        codesign -v "$DAPP" 2> /dev/null && test "$(wc -c < "$DAPP/Contents/MacOS/tando-dashboard")" -lt 2000000'
+check "B5 the dashboard app is a normal app (activation policy regular) with Edit, Window and Quit menus; the menu bar app stays accessory" \
+  eval 'grep -q "setActivationPolicy(.regular)" "$R/macos/dashapp/main.swift" && grep -q "setActivationPolicy(.accessory)" "$R/macos/menubar/main.swift" &&
+        grep -q "NSMenu(title: \"Edit\")" "$R/macos/menubar/DashWindow.swift" && grep -q "NSMenu(title: \"Window\")" "$R/macos/menubar/DashWindow.swift" &&
+        grep -q "terminate" "$R/macos/menubar/DashWindow.swift"'
+check "B6 the menu bar's Open dashboard launches the dashboard app when installed" \
+  grep -q "tando Dashboard.app" "$R/macos/menubar/main.swift"
+
 mkdir -p "$T/mt"
 cp "$here/test/menubar-model.swift" "$T/mt/main.swift"
 if swiftc -swift-version 5 -o "$T/mt/model-test" "$R/macos/menubar/Model.swift" "$T/mt/main.swift" > "$T/mt/err" 2>&1; then
@@ -212,6 +224,8 @@ PL=$HOME/Library/LaunchAgents/local.tando.menubar.plist
 check "I3 install builds ~/Applications/tando.app and a RunAtLoad LaunchAgent (rc=$rc)" \
   eval 'test -x "$HOME/Applications/tando.app/Contents/MacOS/tando-menubar" && plutil -lint "$PL" > /dev/null &&
         grep -q "<key>RunAtLoad</key><true/>" "$PL"'
+check "I3b install also builds ~/Applications/tando Dashboard.app" \
+  test -x "$HOME/Applications/tando Dashboard.app/Contents/MacOS/tando-dashboard"
 check "I4 install records the tando launcher the app runs" grep -qx "tando=$R/bin/tando" "$TANDO_CONFIG_DIR/menubar.conf"
 st=$("$R/bin/tando" menubar status 2>&1)
 check "I5 status shows the app and its settings" eval 'printf "%s" "$st" | grep -q "every *60 s, timeout 45 s"'
@@ -219,6 +233,6 @@ printf 'interval=120\n' >> "$TANDO_CONFIG_DIR/menubar.conf"
 "$R/bin/tando" menubar install > /dev/null 2>&1
 check "I6 a second install keeps the user's settings" eval 'grep -qx "interval=120" "$TANDO_CONFIG_DIR/menubar.conf" && test "$(grep -c "^tando=" "$TANDO_CONFIG_DIR/menubar.conf")" = 1'
 "$R/bin/tando" menubar uninstall > "$T/un.log" 2>&1
-check "I7 uninstall removes the app, the LaunchAgent and the settings" \
-  eval 'test ! -e "$HOME/Applications/tando.app" && test ! -e "$PL" && test ! -e "$TANDO_CONFIG_DIR/menubar.conf"'
+check "I7 uninstall removes the apps, the LaunchAgent and the settings" \
+  eval 'test ! -e "$HOME/Applications/tando.app" && test ! -e "$HOME/Applications/tando Dashboard.app" && test ! -e "$PL" && test ! -e "$TANDO_CONFIG_DIR/menubar.conf"'
 finish
