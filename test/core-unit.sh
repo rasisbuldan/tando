@@ -230,6 +230,22 @@ check "U9b within RAM x 1.5: taken" eq "$(ma 512 2000)" ok
 check "U9c over it: refused, and says how much" eval 'ma 1024 2000 | grep -q "3456 MB with a1 at 1024 MB, over 3000 MB"'
 check "U9d not raised (the host is over already): taken" eq "$(ma 256 500)" ok
 check "U9e configure refuses unless --force" eval 'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "((!force)) && ! mem_admit"'
+# U9h-j: an app with idle_stop is stopped most of the time: admission counts its web process at
+# 2 MB plus 20% of its cap (idle_awake), its workers whole; static and container apps, and
+# idle_stop = off, as before. 8 such apps of 256M and this one fit in 1000 MB x 1.5 (2304 MB of
+# full caps were refused)
+rm -rf "${T:?}/apps"; mkdir -p "$T/apps/a1"
+for i in 2 3 4 5 6 7 8 9; do mkdir -p "$T/apps/a$i"; printf 'memory=256M\nidle_stop=6h\n' > "$T/apps/a$i/app.conf"; done
+printf 'memory=128M\n' > "$T/apps/a1/app.conf"   # (raised to 256M below)
+mkdir -p "$T/x"
+printf 'memory=100M\nidle_stop=10m\nworker.q=x\n' > "$T/x/w.conf"          # 2 + 20 + 100
+printf 'memory=100M\nidle_stop=off\n' > "$T/x/off.conf"                   # 100
+printf 'memory=100M\nidle_stop=6h\nrecipe=container\n' > "$T/x/ct.conf"   # 100
+mc() { "$BASH" -c 'eval "$1"; shift; mem_caps_mb "$@"' _ "$(agent_fn mem_caps_mb)" "$@" | sed "s#$T/x/##" | tr '\n' ' '; }
+check "U9h admission counts an idle_stop app's web at 2 MB + 20% of its cap, its workers whole" eq \
+  "$(mc -a "$T/x/w.conf" "$T/x/off.conf" "$T/x/ct.conf")" "w.conf 122 off.conf 100 ct.conf 100 "
+check "U9i without -a (MemoryLow of high-priority apps): the whole caps" eq "$(mc "$T/x/w.conf")" "w.conf 200 "
+check "U9j 8 idle_stop apps of 256M and one raised to 256M fit in 1000 MB RAM x 1.5" eq "$(ma 256 1000)" ok
 # shellcheck disable=SC2016
 oa() { "$BASH" -c 'eval "$1"; C_priority=$2; oom_adj' _ "$(agent_fn oom_adj | sed 's/\${C\[priority\]:-}/${C_priority:-}/')" "$1"; }
 check "U9f priority: high 100, default 500, low 900" eq "$(oa high) $(oa '') $(oa low)" "100 500 900"

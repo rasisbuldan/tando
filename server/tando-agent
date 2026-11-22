@@ -319,6 +319,38 @@ EOF
   ((WIC_CHANGED)) && dreload
   systemd-tmpfiles --create "$f" 2> /dev/null || true
 }
+# journal-idle <app> [now]: the ExecStopPost of an idle app's unit (idle_stop), as root. A
+# namespace's journald never exits by itself (measured on systemd 259), so an idle app kept
+# ~1.1 MB of it. Once the app stopped cleanly (SERVICE_RESULT success: an idle stop, a deploy's
+# restart; not a crash, which restarts at once), `now` runs in a unit of its own once the app's
+# stop has ended (its ExecStopPost's own output goes to that journald: stopped from in there, the
+# journald started again at once), and stops the journald unless another unit of the app runs
+# (a worker, a job, a pre-flight, a shell: all in the app's slice), whose log stream that would
+# cut. Its sockets then stop with it (StopWhenUnneeded); the next start of a unit of the app needs
+# them again (LogNamespace=) and its first line starts journald: no line is lost. The log scan
+# reads the files, which need no journald.
+cmd_journal_idle() {
+  app "$1"
+  idle_app || return 0
+  if [[ ${2:-} != now ]]; then
+    [[ ${SERVICE_RESULT:-success} == success ]] || return 0
+    systemd-run --quiet --no-block --collect --unit="tando-${A}_jidle" -p After="tando-$A.service" \
+      -p "Description=tando app $A: stop its journald while it is idle" "$AGENT" journal-idle "$A" now > /dev/null 2>&1
+    return 0
+  fi
+  case $(systemctl show -P ActiveState "tando-$A.service" 2> /dev/null) in inactive|failed) ;; *) return 0;; esac
+  local ev g cg
+  cg=$(systemctl show -P ControlGroup "$(app_slice)" 2> /dev/null)
+  [[ -n $cg && -d /sys/fs/cgroup$cg ]] || return 0
+  for ev in "/sys/fs/cgroup$cg"/*/cgroup.events; do
+    [[ -f $ev ]] || continue
+    g=${ev%/cgroup.events}; g=${g##*/}
+    [[ $g == "tando-${A}_wake.service" ]] && continue
+    grepq -x 'populated 1' "$ev" && return 0
+  done
+  systemctl stop "systemd-journald@tando-$A.service" 2> /dev/null
+  return 0
+}
 
 # app_units: every unit of this app, loaded or on disk, but tando-<app>.service and its slice (the
 # callers name those): tando-<app>_job-<name>.* (exactly this app's: "_" is in no app name), and
@@ -665,15 +697,27 @@ app_slice() { echo "tando-${A//-/\\x2d}.slice"; }   # (systemd-escape of a name 
 # high, memory up to its cap that reclaim leaves alone while others have more (MemoryLow on its
 # slice; tando.slice gets the sum of them: prio_sync)
 oom_adj() { case ${C[priority]:-} in high) echo 100;; low) echo 900;; *) echo 500;; esac; }
-# mem_caps_mb file...: per app.conf, "<file> <MB>": its memory cap (default 256M) plus each
-# worker's (worker.<name>.memory, else the app's), in one awk over all of them
+# mem_caps_mb [-a] file...: per app.conf, "<file> <MB>": its memory cap (default 256M) plus each
+# worker's (worker.<name>.memory, else the app's), in one awk over all of them. -a: as admission
+# counts them: the web process of an app with idle_stop is stopped most of the time, so it counts
+# IDLE_MB (what an idle app costs: its units, Caddy's site) plus idle_awake % of its cap (host.conf,
+# default IDLE_AWAKE: the share of such apps awake at once); its workers run always and count whole
+IDLE_MB=2 IDLE_AWAKE=20
 mem_caps_mb() {
-  awk -F= 'function mb(v) { if (v ~ /^[0-9]+G$/) return v * 1024; if (v ~ /^[0-9]+M$/) return v + 0
-                             if (v ~ /^[0-9]+K$/) return int(v / 1024); return 256 }
-    function flush() { if (f == "") return; t = mb(m); for (k in w) t += (k in x) ? mb(x[k]) : mb(m)
+  local adm="" aw=${H[idle_awake]:-${IDLE_AWAKE:-20}}
+  [[ ${1:-} == -a ]] && { adm=1; shift; }
+  [[ $aw =~ ^[0-9]{1,3}$ ]] && ((aw <= 100)) || aw=${IDLE_AWAKE:-20}
+  awk -F= -v adm="$adm" -v aw="$aw" -v idle="${IDLE_MB:-2}" '
+    function mb(v) { if (v ~ /^[0-9]+G$/) return v * 1024; if (v ~ /^[0-9]+M$/) return v + 0
+                     if (v ~ /^[0-9]+K$/) return int(v / 1024); return 256 }
+    function flush() { if (f == "") return; t = mb(m)
+                       if (adm != "" && is != "" && is != "off" && r != "static" && r != "container") t = idle + int((t * aw + 99) / 100)
+                       for (k in w) t += (k in x) ? mb(x[k]) : mb(m)
                        print f, t; delete w; delete x }
-    FNR == 1 { flush(); f = FILENAME; m = "256M" }
+    FNR == 1 { flush(); f = FILENAME; m = "256M"; is = ""; r = "" }
     $1 == "memory" { m = $2 }
+    $1 == "idle_stop" { is = $2 }
+    $1 == "recipe" { r = $2 }
     $1 ~ /^worker\.[^.]+$/ { w[$1] = 1 }
     $1 ~ /^worker\.[^.]+\.memory$/ { k = $1; sub(/\.memory$/, "", k); x[k] = $2 }
     END { flush() }' "$@" 2> /dev/null
@@ -681,7 +725,8 @@ mem_caps_mb() {
 # mem_admit MB: may this app's memory caps (MB, from its new settings) be what they are now asked to be?
 # Refused (ADMIT_WHY) when they grow and every app's caps together would be over RAM x
 # mem_overcommit (host.conf, default 1.5; 0 = no check). Caps that do not grow always pass, so a
-# host that is over already still deploys. Slices allow 3x (pre-flight, jobs): not counted.
+# host that is over already still deploys. Slices allow 3x (pre-flight, jobs): not counted. An
+# app with idle_stop counts at its idle cost plus a share of its cap (mem_caps_mb -a).
 MEM_OVERCOMMIT=1.5
 mem_admit() {
   local f others=0 mine=$1 old=0 total ram oc=${H[mem_overcommit]:-$MEM_OVERCOMMIT} limit x
@@ -690,14 +735,14 @@ mem_admit() {
   [[ $oc =~ ^0+(\.0+)?$ ]] && return 0
   while read -r f x; do
     if [[ $f == "$D/app.conf" ]]; then old=$x; else others=$((others + x)); fi
-  done < <(mem_caps_mb "$R"/apps/*/app.conf)
+  done < <(mem_caps_mb -a "$R"/apps/*/app.conf)
   ((mine > old)) || return 0
   ram=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
   [[ $ram =~ ^[0-9]+$ ]] && ((ram > 0)) || return 0
   limit=$(awk -v r="$ram" -v o="$oc" 'BEGIN { print int(r * o) }')
   total=$((others + mine))
   ((total > limit)) || return 0
-  ADMIT_WHY="the memory caps of all apps would be $total MB with $A at $mine MB, over $limit MB ($ram MB RAM x $oc, mem_overcommit): lower memory = in tando.conf, remove an app, or deploy anyway with --force"
+  ADMIT_WHY="the memory caps of all apps would be $total MB with $A at $mine MB, over $limit MB ($ram MB RAM x $oc, mem_overcommit; an app with idle_stop counts ${IDLE_MB:-2} MB + ${H[idle_awake]:-${IDLE_AWAKE:-20}}% of its memory): lower memory = in tando.conf, set idle_stop, remove an app, or deploy anyway with --force"
   return 1
 }
 # prio_sync: tando.slice's MemoryLow is the sum of the high-priority apps' (a child's protection
@@ -813,6 +858,8 @@ write_unit() {
     # ready once its port answers (the proxy is ordered after it): up to health_timeout
     idle_app && printf 'ExecStartPost=/bin/bash -c '"'"'for i in {1..%s}; do (exec 3<>/dev/tcp/127.0.0.1/%s) 2> /dev/null && exit 0; sleep 0.1; done; exit 1'"'"'\n' \
       $(( ${C[health_timeout]:-60} * 10 )) "${C[port]}"
+    # (and its journald stops with it once nothing else of the app runs: journal-idle)
+    if idle_app && [[ -x $LOGS ]]; then printf 'ExecStopPost=-+%s journal-idle %s\n' "$AGENT" "$A"; fi
     printf 'WorkingDirectory=%s/current\nRestart=on-failure\nRestartSec=2\n' "$D"
     # stop_timeout (default 10 s): how long a stopping process may finish its requests before it
     # is killed; Caddy holds new requests meanwhile (an app that waits for every keep-alive
@@ -2301,6 +2348,7 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
       backup_jobs=1|backup_jobs=2|backup_jobs=3|backup_jobs=4) H[backup_jobs]=${kv#*=};;
       job_slots=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,2}$ ]] || die "bad job_slots: 1 to 999 job runs at once"; H[job_slots]=${kv#*=};;
       mem_overcommit=*) [[ ${kv#*=} =~ ^[0-9]{1,2}(\.[0-9]{1,2})?$ ]] || die "bad mem_overcommit: like 1.5 (0: no check)"; H[mem_overcommit]=${kv#*=};;
+      idle_awake=*) [[ ${kv#*=} =~ ^[0-9]{1,3}$ ]] && ((${kv#*=} <= 100)) || die "bad idle_awake: 0 to 100 (% of the apps with idle_stop counted as awake)"; H[idle_awake]=${kv#*=};;
       uid_min=*|uid_max=*)   # the band of new app users' ids (new_uid); apps made before keep theirs
         [[ ${kv#*=} =~ ^[1-9][0-9]{3,4}$ ]] && ((${kv#*=} >= 1000 && ${kv#*=} <= 59999)) || die "bad ${kv%%=*}: 1000 to 59999"
         H[${kv%%=*}]=${kv#*=};;
@@ -2795,8 +2843,10 @@ cmd_doctor() {
   else row check ok apps "$n apps, ports used $n of $pn ($PR_LO-$PR_HI)"; fi
   local oc=${H[mem_overcommit]:-$MEM_OVERCOMMIT} lim
   lim=$(awk -v r="$((mt / 1048576))" -v o="$oc" 'BEGIN { print int(r * o) }')
-  if ((mt > 0 && lim > 0 && caps / 1048576 > lim)); then
-    row check warn "memory caps" "$((caps / 1048576)) MB of caps over $lim MB ($((mt / 1048576)) MB RAM x $oc, mem_overcommit): a deploy that raises a cap is refused without --force; lower memory = of some apps"
+  # (admission's count: an app with idle_stop at its idle cost plus a share of its cap)
+  local adm; adm=$(mem_caps_mb -a "$R"/apps/*/app.conf | awk '{ s += $2 } END { print s + 0 }')
+  if ((mt > 0 && lim > 0 && adm > lim)); then
+    row check warn "memory caps" "$adm MB of caps counted over $lim MB ($((mt / 1048576)) MB RAM x $oc, mem_overcommit): a deploy that raises a cap is refused without --force; lower memory = of some apps"
   elif ((mt > 0 && caps > mt)); then
     row check ok "memory caps" "$((caps / 1048576)) MB of caps, $((mt / 1048576)) MB RAM (overcommitted, within x $oc)"
   else row check ok "memory caps" "$((caps / 1048576)) MB of caps, $((mt / 1048576)) MB RAM"; fi
@@ -3044,7 +3094,7 @@ cmd_configure() {
     die "$A on <host> was last deployed from ${C[origin]}, not from here ($origin). Deploy from here anyway: tando deploy --force (or tando up --force)"
   fi
   # admission: the memory caps of every app against RAM (--force: deploy anyway)
-  if ((!force)) && ! mem_admit "$(mem_caps_mb <(for x in "${!C[@]}"; do printf '%s=%s\n' "$x" "${C[$x]}"; done) | awk '{ print $2 }')"; then
+  if ((!force)) && ! mem_admit "$(mem_caps_mb -a <(for x in "${!C[@]}"; do printf '%s=%s\n' "$x" "${C[$x]}"; done) | awk '{ print $2 }')"; then
     die "$ADMIT_WHY"
   fi
   # runtimes this app needs and the server lacks: the client installs them (tando-agent runtime)
@@ -3157,6 +3207,13 @@ cmd_configure() {
   # made from its own settings; the live app's unit, site and jobs from the live ones
   conf_copy C LC; conf_copy NC C; app_vars
   local ndb=${C[database]:-} ndirect=${C[db_direct]:-}
+  # the reloads the steps below ask for are only noted (dreload): one at the end, and for a new
+  # app none at all where it can be done without (cfg_reload)
+  local DR_FLAG=/run/tando-configure-reload.$$
+  rm -f "$DR_FLAG"
+  # (the namespace's drop-in before app-setup, which asks systemd about its journald: a unit
+  # loaded before its drop-in is written needs a reload)
+  journal_dir
   [[ -x $LOGS ]] && { "$LOGS" app-setup "$A" > /dev/null || die "log setup failed"; }
   app_perms
   # the shared/ directories the app uses, created once now by its own user (see ensure_shared)
@@ -3173,14 +3230,38 @@ cmd_configure() {
   write_caddy || die "$WC_WHY"
   jobs_follow || die "could not write the job units of $A (disk full?)"
   sync_backup_timer
-  journal_dir
   [[ -f $D/.reserve ]] || { head -c 1048576 /dev/zero > "$D/.reserve" 2> /dev/null && chmod 600 "$D/.reserve"; }
   # (not marked applied on failure: the next deploy tries again)
   fw_sync || die "the per-app loopback rules could not be loaded (above), so $A was not deployed: tando doctor"
-  systemctl daemon-reload
-  has_unit && [[ -z ${S[stopped]:-} ]] && systemctl enable -q "tando-$A"
+  rm -f "$DR_FLAG"
+  cfg_reload "$new"
   st applied "$applied"
   echo "port=${C[port]}"; echo "link=$(link)"; echo "created=$new"; echo "changed=1"; echo "conf=$conf"
+}
+
+# cfg_reload new: configure's one daemon-reload (with 200 apps 4.5-8 s of PID 1, and new apps
+# wait for each other's), then the app's unit enabled. A new app's units are new to systemd,
+# which reads a unit from disk when it is first used (systemd retries a name it did not find), so
+# it needs none: only when one of them is loaded already from files that changed since (the names
+# of an app destroyed before; NeedDaemonReload). Its enable link is not reloaded either (it is
+# read at boot), and is made by systemctl itself (SYSTEMCTL_INSTALL_CLIENT_SIDE): through PID 1
+# it marks every unit of the server as needing a reload (measured on systemd 259). An app that
+# exists gets the reload as before (its units are loaded).
+cfg_reload() {
+  local u=() f
+  if (($1)); then
+    has_unit && [[ -z ${S[stopped]:-} ]] && SYSTEMCTL_INSTALL_CLIENT_SIDE=1 systemctl enable -q --no-reload "tando-$A"
+    for f in "/etc/systemd/system/tando-$A".* "/etc/systemd/system/tando-${A}_"* "/etc/systemd/system/tando-$A-"*; do
+      [[ -f $f ]] && u+=("${f##*/}")
+    done
+    u+=("$(app_slice)" "systemd-journald@tando-$A.service")
+    systemctl show -P NeedDaemonReload "${u[@]}" 2> /dev/null | grepq -x yes || return 0
+    systemctl daemon-reload
+  else
+    systemctl daemon-reload
+    has_unit && [[ -z ${S[stopped]:-} ]] && systemctl enable -q "tando-$A"
+  fi
+  return 0
 }
 
 # activate <app> <token> <build s> <upload s>: start a detached activation, print its id
@@ -7182,6 +7263,7 @@ case $verb in
   shell-put) cmd_shell_put "$@";;
   busy) cmd_busy "$@";;
   job-run) cmd_job_run "$@";;
+  journal-idle) cmd_journal_idle "$@";;
   job-begin) cmd_job_begin "$@";; job-end) cmd_job_end "$@";; job-due) cmd_job_due "$@";; job-gone) cmd_job_gone "$@";; job-pause) cmd_job_pause "$@";; job-log) cmd_job_log "$@";;
   host)   # host care (docs/HOSTCARE.md): the server itself, answered by tando-host (Go, srv/hostcare)
     need_root

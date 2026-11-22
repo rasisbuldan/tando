@@ -606,6 +606,7 @@ once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections 
 `port_max=` (app ports, default 4100-4999), `preflight_min=`, `preflight_max=` (pre-flight ports,
 default 14100-14999; the ranges must not overlap or hold 2019 or 5432), `uid_min=`, `uid_max=`
 (new app users' ids, default 30000-39999), `mem_overcommit=` (default 1.5; 0 turns the check off),
+`idle_awake=` (0-100, default 20: admission counts an app with `idle_stop` at 2 MB plus this % of its memory),
 `job_slots=`, `backup_window=HH:MM-HH:MM` (default 01:00-05:00, the server's time),
 `backup_jobs=1|2` (backups at once, default 1), `log_budget=` (all apps' logs together, default
 `auto`: 20% of the log file system). Without `apps_domain`, links use
@@ -813,6 +814,11 @@ port only while it runs (a probe through Caddy would keep it awake) and raises n
 it is idle; the per-minute recovery leaves it idle. A deploy of an idle app starts the new release
 (it goes idle again later). Caddy keeps no pooled connection to it (`keepalive off`), so the
 timer starts with the last request. A restart stops requests in flight.
+While it is idle its journald (the app's log namespace, about 1.1 MB) stops too, unless a worker,
+a job or a pre-flight of the app runs (they log there); the app's next start starts it again and
+no line is lost. An idle app costs about 2 MB. Admission counts it that way: its web process at
+2 MB plus `idle_awake` % of its `memory` (host setup `idle_awake=`, default 20: the share of such
+apps awake at once), its workers whole.
 ### Database connections and pgbouncer
 
 Apps with `database = postgres` share one PostgreSQL. `tando host setup` sizes it from the

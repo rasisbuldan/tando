@@ -10,7 +10,11 @@ first, grouped by area.
   after that long without a request and its next request starts it (workers and jobs run on) (systemd socket activation and systemd-socket-proxyd
   behind Caddy; the first request waits about 0.1-0.3 s for a small app). `tando ls` says
   `idle`; the monitor and the per-minute recovery do not wake it. Not for static sites,
-  containers (docs/COMMANDS.md, "Scale to zero").
+  containers (docs/COMMANDS.md, "Scale to zero"). While idle its log namespace's journald stops
+  too (about 1.1 MB; not while a worker or job of the app runs), and admission counts an idle_stop
+  app at 2 MB plus `idle_awake` (20) % of its memory, not its whole cap.
+- Scale: creating an app no longer reloads systemd (it did three times; with 200 apps each reload
+  took PID 1 4.5-8 s, and new apps waited for each other's).
 - Scale: a server holds 100 apps and more (tuned for 4 vCPU / 8 GB). Upgrade with
   `tando host setup <host>`; apps keep their ports, users and settings.
   - Ports: the app range is 4100-4999 (was 4100-4199: app 101 was refused), set with `port_min=`

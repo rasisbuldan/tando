@@ -617,11 +617,15 @@ settings; all are in `host.conf`). What keeps the work per app O(1), and the sha
   shared for its hold window (until the app listens), so restarts of different apps run at once
   and only reloads wait for them.
 - **systemd and Caddy reloads.** `write_if_changed` says when it wrote; a daemon-reload follows
-  only then. Host setup writes every app's units and sites first (sites staged as
+  only then. Creating an app needs none: systemd reads a unit it has not loaded from disk when it
+  is first used, so configure reloads only when one of the new app's units is loaded already
+  (NeedDaemonReload), and enables its unit client-side (`SYSTEMCTL_INSTALL_CLIENT_SIDE=1`: an
+  enable through PID 1 marks every unit as needing a reload). With 200 apps a reload is 4.5-8 s. Host setup writes every app's units and sites first (sites staged as
   `<app>.caddy.new`), then reloads systemd once and validates and reloads Caddy once; when Caddy
   refuses, every site file goes back.
 - **Memory.** Configure refuses a deploy that raises an app's caps (memory plus workers') when all
-  apps' caps would pass RAM x `mem_overcommit` (1.5), unless `--force`. `priority = high|low` sets
+  apps' caps would pass RAM x `mem_overcommit` (1.5), unless `--force`. An app with `idle_stop`
+  counts its web process at 2 MB plus `idle_awake` % (20) of its cap, its workers whole. `priority = high|low` sets
   OOMScoreAdjust 100/900 (default 500); high also sets MemoryLow on the app's slice, and their sum
   on tando.slice (a child is protected only as far as its parent).
 - **Jobs.** A job's journal is read from its app's namespace only (`--namespace=+tando-<app>`).
