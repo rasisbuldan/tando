@@ -1,7 +1,8 @@
 // Package pgwire is the studio's PostgreSQL client: protocol 3.0 over one TCP connection, the
 // SCRAM-SHA-256 login only, the simple query for the studio's own statements and Parse/Bind/
 // Describe/Execute/Sync (text format) for everything else. Parse takes exactly one command, which
-// is what makes the read-only mode enforceable (see srv/studio). No TLS (loopback only), no COPY
+// is what makes the read-only mode enforceable (see srv/studio). TLS when Config.TLS is set (a
+// database on a data node: the session and the cancel request both negotiate it), no COPY
 // (refused), no other login method (refused with a message that names tando db psql).
 //
 // Every message is length-checked (MaxMessage) except DataRow, which is read as a stream: each
@@ -12,6 +13,7 @@ package pgwire
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -33,6 +35,9 @@ type Config struct {
 	Database string
 	Password string
 	Params   [][2]string
+	// TLS: negotiate TLS first (SSLRequest) and refuse a server that does not offer it; the
+	// config's RootCAs and ServerName are what verify-full checks
+	TLS *tls.Config
 	// Dial replaces net.Dialer for tests (the cancel request uses it too)
 	Dial func(ctx context.Context, addr string) (net.Conn, error)
 	// scramUser: the name in SCRAM's client-first message; PostgreSQL ignores it (empty, as
@@ -107,11 +112,39 @@ func (e *ProtocolError) Error() string { return "postgresql protocol: " + e.msg 
 func perr(f string, a ...any) error { return &ProtocolError{fmt.Sprintf(f, a...)} }
 
 func dial(cfg *Config, ctx context.Context) (net.Conn, error) {
+	var nc net.Conn
+	var err error
 	if cfg.Dial != nil {
-		return cfg.Dial(ctx, cfg.Addr)
+		nc, err = cfg.Dial(ctx, cfg.Addr)
+	} else {
+		var d net.Dialer
+		nc, err = d.DialContext(ctx, "tcp", cfg.Addr)
 	}
-	var d net.Dialer
-	return d.DialContext(ctx, "tcp", cfg.Addr)
+	if err != nil || cfg.TLS == nil {
+		return nc, err
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		nc.SetDeadline(dl)
+	}
+	// SSLRequest: length 8, code 80877103; the server answers one byte, S or N
+	var b [1]byte
+	if _, err = nc.Write([]byte{0, 0, 0, 8, 4, 210, 22, 47}); err == nil {
+		_, err = io.ReadFull(nc, b[:])
+	}
+	if err == nil && b[0] != 'S' {
+		err = errors.New("the database server does not offer TLS")
+	}
+	if err != nil {
+		nc.Close()
+		return nil, err
+	}
+	tc := tls.Client(nc, cfg.TLS)
+	if err := tc.HandshakeContext(ctx); err != nil {
+		nc.Close()
+		return nil, err
+	}
+	nc.SetDeadline(time.Time{})
+	return tc, nil
 }
 
 // Connect opens a session and logs in.

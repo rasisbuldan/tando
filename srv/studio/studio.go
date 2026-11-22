@@ -11,6 +11,8 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -58,6 +60,8 @@ type Config struct {
 	StmtLimit        time.Duration // one statement at most (the studio's own clock)
 	ConnIdle         time.Duration // the database connection is closed after this long unused
 	PGAddr           string
+	PGServerName     string    // a database elsewhere (a data node): the name or IP its certificate must carry
+	PGRootCert       string    // and the CA file it must chain to (sslmode=verify-full, the app's sslrootcert)
 	Out              io.Writer // stdout: the ready and stopped lines, nothing else
 	Log              io.Writer // stderr (the journal): start, stop, internal errors
 	Dial             func(ctx context.Context) (DB, error)
@@ -129,8 +133,15 @@ func PGDial(c Config) func(ctx context.Context) (DB, error) {
 	return func(ctx context.Context) (DB, error) {
 		ctx, cf := context.WithTimeout(ctx, 10*time.Second)
 		defer cf()
-		db, err := pgwire.Connect(ctx, pgwire.Config{Addr: c.PGAddr, User: c.Role, Database: c.Database,
-			Password: c.Password, Params: startupParams(c)})
+		pc := pgwire.Config{Addr: c.PGAddr, User: c.Role, Database: c.Database, Password: c.Password, Params: startupParams(c)}
+		if c.PGRootCert != "" {
+			t, err := tlsConfig(c.PGRootCert, c.PGServerName)
+			if err != nil {
+				return nil, err
+			}
+			pc.TLS = t
+		}
+		db, err := pgwire.Connect(ctx, pc)
 		if err != nil {
 			return nil, dbErr(err)
 		}
@@ -154,9 +165,30 @@ func dbErr(err error) error {
 	}
 	var ne *net.OpError
 	if errors.As(err, &ne) {
-		return errors.New("PostgreSQL does not answer on 127.0.0.1:5432 (tando doctor)")
+		at := "127.0.0.1:5432"
+		if ne.Addr != nil {
+			at = ne.Addr.String()
+		}
+		return errors.New("PostgreSQL does not answer on " + at + " (tando doctor)")
+	}
+	var ce *tls.CertificateVerificationError
+	if errors.As(err, &ce) {
+		return errors.New("the database server's certificate is not the one pinned for it (" + cut(ce.Error(), 120) + "): tando host link again")
 	}
 	return err
+}
+
+// tlsConfig: verify-full against the CA file (the app's sslrootcert): the chain and the name
+func tlsConfig(caFile, name string) (*tls.Config, error) {
+	b, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, errors.New("cannot read the database's CA " + caFile)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(b) {
+		return nil, errors.New("the database's CA " + caFile + " holds no certificate")
+	}
+	return &tls.Config{RootCAs: pool, ServerName: name, MinVersion: tls.VersionTLS12}, nil
 }
 
 // Rnd: n random bytes, base64url

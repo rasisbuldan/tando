@@ -101,11 +101,12 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 |---|---|---|---|---|---|
 | `data` | path | none (`data` with `database = sqlite`) | | A directory that survives deploys, given to the app as `$TANDO_DATA_DIR`. For a container: the volume's path inside it (`/data`). | `data = data` |
 | `backup` | choice | `daily` when `data` or `database` is set, else off | | `daily` or `off`: a daily backup of the data directory and the database. | `backup = off` |
-| `database` | choice | none | | `postgres` or `sqlite`; the app gets `DATABASE_URL`. | `database = postgres` |
+| `database` | choice | none | | `postgres` or `sqlite`; the app gets `DATABASE_URL`. On a server linked to a data node (`tando host link`), the database is made there and both URLs carry `sslmode=verify-full` (docs/DATA-NODE.md). | `database = postgres` |
 
 ## Database limits
 
-PostgreSQL only (`database = postgres`); `off` turns a limit off.
+PostgreSQL only (`database = postgres`); `off` turns a limit off. On a data node they are set on
+the project's role there, at each deploy (docs/DATA-NODE.md).
 
 | Key | Type | Default | Unit | Meaning | Example |
 |---|---|---|---|---|---|

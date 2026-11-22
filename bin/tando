@@ -154,6 +154,7 @@ cmd_host() {
     ls) host_ls;;
     rm) host_rm "$2";;
     rename) shift; host_rename "$@";;
+    link) shift; . "$TANDO_HOME/lib/datanode.sh"; host_link "$@";;   # docs/DATA-NODE.md
     status|care|update|reboot)   # host care: the server itself (lib/hostcare.sh, docs/HOSTCARE.md)
       . "$TANDO_HOME/lib/hostcare.sh"; "host_$1";;
     setup)
@@ -162,7 +163,8 @@ cmd_host() {
       for kv in "$@"; do
         case $kv in
           apps_domain=*|tls=*|unit_drop=*|public_port=*) ;;
-          postgres=yes|podman=yes|python=yes|node=yes|node=[0-9][0-9]) feats="$feats ${kv%=yes}";;
+          postgres=yes|podman=yes|python=yes|node=yes|node=[0-9][0-9])
+            case "$feats " in *" ${kv%=yes} "*) ;; *) feats="$feats ${kv%=yes}";; esac;;
           postgres_version=[1-9]|postgres_version=[1-9][0-9]) feats="$feats postgres";;
           swap=yes|swap=no|ufw=yes|ufw=no) ;;
           domain_tls=auto|domain_tls=internal|domain_tls=off) ;;
@@ -174,6 +176,9 @@ cmd_host() {
           care=on|care=off) ;;   # host care's security updates (tando-host install; not the agent's)
           --pg-stat-statements) pgss=1;;   # PostgreSQL's top statements (a restart: asked below)
           --pg-restart) pgrs=1;;           # PostgreSQL's new memory settings (a restart: asked below)
+          role=data)   # a data node: PostgreSQL for app nodes (docs/DATA-NODE.md); its step is "data"
+            case "$feats " in *" postgres "*) ;; *) feats="$feats postgres";; esac; feats="$feats data";;
+          data_cert=/*|data_key=/*|data_ca=/*) ;;
           pg_max_connections=auto|pg_max_connections=[1-9][0-9]|pg_max_connections=[1-9][0-9][0-9]|pg_max_connections=[1-9][0-9][0-9][0-9]) ;;
           *) usage_err "bad setting: $kv" host;;
         esac
@@ -196,9 +201,11 @@ cmd_host() {
       install_agent
       # a host without apps_domain: <app>.<ip-with-dashes>.sslip.io, so a new server gives working
       # https links with no DNS set up (sslip.io answers such names with the IP inside them)
-      agent info > "$TMPD/o"; kv_read "$TMPD/o" apps_domain postgres
+      agent info > "$TMPD/o"; kv_read "$TMPD/o" apps_domain postgres role
       # the server's database step (sizing, pgbouncer): with PostgreSQL there or installed now
-      case "$K_postgres $feats " in yes*|*" postgres "*) total=$((total + 1));; esac
+      case "$K_postgres $feats " in yes*|*" postgres "*|*" data "*) total=$((total + 1));; esac
+      # a data node: its postgres install and its own step (role=data counted once above as a feature)
+      case "$K_role $feats " in *" data "*) ;; data*) total=$((total + 1));; esac
       ui_step 1 $total agent ok "$(client_version) in /opt/tando/bin"
       case " $* " in *" apps_domain="*) ;; *)
         if [ -z "$K_apps_domain" ] && ip=$(public_ip "${TARGET#*@}"); then
@@ -382,11 +389,12 @@ cmd_destroy() {
   resolve 1
   local what=""
   agent sudo destroy "$APP" plan < /dev/null > "$TMPD/o"   # stdin is for the answer
-  kv_read "$TMPD/o" releases env data database backups jobs final
+  kv_read "$TMPD/o" releases env data database backups jobs final db_remote db_node
+  local dbr=$K_db_remote dbn=$K_db_node
   what="$(plural "${K_releases:-0}" release)"
   [ "${K_env:-0}" -gt 0 ] && what="$what, $(plural "$K_env" "env key")"
   [ -n "$K_data" ] && what="$what, its data ($(ui_bytes "$K_data"))"
-  [ -n "$K_database" ] && what="$what, its $K_database database"
+  [ -n "$K_database" ] && what="$what, its $K_database database${dbr:+ (on the data node $dbr)}"
   [ "${K_jobs:-0}" -gt 0 ] && what="$what, $(plural "$K_jobs" job)"
   what="$what, its user, unit and Caddy site"
   if [ -n "$PURGE" ]; then [ "${K_backups:-0}" -gt 0 ] && what="$what, and $(plural "$K_backups" backup)"
@@ -397,6 +405,7 @@ cmd_destroy() {
   if [ -n "$K_backup" ]; then
     note "destroyed $K_destroyed; final backup ${K_backup##*/}: tando backup pull ${K_backup##*/} <file> -a $APP"
   else note "destroyed $K_destroyed"; fi
+  [ -z "$dbr" ] || { . "$TANDO_HOME/lib/datanode.sh"; db_remote_drop "$dbr" "$dbn"; }
 }
 
 cmd_backup() {

@@ -2,6 +2,8 @@ package studio
 
 import (
 	"errors"
+	"net"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -149,11 +151,14 @@ func Role(app string) string { return "tando_" + strings.ReplaceAll(app, "-", "_
 
 // ParseEnvCred reads the app's env file (KEY="value" lines, \ escapes; the agent's env_save) for
 // DATABASE_URL, postgres://<role>:<password>@...: the helper's credential. The role must be the
-// app's own (Role): an env edited to name another role is refused.
+// app's own (Role): an env edited to name another role is refused. A database on a data node
+// (DATABASE_URL_DIRECT names another host than the loopback) is reached there, at PostgreSQL's
+// own port, only with sslmode=verify-full and its sslrootcert (docs/DATA-NODE.md).
 func ParseEnvCred(b []byte, app string, c *Config) error {
+	vals := map[string]string{}
 	for _, l := range strings.Split(string(b), "\n") {
-		v, ok := strings.CutPrefix(l, "DATABASE_URL=")
-		if !ok {
+		k, v, ok := strings.Cut(l, "=")
+		if !ok || (k != "DATABASE_URL" && k != "DATABASE_URL_DIRECT") {
 			continue
 		}
 		v = strings.TrimSuffix(strings.TrimPrefix(v, `"`), `"`)
@@ -164,26 +169,57 @@ func ParseEnvCred(b []byte, app string, c *Config) error {
 			}
 			o.WriteByte(v[i])
 		}
-		rest, ok := strings.CutPrefix(o.String(), "postgres://")
-		if !ok {
-			rest, ok = strings.CutPrefix(o.String(), "postgresql://")
+		if _, seen := vals[k]; !seen {
+			vals[k] = o.String()
 		}
-		if !ok {
-			break
-		}
-		userinfo, _, ok := strings.Cut(rest, "@")
-		if !ok {
-			break
-		}
-		c.Role, c.Password, _ = strings.Cut(userinfo, ":")
-		c.Database = c.Role
-		if c.Role != Role(app) {
-			return errors.New("DATABASE_URL in the app's env names another role than the app's")
-		}
-		if !roleRe.MatchString(c.Role) || c.Password == "" || strings.ContainsAny(c.Password, "\x00\r") {
-			break
-		}
+	}
+	u, ok := vals["DATABASE_URL"]
+	if !ok {
+		return errors.New("no DATABASE_URL in the app's env (tando db url)")
+	}
+	rest, ok := strings.CutPrefix(u, "postgres://")
+	if !ok {
+		rest, ok = strings.CutPrefix(u, "postgresql://")
+	}
+	userinfo, _, found := strings.Cut(rest, "@")
+	if !ok || !found {
+		return errors.New("no DATABASE_URL in the app's env (tando db url)")
+	}
+	c.Role, c.Password, _ = strings.Cut(userinfo, ":")
+	c.Database = c.Role
+	if c.Role != Role(app) {
+		return errors.New("DATABASE_URL in the app's env names another role than the app's")
+	}
+	if !roleRe.MatchString(c.Role) || c.Password == "" || strings.ContainsAny(c.Password, "\x00\r") {
+		return errors.New("no DATABASE_URL in the app's env (tando db url)")
+	}
+	if d, ok := vals["DATABASE_URL_DIRECT"]; ok {
+		return remoteAddr(d, c)
+	}
+	return nil
+}
+
+// remoteAddr: where DATABASE_URL_DIRECT says the database is, when not on the loopback
+func remoteAddr(d string, c *Config) error {
+	pu, err := url.Parse(d)
+	if err != nil || (pu.Scheme != "postgres" && pu.Scheme != "postgresql") {
+		return errors.New("DATABASE_URL_DIRECT in the app's env cannot be read")
+	}
+	if pu.User.Username() != c.Role {
+		return errors.New("DATABASE_URL_DIRECT in the app's env names another role than the app's")
+	}
+	h := pu.Hostname()
+	if h == "127.0.0.1" || h == "localhost" || h == "::1" || h == "" {
 		return nil
 	}
-	return errors.New("no DATABASE_URL in the app's env (tando db url)")
+	q := pu.Query()
+	if q.Get("sslmode") != "verify-full" || !strings.HasPrefix(q.Get("sslrootcert"), "/") {
+		return errors.New("the database is on another server (" + h + ") and its URL does not ask for sslmode=verify-full with an sslrootcert: the studio does not connect without it")
+	}
+	port := pu.Port()
+	if port == "" {
+		port = "5432"
+	}
+	c.PGAddr, c.PGServerName, c.PGRootCert = net.JoinHostPort(h, port), h, q.Get("sslrootcert")
+	return nil
 }

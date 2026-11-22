@@ -2523,6 +2523,20 @@ fw_sync() {
   done
   unset 'outside[2019]'
   others=""; for x in "${!outside[@]}"; do others+=", $x"; done
+  # the data node's address (an app node linked to one), matched like loopback above
+  local dbm="" dn4="" dn6=""
+  if valid_ip "${H[db_addr]:-}"; then
+    if [[ ${H[db_addr]} == *:* ]]; then dbm="ip6 daddr ${H[db_addr]}"; else dbm="ip daddr ${H[db_addr]}"; fi
+  fi
+  # a data node: 5432 and 6432 from linked app nodes only (pg_hba then admits each project's role
+  # from its own node only); loopback stays open for the node's own tools
+  if dn_is; then
+    for x in "$DN"/nodes/*; do
+      [[ -f $x ]] || continue
+      x=$(sed -n 's/^addr=//p' "$x"); valid_ip "$x" || continue
+      if [[ $x == *:* ]]; then dn6+="${dn6:+, }$x"; else dn4+="${dn4:+, }$x"; fi
+    done
+  fi
   {
     echo "table inet tando {}"
     echo "flush table inet tando"
@@ -2545,11 +2559,14 @@ fw_sync() {
       # an app with a database: at most db_conns x db_pool connections to them at once
       # (pgbouncer's max_client_conn is shared by all apps; unauthenticated connections to
       # PostgreSQL count against no role's limit)
-      if [[ -n ${pgu[$u]:-} ]]; then
-        echo "    oifname \"lo\" meta skuid $u tcp dport { 5432, 6432 } ct state new ct count over ${pgu[$u]} counter name app_db reject with tcp reset"
-      else
-        echo "    oifname \"lo\" meta skuid $u tcp dport { 5432, 6432 } reject with tcp reset"
-      fi
+      # (and the same to the data node, when the databases are there: docs/DATA-NODE.md)
+      for x in "oifname \"lo\"" ${dbm:+"$dbm"}; do
+        if [[ -n ${pgu[$u]:-} ]]; then
+          echo "    $x meta skuid $u tcp dport { 5432, 6432 } ct state new ct count over ${pgu[$u]} counter name app_db reject with tcp reset"
+        else
+          echo "    $x meta skuid $u tcp dport { 5432, 6432 } reject with tcp reset"
+        fi
+      done
       # the cloud provider's metadata service (instance keys and tokens on many clouds): an app
       # tricked into fetching a URL (SSRF) must not reach it
       echo "    meta skuid $u ip daddr 169.254.169.254 reject"
@@ -2559,6 +2576,15 @@ fw_sync() {
       echo "    oifname != \"lo\" meta skuid $u ct direction reply drop"
     done
     echo "  }"
+    if dn_is; then
+      echo "  counter data_refused {}"
+      echo "  chain data_in {"
+      echo "    type filter hook input priority 0; policy accept;"
+      [[ -z $dn4 ]] || echo "    iifname != \"lo\" ip saddr { $dn4 } tcp dport { 5432, 6432 } accept"
+      [[ -z $dn6 ]] || echo "    iifname != \"lo\" ip6 saddr { $dn6 } tcp dport { 5432, 6432 } accept"
+      echo "    iifname != \"lo\" tcp dport { 5432, 6432 } counter name data_refused reject with tcp reset"
+      echo "  }"
+    fi
     rate_limit_rules
     echo "}"
   } > "$tmp"
@@ -2625,6 +2651,8 @@ cmd_info() {
   echo "ip=$(ip -o route get 1.1.1.1 2> /dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
   echo "addrs=$(ip -o addr show scope global 2> /dev/null | awk '{ sub(/\/.*/, "", $4); printf "%s ", $4 }')"
   echo "domain_tls=$(domain_tls)"
+  # a data node, or an app node whose databases are on one (docs/DATA-NODE.md)
+  echo "role=${H[role]:-app}"; echo "db_host=${H[db_host]:-}"
 }
 
 # host setup, from a fresh Ubuntu server to a ready one. Idempotent: a second run changes nothing
@@ -2670,11 +2698,13 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
       domain_tls=off|domain_tls=internal|domain_tls=auto) H[domain_tls]=${kv#*=};;
       public_port=*) [[ ${kv#*=} =~ ^[0-9]{0,5}$ ]] || die "bad public_port"; H[public_port]=${kv#*=};;
       unit_drop=*) [[ ${kv#*=} =~ ^[A-Za-z,]*$ ]] || die "bad unit_drop"; H[unit_drop]=${kv#*=};;
-      postgres=yes|podman=yes|python=yes|node=yes) feats+=("${kv%=yes}");;
+      postgres=yes|podman=yes|python=yes|node=yes) [[ " ${feats[*]-} " == *" ${kv%=yes} "* ]] || feats+=("${kv%=yes}");;
       postgres_version=*) pg_repin "${kv#*=}"; feats+=(postgres);;   # after a manual upgrade (pg_repin)
       pg_stat_statements=yes) pgss=1;;   # tando host setup --pg-stat-statements (asked first: a restart)
       pg_restart=yes) PG_RESTART_OK=1;;   # tando host setup --pg-restart (asked first): pg_tune may restart
       pg_max_connections=auto) unset 'H[pg_max_connections]';;
+      role=data) H[role]=data; [[ " ${feats[*]-} " == *" postgres "* ]] || feats+=(postgres);;   # a data node (docs/DATA-NODE.md)
+      data_cert=/*|data_key=/*|data_ca=/*) local "${kv%%=*}=${kv#*=}";;   # its own certificates (paths on the server)
       pg_max_connections=*) [[ ${kv#*=} =~ ^[1-9][0-9]{1,3}$ ]] && ((${kv#*=} >= 20)) || die "bad pg_max_connections (20 to 9999, or auto)"
         H[pg_max_connections]=${kv#*=};;
       node=[0-9]*) [[ ${kv#*=} =~ ^[0-9]{2}$ ]] || die "bad node version (a major, like 24)"; feats+=("$kv");;
@@ -2830,6 +2860,12 @@ EOF
     step database run
     pg_host_sync
     step database ok "$PG_DETAIL"
+  fi
+  if dn_is; then
+    step data run
+    if [[ -n ${data_cert:-}${data_key:-}${data_ca:-} ]]; then dn_tls_given "${data_cert:-}" "${data_key:-}" "${data_ca:-}"; save "$R/host.conf" H; fi
+    dn_setup
+    step data ok "$DN_DETAIL"
   fi
   if ((pgss)); then
     [[ ${H[postgres]:-} == yes ]] || die "pg_stat_statements needs PostgreSQL on this server: tando host setup <host> postgres=yes --pg-stat-statements"
@@ -3464,7 +3500,7 @@ cmd_configure() {
     python) python3 -c 'import venv, ensurepip' 2> /dev/null || needs+=" python";;
     container) [[ ${H[podman]:-} == yes ]] && command -v podman > /dev/null || needs+=" podman";;
   esac
-  [[ ${C[database]:-} == postgres && ${H[postgres]:-} != yes ]] && needs+=" postgres"
+  [[ ${C[database]:-} == postgres && ${H[postgres]:-} != yes && -z ${H[db_host]:-} ]] && needs+=" postgres"
   if ((check)); then
     AUDIT_VERB=""   # only a look: nothing to record
     echo "exists=$((1 - new))"; echo "current=${S[current]:-}"; echo "needs=${needs# }"
@@ -3560,6 +3596,8 @@ cmd_configure() {
   local -A NC=() LC=()
   conf_copy C NC
   local conf; conf=$(conf_stage) || die "could not write the settings of this deploy (disk full?)"
+  # a database on the data node: its URLs follow these settings; what the client provisions there
+  local dbro=""; db_remote && { dbro=$(db_remote_conf) || exit 1; }
   if ((!new)) && valid_id "${S[current]:-}"; then
     load "$D/app.conf" LC
     for k in "${!C[@]}"; do conf_key "$k" && unset "C[$k]"; done
@@ -3576,6 +3614,7 @@ cmd_configure() {
                cat "$D/confs/$conf" "$AGENT"; } | cksum | cut -d' ' -f1)
   if ((!new)) && [[ ${S[applied]:-} == "$applied" ]] && [[ -f /etc/caddy/tando/$A.caddy || ${C[caddy]:-} == external ]]; then
     echo "port=${C[port]:-}"; echo "link=$(link)"; echo "created=0"; echo "changed=0"; echo "conf=$conf"
+    [[ -z $dbro ]] || echo "$dbro"
     AUDIT_VERB=""   # nothing changed (every deploy asks): nothing to record
     return 0
   fi
@@ -3601,7 +3640,7 @@ cmd_configure() {
   # the role and its database now (the pre-flight and the release command use them), with the live
   # release's limits: this release's are set when it goes live (db_follow, from conf_put). Its
   # DATABASE_URL follows this release's db_direct (pgbouncer's or PostgreSQL's port)
-  [[ $ndb == postgres ]] && DB_DIRECT=$ndirect db_ensure deploy
+  [[ $ndb == postgres && -z ${H[db_host]:-} ]] && DB_DIRECT=$ndirect db_ensure deploy
   write_unit || die "could not write the unit of $A (disk full?)"
   write_caddy || die "$WC_WHY"
   jobs_follow || die "could not write the job units of $A (disk full?)"
@@ -3613,6 +3652,7 @@ cmd_configure() {
   cfg_reload "$new"
   st applied "$applied"
   echo "port=${C[port]:-}"; echo "link=$(link)"; echo "created=$new"; echo "changed=1"; echo "conf=$conf"
+  [[ -z $dbro ]] || echo "$dbro"
 }
 
 # cfg_reload new: configure's one daemon-reload (with 200 apps 4.5-8 s of PID 1, and new apps
@@ -4726,7 +4766,7 @@ as_app_unit() {
 # app's units, never the host's. A scope, not a sandboxed unit: it costs 8 ms, not 60 (measured);
 # the password stays in the process's environment (its uid's and root's), never on a command line
 as_app_pg() {
-  (cd / && PGPASSWORD=$DB_PW exec systemd-run --quiet --scope --collect --unit="tando-$A-pg-$$-$RANDOM" \
+  (cd / && export PGPASSWORD=$DB_PW && { [[ -z ${DB_SSL:-} ]] || export PGSSLMODE=$DB_SSL PGSSLROOTCERT=$DB_CA; } && exec systemd-run --quiet --scope --collect --unit="tando-$A-pg-$$-$RANDOM" \
     -p "Slice=$(app_slice)" -p MemoryMax=512M choom -n 500 -- runuser -u "$AU" -- "$@")
 }
 
@@ -4780,7 +4820,7 @@ backup_take() { # kind -> prints the backup id (and sets BK_ID); the caller hold
   fi
   if [[ ${C[database]:-} == postgres ]]; then
     db_creds
-    if ! as_app_pg timeout 3600 pg_dump -Fc -h 127.0.0.1 -U "$DB_ROLE" -d "$DB_ROLE" < /dev/null > "$tmp/db.dump"; then
+    if ! as_app_pg timeout 3600 pg_dump -Fc -h "$DB_HOST" -p "$DB_PORT" -U "$DB_ROLE" -d "$DB_ROLE" < /dev/null > "$tmp/db.dump"; then
       rm -rf "$tmp"; echo "pg_dump failed" >&2; return 1
     fi
   fi
@@ -4977,11 +5017,13 @@ cmd_backup_restore() {
     # (statement_timeout and the idle timeout: pg_restore's own first statements set them to 0)
     local rrc
     st restore_step db restore_applied "${S[applied]:-}" applied ""
-    pgsql -c "ALTER ROLE $DB_ROLE SET temp_file_limit = -1" || rfail "could not prepare the database role for the restore"
+    # (on a data node the role's limits stay: only its superuser could lift them, and this node
+    # never holds it; a restore that needs more temp space raises db_temp_limit first)
+    db_remote || pgsql -c "ALTER ROLE $DB_ROLE SET temp_file_limit = -1" || rfail "could not prepare the database role for the restore"
     fp rs.db
-    as_app_pg pg_restore --clean --if-exists --no-owner -h 127.0.0.1 -U "$DB_ROLE" \
+    as_app_pg pg_restore --clean --if-exists --no-owner -h "$DB_HOST" -p "$DB_PORT" -U "$DB_ROLE" \
       -d "$DB_ROLE" < "$dir/db.dump"; rrc=$?
-    db_limits "$DB_ROLE" && st applied "${S[restore_applied]:-}"
+    { db_remote || db_limits "$DB_ROLE"; } && st applied "${S[restore_applied]:-}"
     ((rrc == 0)) || rfail "database restore failed"
   fi
   st restore_step start
@@ -5006,7 +5048,7 @@ rs_end() {
   fi
   for o in "$D"/shared/.restore-* "$D"/shared/.replaced-*; do [[ -e $o || -L $o ]] && as_app rm -rf "$o"; done
   bk_tmp_clean      # (the safety backup's, when it was cut off)
-  if [[ $step == db ]] && db_creds && db_limits "$DB_ROLE"; then S[applied]=${S[restore_applied]:-}; fi
+  if [[ $step == db ]] && db_creds && { db_remote || db_limits "$DB_ROLE"; }; then S[applied]=${S[restore_applied]:-}; fi
   part=$what
   [[ -n $what ]] && what="the restore of backup $bid stopped while the $what was being replaced (${why:-cut off}), so it may be partly restored: tando backup restore $bid --yes runs it again; the data from before it is in backup ${S[restore_safety]:-(none: it was not taken)}"
   # (restore_cut_*: what tando status and ls show: the backup to restore again, the safety backup)
@@ -5147,6 +5189,13 @@ drill_db_drop() {
     *) return 1;;
   esac
 }
+# drill_remote_empty db: every schema the app's role owns in its drill database on the data node
+# goes (public too, made again): the role cannot drop or create databases there
+drill_remote_empty() {
+  as_app_pg psql -X -q -At -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" -U "$DB_ROLE" -d "$1" \
+    -c "DO \$\$ DECLARE s name; BEGIN FOR s IN SELECT nspname FROM pg_namespace WHERE pg_has_role(nspowner, 'USAGE') AND nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' LOOP EXECUTE format('DROP SCHEMA %I CASCADE', s); END LOOP; END \$\$" \
+    -c "CREATE SCHEMA IF NOT EXISTS public" < /dev/null > /dev/null
+}
 # drill_free path need_kb: the filesystem of path has need_kb free, and 256 MB to spare after it
 drill_free() {
   local free; free=$(df -Pk "$1" 2> /dev/null | awk 'NR == 2 { print $4 }')
@@ -5186,7 +5235,7 @@ cmd_backup_drill() { # app [id]
     need=$(tar -tvzf "$dir/data.tar.gz" 2> /dev/null | awk '$1 ~ /^[-h]/ { s += $3 } END { printf "%.0f", s / 1024 + 1 }')
     [[ $need =~ ^[0-9]+$ ]] || why="the data archive cannot be read (tar failed)"
   fi
-  if [[ -z $why && -f $dir/db.dump ]]; then
+  if [[ -z $why && -f $dir/db.dump ]] && ! db_remote; then
     dbneed=$(pgsql -c "SELECT pg_catalog.pg_database_size('$(db_role)') / 1024" 2> /dev/null)
     [[ $dbneed =~ ^[0-9]+$ ]] || dbneed=$(du -sk "$dir/db.dump" | awk '{ print $1 * 4 }')
     pgdir=$(pgsql -c "SHOW data_directory" 2> /dev/null)
@@ -5214,33 +5263,40 @@ cmd_backup_drill() { # app [id]
   if [[ -z $why && -f $dir/db.dump ]]; then
     db_creds
     dbn=$(drill_dbname "$A")
-    dbstate=$(drill_db_state "$dbn" "$DB_ROLE")
-    if [[ $dbstate == foreign ]]; then
+    # on a data node: its empty drill database (made with the project's, owned by the app's
+    # role, data-db ensure) is emptied by the role itself, before and after
+    if db_remote; then dbstate=remote; drill_remote_empty "$dbn" || why="could not empty the drill database $dbn on the data node ${H[db_host]}"
+    else dbstate=$(drill_db_state "$dbn" "$DB_ROLE"); fi
+    if [[ -n $why ]]; then dbn=""
+    elif [[ $dbstate == remote ]]; then :
+    elif [[ $dbstate == foreign ]]; then
       why="a database $dbn exists that is not a restore drill of $A: it was left as it is (drop it by hand if it is not needed)"
       dbn=""
     elif ! { drill_db_drop "$dbn" "$DB_ROLE" && pgsql -c "CREATE DATABASE $dbn OWNER $DB_ROLE" &&
              pgsql -c "REVOKE ALL ON DATABASE $dbn FROM PUBLIC" -c "GRANT CONNECT, TEMPORARY ON DATABASE $dbn TO $DB_ROLE" \
                -c "COMMENT ON DATABASE $dbn IS '$DRILL_MARK'" -c "ALTER ROLE $DB_ROLE IN DATABASE $dbn SET temp_file_limit = -1"; } > /dev/null 2>&1; then
       why="could not create the throwaway database $dbn"
-    else
+    fi
+    if [[ -z $why ]]; then
       ttab=$(as_app_pg pg_restore -l < "$dir/db.dump" 2> /dev/null | awk '$4 == "TABLE" && $5 != "DATA" && $5 != "ATTACH" { n++ } END { print n + 0 }')
       # (its messages may hold rows of the app's data: only the exit code is kept)
-      as_app_pg timeout 3600 pg_restore --no-owner --no-acl -h 127.0.0.1 -U "$DB_ROLE" -d "$dbn" < "$dir/db.dump" > /dev/null 2>&1; rc=$?
+      as_app_pg timeout 3600 pg_restore --no-owner --no-acl -h "$DB_HOST" -p "$DB_PORT" -U "$DB_ROLE" -d "$dbn" < "$dir/db.dump" > /dev/null 2>&1; rc=$?
       if ((rc != 0)); then
         why="pg_restore exited with $rc (run it by hand on a copy of backup $id to see why)"
       else
         # counted as the app's role too, with nothing of the app's on the search path
-        ntab=$(as_app_pg psql -X -q -At -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$DB_ROLE" -d "$dbn" \
+        ntab=$(as_app_pg psql -X -q -At -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" -U "$DB_ROLE" -d "$dbn" \
           -c "SET search_path = pg_catalog" -c "SELECT pg_catalog.count(*) FROM pg_catalog.pg_tables WHERE schemaname OPERATOR(pg_catalog.<>) ALL (ARRAY['pg_catalog', 'information_schema']::pg_catalog.name[])" < /dev/null 2> /dev/null)
         DR_TABLES=$ntab
-        DR_ROWS=$(as_app_pg psql -X -q -At -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$DB_ROLE" -d "$dbn" \
+        DR_ROWS=$(as_app_pg psql -X -q -At -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" -U "$DB_ROLE" -d "$dbn" \
           -c "SET search_path = pg_catalog" -c "SELECT COALESCE(pg_catalog.sum((pg_catalog.xpath('/row/c/text()', pg_catalog.query_to_xml(pg_catalog.format('select pg_catalog.count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint), 0) FROM pg_catalog.pg_tables WHERE schemaname OPERATOR(pg_catalog.<>) ALL (ARRAY['pg_catalog', 'information_schema']::pg_catalog.name[])" < /dev/null 2> /dev/null)
         [[ $ntab =~ ^[0-9]+$ ]] && ((ntab >= ttab)) || why="the dump lists $ttab tables and ${ntab:-no} were restored"
       fi
     fi
   fi
   # the throwaway copies go, whatever happened (the database only when it is this drill's)
-  [[ -n $dbn ]] && { drill_db_drop "$dbn" "$DB_ROLE" || echo "tando-agent: could not drop the throwaway database $dbn" >&2; }
+  if [[ -n $dbn ]] && db_remote; then drill_remote_empty "$dbn" || echo "tando-agent: could not empty the drill database $dbn on the data node" >&2
+  elif [[ -n $dbn ]]; then drill_db_drop "$dbn" "$DB_ROLE" || echo "tando-agent: could not drop the throwaway database $dbn" >&2; fi
   [[ -n $tmp ]] && as_app rm -rf "$tmp"
   DR_SECS=$(($(now) - t0))
   if [[ -z $why ]]; then
@@ -5603,9 +5659,17 @@ pg_tune() {
     return 1
   fi
   pg_sizing
+  local listen=localhost tls=""
+  # a data node (docs/DATA-NODE.md): every address, TLS once its certificate is there (dn_tls);
+  # pg_hba and the firewall decide who gets in
+  if dn_is; then
+    listen='*'
+    [[ -s $DN_TLS/server.pem && -s $DN_TLS/server.key ]] &&
+      tls=$(printf "ssl = on\nssl_cert_file = '%s/server.pem'\nssl_key_file = '%s/server.key'\nssl_min_protocol_version = 'TLSv1.2'\npassword_encryption = 'scram-sha-256'" "$DN_TLS" "$DN_TLS")
+  fi
   cat > "$conf.tmp" <<CONF
 # written by tando (host setup), sized from this server's RAM (docs/ARCHITECTURE.md, PostgreSQL)
-listen_addresses = 'localhost'
+listen_addresses = '$listen'
 max_connections = $PGS_MC
 shared_buffers = ${PGS_SB}MB
 work_mem = ${PGS_WM}MB
@@ -5617,6 +5681,7 @@ max_wal_size = 1GB
 authentication_timeout = 5s
 superuser_reserved_connections = 3
 CONF
+  [[ -z $tls ]] || printf '%s\n' "$tls" >> "$conf.tmp"
   if ! cmp -s "$conf.tmp" "$conf"; then mv "$conf.tmp" "$conf"; changed=1; else rm -f "$conf.tmp"; fi
   # the install can restart dbus or systemd libraries: pg_restart retries until systemctl answers
   if ! pg_isready -q -h 127.0.0.1; then pg_restart; PG_RESTARTED=1; return 0; fi
@@ -5690,6 +5755,19 @@ pgb_sync() {
       p=${f#*:db_pool=}; f=${f%%:*}; f=${f%/app.conf}; f=${f##*/}
       [[ $p =~ ^[0-9]+$ ]] && pool[tando_${f//-/_}]=$p
     done < <(grep -H '^db_pool=' "$R"/apps/*/app.conf 2> /dev/null)
+    # a data node's projects (data-db): their pool is recorded there
+    while IFS= read -r f; do
+      p=${f#*:pool=}; f=${f%%:*}; f=${f##*/}
+      [[ $p =~ ^[0-9]+$ ]] && pool[tando_${f//-/_}]=$p
+    done < <(grep -H '^pool=' "$DN"/db/* 2> /dev/null)
+    local listen=127.0.0.1 auth="auth_type = scram-sha-256"
+    if dn_is; then
+      # every address, TLS for clients (required by hba.tando for every address but loopback)
+      listen='*'
+      [[ -s $DN_TLS/server.pem ]] &&
+        auth="auth_type = hba"$'\n'"auth_hba_file = $PGB_DIR/hba.tando"$'\n'"client_tls_sslmode = allow"$'\n'"client_tls_cert_file = $DN_TLS/server.pem"$'\n'"client_tls_key_file = $DN_TLS/server.key"$'\n'"client_tls_protocols = tlsv1.2,tlsv1.3"
+      [[ -f $PGB_DIR/hba.tando ]] || pgb_put "$PGB_DIR/hba.tando" <<< "host all all 127.0.0.1/32 scram-sha-256" || exit 1
+    fi
     if [[ -n ${A:-} ]]; then me=$(db_role); pool[$me]=${C[db_pool]:-$DB_POOL}; fi
     # protocol-level prepared statements in transaction pooling: pgbouncer 1.21 and newer
     ver=$(pgbouncer --version 2> /dev/null | sed -n 's/^PgBouncer \([0-9]*\)\.\([0-9]*\).*/\1 \2/p' | head -1)
@@ -5709,10 +5787,10 @@ pgb_sync() {
       cat <<INI
 
 [pgbouncer]
-listen_addr = 127.0.0.1
+listen_addr = $listen
 listen_port = $PGB_PORT
 unix_socket_dir =
-auth_type = scram-sha-256
+$auth
 auth_file = $PGB_DIR/userlist.txt
 pool_mode = transaction
 default_pool_size = $DB_POOL
@@ -5872,6 +5950,9 @@ db_creds() {
   DB_URL=${E[DATABASE_URL]:-}
   DB_PW=${DB_URL#postgres://*:}; DB_PW=${DB_PW%%@*}
   [[ -n $DB_URL ]] || die "no DATABASE_URL in the env of $A"
+  # where it is: here, or on the data node (PostgreSQL's own port, TLS checked: as_app_pg)
+  DB_HOST=127.0.0.1 DB_PORT=5432 DB_SSL=""
+  if db_remote; then DB_HOST=${H[db_addr]} DB_SSL=verify-full; fi
 }
 
 # db_ensure [deploy]: create the role and database if missing; (re)write DATABASE_URL with a new
@@ -6010,17 +6091,20 @@ cmd_db_url() { need_root; app "$1"; [[ ${C[database]:-} == postgres ]] || die "$
 # db-info app: what the server has for the app's database (the limits as PostgreSQL holds them)
 cmd_db_info() {
   need_root; app "$1"; [[ ${C[database]:-} == postgres ]] || die "$A has no database"
-  local r k v out; r=$(db_role)
-  out=$(pgsql -F ' ' -c "SELECT 'server', current_setting('server_version_num')::int / 10000" \
+  local r k v out q=pgsql; r=$(db_role)
+  # (on a data node: asked as the app's own role, which sees its own rows of these)
+  db_remote && { db_creds; q="app_psql -d $r"; }
+  out=$($q -F ' ' -c "SELECT 'server', current_setting('server_version_num')::int / 10000" \
     -c "SELECT 'size', pg_database_size('$r')" \
     -c "SELECT 'conns', count(*) FROM pg_stat_activity WHERE usename = '$r'" \
     -c "SELECT 'conn_limit', rolconnlimit FROM pg_roles WHERE rolname = '$r'" \
     -c "SELECT replace(unnest(setconfig), '=', ' ') FROM pg_db_role_setting s JOIN pg_roles o ON o.oid = s.setrole
         WHERE o.rolname = '$r' AND s.setdatabase = 0") || die "PostgreSQL does not answer: tando doctor"
-  echo "role=$r"; echo "cluster=${H[postgres_version]:-}${H[postgres_version]:+/main}"
+  echo "role=$r"
+  if db_remote; then echo "cluster=${H[db_host]} (data node)"; else echo "cluster=${H[postgres_version]:-}${H[postgres_version]:+/main}"; fi
   # how the app connects (its env's DATABASE_URL) and its pool there
   local -A E=(); env_load E
-  if [[ ${E[DATABASE_URL]:-} == *"@127.0.0.1:$PGB_PORT/"* ]]; then echo "via=pgbouncer"; else echo "via=direct"; fi
+  if [[ ${E[DATABASE_URL]:-} == *":$PGB_PORT/"* ]]; then echo "via=pgbouncer"; else echo "via=direct"; fi
   echo "pool=${C[db_pool]:-$DB_POOL}"; echo "db_direct=${C[db_direct]:-false}"
   while read -r k v; do
     case $k in server|size|conns|conn_limit|statement_timeout|idle_in_transaction_session_timeout|temp_file_limit)
@@ -6032,12 +6116,323 @@ cmd_db_psql() { # interactive, over ssh -t; runs as the app user with the app's 
   need_root; app "$1"; [[ ${C[database]:-} == postgres ]] || die "$A has no database"
   db_creds
   export PGPASSWORD=$DB_PW PSQL_HISTORY=/dev/null
+  [[ -z $DB_SSL ]] || export PGSSLMODE=$DB_SSL PGSSLROOTCERT=$DB_CA
   # a person at a prompt: a long query or a pause inside a transaction is meant, so the role's
   # two timeouts are off in this session (the temp file limit stays: only a superuser lifts it)
   export PGOPTIONS='-c statement_timeout=0 -c idle_in_transaction_session_timeout=0'
   audit_done 0
-  cd /tmp && exec runuser -u "$AU" -- psql -h 127.0.0.1 -U "$DB_ROLE" -d "$DB_ROLE"
+  cd /tmp && exec runuser -u "$AU" -- psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_ROLE" -d "$DB_ROLE"
 }
+
+# >>> data node and remote databases (docs/DATA-NODE.md)
+# A data node (host setup role=data) holds PostgreSQL and pgbouncer for app nodes elsewhere. Both
+# listen on the node's addresses with TLS (a CA made on the node, or certificates given with
+# data_cert/data_key/data_ca); pg_hba admits a project's role from its own app node only
+# (hostssl, scram-sha-256); the firewall lets 5432 and 6432 in only from linked app nodes.
+# Provisioning comes from the control plane (the operator's tando): data-link registers an app
+# node, data-db makes or drops a project's role and database, sets its limits and hands its
+# password back once. An app node never holds this node's superuser: it gets the CA (db-link) and,
+# per app, the role's password (db-remote-set), and connects with sslmode=verify-full.
+# Records here: $DN/nodes/<name> (addr=), $DN/db/<app> (node=, pool=).
+DN=$R/data DN_TLS=/etc/tando-data DB_CA=$R/db-ca.pem
+dn_is() { [[ ${H[role]:-} == data ]]; }
+valid_node() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]]; }
+valid_ip() { [[ $1 =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ || ( $1 =~ ^[0-9a-fA-F:]+$ && $1 == *:*:* ) ]]; }
+# dn_addrs: the addresses the node's certificate names: its global ones and data_addrs (a private
+# or forwarded address app nodes reach it by, recorded by data-link)
+dn_addrs() {
+  { ip -o addr show scope global 2> /dev/null | awk '{ sub(/\/.*/, "", $4); print $4 }'
+    tr ',' '\n' <<< "${H[data_addrs]:-}"; } | grep . | sort -u
+}
+# dn_tls: the CA (made once, kept on the node: its key never leaves) and the server certificate,
+# made again when the addresses it must name change or it expires within 30 days. DN_TLS_NEW=1
+# then. Given certificates (data_tls=provided) are left as they are.
+dn_tls() {
+  local san="" a
+  DN_TLS_NEW=""
+  install -d -m 750 -o root -g postgres "$DN_TLS" || return 1
+  [[ ${H[data_tls]:-} == provided ]] && return 0
+  if [[ ! -s $DN_TLS/ca.key || ! -s $DN_TLS/ca.pem ]]; then
+    (umask 077; openssl req -x509 -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -sha256 -days 3650 \
+      -subj "/CN=tando data node CA" -keyout "$DN_TLS/ca.key" -out "$DN_TLS/ca.pem" 2> /dev/null) || return 1
+    chmod 644 "$DN_TLS/ca.pem"
+  fi
+  for a in $(dn_addrs); do san+="${san:+,}IP:$a"; done
+  san+="${san:+,}DNS:localhost"
+  if [[ -s $DN_TLS/server.pem && $(cat "$DN_TLS/server.san" 2> /dev/null) == "$san" ]] &&
+     openssl x509 -checkend 2592000 -noout -in "$DN_TLS/server.pem" > /dev/null 2>&1; then return 0; fi
+  (umask 077; openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -sha256 -subj "/CN=tando data node" \
+    -keyout "$DN_TLS/.server.key" -out "$DN_TLS/.server.csr" 2> /dev/null &&
+   openssl x509 -req -sha256 -days 825 -in "$DN_TLS/.server.csr" -CA "$DN_TLS/ca.pem" -CAkey "$DN_TLS/ca.key" -set_serial "0x$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')" \
+     -extfile <(printf 'subjectAltName=%s\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n' "$san") \
+     -out "$DN_TLS/.server.pem" 2> /dev/null) || { rm -f "$DN_TLS"/.server.*; return 1; }
+  chown root:postgres "$DN_TLS/.server.key" && chmod 640 "$DN_TLS/.server.key" && chmod 644 "$DN_TLS/.server.pem" &&
+    mv -f "$DN_TLS/.server.key" "$DN_TLS/server.key" && mv -f "$DN_TLS/.server.pem" "$DN_TLS/server.pem" || return 1
+  rm -f "$DN_TLS/.server.csr"
+  echo "$san" > "$DN_TLS/server.san"
+  DN_TLS_NEW=1
+}
+# dn_tls_given cert key ca: certificates of the operator's own CA (host setup data_cert= ...)
+dn_tls_given() {
+  [[ -f $1 && -f $2 && -f $3 ]] || die "data_cert, data_key and data_ca must all be files on the server"
+  openssl x509 -noout -in "$1" 2> /dev/null && openssl x509 -noout -in "$3" 2> /dev/null || die "data_cert and data_ca must be PEM certificates"
+  [[ $(openssl x509 -noout -pubkey -in "$1" | sha256sum) == "$(openssl pkey -pubout -in "$2" 2> /dev/null | sha256sum)" ]] ||
+    die "data_key is not the key of data_cert"
+  openssl verify -CAfile "$3" "$1" > /dev/null 2>&1 || die "data_cert is not signed by data_ca"
+  install -d -m 750 -o root -g postgres "$DN_TLS" || die "could not create $DN_TLS"
+  install -m 640 -o root -g postgres "$2" "$DN_TLS/server.key" && install -m 644 "$1" "$DN_TLS/server.pem" &&
+    install -m 644 "$3" "$DN_TLS/ca.pem" || die "could not copy the certificates"
+  rm -f "$DN_TLS/ca.key" "$DN_TLS/server.san"
+  H[data_tls]=provided
+}
+# dn_hba: who may connect, from the records: one hostssl line per project, from its app node's
+# address only, for its own database and its drill database (tdrill_). In PostgreSQL's pg_hba.conf
+# (a marked block at its end, after the package's local lines) and in pgbouncer's hba file.
+DN_HBA_BEGIN="# >>> tando data node (written by tando: edits inside this block do not last)"
+DN_HBA_END="# <<< tando data node"
+dn_hba() {
+  local f a app node addr r m pl="" lines="" t
+  for f in "$DN"/db/*; do
+    [[ -f $f ]] || continue
+    app=${f##*/}; valid_app "$app" || continue
+    node=$(sed -n 's/^node=//p' "$f"); valid_node "$node" || continue
+    addr=$(sed -n 's/^addr=//p' "$DN/nodes/$node" 2> /dev/null); valid_ip "$addr" || continue
+    r=tando_${app//-/_} m=32; [[ $addr == *:* ]] && m=128
+    lines+="hostssl $r,tdrill_${app//-/_} $r $addr/$m scram-sha-256"$'\n'
+    pl+="hostssl $r $r $addr/$m scram-sha-256"$'\n'
+  done
+  f=$(pgsql -c "SHOW hba_file") && [[ -f $f ]] || return 1
+  t=$(mktemp "$f.XXXXXX") || return 1
+  { awk -v b="$DN_HBA_BEGIN" -v e="$DN_HBA_END" '$0 == b { skip = 1 } !skip { print } $0 == e { skip = 0 }' "$f"
+    echo "$DN_HBA_BEGIN"; printf '%s' "$lines"; echo "$DN_HBA_END"; } > "$t" || { rm -f "$t"; return 1; }
+  if cmp -s "$t" "$f"; then rm -f "$t"
+  else
+    chown --reference="$f" "$t" && chmod --reference="$f" "$t" && mv -f "$t" "$f" || { rm -f "$t"; return 1; }
+    pgsql -c "SELECT pg_reload_conf()" > /dev/null || return 1
+  fi
+  [[ -d $PGB_DIR ]] || return 0
+  PGB_CHANGED=""
+  pgb_put "$PGB_DIR/hba.tando" < <(echo "# written by tando (data node): pgbouncer's own checks, local first"
+    echo "host all all 127.0.0.1/32 scram-sha-256"; printf '%s' "$pl") || return 1
+  if [[ -n $PGB_CHANGED ]] && systemctl is-active -q pgbouncer; then systemctl reload pgbouncer || return 1; fi
+  return 0
+}
+# dn_reload_tls: a new certificate: PostgreSQL and pgbouncer read it again (a reload: connections stay)
+dn_reload_tls() {
+  pgsql -c "SELECT pg_reload_conf()" > /dev/null || return 1
+  systemctl is-active -q pgbouncer && { systemctl reload pgbouncer || return 1; }
+  return 0
+}
+# dn_setup (host setup role=data, after PostgreSQL is installed): the certificates, then the
+# listening sockets (pg_tune, pgb_sync read role=data), pg_hba and the firewall. DN_DETAIL: the line.
+dn_setup() {
+  dn_tls || die "could not make the data node's certificates (openssl)"
+  pg_tune || die "$PG_TUNE_ERR"
+  ( pgb_sync ) || die "could not configure pgbouncer for the data node"
+  # pgbouncer reads listen_addr only when it starts
+  if ! ss -Hltn 'sport = :6432' 2> /dev/null | awk '{ print $4 }' | grepq -E '^(0\.0\.0\.0|\*|\[::\]):6432$'; then
+    systemctl restart pgbouncer || die "pgbouncer did not start: sudo journalctl -u pgbouncer -n 20 says why"
+  fi
+  [[ -n $DN_TLS_NEW ]] && { dn_reload_tls || die "PostgreSQL did not take the new certificate"; }
+  dn_hba || die "could not write pg_hba.conf"
+  local n=0 p=0 f
+  for f in "$DN"/nodes/*; do [[ -f $f ]] && n=$((n + 1)); done
+  for f in "$DN"/db/*; do [[ -f $f ]] && p=$((p + 1)); done
+  DN_DETAIL="PostgreSQL 5432 and pgbouncer 6432 with TLS ($([[ ${H[data_tls]:-} == provided ]] && echo "given certificates" || echo "CA made on this node")) on $(dn_addrs | tr '\n' ' ' | sed 's/ $//'); $n app node$( ((n == 1)) || echo s) linked, $p project$( ((p == 1)) || echo s)"
+  [[ -n ${PG_PENDING:-} ]] && DN_DETAIL+="; $PG_PENDING wait for a restart (tando host setup <host> --pg-restart)"
+  return 0
+}
+
+# data-link <node> <addr> [data_addr]: an app node may connect from addr; prints the CA to pin
+# (ca=, base64) and the address it reaches this node by (addr=)
+cmd_data_link() {
+  need_root; host_lock; load "$R/host.conf" H
+  dn_is || die "<host> is not a data node: tando host setup <host> role=data"
+  local name=${1:-} addr=${2:-} via=${3:-}
+  valid_node "$name" || die "bad app node name: $name"
+  valid_ip "$addr" || die "bad address of the app node: $addr (an IP address)"
+  [[ -z $via ]] || valid_ip "$via" || die "bad address of the data node: $via (an IP address)"
+  [[ -n $via ]] || via=$(ip -o route get 1.1.1.1 2> /dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+  valid_ip "$via" || die "this node has no default route: give the address app nodes reach it by (data_addr=)"
+  if ! dn_addrs | grepq -Fx "$via"; then H[data_addrs]=${H[data_addrs]:+${H[data_addrs]},}$via; save "$R/host.conf" H; fi
+  install -d -m 700 "$DN" "$DN/nodes" "$DN/db"
+  printf 'addr=%s\n' "$addr" > "$DN/nodes/$name.tmp" && mv -f "$DN/nodes/$name.tmp" "$DN/nodes/$name" || die "could not record $name (disk full?)"
+  dn_tls || die "could not make the data node's certificates (openssl)"
+  [[ -n $DN_TLS_NEW ]] && { dn_reload_tls || die "PostgreSQL did not take the new certificate"; }
+  if [[ ${H[data_tls]:-} == provided ]] && ! openssl x509 -noout -checkip "$via" -in "$DN_TLS/server.pem" 2> /dev/null | grepq 'does match'; then
+    echo "tando-agent: the given certificate does not name $via: app nodes will refuse it (sslmode=verify-full)" >&2
+  fi
+  dn_hba || die "could not write pg_hba.conf"
+  fw_sync || die "could not load the firewall rules"
+  echo "addr=$via"
+  echo "ca=$(base64 -w0 < "$DN_TLS/ca.pem")"
+}
+# data-unlink <node>: refused while projects of it are here (data-db drop them first)
+cmd_data_unlink() {
+  need_root; host_lock; load "$R/host.conf" H
+  dn_is || die "<host> is not a data node"
+  local name=${1:-} f
+  valid_node "$name" || die "bad app node name: $name"
+  for f in "$DN"/db/*; do [[ -f $f ]] && grepq -x "node=$name" "$f" && die "${f##*/} of $name still has its database here: tando destroy it first"; done
+  rm -f "$DN/nodes/$name"
+  dn_hba || die "could not write pg_hba.conf"
+  fw_sync || die "could not load the firewall rules"
+  echo "unlinked=$name"
+}
+# data-db ensure <app> <node> [pool=N st=T it=T tf=S] [new=1] | drop <app> <node> | ls
+# ensure: the role and database (and the empty drill database tdrill_<app>, which the app node's
+# restore drill restores into with the app's own role), its limits, pg_hba and pgbouncer. A new
+# role, or new=1 (the app node has no password for it), gets a new password: printed once
+# (password=), never stored here.
+cmd_data_db() {
+  need_root; load "$R/host.conf" H
+  dn_is || die "<host> is not a data node: tando host setup <host> role=data"
+  local op=${1:-} app=${2:-} node=${3:-} kv pool=$DB_POOL st=30s it=5min tf=1GB new="" r d pw owner
+  [[ $op == ls ]] && { cmd_data_db_ls; return; }
+  valid_app "$app" || die "invalid app name"
+  valid_node "$node" || die "bad app node name: $node"
+  shift 3
+  for kv in "$@"; do
+    case $kv in
+      pool=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,2}$ ]] || die "bad $kv"; pool=${kv#*=};;
+      st=*|it=*) [[ ${kv#*=} =~ ^(0|[1-9][0-9]{0,8}(ms|s|min|h))$ ]] || die "bad $kv"; printf -v "${kv%%=*}" '%s' "${kv#*=}";;
+      tf=*) [[ ${kv#*=} =~ ^(-1|[1-9][0-9]{0,5}(MB|GB))$ ]] || die "bad $kv"; tf=${kv#*=};;
+      new=1) new=1;;
+      *) die "bad setting: $kv";;
+    esac
+  done
+  r=tando_${app//-/_} d=tdrill_${app//-/_}
+  lockfile "$R/.data.lock"; exec 13>"$R/.data.lock"; flock -w 60 13 || die "another data-db call holds the lock"
+  owner=$(sed -n 's/^node=//p' "$DN/db/$app" 2> /dev/null)
+  case $op in
+    ensure)
+      [[ -f $DN/nodes/$node ]] || die "app node $node is not linked to <host>: tando host link $node <host>"
+      [[ -z $owner || $owner == "$node" ]] || die "the database of $app here belongs to app node $owner (an app name is one project on a data node)"
+      if [[ $(pgsql -c "SELECT 1 FROM pg_roles WHERE rolname = '$r'") != 1 ]]; then
+        pw=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+        pgsql <<< "CREATE ROLE $r WITH LOGIN PASSWORD '$pw';" || die "could not create role $r"
+        echo "created=1"
+      elif [[ -n $new ]]; then
+        pw=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+        pgsql <<< "ALTER ROLE $r WITH LOGIN PASSWORD '$pw';" || die "could not set the password of $r"
+      fi
+      local x
+      for x in "$r" "$d"; do
+        if [[ $(pgsql -c "SELECT 1 FROM pg_database WHERE datname = '$x'") != 1 ]]; then
+          pgsql -c "CREATE DATABASE $x OWNER $r" || die "could not create database $x"
+        fi
+        pgsql -c "REVOKE ALL ON DATABASE $x FROM PUBLIC" -c "GRANT CONNECT, TEMPORARY ON DATABASE $x TO $r" ||
+          die "could not restrict database $x"
+      done
+      pgsql -c "COMMENT ON DATABASE $d IS '$DRILL_MARK'" > /dev/null || die "could not mark $d"
+      # the per-role limits (as db_limits on a single node; docs/CONFIG.md "Database limits")
+      pgsql -c "ALTER ROLE $r CONNECTION LIMIT $((pool + DB_TOOL_SLOTS))" -c "ALTER ROLE $r SET statement_timeout = '$st'" \
+        -c "ALTER ROLE $r SET idle_in_transaction_session_timeout = '$it'" -c "ALTER ROLE $r SET temp_file_limit = '$tf'" ||
+        die "could not set the limits of $r"
+      printf 'node=%s\npool=%s\n' "$node" "$pool" > "$DN/db/$app.tmp" && mv -f "$DN/db/$app.tmp" "$DN/db/$app" ||
+        die "could not record $app (disk full?)"
+      ( A="" pgb_sync ) || echo "tando-agent: could not update pgbouncer's databases (tando doctor)" >&2
+      dn_hba || die "could not write pg_hba.conf"
+      echo "role=$r"
+      [[ -n ${pw:-} ]] && echo "password=$pw"
+      return 0;;
+    drop)
+      [[ -z $owner || $owner == "$node" ]] || die "the database of $app here belongs to app node $owner, not $node"
+      pgsql -c "DROP DATABASE IF EXISTS $r WITH (FORCE)" -c "DROP DATABASE IF EXISTS $d WITH (FORCE)" -c "DROP ROLE IF EXISTS $r" ||
+        die "could not drop the database of $app"
+      rm -f "$DN/db/$app"
+      ( A="" pgb_sync ) || echo "tando-agent: could not take $r out of pgbouncer (tando doctor)" >&2
+      dn_hba || die "could not write pg_hba.conf"
+      echo "dropped=$r";;
+    *) die "data-db ensure|drop|ls";;
+  esac
+}
+# data-db ls: one line per project: app, node, size, connections now, the role's limit
+cmd_data_db_ls() {
+  local rows f app node
+  rows=$(pgsql -F ' ' -c "SELECT r.rolname, coalesce(pg_database_size(d.oid), 0), (SELECT count(*) FROM pg_stat_activity a WHERE a.usename = r.rolname), r.rolconnlimit
+    FROM pg_roles r LEFT JOIN pg_database d ON d.datname = r.rolname WHERE r.rolname LIKE 'tando\_%'") || die "PostgreSQL does not answer"
+  for f in "$DN"/db/*; do
+    [[ -f $f ]] || continue
+    app=${f##*/}; node=$(sed -n 's/^node=//p' "$f")
+    awk -v r="tando_${app//-/_}" -v a="$app" -v n="$node" '$1 == r { print "row", a, n, $2, $3, $4 }' <<< "$rows"
+  done
+}
+
+# ---- an app node whose databases are on a data node (host link) ------------------------------
+# db_remote: this app's database is on the data node (database = postgres on a linked host)
+db_remote() { [[ -n ${H[db_host]:-} && ${C[database]:-} == postgres ]]; }
+# db-link <data-node> <addr> <node-name>: stdin is the data node's CA (pinned in $DB_CA, readable
+# by the apps: their sslrootcert). Refused while an app here has a local database.
+cmd_db_link() {
+  need_root; host_lock; load "$R/host.conf" H
+  local name=${1:-} addr=${2:-} me=${3:-} ca a
+  valid_node "$name" || die "bad data node name: $name"
+  valid_ip "$addr" || die "bad address of the data node: $addr"
+  valid_node "$me" || die "bad name of this node: $me"
+  dn_is && die "<host> is a data node itself"
+  ca=$(head -c 20000)
+  [[ $ca == *"-----BEGIN CERTIFICATE-----"* ]] && openssl x509 -noout <<< "$ca" 2> /dev/null || die "the data node's CA is not a PEM certificate"
+  if [[ -z ${H[db_host]:-} ]]; then
+    for a in "$R"/apps/*/app.conf; do
+      [[ -f $a ]] && grepq -x 'database=postgres' "$a" || continue
+      a=${a%/app.conf}; die "${a##*/} has its database on this server: an app node with local databases cannot be linked yet (docs/DATA-NODE.md)"
+    done
+  fi
+  command -v pg_dump > /dev/null || apt_install postgresql-client
+  printf '%s\n' "$ca" > "$DB_CA.tmp" && chmod 644 "$DB_CA.tmp" && mv -f "$DB_CA.tmp" "$DB_CA" || die "could not write $DB_CA"
+  H[db_host]=$name H[db_addr]=$addr H[db_node]=$me
+  save "$R/host.conf" H; chmod 644 "$R/host.conf"
+  fw_sync || die "could not load the firewall rules"
+  studio_setup || die "could not let the studio reach the data node (sudo journalctl -u tando-studio shows why)"
+  echo "db_host=$name"
+}
+# db_remote_urls pw: the app's URLs on the data node: DATABASE_URL through pgbouncer (6432) unless
+# db_direct = true, DATABASE_URL_DIRECT to PostgreSQL (5432); TLS checked against the pinned CA
+db_remote_urls() {
+  local r h=${H[db_addr]} q="sslmode=verify-full&sslrootcert=$DB_CA"
+  r=$(db_role); [[ $h == *:* ]] && h="[$h]"
+  E[DATABASE_URL_DIRECT]="postgres://$r:$1@$h:5432/$r?$q"
+  if [[ ${C[db_direct]:-} == true ]]; then E[DATABASE_URL]=${E[DATABASE_URL_DIRECT]}
+  else E[DATABASE_URL]="postgres://$r:$1@$h:$PGB_PORT/$r?$q"; fi
+}
+# db_remote_conf (configure, C = the deploy's settings): the URLs follow db_addr and db_direct when
+# the app has its password; prints what the client needs to provision on the data node
+db_remote_conf() {
+  db_remote || return 0
+  local -A E=(); env_load E
+  local u=${E[DATABASE_URL]-} d=${E[DATABASE_URL_DIRECT]-} pw stv it tf
+  echo "db_remote=${H[db_host]}"; echo "db_node=${H[db_node]:-}"
+  stv=$(db_guc db_statement_timeout "${C[db_statement_timeout]:-30s}") && it=$(db_guc db_idle_tx_timeout "${C[db_idle_tx_timeout]:-5m}") &&
+    tf=$(db_guc db_temp_limit "${C[db_temp_limit]:-1G}") || die "bad database limit ($DB_GUC_HINT)"
+  echo "db_pool=${C[db_pool]:-$DB_POOL}"; echo "db_st=$stv"; echo "db_it=$it"; echo "db_tf=$tf"
+  if [[ $u == postgres://*:*@* ]]; then
+    pw=${u#postgres://*:}; pw=${pw%%@*}
+    db_remote_urls "$pw"
+    if [[ ${E[DATABASE_URL]} != "$u" || ${E[DATABASE_URL_DIRECT]} != "$d" ]]; then
+      env_save E || die "could not write the env file of $A (disk full?)"
+      ENV_NOTE="" envlog_put database "" "DATABASE_URL DATABASE_URL_DIRECT" ""
+    fi
+    echo "db_url=1"
+  else echo "db_url=0"; fi
+}
+# db-remote-set <app>: stdin password=<the role's new password, from data-db>: the URLs in its env
+cmd_db_remote_set() {
+  need_root; app "$1"; db_remote || die "$A has no database on a data node"
+  local l pw="" add=""
+  while IFS= read -r l; do [[ $l == password=* ]] && pw=${l#password=}; done
+  [[ $pw =~ ^[0-9a-f]{32,64}$ ]] || die "no password given"
+  lock 300
+  local -A E=(); env_load E
+  [[ -n ${E[DATABASE_URL]-} ]] || add=1
+  db_remote_urls "$pw"
+  env_save E || die "could not write the env file of $A (disk full?)"
+  if [[ -n $add ]]; then ENV_NOTE="" envlog_put database "DATABASE_URL DATABASE_URL_DIRECT" "" ""
+  else ENV_NOTE="" envlog_put database "" "DATABASE_URL DATABASE_URL_DIRECT" ""; fi
+  echo "db_url=1"
+}
+# app_psql args...: psql as the app's role, where its database is (db_creds first)
+app_psql() { as_app_pg psql -X -q -At -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" -U "$DB_ROLE" "$@"; }
 
 # >>> db studio: `tando db studio` (srv/studio, tando-studio; docs/STUDIO.md, docs/ARCHITECTURE.md "db studio")
 # One always-on service per server, tando-studio.service (studio_setup, run by host setup): a front
@@ -6114,6 +6509,8 @@ RestrictAddressFamilies=AF_UNIX AF_INET
 SocketBindDeny=any
 IPAddressDeny=any
 IPAddressAllow=localhost
+# (and the data node, when the apps' databases are there: docs/DATA-NODE.md)
+${H[db_addr]:+IPAddressAllow=${H[db_addr]}}
 MemoryMax=128M
 MemorySwapMax=0
 TasksMax=64
@@ -6368,6 +6765,7 @@ cmd_destroy() { # app [purge]: remove the app; keep a final backup of its data u
     echo "env=$(grep -c . "$D/env")"
     echo "data=$([[ -n ${C[data]:-}${C[data_dir]:-} ]] && du -sb "$ADATA" 2> /dev/null | cut -f1)"
     echo "database=${C[database]:-}"
+    db_remote && { echo "db_remote=${H[db_host]}"; echo "db_node=${H[db_node]:-}"; }
     echo "backups=$(find "$BK/$A" -mindepth 1 -maxdepth 1 2> /dev/null | grep -c .)"
     echo "jobs=$(job_names | grep -c .)"
     echo "workers=$(worker_names | grep -c .)"
@@ -6427,7 +6825,8 @@ destroy_finish() {
   rm -rf "/etc/systemd/system/systemd-journald@tando-$A.service.d" "/etc/systemd/system/systemd-journald-sync@tando-$A.service.d"
   caddy_lock; systemctl reload caddy || echo "warning=caddy reload failed" >&2; exec 11>&-
   fp ds.db
-  [[ ${C[database]:-} == postgres ]] && { db_drop || echo "warning=could not drop the database" >&2; }
+  # (on a data node: the client drops it there, data-db drop; this node cannot)
+  [[ ${C[database]:-} == postgres ]] && ! db_remote && { db_drop || echo "warning=could not drop the database" >&2; }
   if [[ ${C[recipe]:-node} == container ]]; then
     podman images --format '{{.Repository}}:{{.Tag}}' | grep "^localhost/tando-$A:" |
       xargs -r podman rmi -f > /dev/null 2>&1
@@ -7938,6 +8337,9 @@ case $verb in
   backup-restore|backup-cat|db-url|db-psql|shell|job-run|job-pause) audit "$verb" "${1:-}";;
   db-studio|db-studio-code|db-studio-stop) audit "$verb" "${1:-}";;
   backup-drill) audit "$verb" "${1:-}";;
+  data-link|data-unlink|db-link) audit "$verb" -;;
+  data-db) audit "$verb" "${2:-}";;
+  db-remote-set) audit "$verb" "${1:-}";;
   preview-up|preview-rm) audit "$verb" "${2:-}";;
 esac
 # Verbs that change an app run to their end when the ssh session that started them drops: the
@@ -8009,6 +8411,8 @@ case $verb in
   db-url) cmd_db_url "$@";;
   db-psql) cmd_db_psql "$@";;
   db-info) cmd_db_info "$@";;
+  data-link) cmd_data_link "$@";; data-unlink) cmd_data_unlink "$@";; data-db) cmd_data_db "$@";;
+  db-link) cmd_db_link "$@";; db-remote-set) cmd_db_remote_set "$@";;
   db-studio) cmd_db_studio "$@";; db-studio-ls) cmd_db_studio_ls "$@";; db-studio-stop) cmd_db_studio_stop "$@";;
   db-studio-code) cmd_db_studio_code "$@";; db-studio-lower) cmd_db_studio_lower "$@";;
   shell) cmd_shell "$@";;

@@ -72,7 +72,11 @@ configure() {
     configure_wait
   else agent sudo configure "$APP" < "$TMPD/settings" > "$TMPD/cfg"; fi
   kv_read "$TMPD/cfg" link port created changed exists current needs node domains \
-    busy busy_phase busy_left busy_soak conf supersede
+    busy busy_phase busy_left busy_soak conf supersede db_remote db_node db_url db_pool db_st db_it db_tf
+  # a database on a data node (docs/DATA-NODE.md): made or updated there before anything runs
+  if [ "${1:-}" != check ] && [ -n "$K_db_remote" ]; then
+    . "$TANDO_HOME/lib/datanode.sh"; db_remote_provision
+  fi
   # configure check: something holds the app now (a release soaking, a rollback, a backup); the
   # real configure waits for it, and configure_wait says so if it still does then
   if [ "${1:-}" = check ]; then

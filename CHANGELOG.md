@@ -12,6 +12,19 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 
 ### New
 
+- Data nodes (docs/DATA-NODE.md): `tando host setup <h> role=data` runs PostgreSQL and pgbouncer
+  for other servers' apps, on the node's addresses with TLS (a CA made on the node, or your own
+  certificates with `data_cert=`, `data_key=`, `data_ca=`), sized from its RAM. `tando host link
+  <app-node> <data-node>` lets the app node in (firewall on 5432/6432, a `hostssl` pg_hba line per
+  project from its own node only) and pins the data node's CA on the app node. An app with
+  `database = postgres` on a linked app node gets its role and database (and its per-role limits)
+  on the data node, provisioned by the client: the app node never holds the data node's
+  superuser, only the app's own password, and both URLs use `sslmode=verify-full`. Backups
+  (`pg_dump` with the app's role), restore, the restore drill (into `tdrill_<app>` on the data
+  node), the studio (TLS in its PostgreSQL client), `tando db` and destroy (drops the project on
+  the data node) work against it; tandod watches PostgreSQL on the data node and not on the app
+  node. Servers without a link change nothing.
+
 - Preview apps: `tando preview up [--branch B] [--ttl 7d]` deploys this project as
   `<app>-<branch>` (24 characters at most; a checksum keeps two branches apart) on its own link:
   the parent's settings, no database, jobs or backups, no release command (unless

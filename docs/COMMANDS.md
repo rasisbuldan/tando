@@ -969,6 +969,15 @@ take every app's database down. The Ubuntu packages set this; tando pins it in
 PostgreSQL manual suggests for a dedicated database server, makes Node and Python apps on the same
 small server fail to start.
 
+### Databases on a data node
+
+`tando host setup <h> role=data` makes a server a data node, and `tando host link <app-node>
+<data-node> [app_addr=IP] [data_addr=IP]` puts the app node's databases there: an app with
+`database = postgres` then gets its role and database on the data node, reached over TLS
+(verify-full). Backups, restore, the drill, the studio and destroy work against it; the limits
+above apply there too. The layout, what is enforced where and what is not covered:
+docs/DATA-NODE.md.
+
 ### Upgrading PostgreSQL
 
 tando records the major version whose cluster holds the apps' databases (`postgres_version` in
