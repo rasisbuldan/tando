@@ -920,7 +920,7 @@ cd "$E/w/alpha" || exit 1
 conf_set tando.conf preview_skip SECRET_A
 "$R" env set KEEP_A=kept-value > /dev/null 2>&1
 echo 9 > VERSION
-"$R" deploy > "$E/pv.d9" 2>&1       # (configure: alpha's preview_skip reaches the server)
+"$R" deploy --force > "$E/pv.d9" 2>&1       # (configure: alpha's preview_skip reaches the server; --force: the hook section deployed it from elsewhere)
 check "11a preview_skip reaches the server (app.conf of alpha)" srv "sudo grep -qx preview_skip=SECRET_A /opt/tando/apps/alpha/app.conf"
 echo 10 > VERSION
 "$R" preview up --branch feature/Login > "$E/pv.up" 2>&1; rc=$?

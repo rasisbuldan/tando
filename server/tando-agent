@@ -4885,7 +4885,10 @@ cmd_preview_up() { # parent preview [ttl]
         *) k=${PC[idle_stop]:-6h}; [[ $k == off || -z $k ]] && k=6h; echo "idle_stop=$k";; esac
       echo "preview_of=$parent"; echo "preview_expires=$(($(now) + secs))"
     } > "$sf"
-    ( cmd_configure "$pv" < "$sf" > /dev/null ) || { rm -f "$sf"; die "could not create the preview $pv"; }
+    # (the redirections inside the subshell: on the subshell itself bash keeps the original fds in 10 and 11,
+    # and configure's lock on the Caddy sites uses fd 11. PATH: the gate runs the agent with a short one)
+    ( exec < "$sf" > /dev/null; export PATH=/usr/local/sbin:/usr/local/bin:$PATH; cmd_configure "$pv" ) ||
+      { rm -f "$sf"; die "could not create the preview $pv"; }
     rm -f "$sf"
     # the parent's env, minus what it marked preview_skip (and what the server sets itself)
     skip=",${PC[preview_skip]:-},"

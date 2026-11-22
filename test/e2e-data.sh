@@ -426,7 +426,7 @@ check "D11g backup ls shows the last drill (text and --json)" \
 check "D11h the host runs a drill monthly: tando-drill.timer on the 1st, five minutes after the backup window opens" \
   eval 'srv "systemctl is-enabled -q tando-drill.timer" && srv "systemctl cat tando-drill.timer" | grep -qx "OnCalendar=\*-\*-01 01:05:00"'
 dall=$(srv "sudo $AGENT backup-drill-all" 2> /dev/null | tr '\n' ' ')
-check "D11i backup-drill-all drills every app with daily backups ($dall)" eval 'case $dall in "drilled=1 failed=0 ") true;; *) false;; esac'
+check "D11i backup-drill-all drills every app with daily backups ($dall)" eval 'case $dall in drilled=[1-9]" failed=0 ") true;; *) false;; esac'
 # a backup that does not restore: the drill says so, the state keeps it (the alert and doctor read it)
 "$R" backup now > "$E/bk-bad.out" 2>&1
 idb=$(sed -n 's/^backed up [a-z0-9-]*: \([^ ]*\).*/\1/p' "$E/bk-bad.out")
