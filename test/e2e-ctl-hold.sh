@@ -142,6 +142,23 @@ check "H28 the preview is not released on its own while its app is held" eval '[
 req w app.release
 check "H29 releasing the app releases its preview (200 again)" eval 'ok && [ "$(http)" = 200 ] && t_until 30 sh -c "[ \"\$(curl -s -o /dev/null -w %{http_code} --max-time 10 $(t_url shop-pv1))\" = 200 ]"'
 
+# ---- a preview that its app's hold could not hold: sent again, or recovery, holds it ---------------
+fault() { "$SSH" "sudo install -d -m 700 /run/tando-test; sudo touch /etc/tando-test-server; printf 'point=hold.preview\naction=fail\nverb=hold\napp=shop\n' | sudo tee /run/tando-test/fault > /dev/null"; }
+fault
+req w app.hold '{"reason":"pause"}'
+check "H30 a preview the hold could not hold: the hold fails and names it (previews_failed); the preview still serves" eval '
+  [ "$(code)" = failed ] && msg | grep -q "shop-pv1" && [ "$(http)" = 503 ] && [ "$(pvc)" = 200 ]'
+req w app.hold '{"reason":"pause"}'
+check "H31 the hold sent again holds the preview (the already-held branch retries it)" eval 'ok && [ "$(pvc)" = 503 ] && body | grep -q "shop-pv1 is paused"'
+req w app.release
+fault
+req w app.hold '{"reason":"pause"}'
+"$SSH" 'sudo /opt/tando/bin/tando-agent recover-all' > /dev/null 2>&1
+check "H32 recovery holds a preview its app's hold could not" eval '[ "$(pvc)" = 503 ] && body | grep -q "shop-pv1 is paused"'
+req w app.release
+check "H33 control: released, both serve" eval 'ok && [ "$(http)" = 200 ] && t_until 30 sh -c "[ \"\$(curl -s -o /dev/null -w %{http_code} --max-time 10 $(t_url shop-pv1))\" = 200 ]"'
+"$SSH" 'sudo rm -f /run/tando-test/fault'
+
 req w app.destroy '{"confirm":"shop","purge":true}'
 check "H20 destroy removes the app's evidence" eval 'ok && ! "$SSH" "sudo test -e /var/lib/tando/ctl/evidence/shop"'
 "$R" host setup test public_port="$T_HTTP_PORT" ctl_ca=off > /dev/null 2>&1
