@@ -74,7 +74,10 @@ mb_bundle() {
   mkdir -p "$(dirname "$app")" || die "menubar: cannot create $(dirname "$app")"
   new=$(dirname "$app")/.tando-app.$$
   rm -rf "$new"; mkdir -p "$new/Contents/MacOS" "$new/Contents/Resources" || die "menubar: cannot write $new"
-  if ! swiftc -swift-version 5 -O -module-name "${exe//-/_}" -o "$new/Contents/MacOS/$exe" "$@" > "$TMPD/mb.err" 2>&1; then
+  # an explicit target: the toolchain default can be newer than the running macOS (Command Line Tools
+  # for the next macOS stamp minos 28 on a 27 machine, and Launch Services refuses the app).
+  # 13.0 matches LSMinimumSystemVersion in mb_info_plist.
+  if ! swiftc -target "$(uname -m)-apple-macos13.0" -swift-version 5 -O -module-name "${exe//-/_}" -o "$new/Contents/MacOS/$exe" "$@" > "$TMPD/mb.err" 2>&1; then
     rm -rf "$new"; sed 's/^/  /' "$TMPD/mb.err" | tail -20 >&2
     die "menubar: $name did not compile (swiftc above)"
   fi
