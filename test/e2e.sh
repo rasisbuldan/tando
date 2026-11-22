@@ -365,6 +365,14 @@ echo "21d: the failure handler had the page in place within $(($(date +%s) - dn_
 dn=$(curl -s -o "$E/down.body" -w '%{http_code} %{time_total}' http://hello.localhost:$HP/)
 check "21d a unit that gave up: 503 \"unavailable\" at once, not a held request ($dn)" \
   eval 'echo "$dn" | grep -qE "^503 0\.[0-4]" && grep -q "hello is unavailable" "$E/down.body"'
+nrb=$(srv "systemctl show -P NRestarts tando-hello")
+# recover (tando-watch runs it every minute) starts the app systemd gave up on: that start begins
+# systemd's NRestarts at 0, so the loop's restarts are kept for tando-watch and the metrics
+# (restarts_lost: its NRestarts when it gave up, plus that start; more if it looped again)
+srv "sudo /opt/tando/bin/tando-agent recover hello" > /dev/null 2>&1
+nrl=$(st hello restarts_lost)
+check "21e2 the crash loop's $nrb restarts are kept when recover starts the down app again (restarts_lost $nrl)" \
+  eval '[ -n "$nrb" ] && [ "$nrb" -gt 0 ] && [ -n "$nrl" ] && [ "$nrl" -gt "$nrb" ]'
 "$R" env unset CRASH_VERSION >&2
 check "21e env unset restarts it and proxying resumes (v$live)" eqv "$live"
 
@@ -382,6 +390,8 @@ check "21f first deploy failed, nothing live: 503 \"shop is being deployed\" at 
         grep -qi "^retry-after: 10" "$E/shop.hdr" && grep -qi "^content-type: text/html" "$E/shop.hdr" &&
         ! grep -qiE "/opt/|tando" "$E/shop.body"'
 check "21f the page is not another app's and hello still answers v$live" eqv "$live"
+check "21h first deploy failed: its unit is not enabled (it would fail at every boot)" \
+  eval 'srv "test -f /etc/systemd/system/tando-shop.service" && ! srv "systemctl -q is-enabled tando-shop"'
 ( cd "$W/shop" || exit 1
   "$R" env unset UNHEALTHY_VERSION >&2
   "$R" env set SLOW_START=8 >&2
@@ -393,6 +403,8 @@ check "21f during the first deploy the page is served" until_ 30 shop_503
 wait $shop_up
 shop_live() { [ "$(curl -s -m 5 http://shop.localhost:$HP/)" = "hello v1 greeting=" ]; }
 check "21f first release live: the page is gone and the app answers" until_ 30 shop_live
+check "21h the first verified release enables the unit (started at boot)" \
+  until_ 30 eval 'srv "systemctl -q is-enabled tando-shop"'
 # 21g. a release directory removed by hand while the app runs (fault g9): the link dangles, but the
 # app has a release by tando's records and its process answers: never the "being deployed" page
 srv "sudo sh -c 'rm -rf /opt/tando/apps/shop/releases/*'"
@@ -830,8 +842,8 @@ p1=$(srv "sudo sed -n 's/^port=//p' /opt/tando/apps/hello/app.conf")
 p2=$(srv "sudo sed -n 's/^port=//p' /opt/tando/apps/site/app.conf")
 u=$(srv "sudo stat -c %U /opt/tando/apps/site/shared; sudo stat -L -c %U:%G /opt/tando/apps/site/current;
   pgrep -u tando-site | wc -l" | tr '\n' ' ')
-check "9b site: own user and port (hello:$p1 site:$p2), served by Caddy, root:caddy release, no process ($u)" \
-  test -n "$p2" -a "$p1" != "$p2" -a "$u" = "tando-site root:caddy 0 "
+check "9b site: own user and no port (hello:$p1 site:$p2), served by Caddy, root:caddy release, no process ($u)" \
+  test -n "$p1" -a -z "$p2" -a "$u" = "tando-site root:caddy 0 "
 check "9f hello's user cannot read the static site's release" \
   eval '! srv "sudo -u tando-hello ls /opt/tando/apps/site/current/" > /dev/null 2>&1'
 check "9c site user cannot read hello's env" \
@@ -984,6 +996,9 @@ site_release "$W/skew" 1; H1=$AS_H
 "$R" up > "$E/as1.out" 2>&1; rc=$?
 "$R" domain add skew.example.test --force > "$E/asdom.out" 2>&1   # (no DNS here: --force)
 check "AS0 the static site deploys (rc=$rc)" test $rc = 0 -a "$(get skew | grep -c 'release 1')" = 1
+# Caddy serves a static site's files: no process, so no port and no pre-flight port from the range
+check "AS0b a static site takes no port and no pre-flight port" \
+  eval '! srv "sudo grep -qE \"^(port|preflight_port)=\" /opt/tando/apps/skew/app.conf" && grep -q "created skew on" "$E/as1.out" && ! grep -q "created skew on.*port" "$E/as1.out"'
 for n in 2 3; do site_release "$W/skew" $n; "$R" deploy > "$E/as$n.out" 2>&1; done; H3=$AS_H
 # shellcheck disable=SC2034  # read in the eval of a check below
 hdr=$(ah skew "/assets/index-$H1.js")

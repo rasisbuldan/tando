@@ -215,3 +215,18 @@ func umask() os.FileMode {
 	syscall.Umask(m)
 	return os.FileMode(m)
 }
+
+// The restarts column counts what tando's recover took from NRestarts (the state's
+// restarts_lost: systemd begins the count again when recover starts an app it gave up on).
+func TestSampleRestartsLost(t *testing.T) {
+	h := newHost(t)
+	h.app("web", `tando.slice/tando-web.slice/tando-web.service`, 1000, 5_000_000)
+	h.write("opt/apps/web/state", "current=20261114-170102\nrestarts_lost=10\n")
+	h.systemd = "ActiveState=active\nNRestarts=1\n"
+	if err := h.m.Sample(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.read("web.tsv"); got != "1800000000\t1000\t0\t11\tr\t-\t-\t-\t-\t-\n" {
+		t.Errorf("web.tsv: %q", got)
+	}
+}

@@ -1064,9 +1064,11 @@ agent_raw() {
     rc=${PIPESTATUS[0]}
     # the server turned the session away before the command started (sshd MaxSessions on the
     # shared connection, or MaxStartups): nothing ran, so trying again is safe for every verb
-    [ "$rc" = 255 ] && [ $try -lt 3 ] && ssh_busy "${ERRF:-$TMPD/err}" || break
+    # (8 tries over about 10 s: parallel deploys on one connection each hold a session for up to
+    # 10 s while they follow their activation, so a slot frees within that)
+    [ "$rc" = 255 ] && [ $try -lt 8 ] && ssh_busy "${ERRF:-$TMPD/err}" || break
     try=$((try + 1))
-    sleep "0.$((RANDOM % 8 + 2))$try"
+    if [ $try -le 3 ]; then sleep "0.$((RANDOM % 8 + 2))$try"; else sleep "$((try / 3)).$((RANDOM % 10))"; fi
   done
   if [ "$rc" != 0 ] && ssh_explain "${ERRF:-$TMPD/err}"; then return "$rc"; fi
   [ -s "${ERRF:-$TMPD/err}" ] && agent_msgs < "${ERRF:-$TMPD/err}" >&2
@@ -1141,7 +1143,21 @@ ssh_explain() {
   esac
   return 0
 }
-agent() { agent_raw "$@" || bail 1; }
+# agent [sudo] verb args...: agent_raw, and a failure ends the command. Never silently: an agent
+# that failed and said nothing (killed, or a server under load) is named with its verb. The box is
+# closed on stderr: a caller's stdout here is often a file (agent ... > "$TMPD/cfg"), and a
+# deploy that failed in configure closed its box into that file and ended with no last line.
+agent() {
+  local rc v=$1
+  agent_raw "$@" && return 0
+  rc=$?
+  [ "$v" = sudo ] && v=$2
+  [ -s "${ERRF:-$TMPD/err}" ] ||
+    explain "the server ended '$v' with status $rc and gave no reason (a connection cut, or the server under load)" \
+      "try again; if it happens again: tando doctor ${HOST:-}"
+  [ "${UI_BOX:-0}" = 1 ] && ui_box_close >&2
+  exit 1
+}
 
 # The protocol between this client and the server's agent (the agent's info prints proto=; one
 # from 0.1.1 prints none, which counts as 1). PROTO_NEED: the oldest agent this client works

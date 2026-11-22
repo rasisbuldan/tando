@@ -262,8 +262,16 @@ upload() { # sets UPLOAD_SECS, UPLOAD_FILES, UPLOAD_BYTES, TOKEN
   trap 'agent_raw sudo end "$APP" < "$TMPD/token" > /dev/null 2>&1; bail 130' INT TERM
   t0=$(clock)
   ssh_wrapper   # (rsync splits -e on spaces: the host's options go in a script, quoted)
-  if ! rsync -rlptz -c --delete --stats ${rp[@]+"${rp[@]}"} -e "$SSH_WRAPPER" "$STAGE/" \
-       "$TARGET:/opt/tando/apps/$APP/incoming/" > "$TMPD/rsync" 2>&1; then
+  # (a session the server turned away before rsync started, sshd MaxSessions on a connection
+  # that parallel deploys share: nothing was sent, tried again as agent_raw does)
+  local ok=0 try=0
+  while :; do
+    rsync -rlptz -c --delete --stats ${rp[@]+"${rp[@]}"} -e "$SSH_WRAPPER" "$STAGE/" \
+      "$TARGET:/opt/tando/apps/$APP/incoming/" > "$TMPD/rsync" 2>&1 && { ok=1; break; }
+    [ $try -lt 5 ] && ssh_busy "$TMPD/rsync" || break
+    try=$((try + 1)); sleep "$try.$((RANDOM % 10))"
+  done
+  if [ $ok = 0 ]; then
     agent_raw sudo end "$APP" < "$TMPD/token" > /dev/null 2>&1
     phase_line 3 upload fail ""
     if grep -q 'No space left on device\|Disk quota exceeded' "$TMPD/rsync"; then
@@ -660,7 +668,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
 
   if [ -z "${DEPLOY_KEY:-}${PREVIEW_DEPLOY:-}" ]; then   # create the app now that there is something to deploy
     configure
-    [ "$K_created" = 1 ] && ui_box_line "        created $APP on $HOST: user tando-$APP, port $K_port"
+    [ "$K_created" = 1 ] && ui_box_line "        created $APP on $HOST: user tando-$APP${K_port:+, port $K_port}"
     [ "$K_created" = 1 ] && : > "$TMPD/created"
   fi
 
