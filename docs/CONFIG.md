@@ -74,8 +74,14 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 | `max_conns` | number | `256` | connections | Connections Caddy keeps to the app, 1 to 99999. | `max_conns = 100` |
 | `max_requests` | number | off | requests | Requests in flight through Caddy; over it a visitor waits, then gets a 503. | `max_requests = 200` |
 | `hold` | number | `15`, or `health_timeout` if larger | seconds | How long Caddy holds a request while the app (re)starts, 1 to 999. | `hold = 20` |
+| `response_timeout` | number or `off` | `60` | seconds | How long Caddy waits for the headers of the app's answer; then the visitor gets a 504. Websockets and event streams (their headers come at once) are not cut. `off`: no limit (long polls). | `response_timeout = 300` |
+| `body_max` | size or `off` | `100MB` | `KB`, `MB`, `GB` | The largest request body Caddy passes to the app; a larger one gets a 413. | `body_max = 2GB` |
+| `cold_timeout` | number | `30` | seconds | With `idle_stop`: how long a visitor waits for the idle app to start; then a 503 "waking up" page with `Retry-After: 5` (the app goes on starting). | `cold_timeout = 10` |
 | `stop_timeout` | number | `10` | seconds | How long a stopping process may finish its requests before it is killed, 1 to 999. | `stop_timeout = 30` |
-| `priority` | `high`, `normal` or `low` | `normal` | | Which app the kernel stops last (`high`) or first (`low`) when the server runs out of memory. `high` also keeps the app's memory, up to its cap, from being reclaimed while other apps have more. | `priority = high` |
+| `priority` | `high`, `normal` or `low` | `normal` | | Which app the kernel stops last (`high`) or first (`low`) when the server runs out of memory, and its CPU weight under contention (200, 100, 50). `high` also keeps the app's memory, up to its cap, from being reclaimed while other apps have more. | `priority = high` |
+| `tmp_size` | size | `64M` | `K`, `M`, `G` | The app's `/tmp` and `/var/tmp`, each a tmpfs counted in its memory. | `tmp_size = 256M` |
+| `io` | number | none | MB/s | Read and write bandwidth on the disk of the app's directory, 1 to 99999 (only where the cgroup io controller is). | `io = 50` |
+| `disk` | size | host `app_max_mb` (8192 MB) | `M`, `G` | The app's disk share (files and database) for the `disk_warn` (80%) and `disk` alerts. Not a hard quota. | `disk = 2G` |
 | `idle_stop` | time or `on` or `off` | `off` | `s`, `m`, `h` | Scale to zero: stop the app's web process after this long without a request and start it on the next one (`on` is `6h`). Only the web process stops; workers and scheduled jobs keep running. Not for `static` sites or containers. The first request after idle waits while the app starts; no down alert is raised while it is idle (docs/COMMANDS.md, "Scale to zero"). | `idle_stop = 10m` |
 
 ## Assets

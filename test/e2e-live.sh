@@ -8,7 +8,8 @@
 #
 # Server: TANDO_TEST_NAME / TANDO_TEST_SSH_PORT / TANDO_TEST_HTTP_PORT. Apps: web (examples/hello,
 # deployed) and a01..a24, units written by hand that only sleep (25 loaded app units, cgroups
-# and all, without 24 deploys). TANDO_LIVE_BUDGET_S: the budget window (default 300 s).
+# and all, without 24 deploys); for the budget they become apps the checks judge, with journals
+# and log traffic. TANDO_LIVE_BUDGET_S: the budget window (default 300 s).
 # Output: PASS/FAIL lines (docs/TESTING.md), summary, exit status.
 set -u
 # lint: allow RL03 the suite's own test/lib.sh, as docs/TESTING.md shows
@@ -155,6 +156,35 @@ check "L10 tando top follows the server: \"live\" in its title, one status-follo
   eval '[ "$top_rc" = 0 ] && [ "$nf" = 1 ] && [ "$ns" -le 5 ] && sed -n "/^=== live/,/^=== end/p" "$E/top.out" | grep -q "apps 25"'
 
 # ---- budget: 25 apps, the fast loop running, the minute ticks too -------------------------------
+# The 24 units become apps the minute ticks judge (a release in their state, a health probe that
+# reaches web's port), each with its own journal namespace: the odd ones log a line a second and an
+# error every 20 s (the log scan reads them every minute), the even ones once, and a24 floods
+# 100000 lines first (a big journal that then stays quiet).
+"$SSH" 'sudo bash -s' <<'EOF'
+set -e
+wp=$(sed -n 's/^port=//p' /opt/tando/apps/web/app.conf)
+mkdir -p /opt/live-test
+for i in $(seq -w 1 24); do
+  a=a$i
+  printf 'port=%s\nrecipe=node\ncheck_url=http://127.0.0.1:%s\nhealth=/health\n' $((4100 + 10#$i)) "$wp" > /opt/tando/apps/$a/app.conf
+  printf 'current=r1\nphase=idle\n' > /opt/tando/apps/$a/state
+  if [ $a = a24 ]; then
+    printf '[Journal]\nRateLimitBurst=0\n' > /etc/systemd/journald@tando-$a.conf
+    echo 'seq 1 100000 | sed "s/^/flood line lorem ipsum dolor sit amet consectetur adipiscing elit /"; exec sleep infinity' > /opt/live-test/$a.sh
+  elif [ $((10#$i % 2)) = 1 ]; then
+    echo 'i=0; while :; do i=$((i + 1)); echo "GET /x $i 200 3ms"; [ $((i % 20)) = 0 ] && echo "Error: boom number $((i % 3)) at handler" >&2; sleep 1; done' > /opt/live-test/$a.sh
+  else
+    echo 'echo started; exec sleep infinity' > /opt/live-test/$a.sh
+  fi
+  printf '[Unit]\nDescription=live test %s\n[Service]\nLogNamespace=tando-%s\nExecStart=/bin/bash /opt/live-test/%s.sh\n' $a $a $a > /etc/systemd/system/tando-$a.service
+done
+systemctl daemon-reload
+for i in $(seq -w 1 24); do systemctl restart tando-a$i; done
+EOF
+flooded() { "$SSH" 'sudo journalctl -q --namespace=tando-a24 -n 1 -o cat' | grep -q '^flood line .* 100000$'; }
+t_until 120 flooded || log "a24's flood is not all in its journal yet"
+cost_rows() { ask cost > "$E/cost.$1"; }
+cost_rows 0
 cg=$(tandod_cg)
 t_until 15 eval '[ "$(points)" -ge 1 ]'
 t0=$SECONDS; u0=$(cg_usec "$cg"); s0=$(cg_usec init.scope)
@@ -163,7 +193,15 @@ sleep "$WINDOW"   # (a measured window: nothing to wait for)
 u1=$(cg_usec "$cg"); s1=$(cg_usec init.scope); dt=$((SECONDS - t0))
 pm=$(( (u1 - u0) / dt / 1000 )); spm=$(( (s1 - s0) / dt / 1000 ))   # per mille of one core
 log "tandod: $(( (u1 - u0) / 1000 )) ms CPU in $dt s = $((pm / 10)).$((pm % 10))%; systemd (init.scope): $(( (s1 - s0) / 1000 )) ms = $((spm / 10)).$((spm % 10))%"
-check "B1 tandod's CPU with 25 apps, averaged over $dt s, is under 1% of a core ($((pm / 10)).$((pm % 10))%)" test "$pm" -lt 10
+cost_rows 1
+log "tandod's cost by section (tando-status cost: calls, wall, cpu, children's cpu in ms, programs):"
+grep '^cost	total' "$E/cost.1" | sort -t '	' -k5,5nr | head -12 >&2
+check "B1 tandod's CPU with 25 apps and their log traffic, averaged over $dt s, is under 1% of a core ($((pm / 10)).$((pm % 10))%)" test "$pm" -lt 10
+# lscan <file>: the log scan's calls and programs so far ("check logscan" in the cost rows)
+lscan() { awk -F '\t' '$1 == "cost" && $2 == "total" && $8 == "check logscan" { print $3, $7 }' "$1"; }
+read -r c0 k0 <<< "$(lscan "$E/cost.0")"; read -r c1 k1 <<< "$(lscan "$E/cost.1")"
+check "B5 ... with the log scan reading the apps' journals every minute ($((${c1:-0} - ${c0:-0})) scans, $((${k1:-0} - ${k0:-0})) journalctl)" \
+  eval '[ $((${c1:-0} - ${c0:-0})) -ge $((WINDOW / 60 - 1)) ] && [ $((${k1:-0} - ${k0:-0})) -ge $((WINDOW / 60 * 5)) ]'
 anon=$("$SSH" "awk '\$1 == \"anon\" { print \$2 }' /sys/fs/cgroup/$cg/memory.stat")
 log "tandod anon: $((anon / 1024)) KB"
 check "B2 tandod's anonymous memory is under 20 MB ($((anon / 1048576)) MB)" test "$anon" -lt $((20 << 20))

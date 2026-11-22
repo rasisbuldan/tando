@@ -12,6 +12,31 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 
 ### New
 
+- Isolation: limits on what apps share (docs/COMMANDS.md, "Limits and load").
+  - Kernel tables: one app's user holds at most `conn_out` (2048) connections at once, sends at
+    most `dns_rate` (200) DNS packets a second, and holds at most 20 x `db_pool` (100)
+    connections to pgbouncer and PostgreSQL (`tando host setup <host> conn_out=N dns_rate=N`).
+  - Disk: an app's `/tmp` and `/var/tmp` are a tmpfs of `tmp_size` (64M) in its memory, no longer
+    a directory on the root disk. `disk = 2G` in tando.conf sets its own disk share; the new
+    alert `disk_warn` (low) fires at 80% of it. On ext2/3/4 the reserved blocks go to group
+    `tando-core` (PostgreSQL, Caddy) too.
+  - Memory and CPU: Caddy, sshd, tandod, PostgreSQL and pgbouncer get `MemoryLow`; an app's
+    journald runs in its slice (a log flood counts against the app); `priority` sets the CPU
+    weight (high 200, low 50); `io = 50` caps an app's disk bandwidth in MB/s.
+- Caddy per app, so a slow or flooding app ties up only itself (docs/COMMANDS.md, "Limits and
+  load"); applied at the app's next deploy or `tando host setup`:
+  - `response_timeout = 60` (seconds, or `off`): an answer whose headers do not come in time is a
+    504 "<app> took too long to answer". Websockets and event streams are not cut by it.
+  - `body_max = 100MB` (or `off`): a larger request body is a 413, also on Caddy 2.6 (which
+    reported it as a 502).
+  - A connection to the app that does not open in 3 s counts as a restart (held, tried again).
+  - `cold_timeout = 30` (seconds) for an app with `idle_stop`: a visitor waits at most that long
+    for the app to start, then gets a 503 "waking up" page with `Retry-After: 5`; the app goes
+    on starting. Caddy keeps a connection to an idle app's proxy 30 s (was: none), so the
+    idle_stop timer starts up to 30 s after the last request.
+  - Caddy 2.7 and later: a reload (a new app, another app's site change) no longer ends every
+    websocket and event stream at once: they end 30 minutes later (`stream_close_delay`). Caddy
+    2.6 (Ubuntu's package) has no such setting: there a reload still ends them.
 - Scale: a server holds 100 apps and more (tuned for 4 vCPU / 8 GB). Upgrade with
   `tando host setup <host>`; apps keep their ports, users and settings. docs/ARCHITECTURE.md,
   "Many apps on one server".
@@ -161,6 +186,11 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 Run `tando host setup <host>` on each server after updating tando; it applies the items below.
 Steps and checks: docs/release-notes/0.3.0.md.
 
+- An app's `/tmp` and `/var/tmp` are a 64 MB tmpfs in its memory (was: a private directory on
+  the disk), from its next deploy or host setup. An app that writes large temporary files (uploads
+  to the system temp directory) sets `tmp_size = 512M`, or `memory =` higher with it. New caps per
+  app's user: 2048 connections at once (`conn_out`), 200 DNS packets a second (`dns_rate`), 20 x
+  `db_pool` connections to the database; `tando doctor` ("app limits") counts what they refused.
 - PostgreSQL moves to pgbouncer on the app's next deploy. An app's `DATABASE_URL` then points at
   pgbouncer (transaction pooling); `LISTEN`/`NOTIFY`, session advisory locks, session `SET` and
   prepared statements on old drivers do not survive that: set `db_direct = true` for such an app
@@ -195,6 +225,9 @@ Steps and checks: docs/release-notes/0.3.0.md.
   second.
 - Database studio: `tando host setup` installs `tando-studio.service` (see New). An older tando on
   the laptop is told to update before it can open the studio.
+- Caddy limits per app (see New): an answer whose headers take over 60 s is now a 504 and a request
+  body over 100MB a 413, on each app's next deploy or `tando host setup`. Set `response_timeout = off`
+  (or more seconds) for an app with long polls or slow reports, `body_max` for large uploads.
 - `tando ls` (and `ls --all`, per server) above 50 apps shows a summary: the count per state and
   only the apps that are down or have an alert firing; `--all-rows` lists every app; `--json` is
   unchanged.
@@ -212,6 +245,13 @@ Steps and checks: docs/release-notes/0.3.0.md.
 - Monitoring: how an app last ended (`last: exit status 3`) is read from the system journal only
   when the app restarted or its state changed, never for a stopped or static app. A stopped or
   failed app used to start a `journalctl` over the whole system journal every minute.
+- Monitoring: tandod spends about half the CPU it did (153 to 80 ms a minute on a 25-app test
+  server with log traffic). The log scan's error counts, the metrics' previous counters and the
+  request log position are no longer flushed to disk every minute (a new error group still is). A
+  hung app's direct liveness probes run at once (the run waits 20 s at most, not 20 s per app), and
+  up to 64 health probes run in parallel. `tando-status cost` on the server breaks tandod's CPU
+  down by section; `TANDOD_PROFILE=<file>` in its environment writes a CPU profile
+  (docs/MONITORING.md, "Where tandod's CPU goes").
 
 ### Fixed
 

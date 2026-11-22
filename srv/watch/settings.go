@@ -28,6 +28,7 @@ var defaults = []struct{ key, def, desc string }{
 	{"tls_every", "360", "minutes between certificate checks"},
 	{"backup_hours", "50", "hours since the last daily backup before firing"},
 	{"disk_every", "10", "minutes between measurements of the disk use of each app (shared/, data, releases) against app_max_mb"},
+	{"disk_warn_pct", "80", "% of an app's disk share (disk in tando.conf, else app_max_mb) at which disk_warn (low) fires"},
 	{"disk_stop_pct", "95", "an app over app_max_mb is stopped when its file system is this % full (0 = never)"},
 	{"liveness", "3", "failed health probes in a row, with the unit of the app running, after which tando-watch restarts the app (at most 3 times an hour, then only alerts); 0 = never"},
 	{"stuck_min", "20", "minutes an activation may run before it counts as stuck"},
@@ -64,12 +65,12 @@ var defaults = []struct{ key, def, desc string }{
 // The checks that can be turned off ("<check>=off", "<app>.<check>=off"). "logs" is of low
 // severity: no high priority in ntfy, "(low)" in the text.
 var (
-	appChecks  = []string{"down", "health", "memory", "oom", "restarts", "tls", "backup", "stuck", "disk", "http", "slow", "errors", "logs", "job", "worker", "db_conns", "db_deadlock", "db_wrap", "db_wrap_warn"}
+	appChecks  = []string{"down", "health", "memory", "oom", "restarts", "tls", "backup", "stuck", "disk", "http", "slow", "errors", "logs", "job", "worker", "db_conns", "db_deadlock", "db_wrap", "db_wrap_warn", "disk_warn"}
 	hostChecks = []string{"disk", "inodes", "host_memory", "swap", "load", "host_oom", "caddy", "caddy_config", "firewall", "monitor", "monitor_cost", "postgres"}
 )
 
 func lowSeverity(check string) bool {
-	return check == "logs" || check == "ssh" || check == "db_wrap_warn"
+	return check == "logs" || check == "ssh" || check == "db_wrap_warn" || check == "disk_warn"
 }
 
 // textSettings are the settings that are not numbers.

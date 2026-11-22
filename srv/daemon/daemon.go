@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"tando/srv/daemon/proto"
+	"tando/srv/internal/cost"
 	"tando/srv/internal/decimal"
 	"tando/srv/internal/env"
 	"tando/srv/internal/out"
@@ -76,6 +77,7 @@ type Daemon struct {
 	bus      *busRunner
 	health   health
 	served   atomic.Int64 // socket requests answered, but ticks: the readers' (selfCounters)
+	cost     *cost.Meter  // its cost breakdown by section (the `cost` verb)
 }
 
 // selfCounters: tandod's pid, the programs it has started and the readers' requests it has
@@ -93,6 +95,8 @@ func New(e env.Env, sd Systemd) *Daemon {
 	d.health = health{ActiveFile: ActiveFile, TickFile: "/run/tando-watch/tandod.tick", StateFile: watch.DaemonStateFile}
 	d.Watch = watch.New(e, os.Getpid())
 	d.Watch.Cache = watch.NewCache()
+	d.cost = cost.New(run.Started)
+	d.Watch.Cost = d.cost
 	d.Metrics = metrics.New(e, "")
 	d.Metrics.Self = d.selfCounters // (what the monitoring costs: srv/metrics tandod.x)
 	d.Logs = logs.New(e)
@@ -105,6 +109,7 @@ func New(e env.Env, sd Systemd) *Daemon {
 	statusRows(d) // (status's rows of logs, watch and metrics in-process: statusrows.go)
 	if live.V2(e.Cgroup) {
 		d.Live = live.New(e, func(units []string) ([]map[string]string, error) { return bus.get(units, liveProps) })
+		d.Live.Cost = d.cost
 	}
 	d.TimerActive = func(ctx context.Context) bool {
 		b, err := e.Run.Output(ctx, runShow("tando-watch.timer"))
@@ -307,6 +312,9 @@ func (d *Daemon) handle(ctx context.Context, r proto.Request, w io.Writer) error
 	if r.Verb != "tick" {
 		d.served.Add(1)
 	}
+	if r.Verb != "tick" && r.Verb != "cost" {
+		defer d.cost.Start("socket " + r.Verb)()
+	}
 	o := out.New(w)
 	defer o.Flush()
 	var args []string
@@ -338,6 +346,9 @@ func (d *Daemon) handle(ctx context.Context, r proto.Request, w io.Writer) error
 		} else {
 			d.Live.RingRows(o, r.Arg)
 		}
+		return nil
+	case "cost":
+		costRows(o, d.cost.Snapshot())
 		return nil
 	case "status":
 		if d.Status == nil {

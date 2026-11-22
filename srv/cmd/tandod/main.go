@@ -43,7 +43,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	stopProfile := startProfile() // (only in a build with -tags profile: profile.go)
+	stopProfile := startProfile() // (TANDOD_PROFILE: profile.go)
 	defer stopProfile()
 	sd := daemon.Systemd{NotifySocket: os.Getenv("NOTIFY_SOCKET"), WatchdogUSec: os.Getenv("WATCHDOG_USEC"),
 		WatchdogPID: os.Getenv("WATCHDOG_PID")}

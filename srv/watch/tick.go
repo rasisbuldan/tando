@@ -72,6 +72,7 @@ func (w Watch) Run(ctx context.Context) error {
 	if err := needRoot(w.Env); err != nil {
 		return err
 	}
+	defer w.Cost.TickDone()
 	w.pretick(ctx)
 	w.sweepTemp()
 	l, err := w.takeLock(30 * time.Second)
@@ -82,13 +83,16 @@ func (w Watch) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	end := w.Cost.Start("load")
 	t := w.newTick(ctx)
 	if err := os.MkdirAll(w.RunDir, 0o700); err == nil {
 		os.Chmod(w.RunDir, 0o700)
 	}
 	t.vs = newStore(loadQuiet(w.vstatePath()))
 	w.recoverCommit(t.st) // a run killed after its commit point: finish what it decided
+	end()
 	t.check()
+	end = w.Cost.Start("commit")
 	err = t.commit()
 	if err == nil {
 		w.newErrorsCommitted()
@@ -97,10 +101,13 @@ func (w Watch) Run(ctx context.Context) error {
 	if t.vs.dirty {
 		t.vs.save(w.vstatePath())
 	}
+	end()
 	l.Release()
 	if err != nil {
 		return err
 	}
+	end = w.Cost.Start("deliver")
+	defer end()
 	w.deliver(ctx, t.cfg, t.vs, t.now)
 	if t.vs.dirty {
 		t.vs.save(w.vstatePath())
@@ -129,12 +136,15 @@ func (w *Watch) newTick(ctx context.Context) *tick {
 
 // check runs every check of the tick and decides what to send.
 func (t *tick) check() {
+	m := t.w.Cost
 	t.readInbox()
 	t.checkBoot()
+	end := m.Start("apps (systemctl show)")
 	names := t.findApps()
+	end()
 	t.names = names
 	for _, c := range firstChecks() {
-		c.check(t)
+		m.Time("check "+c.name(), func() { c.check(t) })
 	}
 	for _, a := range names {
 		at := t.loadApp(a)
@@ -143,14 +153,20 @@ func (t *tick) check() {
 		}
 		t.apps = append(t.apps, at)
 		for _, c := range appCheckList() {
-			c.check(t, at)
+			if m == nil {
+				c.check(t, at)
+				continue
+			}
+			m.Time("check "+c.name(), func() { c.check(t, at) })
 		}
 	}
 	for _, c := range lastChecks() {
-		c.check(t)
+		m.Time("check "+c.name(), func() { c.check(t) })
 	}
+	end = m.Start("reconcile")
 	t.forgetRemoved()
 	t.reconcile()
+	end()
 }
 
 // checkBoot: the host restarted? App checks wait boot_grace while it settles; one notice.
