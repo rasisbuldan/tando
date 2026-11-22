@@ -9025,7 +9025,10 @@ cmd_hold() { # app pause|suspend [message]
   unset "S[down]"
   # (phase stop: a hold cut off here is finished by recover as a stop; the state says held already)
   st phase stop || die "could not save the state (disk full?); $A is not held"
-  if ! { fp hold.stop && stop_app; }; then
+  # (nothing deployed yet: no unit runs; the page alone, and no deploy until release)
+  if [[ -z ${S[current]:-} ]]; then
+    write_caddy || die "${WC_WHY:-Caddy refused the site}; $A is held, its page is not served yet (recovery retries)"
+  elif ! { fp hold.stop && stop_app; }; then
     # (logged, not undone: a takedown that half worked is finished by the next recover)
     die "${WC_WHY:-systemctl stop failed}; $A is held, but not all of it stopped yet (recovery retries)"
   fi
@@ -9041,11 +9044,13 @@ cmd_release() { # app
   AUDIT_NOTE="was $was"
   unset "S[hold]" "S[hold_since]" "S[hold_note]" "S[hold_pre_stopped]" "S[hold_release]"
   if [[ -n $pre || -z ${S[current]:-} ]]; then
-    # stopped before the hold (tando stop): it stays stopped, with the stopped page
+    # stopped before the hold (tando stop): it stays stopped, with the stopped page; nothing
+    # deployed yet: the page a first deploy replaces
+    [[ -n $pre ]] || unset "S[stopped]"
     save "$D/state" S || die "could not save the state (disk full?)"
     write_caddy || echo "tando-agent: ${WC_WHY:-Caddy refused the site}" >&2
     jobs_follow || echo "tando-agent: the job timers of $A could not be updated yet: recovery retries" >&2
-    echo released="$was"; echo stopped=1; echo healthy=1; return 0
+    echo released="$was"; [[ -n $pre ]] && echo stopped=1; echo healthy=1; return 0
   fi
   # (phase start: cut off, recover starts it)
   st phase start || die "could not save the state (disk full?); $A is still held"
