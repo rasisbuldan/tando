@@ -124,11 +124,16 @@ func (g *Gate) rootPreview(app, verb string) error {
 		return die("this key may make and remove previews named %s-<name> only", app)
 	}
 	pv := p.Preview
-	call := []string{verb, app, pv}
-	if p.TTL != "" {
-		call = append(call, p.TTL)
+	// constant verbs at each call site (srvlint's argument table); pv and the ttl are checked above
+	var o []byte
+	switch {
+	case verb == "preview-rm":
+		o, err = g.agent(true, 10*60, "preview-rm", app, pv)
+	case p.TTL != "":
+		o, err = g.agent(true, 10*60, "preview-up", app, pv, p.TTL)
+	default:
+		o, err = g.agent(true, 10*60, "preview-up", app, pv)
 	}
-	o, err := g.agent(true, 10*60, call...)
 	if err != nil {
 		return Exit{1}
 	}

@@ -25,6 +25,9 @@ gate/rootmode.go agent	tando-agent	tando-agent begin <valid:app> <param who: cal
 gate/rootmode.go agent	tando-agent	tando-agent end <valid:app> <valid:l.Token>
 gate/rootmode.go agent	tando-agent	tando-agent end <valid:app> <valid:p.Token>
 gate/rootmode.go agent	tando-agent	tando-agent end <valid:app> <valid:string(m[1])>
+gate/rootmode.go agent	tando-agent	tando-agent preview-rm <valid:app> <valid:pv>
+gate/rootmode.go agent	tando-agent	tando-agent preview-up <valid:app> <valid:pv>
+gate/rootmode.go agent	tando-agent	tando-agent preview-up <valid:app> <valid:pv> <valid:p.TTL>
 gate/sshd.go installSSHD	sshd	sshd -t
 gate/sshd.go installSSHD	systemctl	systemctl reload ssh
 gate/sshd.go installSSHD	systemctl	systemctl reload sshd
@@ -124,4 +127,4 @@ watch/verbs_install.go systemctl	systemctl	systemctl enable -q tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl reset-failed tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl start tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl try-restart tandod.service
-# positions: 563 constant, 55 prefixed, 3 int, 47 validated, 3 value of an option, 12 after --, 0 other
+# positions: 569 constant, 55 prefixed, 3 int, 54 validated, 3 value of an option, 12 after --, 0 other
