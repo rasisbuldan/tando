@@ -187,6 +187,7 @@ srv "printf '%s\n' $B_IP/32 192.0.2.0/24 198.51.100.0/24 > ~/lists/ips-v4"
 upd > /dev/null 2>&1
 check "OR31 a good list after failures clears the count" eval 'srv "sudo grep -q ^fails=0 /opt/tando/origin.status"'
 srv "printf '%s\n' $B_IP/32 192.0.2.0/24 198.51.100.0/24 203.0.113.0/24 > ~/lists/ips-v4"
+# shellcheck disable=SC2034 # read inside the eval'd check below
 sums0=$(sums)
 srv 'sudo install -d -m 700 /run/tando-test; sudo touch /etc/tando-test-server; printf "point=origin.fw\naction=fail\n" | sudo tee /run/tando-test/fault > /dev/null'
 upd > "$E/upd-fw.out" 2>&1; rc=$?
