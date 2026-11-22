@@ -77,6 +77,8 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
     took minutes with 100 apps).
   - Memory: a deploy that raises an app's memory caps over RAM x 1.5 (`mem_overcommit=`, 0 turns
     it off) is refused unless `--force`. New `priority = high|low` in tando.conf.
+  - Creating an app no longer reloads systemd (it did three times; with 150 apps that was 1 s of
+    PID 1 each, 4.5-8 s with 200), and apps created at once no longer fail in groupadd.
   - Jobs: at most `job_slots` runs at once on the server (default the number of CPUs, at least 2).
   - Logs: `log_budget=` (default 20% of the disk) is split across the apps' default log caps;
     `tando doctor` compares the caps with it.
@@ -84,7 +86,13 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   long without a request and its next request starts it (workers and jobs run on); systemd socket
   activation and systemd-socket-proxyd behind Caddy, so the first request waits about 0.1-0.3 s
   for a small app. `tando ls` says `idle`; the monitor and the per-minute recovery do not wake it.
-  Not for static sites or containers (docs/COMMANDS.md, "Scale to zero").
+  Not for static sites or containers (docs/COMMANDS.md, "Scale to zero"). While idle its log
+  namespace's journald stops too (about 1.1 MB; not while a worker or job of the app runs), and
+  admission counts an idle_stop app at 2 MB plus `idle_awake` (20) % of its memory, not its cap.
+  Fixed: an idle_stop app woken more than five times in a minute was refused its next start
+  (systemd's start limit counted every wake), its wake socket then failed and visitors got 502
+  and the down page; a clean idle stop now resets the counter (its proxy and journald sync units
+  have no start limit of their own any more). The neighbours suite's N5-C/N6-C were this.
 - PostgreSQL for 100 apps: `tando host setup` sizes it from the server's RAM (max_connections 100
   and shared_buffers 15% on 8 GB, instead of 20 and 32 MB) and runs one pgbouncer for all apps
   (127.0.0.1:6432, transaction pooling, `db_pool` server connections per app, default 5). New

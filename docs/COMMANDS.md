@@ -619,6 +619,7 @@ once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections 
 `port_max=` (app ports, default 4100-4999), `preflight_min=`, `preflight_max=` (pre-flight ports,
 default 14100-14999; the ranges must not overlap or hold 2019 or 5432), `uid_min=`, `uid_max=`
 (new app users' ids, default 30000-39999), `mem_overcommit=` (default 1.5; 0 turns the check off),
+`idle_awake=` (0-100, default 20: admission counts an app with `idle_stop` at 2 MB plus this % of its memory),
 `job_slots=`, `backup_window=HH:MM-HH:MM` (default 01:00-05:00, the server's time),
 `backup_jobs=1` to `4` (backups at once, default 1), `backup_drill=monthly|off` (the monthly restore drill,
 default monthly; see `backup`), `log_budget=` (all apps' logs together, default
@@ -866,6 +867,12 @@ shorter), so the timer starts up to 30 s after the last request. A visitor waits
 `cold_timeout` (30 s) for the app to start, then gets a 503 "waking up" page with `Retry-After: 5`
 while the app goes on starting. (Caddy tells a cold start by `/run/tando-wake/<app>.up`, which the
 app's unit makes once its port answers and removes when it stops.) A restart stops requests in flight.
+While it is idle its journald (the app's log namespace, about 1.1 MB) stops too, unless a worker,
+a job or a pre-flight of the app runs (they log there); the app's next start starts it again and
+no line is lost. A clean idle stop also resets the unit's start limit (5 starts in 60 s, which
+ends a crash loop), so an app woken often is never refused a start. An idle app costs about 2 MB. Admission counts it that way: its web process at
+2 MB plus `idle_awake` % of its `memory` (host setup `idle_awake=`, default 20: the share of such
+apps awake at once), its workers whole.
 ### Database connections and pgbouncer
 
 Apps with `database = postgres` share one PostgreSQL. `tando host setup` sizes it from the

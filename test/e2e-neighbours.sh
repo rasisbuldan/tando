@@ -182,20 +182,17 @@ b_ok() { [ "$BBAD" -le "${BTOL:-0}" ] && [ "$BP95" -lt "$1" ] && [ "$BMAX" -lt 5
 # C: stopped (as an idle stop leaves it: wake socket listening), then one request wakes it
 c_idle() { srv "sudo systemctl stop tando-$C.service" > /dev/null 2>&1; t_until 15 srv "systemctl -q is-active tando-${C}_wake.socket && test -S /run/tando-wake/$C.sock" > /dev/null 2>&1; }
 CCODE="" CSEC=""
-CKNOWN=0
 c_wake() {
-  CKNOWN=0
   c_idle > /dev/null; read -r CCODE CSEC < <(curl -s -o /dev/null -w '%{http_code} %{time_total}\n' --max-time 30 "$(t_url $C /)")
   if [ "$CCODE" != 200 ]; then
     echo "  C did not wake: HTTP $CCODE after $CSEC s" >&2
     local d
     d=$(srv "systemctl --no-pager -l status tando-$C.service tando-${C}_wake.socket tando-${C}_wake.service 2>&1 | tail -40; sudo journalctl --no-pager -n 15 -o cat -u tando-${C}_wake.service -u tando-$C.service; sudo journalctl --no-pager -n 10 -o cat -u caddy" 2>&1)
     echo "$d" >&2
-    # Seen in 4 of 7 runs, only while A floods its log: systemd's start limit on C's unit and the
-    # trigger limit on its wake socket were hit (a finding, F2 in the report). It is named, not hidden:
-    # the check is a SKIP with the reason, and the socket is brought back so later windows still run.
+    # (the socket is brought back, so a later window still tests C. Seen before: C's sixth start
+    # in a minute (each wake is one) hit the unit's start limit and then the socket's trigger limit,
+    # whatever A did; the agent now resets the counter after each clean idle stop)
     if echo "$d" | grep -q 'start-limit-hit\|trigger-limit-hit'; then
-      CKNOWN=1
       srv "sudo systemctl reset-failed 'tando-$C*'; sudo systemctl start tando-${C}_wake.socket" > /dev/null 2>&1
     fi
   fi
@@ -206,9 +203,7 @@ status_works() { "$R" status -a "$B" -H test > "$E/status.out" 2>&1; }
 common() { # <id> <name> <budget ms> <contained note>
   local id=$1 name=$2 budget=$3 note=$4
   check "$id-B B answers every probe during $name (p95 < $budget ms)" b_ok "$budget"
-  if [ "$CKNOWN" = 1 ]; then
-    skip "$id-C C's wake failed during $name: start-limit-hit on its unit and trigger-limit-hit on its wake socket (known finding F2, see the log above)"
-  else check "$id-C C wakes and answers during $name (cold start)" eval '[ "$CCODE" = 200 ]'; fi
+  check "$id-C C wakes and answers during $name (cold start)" eval '[ "$CCODE" = 200 ]'
   ls_works && status_works; local lsrc=$?
   check "$id-L tando ls and tando status work during $name" eval "[ $lsrc = 0 ]"
   check "$id-P B and C were not restarted by $name" eval '[ "$(mainpid $B)" = "$b_pid" ]'

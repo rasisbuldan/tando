@@ -27,6 +27,7 @@ of its rivals, on one Next.js standalone app. Results: `RESULTS.md`. Raw output:
 | `run-rivals.sh`, `summarize-v2.py` | v2: 3 rounds of every rival into `raw/v2/`, and its summary |
 | `run-e-dokku.sh` | Dokku (bare 24.04, official bootstrap); 3 rounds via `run-e-rounds.sh` into `raw/v2/e/` |
 | `server-bare/`, `server/build-images.sh` | bare image (copy of the test server, BARE=1); server images built with a dedicated builder |
+| `density.sh` | density at scale (not in the test tiers): N apps with `idle_stop` on one test server; daemon-reload time, PID 1 RSS and units every 50 apps, idle journald instances, a new app's time and reloads (`OLD=<checkout>` for a before), and PID 1 across rounds of wake sockets driven into their trigger limit |
 | `cleanup.sh` | removes every `tando-bench-*` container/volume/network/image, Kamal's builder and registry |
 
 ## Rerun

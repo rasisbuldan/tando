@@ -230,6 +230,22 @@ check "U9b within RAM x 1.5: taken" eq "$(ma 512 2000)" ok
 check "U9c over it: refused, and says how much" eval 'ma 1024 2000 | grep -q "3456 MB with a1 at 1024 MB, over 3000 MB"'
 check "U9d not raised (the host is over already): taken" eq "$(ma 256 500)" ok
 check "U9e configure refuses unless --force" eval 'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "((!force)) && ! mem_admit"'
+# U9h-j: an app with idle_stop is stopped most of the time: admission counts its web process at
+# 2 MB plus 20% of its cap (idle_awake), its workers whole; static and container apps, and
+# idle_stop = off, as before. 8 such apps of 256M and this one fit in 1000 MB x 1.5 (2304 MB of
+# full caps were refused)
+rm -rf "${T:?}/apps"; mkdir -p "$T/apps/a1"
+for i in 2 3 4 5 6 7 8 9; do mkdir -p "$T/apps/a$i"; printf 'memory=256M\nidle_stop=6h\n' > "$T/apps/a$i/app.conf"; done
+printf 'memory=128M\n' > "$T/apps/a1/app.conf"   # (raised to 256M below)
+mkdir -p "$T/x"
+printf 'memory=100M\nidle_stop=10m\nworker.q=x\n' > "$T/x/w.conf"          # 2 + 20 + 100
+printf 'memory=100M\nidle_stop=off\n' > "$T/x/off.conf"                   # 100
+printf 'memory=100M\nidle_stop=6h\nrecipe=container\n' > "$T/x/ct.conf"   # 100
+mc() { "$BASH" -c 'eval "$1"; shift; mem_caps_mb "$@"' _ "$(agent_fn mem_caps_mb)" "$@" | sed "s#$T/x/##" | tr '\n' ' '; }
+check "U9h admission counts an idle_stop app's web at 2 MB + 20% of its cap, its workers whole" eq \
+  "$(mc -a "$T/x/w.conf" "$T/x/off.conf" "$T/x/ct.conf")" "w.conf 122 off.conf 100 ct.conf 100 "
+check "U9i without -a (MemoryLow of high-priority apps): the whole caps" eq "$(mc "$T/x/w.conf")" "w.conf 200 "
+check "U9j 8 idle_stop apps of 256M and one raised to 256M fit in 1000 MB RAM x 1.5" eq "$(ma 256 1000)" ok
 # shellcheck disable=SC2016
 oa() { "$BASH" -c 'eval "$1"; C_priority=$2; oom_adj' _ "$(agent_fn oom_adj | sed 's/\${C\[priority\]:-}/${C_priority:-}/')" "$1"; }
 check "U9f priority: high 100, default 500, low 900" eq "$(oa high) $(oa '') $(oa low)" "100 500 900"
@@ -381,20 +397,25 @@ ub() { # current stopped recipe idle_stop wants(0|1) -> the systemctl calls
   : > "$T/etc/systemd/system/tando-a1.service"
   [ "$5" = 1 ] && : > "$T/etc/systemd/system/multi-user.target.wants/tando-a1.service"
   # shellcheck disable=SC2016
-  R=$T "$BASH" -c 'eval "$1"; systemctl() { echo "$*" >> "$R/calls"; }; A=a1
+  R=$T "$BASH" -c 'eval "$1"; systemctl() { echo "${SYSTEMCTL_INSTALL_CLIENT_SIDE:+client }$*" >> "$R/calls"; }; A=a1
     S_current=$2 S_stopped=$3 C_recipe=$4 C_idle_stop=$5; unit_boot' _ \
-    "$(agent_fn unit_boot has_unit | na)" "$1" "$2" "$3" "$4"   # (idle_app comes with has_unit's lines)
+    "$(agent_fn unit_boot unit_enable has_unit | na)" "$1" "$2" "$3" "$4"   # (idle_app comes with has_unit's lines)
   tr '\n' ';' < "$T/calls"
 }
-check "U14a no release live, enabled: disabled" eq "$(ub "" "" node "" 1)" "disable -q tando-a1;"
-check "U14b a release live, not enabled: enabled" eq "$(ub r1 "" node "" 0)" "enable -q tando-a1;"
+# (the link made by systemctl itself, with no daemon-reload: through PID 1, an enable reloaded
+# systemd, and a new app is created and deployed with none: e2e-idle I20)
+check "U14a no release live, enabled: disabled" eq "$(ub "" "" node "" 1)" "client disable -q --no-reload tando-a1;"
+check "U14b a release live, not enabled: enabled" eq "$(ub r1 "" node "" 0)" "client enable -q --no-reload tando-a1;"
 check "U14c a release live, enabled: nothing" eq "$(ub r1 "" node "" 1)" ""
 check "U14d no release, not enabled: nothing" eq "$(ub "" "" node "" 0)" ""
 check "U14e a stopped app is not enabled" eq "$(ub r1 1 node "" 0)" ""
 check "U14f an idle app (its socket starts it) is not enabled" eq "$(ub r1 "" node 6h 0)" ""
 check "U14g a static app has no unit" eq "$(ub "" "" static "" 1)" ""
-check "U14h configure enables the unit only with a live release" eval \
-  'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep "systemctl enable" | grep -q "S\[current\]"'
+check "U14h configure enables the unit only with a live release, and never for a new app" eval \
+  'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "^  cfg_reload \"\$new\"" &&
+   ! sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "systemctl enable" &&
+   sed -n "/^cfg_reload() {/,/^}/p" "$ROOT/server/tando-agent" | grep "enable" | grep -v "^ *#" | grep -c . | grep -qx 1 &&
+   sed -n "/^cfg_reload() {/,/^}/p" "$ROOT/server/tando-agent" | grep "unit_enable enable" | grep -q "S\[current\]"'
 check "U14i a verified operation's trailer runs unit_boot, and so does recover for an app with no release" eval \
   'sed -n "/^op_trailer() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "^  unit_boot" &&
    sed -n "/^rec_service() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "S\[current\]:-} \]\] || { unit_boot"'

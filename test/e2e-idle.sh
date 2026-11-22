@@ -35,14 +35,39 @@ check "I2 its unit is not started at boot (no multi-user link), its wake socket 
   ! "$SSH" "test -e /etc/systemd/system/multi-user.target.wants/tando-zz.service"'
 check "I3 Caddy proxies to the wake socket" "$SSH" 'sudo grep -q "reverse_proxy unix//run/tando-wake/zz.sock" /etc/caddy/tando/zz.caddy'
 
+# a second idle app, without a worker: created with no daemon-reload (with 200 apps one costs PID 1
+# 4.5-8 s), and its journald stops while it is idle (a worker keeps zz's: it logs there)
+cp -R "$ROOT/examples/hello" "$W/zy"; printf 'app = zy\nidle_stop = 15s\n' >> "$W/zy/tando.conf"
+reloads() { "$SSH" "journalctl _PID=1 --since @$1 --no-pager -o cat" 2> /dev/null | grep -c '^Reloading finished'; }
+t0=$("$SSH" 'date +%s'); sleep 1
+(cd "$W/zy" && "$R" up --yes > "$E/up-zy.log" 2>&1); rc=$?
+nr=$(reloads "$t0")
+check "I20 a new app is created and deployed without a daemon-reload of systemd ($nr)" eval '[ $rc = 0 ] && [ "$nr" = 0 ] && [ "$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$(t_url zy)")" = 200 ]'
+jd() { "$SSH" "systemctl show -P ActiveState systemd-journald@tando-$1.service" 2> /dev/null; }
+
 # ---- idle ----------------------------------------------------------------------------------------
 check "I4 without requests it stops (within idle_stop + 60 s)" t_until 75 is_idle
 check "I4b only the web process stops: its worker runs on" "$SSH" 'systemctl -q is-active tando-zz_worker-tick.service'
-check "I5 ls says idle, not down" eval '"$R" ls -H test 2> /dev/null | grep -w zz | grep -qw idle'
-# a monitor run and recovery (both run every minute) leave it idle and raise no down alert
-"$SSH" 'sudo systemctl start tando-watch.service; sudo /opt/tando/bin/tando-agent recover-all' > /dev/null 2>&1
-check "I6 the monitor and recover-all do not wake it" is_idle
-check "I7 no down or health alert for an idle app" eval '[ -z "$("$SSH" "sudo grep -E \"^zz\\.(down|health)\\.st=(pending|firing)\" /var/lib/tando/watch/state")" ]'
+zy_quiet() { [ "$("$SSH" 'systemctl show -P ActiveState tando-zy.service')" = inactive ] && [ "$(jd zy)" = inactive ]; }
+check "I21 an idle app without a worker: its journald stops too (a minute after the app)" t_until 150 zy_quiet
+check "I22 an idle app with a worker keeps its journald (the worker logs to it)" eval '[ "$(jd zz)" = active ]'
+starts() { "$R" logs -a zy -H test -n 1000 --grep 'hello v1 on' 2> /dev/null | grep -c 'hello v1 on'; }
+n0=$(starts)
+r=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$(t_url zy)")
+woke_logged() { [ "$(jd zy)" = active ] && [ "$(starts)" -gt "$n0" ]; }
+check "I23 the first request wakes it, its journald starts again and has the app's start line" eval '[ "$r" = 200 ] && t_until 10 woke_logged'
+# every wake is a start of the unit, and its start limit (5 in 60 s, for crash loops) counted
+# them: the sixth wake in a minute was refused (start-limit-hit, then the wake socket's trigger
+# limit: 502 and the down page). Seven idle stops and wakes in a row (stopped as an idle stop
+# stops it), each right after the last
+settled_zy() { [ "$("$SSH" "systemctl show -P ActiveState tando-zy.service")" = inactive ]; }
+wakes="" k=0
+while [ $k -lt 7 ]; do
+  k=$((k + 1))
+  "$SSH" 'sudo systemctl stop tando-zy.service' > /dev/null 2>&1; t_until 15 settled_zy > /dev/null
+  wakes="$wakes$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$(t_url zy)") "
+done
+check "I24 an idle app woken 7 times within a minute answers every time (got $wakes)" eval '[ "$wakes" = "200 200 200 200 200 200 200 " ]'
 
 # ---- wake ----------------------------------------------------------------------------------------
 : > "$E/numbers"
