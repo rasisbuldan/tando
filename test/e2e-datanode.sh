@@ -116,8 +116,9 @@ check "dn12 backup: the dump of the database on B is in the app node's backup ($
 check "dn13 restore: the database on B is back as it was at the backup ($(page), rc=$rc)" \
   eval '[ $rc = 0 ] && [ "$(page)" = "notes v1 db=2 file=2" ]'
 "$R" backup drill > "$E/drill.out" 2>&1; rc=$?; cat "$E/drill.out" >&2
+# (the newest backup is the restore's safety backup: three notes)
 check "dn14 restore drill: restored into tdrill_notes on B with the app's own role, then emptied (rc=$rc)" \
-  eval '[ $rc = 0 ] && tr -d "│" < "$E/drill.out" | grep -q "1 tables, 2 rows" &&
+  eval '[ $rc = 0 ] && tr -d "│" < "$E/drill.out" | grep -q "1 tables, 3 rows" &&
         [ "$(bsql "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '"'"'public'"'"' AND c.relkind = '"'"'r'"'"'" tdrill_notes)" = 0 ]'
 
 # ---- destroy: the project goes from the data node too --------------------------------------------
