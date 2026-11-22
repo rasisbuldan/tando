@@ -84,8 +84,9 @@ srv/watch/*              go @alerts e2e-idle e2e-status e2e-host e2e-faults-q4 e
 srv/logs/*               go e2e-logs e2e e2e-ci @alerts e2e-workers e2e-upgrade
 srv/offsite/*            go e2e-offsite e2e-data e2e-upgrade
 srv/status/*             go ui-test e2e-idle e2e-status e2e-live e2e-top e2e-cli e2e-workers e2e-upgrade
-srv/metrics/*            go e2e-status e2e-top e2e-sec2 @alerts e2e-upgrade
-srv/gate/*               go e2e-ci e2e-sec2 e2e-upgrade
+srv/metrics/*            go e2e-status e2e-top e2e-sec2 @alerts e2e-upgrade e2e-ctl
+srv/gate/*               go e2e-ci e2e-sec2 e2e-upgrade e2e-ctl
+srv/ctl/*                go e2e-ctl
 srv/hostcare/*           go e2e-host @alerts e2e-upgrade
 srv/studio/*             go e2e-studio
 srv/live/*               go e2e-live
@@ -150,6 +151,7 @@ test/e2e-workers.sh      e2e-workers lint
 test/e2e-neighbours.sh   e2e-neighbours lint
 test/e2e-proxy.sh        e2e-proxy lint
 test/e2e-upgrade.sh      e2e-upgrade lint
+test/e2e-ctl.sh          e2e-ctl lint
 test/faults/*            @faults e2e-matrix-quick e2e-matrix-weekly lint
 test/sec2/*              e2e-sec2 lint
 test/sec3/*              e2e-sec2 lint

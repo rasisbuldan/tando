@@ -147,6 +147,17 @@ public_ip() {
   printf '%s' "$ip"
 }
 
+# ctl_ca_arg <value>: host setup's ctl_ca= as the agent takes it: off, or the CA's public key
+# (a .pub file here, or "<type> <base64>") as <type>:<base64>
+ctl_ca_arg() {
+  local v=$1 t k
+  case $v in off) echo off; return;; esac
+  if [ -f "$v" ]; then v=$(head -n 1 "$v"); fi
+  case $v in *:*) t=${v%%:*} k=${v#*:};; *) t=${v%% *} k=${v#* }; k=${k%% *};; esac
+  case $t in ""|*[!a-z0-9@.-]*) usage_err "ctl_ca: a CA public key (.pub file) or off" host;; esac
+  case $k in ""|*[!A-Za-z0-9+/=]*) usage_err "ctl_ca: a CA public key (.pub file) or off" host;; esac
+  echo "$t:$k"
+}
 cmd_host() {
   local kv feats="" pgss="" pgrs=""
   case ${1:-ls} in
@@ -172,6 +183,8 @@ cmd_host() {
           request_log_max=*) ;;
           port_min=*|port_max=*|preflight_min=*|preflight_max=*|uid_min=*|uid_max=*|mem_overcommit=*|idle_awake=*|job_slots=*|backup_window=*|backup_jobs=*|backup_drill=monthly|backup_drill=off) ;;
           care=on|care=off) ;;   # host care's security updates (tando-host install; not the agent's)
+          ctl_ca=*) ctl_ca_arg "${kv#ctl_ca=}" > /dev/null;;   # control plane mode (docs/CONTROL-PLANE.md)
+          ctl_krl=?*) [ -f "${kv#ctl_krl=}" ] || usage_err "ctl_krl: no such file: ${kv#ctl_krl=}" host;;
           --pg-stat-statements) pgss=1;;   # PostgreSQL's top statements (a restart: asked below)
           --pg-restart) pgrs=1;;           # PostgreSQL's new memory settings (a restart: asked below)
           pg_max_connections=auto|pg_max_connections=[1-9][0-9]|pg_max_connections=[1-9][0-9][0-9]|pg_max_connections=[1-9][0-9][0-9][0-9]) ;;
@@ -185,10 +198,11 @@ cmd_host() {
       # so is a new max_connections or shared_buffers (sized from the server's RAM)
       [ -z "$pgrs" ] || confirm "host setup --pg-restart restarts PostgreSQL on $HOST if its memory settings wait for it: every app's database is unavailable for a few seconds." "$HOST"
       ui_box_open "host setup $HOST" "$TARGET"
-      local t0 total n sargs=() care=""
+      local t0 total n sargs=() care="" krl=""
       for kv in "$@"; do
         case $kv in care=*) care=$kv;; --pg-stat-statements) sargs+=(pg_stat_statements=yes);;
-          --pg-restart) sargs+=(pg_restart=yes);; *) sargs+=("$kv");; esac
+          --pg-restart) sargs+=(pg_restart=yes);; ctl_ca=*) sargs+=("ctl_ca=$(ctl_ca_arg "${kv#ctl_ca=}")");;
+          ctl_krl=*) krl=${kv#ctl_krl=};; *) sargs+=("$kv");; esac
       done
       total=$((9 + $(printf '%s' "$feats" | wc -w)))
       [ -z "$pgss" ] || total=$((total + 1))
@@ -211,6 +225,10 @@ cmd_host() {
         while IFS= read -r kv; do box_say "$UI_RED" "$kv"; done < "$TMPD/serr" 2> /dev/null
         ui_box_close "setup stopped; fix that and run tando host setup $HOST again (it continues)"
         exit 1
+      fi
+      if [ -n "$krl" ]; then   # the control plane's revocation list, as it is (binary)
+        ssh "${SSHO[@]}" "$TARGET" 'sudo -n /opt/tando/bin/tando-gate admin ctl-krl' < "$krl" > /dev/null 2> "$TMPD/err" ||
+          { while IFS= read -r kv; do box_say "$UI_RED" "$kv"; done < "$TMPD/err"; ui_box_close "the revocation list was not installed"; exit 1; }
       fi
       . "$TANDO_HOME/lib/cmd-alerts.sh"           # alerts: tando-watch's units and its timer
       alerts_install

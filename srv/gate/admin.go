@@ -43,6 +43,15 @@ func (g *Gate) Admin(args []string) error {
 		w.KV("ok", "1")
 		return w.Flush()
 	}
+	if strings.HasPrefix(verb, "ctl-") {
+		if len(args) != 1 {
+			return die("bad call")
+		}
+		if err := g.CtlAdmin(w, verb); err != nil {
+			return err
+		}
+		return w.Flush()
+	}
 	if !valid.App(app) {
 		return die("bad app name")
 	}

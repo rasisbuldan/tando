@@ -12,6 +12,19 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 
 ### New
 
+- Control plane mode (docs/CONTROL-PLANE.md), off unless turned on: `tando host setup <host>
+  ctl_ca=<ca.pub>` lets a program drive the server over ssh as the user `tando-ctl`, with OpenSSH
+  user certificates of that CA only (validity, source address and the revocation list
+  `ctl_krl=<file>` checked by sshd; no static key). The principal decides: `tando-ctl-read`,
+  `tando-ctl-write`, or `tando-app-<app>` for one app. One JSON request on stdin, one JSON response
+  on stdout, versioned (`"v": 1`). Read verbs: `inventory` (capacity, admission headroom, every
+  app's caps, measured use, state and awake seconds), `app.status`, `app.releases`, `app.history`,
+  `alerts`, `usage`. Mutating verbs, the laptop's own agent paths: `app.restart`, `stop`, `start`,
+  `rollback`, `env.set`, `env.unset`, `destroy`; each carries a `request_id`: a retry gets the
+  first response (waiting for it while it runs), nothing runs twice, one app's requests run in
+  order. Metering: a per-minute ledger of each app's allocated memory and awake seconds (measured
+  memory and CPU beside them, informational), read with a cursor, kept 14 days, across restarts.
+  The laptop CLI is unchanged.
 - Preview apps: `tando preview up [--branch B] [--ttl 7d]` deploys this project as
   `<app>-<branch>` (24 characters at most; a checksum keeps two branches apart) on its own link:
   the parent's settings, no database, jobs or backups, no release command (unless

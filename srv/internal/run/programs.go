@@ -29,6 +29,7 @@ var Programs = []string{
 	"python3",
 	"rsync",
 	"sendmail",
+	"ssh-keygen",
 	"sshd",
 	"sudo",
 	"systemctl",
