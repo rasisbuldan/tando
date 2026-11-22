@@ -450,7 +450,9 @@ cmd_wake_admit() {
       : > "$WAKE_DIR/.full"
       systemd-run --quiet --no-block --collect --unit="tando-wake-check-$now" --on-active=30 "$AGENT" wake-check > /dev/null 2>&1
       # (a skipped start counts against the unit's start limit: cleared, as a clean idle stop does)
-      systemd-run --quiet --no-block --collect --unit="tando-${A}_refused-$now" --on-active=2 systemctl reset-failed "tando-$A.service" > /dev/null 2>&1
+      # and its proxy, started anyway (it needs the app), goes: the socket listens on
+      systemd-run --quiet --no-block --collect --unit="tando-${A}_refused-$now" --on-active=2 /bin/sh -c \
+        "systemctl stop tando-${A}_wake.service; systemctl reset-failed tando-$A.service" > /dev/null 2>&1
       echo "tando-agent: $A not woken: $n idle apps awake (awake_max $max) and none quiet: its requests get 503 until one stops" >&2
       return 1
     fi
@@ -8978,7 +8980,7 @@ case $verb in
   busy) cmd_busy "$@";;
   job-run) cmd_job_run "$@";;
   idle-stopped) cmd_idle_stopped "$@";;
-  wake-admit) cmd_wake_admit "$@";;
+  wake-admit) cmd_wake_admit "$@"; exit $?;;   # (1: refused, for its ExecCondition)
   fw-sync) need_root; load "$R/host.conf" H; fw_sync;;   # (tando-firewall.service's ExecStartPost)
   fw-ctr) cmd_fw_ctr "$@";;
   wake-check) cmd_wake_check;;

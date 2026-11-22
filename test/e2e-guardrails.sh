@@ -140,9 +140,11 @@ for a in gi1 gi2; do [ "$(code "$a")" = 200 ] || true; done
 srv 'sudo rm -f /run/tando-wake/.full' > /dev/null
 rm -f "$E"/burst.*
 for i in 1 2 3; do (code gi3 > "$E/burst.$i" &); done
-t_until 40 eval '[ "$(cat "$E"/burst.* 2> /dev/null | wc -c)" -ge 9 ]' > /dev/null
-burst=$(cat "$E"/burst.* | tr '\n' ' ')
-check "G25b a cold burst over awake_max starts nothing: refused before the app runs ($burst)" eval 'stopped gi3 && echo "$burst" | grep -q 503'
+burst_done() { [ "$(cat "$E"/burst.* 2> /dev/null | wc -c)" -ge 9 ]; }
+t_until 40 burst_done > /dev/null
+burst=$(for f in "$E"/burst.*; do printf '%s ' "$(cat "$f")"; done)
+# (the first gets an error page: its connection was already queued; the rest 503 at once)
+check "G25b a cold burst over awake_max starts nothing: refused before the app runs ($burst)" eval 'stopped gi3 && ! echo "$burst" | grep -q 200'
 check "G25c and the refused app is not marked down (its unit is not failed)" eval '[ "$(srv "systemctl show -P ActiveState tando-gi3.service")" != failed ] && ! srv "sudo grep -qx down=1 /opt/tando/apps/gi3/state"'
 # a minute later the first two have no open connection: the next wake stops the one woken first
 srv 'sudo /opt/tando/bin/tando-agent wake-check' > /dev/null
