@@ -10,6 +10,14 @@ Highlights: a server holds 100 apps and more; a dashboard add-on (web app, insta
 laptop); an always-on database studio; cloud-style monitoring of the server, the apps and their
 databases; scale to zero; faster deploys. Several defaults change: read "On upgrade" first.
 
+### Control plane and origin follow-ups
+
+- `ctl_krl=<file>` with fewer entries than the current list (an empty file too) is refused unless
+  `ctl_krl_force=yes`; `ctl_krl=none` empties the list by name (`empty` still works when no file has
+  that name). `ctl-check` also asks sshd about the node's own addresses and refuses a `SetEnv` or
+  `AcceptEnv` of `SSH_USER_AUTH`. The request store's cap check is O(1) (a count file).
+- `tando doctor` shows the origin lock's certificate warning and repeated refresh failures together.
+
 ### New
 
 - Data nodes (docs/DATA-NODE.md): `tando host setup <h> role=data` runs PostgreSQL and pgbouncer
