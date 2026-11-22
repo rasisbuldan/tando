@@ -1252,8 +1252,9 @@ probe() {
   local to=$1 end unit=$2 code rc n0=0 n state err_since="" body step=0 k v
   # the first polls come fast: an app is often up within a second, and each 0.5 s step it waited
   # for added up to that much to the pre-flight and again to the verify. 0.05, then every 0.1 s for
-  # about two seconds (the unit's state asked every 4th time only: a curl is the whole cost of a
-  # poll, about 10 ms of CPU on one vCPU), every 0.25 s up to about four, then every 0.5 s
+  # about two seconds (the unit's state asked every 4th time only while the port refuses at once: a
+  # curl is the whole cost of a poll, about 10 ms of CPU on one vCPU), every 0.25 s up to about
+  # four, then every 0.5 s
   local -a nap=(0.05)
   mono; end=$((MONO + $1))
   shift 2
@@ -1288,7 +1289,8 @@ probe() {
       err_since=""
     fi
     ((MONO < end)) || { PROBE_WHY="no healthy answer within $to s (last: $LAST_ANSWER)"; rm -f "$body"; return 1; }
-    if [[ -n $unit ]] && ((step >= 20 || step % 4 == 3)); then
+    # (a poll that was not refused at once may have taken up to its 5 s: the state is asked then too)
+    if [[ -n $unit ]] && ((step >= 20 || step % 4 == 3 || rc != 7)); then
       # (one systemctl call for both)
       state="" n=""
       while IFS='=' read -r k v; do
