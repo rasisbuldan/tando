@@ -372,7 +372,11 @@ awake_victim() {
     ((t <= now - AWAKE_GRACE)) || continue
     p=$(sed -n 's/^port=//p' "$R/apps/$a/app.conf" 2> /dev/null)
     [[ $p =~ ^[0-9]+$ ]] || continue
-    [[ -z $(ss -Htn state established "( sport = :$p )" 2> /dev/null) ]] || continue
+    # in use: a connection to its port with traffic within the last AWAKE_GRACE seconds (an idle
+    # keep-alive, Caddy's or a client's, keeps no app awake)
+    ss -Htni state established "( sport = :$p )" 2> /dev/null | awk -v g=$((AWAKE_GRACE * 1000)) '
+      { for (i = 1; i <= NF; i++) if ($i ~ /^last(snd|rcv):[0-9]+$/) { split($i, x, ":"); if (x[2] + 0 < g) busy = 1 } }
+      END { exit !busy }' && continue
     echo "$a"; return 0
   done < <(for f in "$WAKE_DIR"/*.awake; do [[ -f $f ]] && { a=${f##*/}; echo "$(stat -c %Y "$f") ${a%.awake}"; }; done | sort -n)
   return 1
@@ -413,6 +417,29 @@ cmd_wake_admit() {
     : > "$WAKE_DIR/$A.cool"
     systemd-run --quiet --no-block --collect --unit="tando-${A}_cool-$now" --on-active=60 /bin/rm -f "$WAKE_DIR/$A.cool" > /dev/null 2>&1
     echo "tando-agent: $A was woken ${#w[@]} times within a minute (wake_rate $rate): its cold requests get 503 for a minute" >&2
+  fi
+  # the cap, before the app starts (this is its unit's ExecCondition): a slot, or a quiet app to
+  # stop for it, or the start is skipped (no failure: the unit stays inactive, its wake socket
+  # listens on; Caddy answers this app's and every other idle app's cold requests 503 meanwhile).
+  # tando's own start (a deploy, a restart: <app>.admin) is never refused
+  local max n=0 f v
+  max=$(awake_cap)
+  if [[ -f $WAKE_DIR/$A.admin ]]; then rm -f "$WAKE_DIR/$A.admin"
+  elif [[ $max =~ ^[1-9][0-9]*$ ]]; then
+    for f in "$WAKE_DIR"/*.awake; do [[ -f $f && $f != "$WAKE_DIR/$A.awake" ]] && n=$((n + 1)); done
+    if ((n >= max)) && v=$(awake_victim "$A"); then
+      rm -f "$WAKE_DIR/$v.awake"; n=$((n - 1))
+      systemctl stop --no-block "tando-${v}_wake.service" "tando-$v.service" 2> /dev/null
+      echo "tando-agent: stopped the idle app $v for a wake of $A (awake_max $max)" >&2
+    fi
+    if ((n >= max)); then
+      : > "$WAKE_DIR/.full"
+      systemd-run --quiet --no-block --collect --unit="tando-wake-check-$now" --on-active=30 "$AGENT" wake-check > /dev/null 2>&1
+      # (a skipped start counts against the unit's start limit: cleared, as a clean idle stop does)
+      systemd-run --quiet --no-block --collect --unit="tando-${A}_refused-$now" --on-active=2 systemctl reset-failed "tando-$A.service" > /dev/null 2>&1
+      echo "tando-agent: $A not woken: $n idle apps awake (awake_max $max) and none quiet: its requests get 503 until one stops" >&2
+      return 1
+    fi
   fi
   : > "$WAKE_DIR/$A.awake"
   awake_trim "$A"
@@ -686,6 +713,7 @@ wake_mark() { echo "$WAKE_DIR/$A.up"; }
 svc_restart() {
   if idle_app; then
     systemctl stop "tando-${A}_wake.service" "tando-$A.service" &&
+      { mkdir -p "$WAKE_DIR" && : > "$WAKE_DIR/$A.admin"; }   # (wake_admit: tando's own start is never refused)
       systemctl start "tando-${A}_wake.socket" "tando-${A}_wake.service"
   else
     systemctl restart "tando-$A"
@@ -1291,7 +1319,7 @@ write_unit() {
     # mark (wake_mark, as root: +) tells Caddy it runs; it goes when the process stops. Before it
     # starts, the awake governor counts the wake (wake-admit)
     if idle_app; then
-      printf 'ExecStartPre=-+%s wake-admit %s\n' "$AGENT" "$A"
+      printf 'ExecCondition=+%s wake-admit %s\n' "$AGENT" "$A"
       printf 'ExecStartPost=/bin/bash -c '"'"'for i in {1..%s}; do (exec 3<>/dev/tcp/127.0.0.1/%s) 2> /dev/null && exit 0; sleep 0.1; done; exit 1'"'"'\n' \
         $(( ${C[health_timeout]:-60} * 10 )) "${C[port]}"
       printf 'ExecStartPost=+/bin/touch %s\nExecStopPost=+/bin/rm -f %s\n' "$(wake_mark)" "$(wake_mark)"
@@ -3297,7 +3325,8 @@ cmd_fw_ctr() {
   command -v nft > /dev/null || die "no nft: the network rules of $A cannot be loaded, so it does not start"
   [[ -d /sys/fs/cgroup/$t ]] || die "no slice $t: the network rules of $A cannot match it, so it does not start"
   fw_sync || die "the network rules could not be loaded, so $A does not start"
-  nft list chain inet tando containers 2> /dev/null | grepq -F "\"$t\"" ||
+  # (nft may print the path as given, \x2d and all, or with the dashes)
+  nft list chain inet tando containers 2> /dev/null | grepq -F -e "\"$t\"" -e "\"tando.slice/tando-$A.slice\"" ||
     die "the network rules of $A by its slice are not loaded, so it does not start: tando doctor"
 }
 

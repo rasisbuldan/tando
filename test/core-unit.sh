@@ -555,7 +555,7 @@ check "U18m no idle app: no cap" eq "$(aa 1024000 'memory=500M\n')" 0
 check "U18n at least 1 when nothing fits" eq "$(aa 102400 'memory=500M\n' 'memory=100M\nidle_stop=10m\n')" 1
 # the governor's hooks: an idle app's unit counts its wake first; its site answers 503 while the
 # governor says no (.full, <app>.cool), before it would start the app
-check "U18o an idle app's unit runs wake-admit before it starts" grep -q "ExecStartPre=-+%s wake-admit %s" "$ROOT/server/tando-agent"
+check "U18o an idle app's unit asks wake-admit before it starts, and may be refused (ExecCondition, no -)" grep -q "ExecCondition=+%s wake-admit %s" "$ROOT/server/tando-agent"
 check "U18p the site of an idle app answers 503 under the governor" eval 'grep -q "try_files .full \$A.cool" "$ROOT/server/tando-agent"'
 check "U18q a stop of an idle app leaves the governor's count" eval 'sed -n "/^cmd_idle_stopped() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q awake_gone'
 

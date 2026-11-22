@@ -56,6 +56,10 @@ check "G7 the app's row (inventory) names its profile" eval 'srv "sudo $AG statu
 mk gp 'profile = small' 'memory = 128M' 'cpu = 50%'
 up gp; rc=$?
 check "G8 a cpu over the profile's is refused" eval '[ $rc != 0 ] && grep -q "cpu = 50% is over 20%" "$E/up-gp.log"'
+# the admin's settings stay unless cleared: a tando.conf without the profile keeps it
+mk gp 'memory = 128M' 'job.nightly = 0 3 * * * | true'
+up gp; rc=$?
+check "G8b a deploy whose tando.conf has no profile keeps the app's profile" eval '[ $rc = 0 ] && srv "sudo grep -qx profile=small /opt/tando/apps/gp/app.conf"'
 
 # ---- outbound: mail, connection rate, bytes ---------------------------------------------------
 mk gq
@@ -102,6 +106,12 @@ ue=$(srv "id -u tando-ge")
 check "G17 egress_ip: the app's uid's outbound connections are SNATed to it" eval '[ $rc = 0 ] && srv "sudo nft list chain inet tando egress" | grep -q "meta skuid $ue meta nfproto ipv4 counter packets [0-9]* bytes [0-9]* snat ip to $extra"'
 as ge "exec 3<>/dev/tcp/$gw/1" > /dev/null 2>&1
 check "G18 and the rule matched its connection" eval 'srv "sudo nft list chain inet tando egress" | grep "skuid $ue" | grep -Eq "packets [1-9]"'
+mk gf "egress_ip = $extra"
+up gf; rc=$?
+check "G18b another app cannot take the same egress_ip" eval '[ $rc != 0 ] && grep -q "egress address of another app (ge)" "$E/up-gf.log"'
+x0=$(cnt app_egress)
+as gq "curl -s -m 3 --interface $extra http://$gw:1/" > /dev/null 2>&1
+check "G18c another app's packets from ge's egress address are dropped ($x0 -> $(cnt app_egress))" eval '[ "$(cnt app_egress)" -gt "$x0" ]'
 mk gb "bind_ip = $main"
 up gb; rc=$?
 check "G19 bind_ip on the server's main address (every other site's) is refused" eval '[ $rc != 0 ] && grep -q "main address" "$E/up-gb.log"'
@@ -123,6 +133,17 @@ check "G23 a crawler over 3 idle apps with awake_max=2: two wake, the third gets
   eval '[ "$crawl" = "gi1=200 gi2=200 gi3=503 " ]'
 check "G24 the 503 says try again later (Retry-After)" eval 'curl -s -D - -o /dev/null --max-time 10 "$(t_url gi3)" | grep -qi "^Retry-After: 60"'
 check "G25 the third was not started" stopped gi3
+# a burst: three cold requests at once to an idle app, awake_max=2 with two already awake
+# (gi1, gi2: not quiet yet): none of them may start, before it would use memory
+srv 'sudo /opt/tando/bin/tando-agent wake-check' > /dev/null
+for a in gi1 gi2; do [ "$(code "$a")" = 200 ] || true; done
+srv 'sudo rm -f /run/tando-wake/.full' > /dev/null
+rm -f "$E"/burst.*
+for i in 1 2 3; do (code gi3 > "$E/burst.$i" &); done
+t_until 40 eval '[ "$(cat "$E"/burst.* 2> /dev/null | wc -c)" -ge 9 ]' > /dev/null
+burst=$(cat "$E"/burst.* | tr '\n' ' ')
+check "G25b a cold burst over awake_max starts nothing: refused before the app runs ($burst)" eval 'stopped gi3 && echo "$burst" | grep -q 503'
+check "G25c and the refused app is not marked down (its unit is not failed)" eval '[ "$(srv "systemctl show -P ActiveState tando-gi3.service")" != failed ] && ! srv "sudo grep -qx down=1 /opt/tando/apps/gi3/state"'
 # a minute later the first two have no open connection: the next wake stops the one woken first
 srv 'sudo /opt/tando/bin/tando-agent wake-check' > /dev/null
 t_until 200 eval '[ "$(code gi3)" = 200 ]' > /dev/null; r=$?
@@ -138,28 +159,39 @@ check "G27 an app woken more than wake_rate times a minute answers 503 while coo
 # ---- container apps: matched by their slice ---------------------------------------------------
 if command -v docker > /dev/null 2>&1 || command -v podman > /dev/null 2>&1; then
   "$R" host setup test public_port="$T_HTTP_PORT" podman=yes > "$E/setup-podman.out" 2>&1 || skip "G28 podman could not be installed (network?)"
-  rm -rf "${W:?}/gc"; cp -R "$ROOT/examples/container" "$W/gc"
-  sed -i.bak 's/^app = .*/app = gc/' "$W/gc/tando.conf"; rm -f "$W/gc/tando.conf.bak"
-  printf 'mail_out = off\n' >> "$W/gc/tando.conf"
-  up gc; rc=$?
-  port=$(srv "sudo sed -n 's/^port=//p' /opt/tando/apps/gc/app.conf")
-  check "G28 a container app's slice has its rules (chain containers)" eval '[ $rc = 0 ] && srv "sudo nft list chain inet tando containers" | grep -q "socket cgroupv2 level 2 \"tando.slice/tando-gc.slice\" tcp dport { 25, 465, 587, 2525 }"'
+  # (a name with a dash: its slice is tando-g\x2dc.slice)
+  rm -rf "${W:?}/g-c"; cp -R "$ROOT/examples/container" "$W/g-c"
+  sed -i.bak 's/^app = .*/app = g-c/' "$W/g-c/tando.conf"; rm -f "$W/g-c/tando.conf.bak"
+  printf 'mail_out = off\n' >> "$W/g-c/tando.conf"
+  up g-c; rc=$?
+  port=$(srv "sudo sed -n 's/^port=//p' /opt/tando/apps/g-c/app.conf")
+  check "G28 a container app's slice has its rules (chain containers)" eval '[ $rc = 0 ] && srv "sudo nft list chain inet tando containers" | grep -F -e "tando-g\\x2dc.slice" -e "tando-g-c.slice" | grep -q "tcp dport { 25, 465, 587, 2525 }"'
+  check "G28b its units (app, pre-flight, env check) load the rules before they start, and fail without them" eval 'srv "systemctl cat tando-g-c.service" | grep -q "^ExecStartPre=+/opt/tando/bin/tando-agent fw-ctr g-c\$"'
   m0=$(cnt app_mail)
-  srv "sudo podman exec tando-gc-$port sh -c 'nc -w 4 192.0.2.1 25 < /dev/null'" > /dev/null
+  srv "sudo podman exec tando-g-c-$port sh -c 'nc -w 4 192.0.2.1 25 < /dev/null'" > /dev/null
   m1=$(cnt app_mail)
   check "G29 a connection from inside the container is refused by the app's mail rule ($m0 -> $m1)" eval '[ "$m1" -gt "$m0" ]'
   x0=$(cnt app_meta)
-  t0=$SECONDS; srv "sudo podman exec tando-gc-$port sh -c 'nc -w 5 169.254.169.254 80 < /dev/null'" > /dev/null; dt=$((SECONDS - t0))
+  t0=$SECONDS; srv "sudo podman exec tando-g-c-$port sh -c 'nc -w 5 169.254.169.254 80 < /dev/null'" > /dev/null; dt=$((SECONDS - t0))
   check "G30 the metadata address is refused from inside the container ($x0 -> $(cnt app_meta), ${dt}s)" eval '[ "$(cnt app_meta)" -gt "$x0" ] && [ $dt -lt 5 ]'
-  srv "sudo systemctl restart tando-gc.service" > /dev/null
+  srv "sudo systemctl restart tando-g-c.service" > /dev/null
   m0=$(cnt app_mail)
-  t_until 30 eval 'srv "sudo podman exec tando-gc-$port true"' > /dev/null
-  srv "sudo podman exec tando-gc-$port sh -c 'nc -w 4 192.0.2.1 25 < /dev/null'" > /dev/null
+  t_until 30 eval 'srv "sudo podman exec tando-g-c-$port true"' > /dev/null
+  srv "sudo podman exec tando-g-c-$port sh -c 'nc -w 4 192.0.2.1 25 < /dev/null'" > /dev/null
   check "G31 after a restart of the app (a new slice id) its rules still match" eval '[ "$(cnt app_mail)" -gt "$m0" ]'
+  # nftables restarted (everything flushed): tando-firewall loads the container chain again
+  srv "sudo systemctl restart nftables.service" > /dev/null 2>&1 || srv "sudo systemctl restart tando-firewall.service" > /dev/null
+  t_until 20 eval 'srv "sudo nft list chain inet tando containers" | grep -qF -e "tando-g\\x2dc.slice" -e "tando-g-c.slice"' > /dev/null; r=$?
+  check "G32 after nftables is restarted the running container's rules are back" eval '[ $r = 0 ]'
+  # fail closed: with the rules not loadable (nft gone for a moment) the container does not start
+  srv "sudo mv /usr/sbin/nft /usr/sbin/nft.off; sudo systemctl restart tando-g-c.service" > /dev/null 2>&1; r=$?
+  st=$(srv "systemctl show -P ActiveState tando-g-c.service")
+  srv "sudo mv /usr/sbin/nft.off /usr/sbin/nft; sudo systemctl reset-failed tando-g-c.service; sudo systemctl start tando-g-c.service" > /dev/null 2>&1
+  check "G33 without its rules a container app does not start (fail closed: $st)" eval '[ "$st" != active ]'
 else
   skip "G28 container apps: no docker or podman here to build examples/container"
 fi
 
-for a in gp gq ge gb gi1 gi2 gi3 gc; do "$R" destroy -a "$a" -H test --purge --yes > /dev/null 2>&1; done
+for a in gp gq ge gf gb gi1 gi2 gi3 g-c; do "$R" destroy -a "$a" -H test --purge --yes > /dev/null 2>&1; done
 srv "sudo ip addr del $extra/32 dev $dev" > /dev/null
 t_done
