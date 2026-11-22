@@ -25,6 +25,8 @@ type Request struct {
 	App       string          `json:"app,omitempty"`
 	RequestID string          `json:"request_id,omitempty"`
 	Args      json.RawMessage `json:"args,omitempty"`
+
+	ident Ident // who sent it (set by Serve once allowed; never from the request)
 }
 
 // Response is one JSON object on stdout, followed by a newline.

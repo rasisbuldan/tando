@@ -51,6 +51,7 @@ func init() {
 		"app.env.set":   {write: true, app: appRequired, timeout: 10 * time.Minute, run: (*Ctl).envSet},
 		"app.env.unset": {write: true, app: appRequired, timeout: 10 * time.Minute, run: (*Ctl).envUnset},
 		"app.destroy":   {write: true, writeOnly: true, app: appRequired, timeout: 30 * time.Minute, run: (*Ctl).destroy},
+		"app.deploy":    {write: true, app: appRequired, timeout: 75 * time.Minute, run: (*Ctl).appDeploy},
 	}
 }
 

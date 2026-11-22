@@ -2333,6 +2333,32 @@ cmd_end() { # app, token on stdin (or as argument): give the lease back (upload 
   echo ok=1
 }
 
+# artifact-put <app>, stdin: the lease token, then the directory: the control plane's artifact
+# (docs/CONTROL-PLANE.md, app.deploy), unpacked and checked by tando-gate's ctl mode into its own
+# root-only directory, becomes this app's upload: incoming/ gets exactly its files, owned by
+# incoming/'s owner as an rsync of theirs would leave them. The rest is a deploy's (activate):
+# the import checks the copy again (links, special files, .env).
+cmd_artifact_put() {
+  need_root; app "$1"
+  local token src own
+  IFS= read -r token || token=""; IFS= read -r src || src=""
+  [[ $src =~ ^/var/lib/tando/ctl/art/[A-Za-z0-9_-]+/t/release$ ]] || die "bad artifact directory"
+  [[ -d $src && ! -L $src && ! -L ${src%/release} && ! -L ${src%/t/release} &&
+     $(stat -c %u:%a "${src%/t/release}") == 0:700 && $(stat -c %u "$src") == 0 ]] ||
+    die "the artifact directory is not root's own"
+  lease_lock
+  load "$D/upload" L
+  [[ -n $token && ${L[token]:-} == "$token" && -z ${L[id]:-} ]] || die "this upload's lease is not held (expired, or taken over)"
+  [[ -d $D/incoming && ! -L $D/incoming ]] || die "incoming/ is not a directory"
+  upload_writing && die "an upload into $A's incoming/ is running"
+  own=$(stat -c %u:%g "$D/incoming") || die "incoming/ cannot be read"
+  rsync -a --delete --no-owner --no-group --chown="$own" --chmod=go-rwx "$src/" "$D/incoming/" 2> "$D/copy.err" ||
+    die "could not fill incoming/: $(tail -1 "$D/copy.err" | cut -c1-200)"
+  rm -f "$D/copy.err"
+  chmod go-rwx "$D/incoming"
+  echo ok=1
+}
+
 # ---- Caddy's admin API and loopback isolation ------------------------------------------------
 #
 # caddy_fallback: Caddy's stock site (":80 { root * /usr/share/caddy; file_server }", the
@@ -3804,6 +3830,8 @@ cmd_configure() {
     # interrupted before app.conf existed (its marker .creating is in the app's directory)
     id "tando-$A" &> /dev/null && [[ ! -f $D/.creating ]] && die "user tando-$A exists but was not created by tando"
     name_free "$A" || die "$NAME_WHY: choose another app name (app = in tando.conf)"
+    # a node the control plane drains (node.drain) takes no new app, from any client
+    [[ -e /var/lib/tando/ctl/draining ]] && die "this server is draining (the control plane's node.drain): it takes no new app"
     new=1
   fi
   app_vars
@@ -8940,6 +8968,7 @@ case $verb in
   runtime) audit runtime -;;
   domain-add|domain-rm) audit "$verb" "${1:-}";;
   activate|run-activation) audit deploy "${1:-}";;
+  artifact-put) audit "$verb" "${1:-}";;
   configure|rollback|env-set|env-unset|env-ls|start|stop|restart|unlock|destroy|backup-run|\
   backup-restore|backup-cat|db-url|db-psql|shell|job-run|job-pause) audit "$verb" "${1:-}";;
   db-studio|db-studio-code|db-studio-stop) audit "$verb" "${1:-}";;
@@ -8969,6 +8998,7 @@ case $verb in
   configure) cmd_configure "$@";;
   begin) cmd_begin "$@";;
   end) cmd_end "$@";;
+  artifact-put) cmd_artifact_put "$@";;
   activate) cmd_activate "$@";;
   run-activation) cmd_run_activation "$@";;
   recover) cmd_recover "$@";;

@@ -108,6 +108,7 @@ func (c *Ctl) Serve(ctx context.Context, id Ident, in []byte, w io.Writer) int {
 			resp = Response{V: Version, Verb: r.Verb, App: r.App, RequestID: r.RequestID, Error: aerr}
 			break
 		}
+		r.ident = id
 		v := verbs[r.Verb]
 		do := func() Response { return c.run(ctx, v, r) }
 		if v.write {
