@@ -65,6 +65,7 @@ lib/cmd-next.sh          lint ui-test e2e-cli e2e-ease
 lib/cmd-open.sh          lint ui-test e2e-cli e2e-ease
 lib/cmd-requests.sh      lint ui-test e2e-cli e2e-logs
 lib/cmd-restore.sh       lint ui-test e2e-cli e2e-data e2e-offsite
+lib/cmd-preview.sh       lint ui-test e2e-cli e2e-ci e2e-data
 lib/cmd-ssh.sh           lint ui-test e2e-cli e2e
 lib/cmd-top.sh           lint ui-test e2e-cli e2e-top
 lib/cmd-snapshot.sh      lint ui-test e2e-cli e2e-status e2e-top
@@ -146,6 +147,8 @@ test/e2e-jobs.sh         e2e-jobs lint
 test/cron-ref.py         e2e-jobs lint
 test/e2e-matrix*         e2e-matrix-quick e2e-matrix-weekly lint
 test/e2e-workers.sh      e2e-workers lint
+test/e2e-neighbours.sh   e2e-neighbours lint
+test/e2e-proxy.sh        e2e-proxy lint
 test/e2e-upgrade.sh      e2e-upgrade lint
 test/faults/*            @faults e2e-matrix-quick e2e-matrix-weekly lint
 test/sec2/*              e2e-sec2 lint

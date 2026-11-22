@@ -58,7 +58,11 @@ through Caddy, then a soak (30 s, `soak = N`) in which a crash rolls back. Retur
 `--yes`: tando.conf now names another app or server than the last deploy from here.
 When the upload and the settings are exactly those of the live, verified release, nothing is
 activated: "already live", no new release, no restart (`tando restart` restarts it). A deploy that
-finds another one's release soaking is queued and says what it waits for. While another deploy
+finds the app's last release still in its soak supersedes it: the soak ends at once (it says so)
+and that release stays live until the new one switches, recorded as `superseded` (live, not
+verified: if the new release fails after its switch, the app goes back to the last *verified*
+release, never to the superseded one). A deploy that finds another operation holding the app (a
+rollback, a backup) waits for it and says what it waits for. While another deploy
 (also from another terminal of the same user) is uploading, a deploy is refused at once.
 `release = <command>` in tando.conf runs once per deploy on the server, between pre-flight and
 switch (database migrations): see [The release command](#the-release-command).
@@ -385,14 +389,22 @@ Example: `tando db studio shop`
 
 ### backup
 `tando backup ls [app] [--json]` · `tando backup now [app]` · `tando backup restore <id> [--yes]` ·
-`tando backup pull <id> <file>`. Flags: `-a -H --yes`. Subcommands: ls (default, 0-1), now (0-1), restore (1),
-pull (2).
+`tando backup drill [app]` · `tando backup pull <id> <file>`. Flags: `-a -H --yes`. Subcommands: ls (default, 0-1), now (0-1),
+drill (0-1), restore (1), pull (2).
 Backups of the data directory and database. `restore` asks first and keeps a safety backup. `ls`
 and `pull` work for a destroyed app's final backup. `pull` creates the file mode 600 (it holds the
 data and a database dump) and refuses an existing file. `ls` heads its time column `TIME (GMT)`.
 `ls --json`: `{"host", "app", "backups": [{"id", "kind", "created", "size_bytes", "holds",
 "where"}], "offsite_error"}` (`where`: local, both, offsite, local+pending, local+uploading,
 local+failed; null without offsite).
+`backup drill` proves the newest backup restores: it is restored into a throwaway directory and
+database on the server (the live ones are never touched), the files and tables restored are counted
+against what the backup lists, `pg_restore`'s exit is checked, and the copy is removed. It prints
+the counts and exits 1 with the reason when it fails. The server drills every app with daily
+backups monthly (`backup_drill=monthly|off` in `tando host setup`, after the backup queue, inside
+`backup_window`); `ls` shows the last result below its table (`--json`: `"drill": {"at", "result",
+"backup", "files", "tables", "rows", "seconds", "why"}`, absent before the first), `tando doctor`
+warns about a failed drill, and the alert `drill` fires for it (docs/PREVIEWS.md).
 A restore of an app stopped with `tando stop` leaves it stopped (the data restored; `tando start`
 starts it). A restore cut off by a kill or a reboot is ended by the server's recovery: the app runs
 its release again (a stopped app stays stopped). When the database (or an adopted app's data directory) was being replaced at that moment,
@@ -602,12 +614,15 @@ nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Setting
 `ci_max_file_mb=`, `unit_drop=`, `journal_max=` (not in help.txt), and the per-client limits on ports
 80/443: `rate_limit=on|off|auto` (auto: on when tando owns Caddy), `conn_limit=N` (connections at
 once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections per second, burst
-3x; default 100). Scale (docs/ARCHITECTURE.md, "Many apps on one server"): `port_min=`,
+3x; default 100), and per app's user `conn_out=N` (connections at once, default 2048), `dns_rate=N`
+(DNS packets a second, default 200), `stream_close_delay=5m` (how long a Caddy reload leaves websockets and event streams open, Caddy 2.7+) ("Limits and load"). Scale (docs/ARCHITECTURE.md, "Many apps on one server"): `port_min=`,
 `port_max=` (app ports, default 4100-4999), `preflight_min=`, `preflight_max=` (pre-flight ports,
 default 14100-14999; the ranges must not overlap or hold 2019 or 5432), `uid_min=`, `uid_max=`
 (new app users' ids, default 30000-39999), `mem_overcommit=` (default 1.5; 0 turns the check off),
+`idle_awake=` (0-100, default 20: admission counts an app with `idle_stop` at 2 MB plus this % of its memory),
 `job_slots=`, `backup_window=HH:MM-HH:MM` (default 01:00-05:00, the server's time),
-`backup_jobs=1` to `4` (backups at once, default 1), `log_budget=` (all apps' logs together, default
+`backup_jobs=1` to `4` (backups at once, default 1), `backup_drill=monthly|off` (the monthly restore drill,
+default monthly; see `backup`), `log_budget=` (all apps' logs together, default
 `auto`: 20% of the log file system). Without `apps_domain`, links use
 `<ip-with-dashes>.sslip.io` (an outside service). `--deploy` and `--insecure-test` are not in the
 usage (docs/DEV-NOTES.md, mismatch 7). `care=on|off`: host care's security updates (on by default where tando
@@ -668,15 +683,32 @@ Example: `tando version -H vps`
 ## CI
 
 ### ci
-`tando ci setup | rotate | ls | revoke <id|SHA256:...|all>`
+`tando ci setup [--previews] | rotate | ls | revoke <id|SHA256:...|all>`
 `tando ci github [--ref TAG|SHA] [--repo URL] [--branch B] [--node N] [--env NAME] [--force]`
 `tando ci hook [--branch B] [--force]` · `tando ci hook --remove`
-Flags: `-a -H --ref --repo --branch --node --env --force --remove`. A subcommand is required.
+Flags: `-a -H --ref --repo --branch --node --env --force --remove --previews`. A subcommand is required.
 Run by the admin in the app's directory. `setup` creates a deploy key for this app only and prints
-the CI secrets once; `rotate` replaces every key; `github` writes `.github/workflows/deploy.yml`;
+the CI secrets once (`--previews`: a key that may only make, deploy to and remove the app's
+previews, never deploy the app itself: the one for pull requests, docs/CI.md); `rotate` replaces every key; `github` writes `.github/workflows/deploy.yml`;
 `hook` installs a git pre-push hook. See docs/CI.md. `--env` is not in help.txt's usage
 (docs/DEV-NOTES.md, mismatch 5).
 Example: `tando ci setup > ci-secrets.txt`
+
+### preview
+`tando preview up [--branch B] [--ttl 7d]` · `tando preview ls [--json]` · `tando preview rm [--branch B]`.
+Flags: `-a -H --branch --ttl --json --yes`. Subcommands: up, ls (default), rm.
+A temporary copy of the app for a branch, at `<app>-<branch>` (24 characters at most, a checksum
+added when the branch name had to change) on its own link. `up` makes it on the server from the
+parent's settings, then deploys this directory to it (again to update it; it renews the expiry):
+no database, no jobs, no backups, no domains, `idle_stop` 6h unless the parent has its own, the
+no release command unless the parent has `preview_release = on`, and of the parent's env at that
+moment only the names its `preview_env` lists (minus `preview_skip`; never `DATABASE_URL`,
+`DATABASE_URL_DIRECT` or a value naming the parent's database or directory). Removed by the server after `preview_ttl`
+(default 7d, hourly sweep) or by `rm`. The branch is `--branch`, else CI's (`GITHUB_HEAD_REF`,
+`GITHUB_REF_NAME`), else the checkout's. With a CI deploy key the same commands work for previews of
+the key's own app (docs/CI.md). `ls` lists the previews of this app. Design: docs/PREVIEWS.md.
+tando.conf: `preview_ttl = 3d`, `preview_env = API_BASE, FEATURE_FLAGS`, `preview_release = on`.
+Example: `tando preview up --branch feature/login`
 
 ## More
 
@@ -792,10 +824,29 @@ the next deploy; per host with `tando host setup <host> key=value`.
 | `max_conns =` | 256 | Caddy's connections to the app | requests wait in Caddy for a free connection |
 | `max_requests =` | none (off) | requests in flight through Caddy | over it a request waits up to the hold and then gets `503` "<app> is busy ..." with `Retry-After: 5` |
 | `hold =` | 15, or `health_timeout` | seconds Caddy holds a request while the app (re)starts | after it the visitor gets 502; with `max_requests` also how long a request over the limit waits for its 503 |
+| `response_timeout =` | 60 (`off`: none) | seconds Caddy waits for the headers of the app's answer | `504` "<app> took too long to answer"; a websocket or event stream is not cut (its headers come at once), a long poll is: set `off` or more for it. Caddy sends the request again while the hold lasts, so keep `response_timeout` over `hold` (as the defaults are) or the app gets it more than once |
+| `body_max =` | 100MB (`off`: none) | the largest request body Caddy passes on | `413` "The request is too large for <app>" |
+| `cold_timeout =` | 30 | with `idle_stop`: seconds a visitor waits for the app to start | `503` "<app> is waking up" with `Retry-After: 5`; the app goes on starting |
+| (fixed) | 3 s | a connection to the app that does not open | held and tried again, like a restart (then 502 after the hold) |
 | `stop_timeout =` | 10 | seconds a stopping process may finish its requests | it is killed (requests it still had fail); Caddy holds new ones meanwhile |
 | host `conn_limit=` | 200 | connections at once per client address (IPv6: per /64) on ports 80/443 | further connections are reset |
 | host `conn_rate=` | 100 | new connections a second per client address, burst 3x | further SYNs are dropped: the client retries a second later |
 | host `rate_limit=` | auto | on, off, or auto: on only where tando owns Caddy (it installed it, or the Caddyfile has no other site) | `tando doctor` row "client limits" shows how often they tripped |
+| `priority =` | normal | CPU weight of the app's slice under contention: high 200, normal 100, low 50 (and the OOM order, MemoryLow for high) | a busy `low` app yields CPU to the others first |
+| `tmp_size =` | 64M | the app's `/tmp` and `/var/tmp`: each a tmpfs of its own, counted in its memory (not a directory on the disk every app shares; a venv or container build keeps a private /tmp on disk) | writes fail with "No space left on device" |
+| `io =` | none | MB/s of reads and of writes on the disk of the app's directory (`IORead/WriteBandwidthMax`; only where the cgroup io controller is) | the app's disk I/O is slowed |
+| `disk =` | host `app_max_mb` | the app's disk share for alerts (`2G`, `500M`): its files and database | alert `disk_warn` (low) from 80%, `disk` over it; no hard quota |
+| host `conn_out=` | 2048 | TCP and UDP connections one app's user holds at once (the kernel's connection table is the host's) | further connects are refused at once (`ECONNREFUSED`) |
+| host `dns_rate=` | 200 | DNS packets a second one app's user sends (burst 2x), the resolver all apps share | further lookups fail at once |
+| (`db_pool` x 20) | 100 | connections one app's user holds to pgbouncer and PostgreSQL together (pgbouncer's 5000 client slots are every app's) | further connects are refused |
+
+The core is protected the other way round: `host setup` gives Caddy (64 MB), sshd (32 MB),
+tandod (32 MB), pgbouncer (32 MB) and PostgreSQL (its shared buffers + 32 MB) a `MemoryLow=`
+(reclaim takes from apps first) and `system.slice` their sum. On ext2/3/4, the blocks the file
+system of /opt/tando reserves (often 5%) go to group `tando-core` too (PostgreSQL and Caddy are
+in it; root always has them): an app that fills the disk leaves the database and Caddy room. The
+running PostgreSQL and Caddy get the group at their next restart. The `tando doctor` row "app
+limits" counts what the per-app rules refused.
 
 ### Lower memory for Node: node_lite
 
@@ -853,8 +904,17 @@ group caddy) instead of its port. A connection there starts `tando-<app>_wake.se
 in the squeeze audit). `tando ls` shows such an app as `idle`; the monitor asks its health on its
 port only while it runs (a probe through Caddy would keep it awake) and raises no down alert while
 it is idle; the per-minute recovery leaves it idle. A deploy of an idle app starts the new release
-(it goes idle again later). Caddy keeps no pooled connection to it (`keepalive off`), so the
-timer starts with the last request. A restart stops requests in flight.
+(it goes idle again later). Caddy keeps an unused connection to it 30 s (or `idle_stop`, when
+shorter), so the timer starts up to 30 s after the last request. A visitor waits at most
+`cold_timeout` (30 s) for the app to start, then gets a 503 "waking up" page with `Retry-After: 5`
+while the app goes on starting. (Caddy tells a cold start by `/run/tando-wake/<app>.up`, which the
+app's unit makes once its port answers and removes when it stops.) A restart stops requests in flight.
+While it is idle its journald (the app's log namespace, about 1.1 MB) stops too, unless a worker,
+a job or a pre-flight of the app runs (they log there); the app's next start starts it again and
+no line is lost. A clean idle stop also resets the unit's start limit (5 starts in 60 s, which
+ends a crash loop), so an app woken often is never refused a start. An idle app costs about 2 MB. Admission counts it that way: its web process at
+2 MB plus `idle_awake` % of its `memory` (host setup `idle_awake=`, default 20: the share of such
+apps awake at once), its workers whole.
 ### Database connections and pgbouncer
 
 Apps with `database = postgres` share one PostgreSQL. `tando host setup` sizes it from the
@@ -1020,6 +1080,9 @@ release, the kept ones), and as many free inodes as it has files; an upload over
 a new app reload Caddy's whole config; Caddy 2.6 finishes requests in flight but closes idle
 keep-alive connections of every site it serves (clients reconnect; one that sends on a connection
 being closed sees a reset). A deploy itself does not reload Caddy when the site did not change.
+A reload also ends the websockets and event streams of every app: at once on Caddy 2.6 (Ubuntu's
+package; it has no setting against it), 5 minutes later on Caddy 2.7 and later
+(`stream_close_delay 5m` in each site; `tando host setup <host> stream_close_delay=30m` changes it: every reload keeps the old config's streams that long, so frequent deploys pile them up), so a client that reconnects keeps working either way.
 **Restarts under load:** an app that on SIGTERM only calls `server.close()` waits for every
 keep-alive connection, and Caddy keeps its connections busy under load: the old process lives until
 stop_timeout. Close idle connections too and answer with `Connection: close` from then on (see
@@ -1101,10 +1164,11 @@ only. A menu bar icon for every registered server, and an outside heartbeat from
   signs it ad hoc (`codesign -s -`), writes `$TANDO_CONFIG_DIR/menubar.conf` (which `tando` to run:
   the launcher you ran install with, since a LaunchAgent has no PATH of yours) and the LaunchAgent
   `~/Library/LaunchAgents/local.tando.menubar.plist` (RunAtLoad: it starts at login; Quit stops it
-  until the next login), and starts it. `--dry-run` prints all of that and changes nothing. Run it
+  until the next login), and starts it. It also builds `~/Applications/tando Dashboard.app` (below).
+  `--dry-run` prints all of that and changes nothing. Run it
   again after a tando update: it rebuilds the app and keeps your settings.
-- `uninstall` stops it and removes the app, the LaunchAgent and menubar.conf. `status`: installed,
-  running, which tando, the interval. `build --out DIR` only compiles and signs `DIR/tando.app`.
+- `uninstall` stops it and removes both apps, the LaunchAgent and menubar.conf. `status`: installed,
+  running, which tando, the interval. `build --out DIR` only compiles and signs `DIR/tando.app` and `DIR/tando Dashboard.app`.
 - **What it checks**, every `interval` seconds (menubar.conf, default 60), one check at a time, each
   stopped after `timeout` seconds (default 45): `tando ls --all --json` (one ssh connection per
   server: the apps, their state and the firing alerts), then a GET of every running app's link from
@@ -1119,15 +1183,20 @@ only. A menu bar icon for every registered server, and an outside heartbeat from
   with "Open <link>" and "Open status in Terminal", which runs `tando status <app> -H <server>`); a
   server it cannot reach, with the reason; the firing alerts; Open dashboard (⌘D, below); Refresh now
   (⌘R); Open status in Terminal (`tando ls --all`); Quit.
-- **Open dashboard** (⌘D) opens the dashboard add-on in a window of its own (a WKWebView; one window,
-  reused; native title bar; at least 900x600, its size and place are remembered; ⌘R reloads, ⌘W closes
-  the window and not the app; links to other sites open in your default browser, and the window never
-  shows anything but `127.0.0.1:<port>`). It finds `tando-dash` (`~/.local/lib/tando-dash/current`,
-  `~/.local/bin`, `PATH`), starts it (`--no-open`) when `~/.config/tando/dash.lock` names no running
-  process (a lock left by a crash is told by its dead pid), and asks it for a fresh one-time link
-  (`POST /api/newcode` with the lock's key). Without the add-on the row reads "Install dashboard…" and
-  shows the one command, `tando addon install dashboard`. Closing the window ends the page; the idle
-  `tando-dash` stops by itself. `tando-menubar --dash-url` does all of this but the window and prints the link.
+- **Open dashboard** (⌘D) launches or activates the dashboard app, `~/Applications/tando Dashboard.app`
+  (built by `tando menubar install`; `tando dashboard` with no arguments opens it too on macOS). It is
+  a regular app: Dock icon, Cmd+Tab, Spotlight and Launchpad, with an app menu (Quit), Edit (copy and
+  paste work), View (⌘R reload) and Window (⌘W closes the window and not the app; the page is blanked,
+  so nothing runs while it is closed). A thin WKWebView on the system WebKit, about 170 KB, no Electron.
+  One window, at least 900x600, size and place remembered; links to other sites open in your default
+  browser, and the window never shows anything but `127.0.0.1:<port>`. It finds `tando-dash`
+  (`~/.local/lib/tando-dash/current`, `~/.local/bin`, `PATH`), starts it (`--no-open`) when
+  `~/.config/tando/dash.lock` names no running process (a lock left by a crash is told by its dead pid),
+  and asks it for a fresh one-time link (`POST /api/newcode` with the lock's key). The menu bar app
+  itself stays out of the Dock. Without the dashboard app installed, the menu bar shows the dashboard in
+  a window of its own (fallback); without the add-on the row reads "Install dashboard…" and shows
+  `tando addon install dashboard`. The idle `tando-dash` stops by itself. `tando-menubar --dash-url`
+  does the lookup and prints the link.
 - **The cache.** While `tando-dash` runs it writes `~/.config/tando/cache/ls-all.json` (the shape of
   `tando ls --all --json`). A check that finds it younger than `interval` reads it instead of running
   `tando ls --all --json` (no second set of ssh connections); an older or unreadable file is ignored.

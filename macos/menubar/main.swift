@@ -76,8 +76,6 @@ func fail(_ msg: String) -> Never {
 
 // ---- running tando -------------------------------------------------------------------------------
 
-struct CheckError: Error { let why: String }
-
 /// Runs tando with args, at most `timeout` seconds; stdout on success, a short reason otherwise.
 /// Blocking: call it off the main thread.
 func runTando(_ path: String, _ args: [String], timeout: Double) -> Result<Data, CheckError> {
@@ -439,7 +437,17 @@ final class Controller: NSObject, NSMenuDelegate {
         return menu
     }
 
-    @objc func openDashboard() { dash.open() }
+    /// The dashboard is its own app (~/Applications/tando Dashboard.app, installed with this one):
+    /// launch or activate it. Without it, the fallback window of this app.
+    @objc func openDashboard() {
+        let url = URL(fileURLWithPath: dashHome() + "/Applications/tando Dashboard.app")
+        if FileManager.default.fileExists(atPath: url.path) {
+            let cfg = NSWorkspace.OpenConfiguration(); cfg.activates = true
+            NSWorkspace.shared.openApplication(at: url, configuration: cfg) { _, err in
+                if err != nil { DispatchQueue.main.async { self.dash.open() } }
+            }
+        } else { dash.open() }
+    }
 
     @objc func openLink(_ sender: NSMenuItem) {
         if let u = sender.representedObject as? URL { NSWorkspace.shared.open(u) }

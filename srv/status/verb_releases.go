@@ -159,6 +159,11 @@ func absCompare(na, fa, nb, fb string) int {
 // Without an app every directory under apps/ with a history.tsv counts.
 func (c *Collector) History(ctx context.Context, w io.Writer, name, count string) error {
 	n := int64(20)
+	// a lone number is the count (app names start with a letter): `history 20` as the CLI sends
+	// it for all apps
+	if count == "" && decimal.IsDigits(name) {
+		name, count = "", name
+	}
 	if count != "" {
 		if !decimal.IsDigits(count) {
 			return die("bad count")

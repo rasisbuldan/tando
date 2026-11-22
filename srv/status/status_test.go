@@ -258,6 +258,12 @@ func TestHistory(t *testing.T) {
 		"hist\tweb\t"+line("20261101-000002"), "hist\tweb\t"+line("20261101-000003")))
 	two, _ := h.out(func(c *Collector, b *bytes.Buffer) error { return c.History(context.Background(), b, "web", "02") })
 	eq(t, two, rows("hist\tweb\t"+line("20261101-000002"), "hist\tweb\t"+line("20261101-000003")))
+	// a lone number is the count over all apps (what `tando history -H host` sends)
+	lone, err := h.out(func(c *Collector, b *bytes.Buffer) error { return c.History(context.Background(), b, "1", "") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, lone, rows("hist\tapi\t"+line("20261101-000009"), "hist\tweb\t"+line("20261101-000003")))
 	none, _ := h.out(func(c *Collector, b *bytes.Buffer) error { return c.History(context.Background(), b, "web", "0") })
 	eq(t, none, "")
 	// a deploy that ran a release command has a 13th field, its seconds; 11 or 14 fields: no record

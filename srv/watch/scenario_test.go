@@ -329,6 +329,27 @@ func TestLivenessCap(t *testing.T) {
 	}
 }
 
+// Apps that hang are asked on their own ports at once: the run waits for one direct probe (20 s
+// at most), not one per app.
+func TestLivenessProbesAtOnce(t *testing.T) {
+	f := newFakeHost(t)
+	f.app("hog")
+	f.app("hog2")
+	f.ticks(2)
+	f.probe["http://hog.localhost/health"] = probeRes{exit: 28}
+	f.probe["http://hog2.localhost/health"] = probeRes{exit: 28}
+	f.ticks(2)
+	f.slow = 400 * time.Millisecond
+	t0 := time.Now()
+	f.ticks(1) // the third failed probe in a row: both are due
+	if d := time.Since(t0); d > 700*time.Millisecond {
+		t.Errorf("the run took %v: the direct probes ran one after the other", d)
+	}
+	if n := len(f.called("systemd-run")); n != 2 {
+		t.Errorf("%d restarts, want 2", n)
+	}
+}
+
 func TestDiskGuard(t *testing.T) {
 	for _, tt := range []struct {
 		du       string
@@ -720,5 +741,36 @@ func TestForgetIncident(t *testing.T) {
 	}
 	if got := rd("lib/watch/probe/shop"); got != "400 hold\n460 ok 5\n940 hold\n1000 hold\n1300 ok 4\n1360 unhealthy 3\n" {
 		t.Errorf("probe: %q", got)
+	}
+}
+
+// disk = in tando.conf is the app's own disk share (instead of app_max_mb); disk_warn (low) fires
+// from disk_warn_pct (80) of it up to the share, disk over it.
+func TestDiskShareAndWarn(t *testing.T) {
+	for _, tt := range []struct {
+		conf       []string
+		du         string
+		warn, fire bool
+		det        string
+	}{
+		{[]string{"disk=1G"}, "700", false, false, ""},
+		{[]string{"disk=1G"}, "900", true, false, "hog uses 900 MB of disk, 87% of the 1024 MB allowed (disk)"},
+		{[]string{"disk=1G"}, "1100", false, true, "hog uses 1100 MB of disk, over the 1024 MB allowed to it (disk in tando.conf)"},
+		{[]string{"disk=500M"}, "450", true, false, "hog uses 450 MB of disk, 90% of the 500 MB allowed (disk)"},
+		{nil, "7000", true, false, "hog uses 7000 MB of disk, 85% of the 8192 MB allowed (app_max_mb)"},
+		{nil, "900", false, false, ""},
+	} {
+		f := newFakeHost(t)
+		f.app("hog", tt.conf...)
+		f.settings("disk_every=0", "disk_stop_pct=0")
+		f.du = tt.du
+		f.ticks(2)
+		warn, fire := f.st("hog.disk_warn.st") == "firing", f.st("hog.disk.st") == "firing"
+		if warn != tt.warn || fire != tt.fire {
+			t.Errorf("%v du %s: disk_warn %v disk %v (%q %q)", tt.conf, tt.du, warn, fire, f.st("hog.disk_warn.det"), f.st("hog.disk.det"))
+		}
+		if d := f.st("hog.disk_warn.det") + f.st("hog.disk.det"); tt.det != "" && d != tt.det {
+			t.Errorf("%v du %s: detail %q\nwant %q", tt.conf, tt.du, d, tt.det)
+		}
 	}
 }

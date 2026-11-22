@@ -16,12 +16,17 @@ var exitRe = regexp.MustCompile(`code=(exited|killed|dumped), status=([0-9]+)`)
 // countRestarts: restarts since the last run (NRestarts drops to 0 on a manual restart or a
 // reboot), and how the app's main process last ended (a crash: exit status or signal, and
 // whether the kernel's OOM killer did it), for the details of down and restarts.
+// NRestarts also begins again when tando's recover starts an app systemd gave up on (start
+// limit); the agent keeps the count it had then (plus that start) in the state's restarts_lost,
+// added here, so a crash loop that ended and was restarted between two runs is still counted.
 func countRestarts(t *tick, a *appTick) {
 	k := a.name
 	nr0, had := t.st.lookup(k + ".nr")
 	nr := a.unit["NRestarts"]
 	if nr == "" { // unknown this run: keep the baseline
 		nr = or(nr0, "0")
+	} else {
+		nr = RestartsWithLost(nr, a.state["restarts_lost"])
 	}
 	if had && nr0 != "" && num(nr, 0) > num(nr0, 0) {
 		a.newRestarts = num(nr, 0) - num(nr0, 0)
@@ -191,4 +196,13 @@ func checkRestarts(t *tick, a *appTick) {
 	case !a.hold || n == 0:
 		t.sample(k, a.name, "restarts", ok, "", 1)
 	}
+}
+
+// RestartsWithLost is systemd's NRestarts plus the restarts tando's recover took from it (the
+// state's restarts_lost); nr unchanged when either is not a number.
+func RestartsWithLost(nr, lost string) string {
+	if !decimal.IsDigits(nr) || !decimal.IsDigits(lost) || len(nr) > 9 || len(lost) > 9 {
+		return nr
+	}
+	return decimal.Itoa(num(nr, 0) + num(lost, 0))
 }

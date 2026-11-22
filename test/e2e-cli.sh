@@ -348,7 +348,8 @@ check "S7c TMPDIR with a space: commands still work (rc=$rc)" \
   eval 'test $rc = 0 && printf "%s" "$out" | grep -q "TIME (GMT)"'
 # sshd turns sessions away when too many share one connection (MaxSessions 10): the stub refuses
 # the first two tries of each of 30 parallel commands; every one must still succeed, and one that
-# is always refused names the cause
+# is always refused names the cause after 9 tries (about 10 s: a deploy following its activation
+# holds a session up to 10 s)
 mkdir -p "$E/busybin" "$E/busy"; rm -f "$E/busy/"c.*
 cat > "$E/busybin/ssh" <<'STUB'
 #!/bin/bash
@@ -370,7 +371,7 @@ check "S7d 30 parallel commands, each refused twice by sshd MaxSessions, all suc
 out=$(cd "$E/w/hello" && BUSY_DIR=$E/busy BUSY_ID=x BUSY_ALWAYS=1 PATH="$E/busybin:$PATH" "$R" history < /dev/null 2>&1); rc=$?
 check "S7e a session that stays refused: one sentence that names the cause (rc=$rc)" \
   eval 'test $rc != 0 && printf "%s" "$out" | grep -q "too many tando commands at once to vps" &&
-        test "$(cat "$E/busy/c.x")" = 4'
+        test "$(cat "$E/busy/c.x")" = 9'
 out=$(cd "$E/w/noconf" && "$R" ssh -- id 2>&1); rc=$?
 check "S8 ssh -- cmd outside a project names the app form (rc=$rc)" \
   eval 'test $rc = 1 && printf "%s" "$out" | grep -q "tando ssh <app> -- <command>"'
@@ -556,5 +557,32 @@ best() { local m x i; m=99999; for i in 1 2 3; do x=$(ms "$@"); [ "$x" -lt "$m" 
 tr_=$(best restart); tu=$(best unlock)
 check "RT5 restart returns when the agent answers (restart ${tr_} ms, a plain call ${tu} ms, the agent 300 ms)" \
   test $((tr_ - tu - 300)) -lt 120
+
+# PV: preview names (tando preview): <app>-<slug>, 24 characters at most, never shared by two branches
+pvn() { ( . "$ROOT/lib/cmd-preview.sh"; die() { echo "DIE $*"; exit 1; }; preview_name "$1" "$2" && echo "$PV_NAME" ); }
+check "PV1 a plain branch keeps its name: alpha + fix-typo = alpha-fix-typo" test "$(pvn alpha fix-typo)" = alpha-fix-typo
+n1=$(pvn alpha feature/Login); n2=$(pvn alpha feature-login)
+check "PV2 a branch that had to change gets a checksum ($n1), the one that did not does not ($n2)" \
+  eval 'test "$n2" = alpha-feature-login && printf "%s" "$n1" | grep -Eq "^alpha-feature-login-[0-9a-f]{4}$" && test "$n1" != "$n2"'
+n3=$(pvn alpha "release/2026.11 hotfix very long name")
+check "PV3 a long branch is cut to 24 characters in all, a valid app name ($n3)" \
+  eval 'test ${#n3} -le 24 && printf "%s" "$n3" | grep -Eq "^alpha-[a-z0-9-]+-[0-9a-f]{4}$" && ! printf "%s" "$n3" | grep -q -- "--"'
+n4=$(pvn alpha "release/2026.11 hotfix very long nome")
+check "PV4 two long branches with the same start do not share a name ($n3, $n4)" test "$n3" != "$n4"
+check "PV5 an app name too long for previews is refused with why" eval 'pvn averyverylongappname-x b | grep -q "^DIE the app name .* too long for previews"'
+check "PV6 a branch of only symbols still gets a valid name ($(pvn alpha '///'))" eval 'pvn alpha "///" | grep -Eq "^alpha-branch-[0-9a-f]{4}$"'
+out=$("$R" preview up --ttl 7w 2>&1); rc=$?
+check "PV7 tando preview up --ttl 7w: refused before any call" eval 'test $rc != 0 && printf "%s" "$out" | grep -q "bad --ttl"'
+out=$("$R" preview frob 2>&1); rc=$?
+check "PV8 tando preview frob is a usage error" test $rc = 2
+out=$("$R" backup drill --help 2>&1)
+check "PV9 backup drill is in the help" eval 'printf "%s" "$out" | grep -Fq "tando backup drill [app]"'
+printf 'host\tx\nserver\t1\npreview\talpha-feature-login-d910\talpha\t%s\t1\t20261122-010112\thttp://alpha-feature-login-d910.apps.example.org\npreview\talpha-pr-7\talpha\t%s\t1\t-\thttp://alpha-pr-7.apps.example.org\n' "$(( $(date +%s) + 600000 ))" "$(( $(date +%s) + 7300 ))" > "$E/pv.rows"
+# shellcheck disable=SC2034  # (read in the eval of PV11)
+pvout=$( . "$ROOT/lib/ui.sh"; . "$ROOT/lib/common.sh"; . "$ROOT/lib/views.sh"; . "$ROOT/lib/cmd-preview.sh"; TMPD=$E; cp "$E/pv.rows" "$E/st"; APP=alpha HOST=vps; TANDO_COLOR=never; ui_init; preview_render 2>&1 )
+check "PV11 preview ls shows each name whole, its expiry and its whole link, and 'not deployed yet'" \
+  eval 'printf "%s" "$pvout" | grep -q "alpha-feature-login-d910  expires in 6d" && printf "%s" "$pvout" | grep -q "http://alpha-feature-login-d910.apps.example.org" &&
+        printf "%s" "$pvout" | grep -q "alpha-pr-7  expires in 2h .*not deployed yet"'
+check "PV10 none of the preview checks reached a server (ssh/rsync calls: $(calls))" test "$(calls)" = 0
 rm -rf "${E:?}/w/hello/.tando"
 t_done

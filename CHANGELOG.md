@@ -20,6 +20,63 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   `tando up` (checksum-verified), env variables as bindings. `tando init` suggests it for a
   `wrangler.toml` project. No Node APIs beyond nodejs_compat, no file system (docs/COMMANDS.md,
   "Workers apps").
+- bench: `bench/fleet.sh` (100-app fleet and reboot test on a real server), `bench/rebuild-drill.sh` (rebuild and offsite restore drill) and `bench/container-egress.sh` (container apps bypass the per-uid network rules: measured, fix proposed); docs/THREAT-MODEL.md.
+- Preview apps: `tando preview up [--branch B] [--ttl 7d]` deploys this project as
+  `<app>-<branch>` (24 characters at most; a checksum keeps two branches apart) on its own link:
+  the parent's settings, no database, jobs or backups, no release command (unless
+  `preview_release = on`), only the env names the parent lists in `preview_env` (never its
+  database URLs; minus `preview_skip`), `idle_stop` 6h, removed by the server after `preview_ttl`
+  (default 7d). `preview ls` and `preview rm` list and remove them; destroying an app destroys its
+  previews. A CI deploy key of the app may make, deploy to and remove previews of its own app only
+  (new gate verbs and two more exact sudo commands; run `tando host setup` once), and
+  `tando ci setup --previews` makes a key that may do only that, never deploy the app: the key for
+  pull requests, so the production key stays limited to `main`. A GitHub Actions example is in
+  docs/CI.md. Design: docs/PREVIEWS.md.
+- Restore drill: `tando backup drill [app]` restores the newest backup into a throwaway database
+  (`tdrill_<app>`, as the app's own role, no PUBLIC access) and directory on the server, checks
+  file and table counts and `pg_restore`'s exit, reports and removes the copy (the live data is
+  never touched; it checks both disks first, by the archive's real size). The server does it monthly after the backup
+  queue (`backup_drill = monthly|off` in `tando host setup`); `backup ls` shows the last result,
+  `doctor` warns and an alert fires when a drill fails.
+- Dashboard on macOS: its own app, `~/Applications/tando Dashboard.app` (built by `tando menubar
+  install`): Dock icon, Cmd+Tab, Spotlight, standard menus (copy and paste work), a thin WKWebView on
+  the system WebKit. The menu bar's Open dashboard and `tando dashboard` open it. The dashboard's
+  left sidebar is now Overview / Deploys / Alerts, then Server, Apps (all servers, one list) and
+  Database (opens the studio directly); it and the page no longer scroll or bounce: only the main pane does.
+- Isolation: limits on what apps share (docs/COMMANDS.md, "Limits and load").
+  - Kernel tables: one app's user holds at most `conn_out` (2048) connections at once, sends at
+    most `dns_rate` (200) DNS packets a second, and holds at most 20 x `db_pool` (100)
+    connections to pgbouncer and PostgreSQL (`tando host setup <host> conn_out=N dns_rate=N`).
+  - Disk: an app's `/tmp` and `/var/tmp` are a tmpfs of `tmp_size` (64M) in its memory, no longer
+    a directory on the root disk. `disk = 2G` in tando.conf sets its own disk share; the new
+    alert `disk_warn` (low) fires at 80% of it. On ext2/3/4 the reserved blocks go to group
+    `tando-core` (PostgreSQL, Caddy) too.
+  - Memory and CPU: Caddy, sshd, tandod, PostgreSQL and pgbouncer get `MemoryLow`; an app's
+    journald runs in its slice (a log flood counts against the app); `priority` sets the CPU
+    weight (high 200, low 50); `io = 50` caps an app's disk bandwidth in MB/s.
+- Caddy per app, so a slow or flooding app ties up only itself (docs/COMMANDS.md, "Limits and
+  load"); applied at the app's next deploy or `tando host setup`:
+  - `response_timeout = 60` (seconds, or `off`): an answer whose headers do not come in time is a
+    504 "<app> took too long to answer". Websockets and event streams are not cut by it.
+  - `body_max = 100MB` (or `off`): a larger request body is a 413, also on Caddy 2.6 (which
+    reported it as a 502).
+  - A connection to the app that does not open in 3 s counts as a restart (held, tried again).
+  - `cold_timeout = 30` (seconds) for an app with `idle_stop`: a visitor waits at most that long
+    for the app to start, then gets a 503 "waking up" page with `Retry-After: 5`; the app goes
+    on starting. Caddy keeps a connection to an idle app's proxy 30 s (was: none), so the
+    idle_stop timer starts up to 30 s after the last request.
+  - Caddy 2.7 and later: a reload (a new app, another app's site change) no longer ends every
+    websocket and event stream at once: they end 5 minutes later (`stream_close_delay`; `tando host setup <host> stream_close_delay=30m` to change it). Caddy
+    2.6 (Ubuntu's package) has no such setting: there a reload still ends them.
+- Deploys: a deploy no longer waits out the soak of the release before it (back-to-back deploys
+  took the rest of that soak, up to 30 s, on top of their own time). It supersedes it: the soak
+  ends at once, that release stays live until the new one switches and is recorded as
+  `superseded` (in `tando releases` and `tando history`): live, not verified. A new release that
+  fails after its switch goes back to the last verified release, never to a superseded one.
+- Faster health checks: the pre-flight and the check through Caddy poll every 0.1 s for their
+  first two seconds (they waited up to 0.5 s between polls), asking systemd for the unit's state
+  in one call every fourth poll. State writes during a deploy fork less (the metadata group is
+  looked up once per process, a temp file is made with its group and mode in one step).
 - Scale: a server holds 100 apps and more (tuned for 4 vCPU / 8 GB). Upgrade with
   `tando host setup <host>`; apps keep their ports, users and settings. docs/ARCHITECTURE.md,
   "Many apps on one server".
@@ -29,6 +86,8 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
     took minutes with 100 apps).
   - Memory: a deploy that raises an app's memory caps over RAM x 1.5 (`mem_overcommit=`, 0 turns
     it off) is refused unless `--force`. New `priority = high|low` in tando.conf.
+  - Creating an app no longer reloads systemd (it did three times; with 150 apps that was 1 s of
+    PID 1 each, 4.5-8 s with 200), and apps created at once no longer fail in groupadd.
   - Jobs: at most `job_slots` runs at once on the server (default the number of CPUs, at least 2).
   - Logs: `log_budget=` (default 20% of the disk) is split across the apps' default log caps;
     `tando doctor` compares the caps with it.
@@ -36,7 +95,13 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   long without a request and its next request starts it (workers and jobs run on); systemd socket
   activation and systemd-socket-proxyd behind Caddy, so the first request waits about 0.1-0.3 s
   for a small app. `tando ls` says `idle`; the monitor and the per-minute recovery do not wake it.
-  Not for static sites or containers (docs/COMMANDS.md, "Scale to zero").
+  Not for static sites or containers (docs/COMMANDS.md, "Scale to zero"). While idle its log
+  namespace's journald stops too (about 1.1 MB; not while a worker or job of the app runs), and
+  admission counts an idle_stop app at 2 MB plus `idle_awake` (20) % of its memory, not its cap.
+  Fixed: an idle_stop app woken more than five times in a minute was refused its next start
+  (systemd's start limit counted every wake), its wake socket then failed and visitors got 502
+  and the down page; a clean idle stop now resets the counter (its proxy and journald sync units
+  have no start limit of their own any more). The neighbours suite's N5-C/N6-C were this.
 - PostgreSQL for 100 apps: `tando host setup` sizes it from the server's RAM (max_connections 100
   and shared_buffers 15% on 8 GB, instead of 20 and 32 MB) and runs one pgbouncer for all apps
   (127.0.0.1:6432, transaction pooling, `db_pool` server connections per app, default 5). New
@@ -165,6 +230,11 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 Run `tando host setup <host>` on each server after updating tando; it applies the items below.
 Steps and checks: docs/release-notes/0.3.0.md.
 
+- An app's `/tmp` and `/var/tmp` are a 64 MB tmpfs in its memory (was: a private directory on
+  the disk), from its next deploy or host setup. An app that writes large temporary files (uploads
+  to the system temp directory) sets `tmp_size = 512M`, or `memory =` higher with it. New caps per
+  app's user: 2048 connections at once (`conn_out`), 200 DNS packets a second (`dns_rate`), 20 x
+  `db_pool` connections to the database; `tando doctor` ("app limits") counts what they refused.
 - PostgreSQL moves to pgbouncer on the app's next deploy. An app's `DATABASE_URL` then points at
   pgbouncer (transaction pooling); `LISTEN`/`NOTIFY`, session advisory locks, session `SET` and
   prepared statements on old drivers do not survive that: set `db_direct = true` for such an app
@@ -199,6 +269,9 @@ Steps and checks: docs/release-notes/0.3.0.md.
   second.
 - Database studio: `tando host setup` installs `tando-studio.service` (see New). An older tando on
   the laptop is told to update before it can open the studio.
+- Caddy limits per app (see New): an answer whose headers take over 60 s is now a 504 and a request
+  body over 100MB a 413, on each app's next deploy or `tando host setup`. Set `response_timeout = off`
+  (or more seconds) for an app with long polls or slow reports, `body_max` for large uploads.
 - `tando ls` (and `ls --all`, per server) above 50 apps shows a summary: the count per state and
   only the apps that are down or have an alert firing; `--all-rows` lists every app; `--json` is
   unchanged.
@@ -216,9 +289,34 @@ Steps and checks: docs/release-notes/0.3.0.md.
 - Monitoring: how an app last ended (`last: exit status 3`) is read from the system journal only
   when the app restarted or its state changed, never for a stopped or static app. A stopped or
   failed app used to start a `journalctl` over the whole system journal every minute.
+- Monitoring: tandod spends about half the CPU it did (153 to 80 ms a minute on a 25-app test
+  server with log traffic). The log scan's error counts, the metrics' previous counters and the
+  request log position are no longer flushed to disk every minute (a new error group still is). A
+  hung app's direct liveness probes run at once (the run waits 20 s at most, not 20 s per app), and
+  up to 64 health probes run in parallel. `tando-status cost` on the server breaks tandod's CPU
+  down by section; `TANDOD_PROFILE=<file>` in its environment writes a CPU profile
+  (docs/MONITORING.md, "Where tandod's CPU goes").
 
 ### Fixed
 
+- Fixed: `tando history` for all apps (no `-a`) answered "invalid app name": a lone number is the
+  count, in the agent, tando-status and the shell fallback (old clients work too). The dashboard's
+  Deploys page works again.
+- Parallel `tando up` of new apps on one server. Two of them could pick the same user or
+  group id (the second failed with "groupadd ... failed"); ids are now picked under one lock. A
+  new app's configure no longer holds the staged-env lock to its end (with many apps others
+  waited over 60 s and failed "another env change of an app not created yet takes over 60 s").
+  An agent call that failed with no message now says so, and the deploy box is closed (a failure
+  in configure ended the deploy with no last line). The upload and agent calls try again for
+  about 10 s when sshd turns a session away (MaxSessions on a shared connection).
+- An app whose first deploy failed is no longer left with an enabled unit that fails at
+  every boot: the unit is enabled once a release is verified (recover disables one left by an
+  older tando).
+- Static sites take no port and no pre-flight port (Caddy serves their files); one that becomes
+  a process (another recipe) gets them at that deploy. Existing static sites keep theirs.
+- A crash loop that systemd gave up on and tando's recovery started again was lost: the
+  start began systemd's restart count again, so neither the alert nor the restarts metric saw it.
+  The count is kept in the app's state (`restarts_lost`) until its next restart or deploy.
 - A new app could get another app's pre-flight port (its port + 100) as its own port once the port
   range was widened past 100 ports: that app's every deploy and env change then failed with
   "pre-flight port in use", and the loopback rules let its user reach the new app. A new app's port

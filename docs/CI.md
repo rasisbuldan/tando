@@ -33,6 +33,8 @@ data: give a CI-deployed app only secrets you would also give your CI (see below
 | begin / end A's upload lease | yes | yes (lease is tagged `ci-<key id>`) | no |
 | activate A (pre-flight, switch, verify, auto-rollback) | yes | yes, only its own frozen upload | no |
 | deploy-status, status, releases, history of A | yes | yes (no app log lines, no other app's rows) | no |
+| make, deploy to and remove previews `A-<name>` of A (`tando preview`) | yes | yes, only names `A-<slug>`; a preview has no previews | no |
+| the same with a previews key (`tando ci setup --previews`) | yes | previews and A's status only: begin, receive, activate and end of A itself are refused | no |
 | `rollback`, `rollback <id>` | yes | **no** | no |
 | `up`/`configure` (start command, health, memory, jobs, unit, Caddy) | yes | **no** | no |
 | `env set/unset/ls`, `logs`, `start/stop/restart`, `unlock`, `backup *`, `db *`, `destroy` | yes | **no** | no |
@@ -84,7 +86,8 @@ branch). The key cannot reach other apps' files, root, or tando' configuration.
   `GOTRACEBACK`, `GOGC`, `GOMEMLIMIT`, `GOMAXPROCS`) is set (sudo's `env_reset` removes them). A
   crash prints `tando-gate: internal error` and nothing else.
 - **sudo**: `/etc/sudoers.d/tando-d-<app>` allows exactly `tando-gate root <app> begin`, `end`,
-  `activate` and `receive`: fixed path, verb and app, nothing else.
+  `activate`, `receive`, `preview-up` and `preview-rm`: fixed path, verb and app, nothing else (a
+  preview's name and expiry come on stdin and are checked again by root mode).
 - **Root mode is bound to the ssh session.** Walking up past sudo, the first other process must be
   the gate as login shell (`tando-gate -c "<gate> key <id>"`, executable the gate) running wholly as the deploy user,
   whose parent is that user's `sshd-session` and whose grandparent is sshd's root process. The key id
@@ -196,6 +199,77 @@ Writes `.github/workflows/deploy.yml` from `templates/github-deploy.yml`:
   resolves to its commit (the job then fails if the tag moved). Branch names are refused.
 - `tando deploy` with the secrets in that step's environment only. `tando deploy` runs the build
   from `tando.conf`, the same command as on the laptop.
+
+## Preview apps from CI
+
+A pull request can get its own app, `<app>-<branch>` (docs/PREVIEWS.md). Use a key made for
+that, never the production key:
+
+```
+tando ci setup --previews      # a key that may only make, deploy to and remove alpha-<name>
+```
+
+It may make and remove previews named `<app>-<name>` of its own app and deploy to them, and read
+the app's status; root mode refuses it every verb of a deploy of the app itself, so whoever can
+read it (any branch) can never deploy production. The gate checks the preview's name in the
+request, in root mode and in the agent, and the preview gets a deploy user of its own holding
+copies of the app's keys (revoking or rotating a key ends the previews' sessions too). Store it in
+a GitHub environment of its own, `tando-preview`, that allows pull request branches. **The
+production key stays in `tando-deploy`, limited to `main`**: never widen that environment to other
+branches, since a branch that can read a key can run code as the app with that key's rights.
+
+A preview gets none of the app's env unless the app's `preview_env` names it (never the database
+URLs), and no release command unless `preview_release = on` (docs/PREVIEWS.md). Limits: 10
+previews per app, 7 days (`preview_ttl` in tando.conf); the app name has at most 18 characters.
+A pull request from a fork has no access to the secrets anyway.
+
+```yaml
+# .github/workflows/preview.yml (tando ci github writes deploy.yml; this one is added by hand)
+name: preview
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+concurrency:
+  group: tando-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  preview:
+    if: github.event.pull_request.head.repo.full_name == github.repository   # not from forks
+    runs-on: ubuntu-24.04
+    environment: tando-preview         # the key of tando ci setup --previews; TANDO_HOST TANDO_PORT TANDO_KNOWN_HOSTS
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: install tando (pinned: use the same --ref as deploy.yml)
+        run: |
+          git clone https://github.com/OWNER/tando "$HOME/tando"
+          git -C "$HOME/tando" checkout --detach <40-hex commit or tag as in deploy.yml>
+          echo "$HOME/tando/bin" >> "$GITHUB_PATH"
+      - name: preview up
+        if: github.event.action != 'closed'
+        run: npm ci && tando preview up      # the branch is GITHUB_HEAD_REF
+        env:
+          TANDO_DEPLOY_KEY: ${{ secrets.TANDO_DEPLOY_KEY }}
+          TANDO_HOST: ${{ secrets.TANDO_HOST }}
+          TANDO_PORT: ${{ secrets.TANDO_PORT }}
+          TANDO_KNOWN_HOSTS: ${{ secrets.TANDO_KNOWN_HOSTS }}
+      - name: preview rm
+        if: github.event.action == 'closed'
+        run: tando preview rm
+        env:
+          TANDO_DEPLOY_KEY: ${{ secrets.TANDO_DEPLOY_KEY }}
+          TANDO_HOST: ${{ secrets.TANDO_HOST }}
+          TANDO_PORT: ${{ secrets.TANDO_PORT }}
+          TANDO_KNOWN_HOSTS: ${{ secrets.TANDO_KNOWN_HOSTS }}
+```
+
+`tando preview up` prints the link in the log (add it to the pull request with a comment step if
+you like). A preview that nobody removes expires by itself. A server that was set up before this
+feature needs `tando host setup <host>` once (the gate's sudo rules are rewritten then). The
+workflow above is an example, not generated by `tando ci github` and not run by the test suite; the
+gate and CLI behaviour is (test/e2e-ci.sh, section 11).
 
 ## Pre-push hook: `tando ci hook`
 

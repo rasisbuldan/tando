@@ -49,9 +49,9 @@ function Shell() {
   return (
     <TooltipProvider>
       <a href="#main" className="skip">Skip to content</a>
-      <div className="flex min-h-screen">
+      <div className="flex h-dvh overflow-hidden">
         <Sidebar hosts={st.data} sb={sb} version={VERSION} />
-        <main id="main" className="min-w-0 flex-1 px-4 pb-8 lg:px-6">
+        <main id="main" tabIndex={-1} className="h-full min-w-0 flex-1 overflow-y-auto overscroll-none px-4 pb-8 outline-none lg:px-6">
           <div className="max-w-[1440px]">
             <PanelBoundary>
               <Suspense fallback={<div className="h-14 border-b border-border"><Loading h="h-14" /></div>}>

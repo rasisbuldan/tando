@@ -1,6 +1,6 @@
 # lib/cmd-ci.sh: restricted deploy keys for CI. Sourced by bin/tando for `tando ci ...`, and by
 # resolve() when TANDO_DEPLOY_KEY is set (CI) or a host entry has kind=deploy.
-# help: ci setup|ls|revoke <id|fingerprint|all>|rotate|github|hook   deploy keys for CI (admin)
+# help: ci setup [--previews]|ls|revoke <id|fingerprint|all>|rotate|github|hook   deploy keys for CI (admin)
 #
 # The server side is tando-gate, a Go program (srv/gate; installed as /opt/tando/bin/tando-gate by
 # install_helpers, the binary for the server's CPU). See docs/CI.md.
@@ -12,6 +12,7 @@ ci_usage() {
   cat >&2 <<'EOF'
 usage: tando ci <command>              (run by the admin, in the app's directory)
   setup                  create a deploy key for this app; prints it once with the CI secrets
+  setup --previews       a key for previews only (<app>-<branch>): it cannot deploy the app itself
   rotate                 a new key replaces every existing one (they stop working now)
   ls                     keys with fingerprint, created and last deploy
   revoke <id|SHA256:..|all>
@@ -112,9 +113,9 @@ ci_date() { # epoch -> "2026-11-14 17:01" in GMT
   TZ=UTC local_time "$1" '+%Y-%m-%d %H:%M'
 }
 
-ci_setup() { # [rotate]
-  local mode=${1:-} h port kh line n=0
-  ci_admin "${mode:-setup}"
+ci_setup() { # [rotate|previews]
+  local mode=${1:-} h port kh line n=0 envname=tando-deploy
+  case $mode in rotate) ci_admin rotate;; *) ci_admin setup;; esac
   command -v ssh-keygen > /dev/null || die "ssh-keygen not found"
   ci_install_gate
   ssh-keygen -q -t ed25519 -N '' -C "tando-ci-$APP" -f "$TMPD/ci_key" < /dev/null > /dev/null ||
@@ -126,7 +127,12 @@ ci_setup() { # [rotate]
   if [ "${port:-22}" = 22 ]; then kh=$h; else kh="[$h]:$port"; fi
   ui_box_open "ci ${mode:-setup} $APP" "$HOST"
   ui_kv "login" "$K_user@$h port ${port:-22}"
-  ui_kv "can" "upload, activate, status of $APP; nothing else"
+  if [ "$mode" = previews ]; then
+    envname=tando-preview
+    ui_kv "can" "make, deploy to and remove previews $APP-<branch>; read $APP's status; never deploy $APP"
+  else
+    ui_kv "can" "upload, activate, status of $APP, and its previews; nothing else"
+  fi
   ui_kv "note" "the code it ships runs with $APP's env and data: whoever holds the key can read them"
   ui_kv "key" "$K_keyid  $K_fingerprint"
   [ "$mode" = rotate ] && ui_kv "revoked" "$K_revoked older key(s); their sessions were ended"
@@ -142,11 +148,15 @@ ci_setup() { # [rotate]
     printf -- '--- end\n'
   }
   rm -f "$TMPD/ci_key"
-  note "GitHub: gh secret set <NAME> --env tando-deploy (paste each value), then: tando ci github"
+  if [ "$mode" = previews ]; then
+    note "GitHub: gh secret set <NAME> --env $envname (paste each value); allow pull request branches on that environment, never on tando-deploy (docs/CI.md, \"Preview apps from CI\")"
+  else
+    note "GitHub: gh secret set <NAME> --env $envname (paste each value), then: tando ci github"
+  fi
 }
 
 ci_ls() {
-  local id fp created used who
+  local id fp created used who scope
   ci_admin ls
   gate_admin key-ls "$APP" > "$TMPD/keys" || bail 1
   ui_box_open "deploy keys $APP" "$HOST"
@@ -154,13 +164,14 @@ ci_ls() {
     ui_box_line "no deploy keys (tando ci setup)"; ui_box_close; return 0
   fi
   {
-    printf 'ID\tFINGERPRINT\tCREATED (GMT)\tLAST DEPLOY (GMT)\tBY\n'
-    while IFS='	' read -r _ id fp created used who; do
+    printf 'ID\tFINGERPRINT\tCREATED (GMT)\tLAST DEPLOY (GMT)\tBY\tMAY\n'
+    while IFS='	' read -r _ id fp created used who scope; do
       [ "$used" = - ] && used=never || used=$(ci_date "$used")
-      printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$fp" "$(ci_date "$created")" "$used" "$who"
+      [ "$scope" = previews ] && scope=previews || scope=deploy
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$fp" "$(ci_date "$created")" "$used" "$who" "$scope"
     done < <(grep '^key	' "$TMPD/keys")
   } > "$TMPD/rows"
-  ui_table "l,l:20-52,l!2,l!1,l!3" < "$TMPD/rows"
+  ui_table "l,l:20-52,l!2,l!1,l!3,l" < "$TMPD/rows"
   ui_box_close
 }
 
@@ -317,7 +328,11 @@ ci_hook() {
 
 cmd_ci() {
   case ${ARGS[1]:-} in
-    setup) ci_setup;;
+    setup) case ${ARGS[2]:-} in
+        "") ci_setup;;
+        --previews) ci_setup previews;;
+        *) ci_usage; exit 1;;
+      esac;;
     rotate) ci_setup rotate;;
     ls) ci_ls;;
     revoke) ci_revoke "${ARGS[2]:-}";;

@@ -230,6 +230,22 @@ check "U9b within RAM x 1.5: taken" eq "$(ma 512 2000)" ok
 check "U9c over it: refused, and says how much" eval 'ma 1024 2000 | grep -q "3456 MB with a1 at 1024 MB, over 3000 MB"'
 check "U9d not raised (the host is over already): taken" eq "$(ma 256 500)" ok
 check "U9e configure refuses unless --force" eval 'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "((!force)) && ! mem_admit"'
+# U9h-j: an app with idle_stop is stopped most of the time: admission counts its web process at
+# 2 MB plus 20% of its cap (idle_awake), its workers whole; static and container apps, and
+# idle_stop = off, as before. 8 such apps of 256M and this one fit in 1000 MB x 1.5 (2304 MB of
+# full caps were refused)
+rm -rf "${T:?}/apps"; mkdir -p "$T/apps/a1"
+for i in 2 3 4 5 6 7 8 9; do mkdir -p "$T/apps/a$i"; printf 'memory=256M\nidle_stop=6h\n' > "$T/apps/a$i/app.conf"; done
+printf 'memory=128M\n' > "$T/apps/a1/app.conf"   # (raised to 256M below)
+mkdir -p "$T/x"
+printf 'memory=100M\nidle_stop=10m\nworker.q=x\n' > "$T/x/w.conf"          # 2 + 20 + 100
+printf 'memory=100M\nidle_stop=off\n' > "$T/x/off.conf"                   # 100
+printf 'memory=100M\nidle_stop=6h\nrecipe=container\n' > "$T/x/ct.conf"   # 100
+mc() { "$BASH" -c 'eval "$1"; shift; mem_caps_mb "$@"' _ "$(agent_fn mem_caps_mb)" "$@" | sed "s#$T/x/##" | tr '\n' ' '; }
+check "U9h admission counts an idle_stop app's web at 2 MB + 20% of its cap, its workers whole" eq \
+  "$(mc -a "$T/x/w.conf" "$T/x/off.conf" "$T/x/ct.conf")" "w.conf 122 off.conf 100 ct.conf 100 "
+check "U9i without -a (MemoryLow of high-priority apps): the whole caps" eq "$(mc "$T/x/w.conf")" "w.conf 200 "
+check "U9j 8 idle_stop apps of 256M and one raised to 256M fit in 1000 MB RAM x 1.5" eq "$(ma 256 1000)" ok
 # shellcheck disable=SC2016
 oa() { "$BASH" -c 'eval "$1"; C_priority=$2; oom_adj' _ "$(agent_fn oom_adj | sed 's/\${C\[priority\]:-}/${C_priority:-}/')" "$1"; }
 check "U9f priority: high 100, default 500, low 900" eq "$(oa high) $(oa '') $(oa low)" "100 500 900"
@@ -351,7 +367,7 @@ check "U12h an app whose pool does not grow deploys on a server already over" \
 check "U12i ... and one that grows it is refused" \
   eval 'pgpool 21 30 database=postgres,db_pool=20 database=postgres database=postgres | grep -q "over the 22"'
 
-# ---- U13 runtimes: node_lite (a `node` that adds V8's --lite-mode, first in the app's PATH: V8
+# ---- U18 runtimes: node_lite (a `node` that adds V8's --lite-mode, first in the app's PATH: V8
 # options such as --lite-mode are not allowed in NODE_OPTIONS) and workerd (the capnp config of
 # one worker: its modules, compatibility settings, env as bindings)
 lite() { # args -> what a (stub) node got through the shim
@@ -361,9 +377,9 @@ lite() { # args -> what a (stub) node got through the shim
   "$BASH" -c 'eval "$1"; R=$2/etc; lite_shim && PATH=$R/lite:$3 && shift 3 && node "$@"' _ \
     "$(agent_fn lite_shim)" "$T/lite" "$T/lite/real:/usr/bin:/bin" "$@"
 }
-check "U13a node_lite: the shim runs node with --lite-mode first, then the app's arguments" \
+check "U18a node_lite: the shim runs node with --lite-mode first, then the app's arguments" \
   eq "$(lite server.js a)" "--lite-mode server.js a"
-check "U13b node_lite: the shim is executable and written once (a second write leaves it as it is)" \
+check "U18b node_lite: the shim is executable and written once (a second write leaves it as it is)" \
   eval 'lite x > /dev/null; test -x "$T/lite/etc/lite/node" && m=$(cksum < "$T/lite/etc/lite/node") &&
         "$BASH" -c "eval \"\$1\"; R=\$2/etc; lite_shim" _ "$(agent_fn lite_shim)" "$T/lite" && test "$m" = "$(cksum < "$T/lite/etc/lite/node")"'
 wc_() { # dir port entry [name=value lines on stdin] -> the capnp config
@@ -374,21 +390,124 @@ mkdir -p "$T/w1/src/lib"
 printf 'name = "x"\nmain = "src/index.js"\ncompatibility_date = "2025-06-01"\ncompatibility_flags = ["nodejs_compat", "global_navigator"]\n' > "$T/w1/wrangler.toml"
 : > "$T/w1/src/index.js"; : > "$T/w1/src/util.js"; : > "$T/w1/src/lib/more.mjs"
 mkdir -p "$T/w1/node_modules/x"; : > "$T/w1/node_modules/x/skip.js"
-check "U13c workerd config: the entry is the first module, its siblings follow, node_modules is left out" \
+check "U18c workerd config: the entry is the first module, its siblings follow, node_modules is left out" \
   eval 'c=$(wc_ "$T/w1" 9100 src/index.js < /dev/null); printf "%s\n" "$c" | grep -n "esModule" | head -1 | grep -q "\"index.js\"" &&
         echo "$c" | grep -q "name = \"util.js\"" && echo "$c" | grep -q "name = \"lib/more.mjs\"" && ! echo "$c" | grep -q skip.js'
-check "U13d workerd config: listens on 127.0.0.1:<port> only" \
+check "U18d workerd config: listens on 127.0.0.1:<port> only" \
   eval 'wc_ "$T/w1" 9100 src/index.js < /dev/null | grep -q "address = \"127.0.0.1:9100\""'
-check "U13e workerd config: compatibility date and flags from wrangler.toml" \
+check "U18e workerd config: compatibility date and flags from wrangler.toml" \
   eval 'c=$(wc_ "$T/w1" 9100 src/index.js < /dev/null); echo "$c" | grep -q "compatibilityDate = \"2025-06-01\"" &&
         echo "$c" | grep -q "compatibilityFlags = \[\"nodejs_compat\", \"global_navigator\"\]"'
-check "U13f workerd config: a date newer than the pinned workerd knows is lowered to what it knows" \
+check "U18f workerd config: a date newer than the pinned workerd knows is lowered to what it knows" \
   eval 'sed -i.bak "s/2025-06-01/2031-01-01/" "$T/w1/wrangler.toml"; wc_ "$T/w1" 9100 src/index.js < /dev/null | grep -q "compatibilityDate = \"2025-10-01\""'
-check "U13g workerd config: env vars are text bindings, quotes and backslashes escaped" \
+check "U18g workerd config: env vars are text bindings, quotes and backslashes escaped" \
   eval 'c=$(printf "%s\n" "GREETING=hi \"you\" \\\\ ok" "N=1" | wc_ "$T/w1" 9100 src/index.js); echo "$c" | grep -qF "(name = \"GREETING\", text = \"hi \\\"you\\\" \\\\\\\\ ok\")" &&
         echo "$c" | grep -qF "(name = \"N\", text = \"1\")"'
-check "U13h workerd config: no wrangler.toml: today-ish default date, no flags" \
+check "U18h workerd config: no wrangler.toml: today-ish default date, no flags" \
   eval 'mkdir -p "$T/w2"; : > "$T/w2/a.js"; c=$(wc_ "$T/w2" 9101 a.js < /dev/null); echo "$c" | grep -q "compatibilityDate = \"2025-09-01\"" && ! echo "$c" | grep -q compatibilityFlags'
+# ---- U13 a new app's user and its metadata group take their ids under one host lock (uid_lock):
+# two `tando up` of new apps at once picked the same free id and the second groupadd failed
+# ("GID already exists"). (flock, groupadd, new_uid and the rest: stubs; $T/calls in order)
+ap() {
+  : > "$T/calls"
+  # shellcheck disable=SC2016
+  R=$T "$BASH" -c 'eval "$1"; getent() { return 2; }; lockfile() { :; }; new_uid() { echo 30001; }
+    flock() { echo "flock $*" >> "$R/calls"; }; groupadd() { echo "groupadd $*" >> "$R/calls"; }
+    usermod() { :; }; id() { return 1; }; deploy_user() { return 1; }; chown() { :; }; chmod() { :; }
+    touch() { :; }; install() { :; }; meta_mode() { :; }; die() { echo "die $*" >> "$R/calls"; exit 1; }
+    A=a1 D=$R/a1; app_perms' _ "$(agent_fn meta_group_ok uid_lock)" 2> /dev/null   # (app_perms comes with meta_group_ok's lines)
+  tr '\n' ';' < "$T/calls"
+}
+check "U13a the metadata group's id is picked under the uid lock" eval 'ap | grep -q "^flock -w 120 14;groupadd "'
+check "U13b configure picks the app user's id under the uid lock" eval \
+  'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "uid_lock; nu=\$(new_uid)"'
+check "U13c a new app's configure gives back the staged lock with the ports lock, not at its end" eval \
+  'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "flock -u 8; exec 3>&-"'
+
+# ---- U14 unit_boot: an app's unit is enabled (started at boot) only while a release is live, so
+# a first deploy that failed leaves no unit that fails at every boot; an app that has none is
+# disabled (recover does it for those left by an older tando). Never for a stopped, idle (its
+# socket starts it) or static app. (systemctl: a stub; /etc is moved into $T; ${C[k]} and ${S[k]}
+# become ${C_k} and ${S_k}: this runs under bash 3.2, which has no associative arrays)
+na() { sed -e 's/\${\([CS]\)\[\([a-z_]*\)\]/${\1_\2/g' -e "s#/etc/#$T/etc/#g"; }
+ub() { # current stopped recipe idle_stop wants(0|1|2: the wake socket) -> the systemctl calls
+  rm -rf "${T:?}/etc"; mkdir -p "$T/etc/systemd/system/multi-user.target.wants"; : > "$T/calls"
+  : > "$T/etc/systemd/system/tando-a1.service"
+  [ "$5" = 1 ] && : > "$T/etc/systemd/system/multi-user.target.wants/tando-a1.service"
+  [ "$5" = 2 ] && mkdir -p "$T/etc/systemd/system/sockets.target.wants" && : > "$T/etc/systemd/system/sockets.target.wants/tando-a1_wake.socket"
+  # shellcheck disable=SC2016
+  R=$T "$BASH" -c 'eval "$1"; systemctl() { echo "${SYSTEMCTL_INSTALL_CLIENT_SIDE:+client }$*" >> "$R/calls"; }; A=a1
+    S_current=$2 S_stopped=$3 C_recipe=$4 C_idle_stop=$5; unit_boot' _ \
+    "$(agent_fn unit_boot unit_enable has_unit | na)" "$1" "$2" "$3" "$4"   # (idle_app comes with has_unit's lines)
+  tr '\n' ';' < "$T/calls"
+}
+# (the link made by systemctl itself, with no daemon-reload: through PID 1, an enable reloaded
+# systemd, and a new app is created and deployed with none: e2e-idle I20)
+check "U14a no release live, enabled: disabled" eq "$(ub "" "" node "" 1)" "client disable -q --no-reload tando-a1;"
+check "U14b a release live, not enabled: enabled" eq "$(ub r1 "" node "" 0)" "client enable -q --no-reload tando-a1;"
+check "U14c a release live, enabled: nothing" eq "$(ub r1 "" node "" 1)" ""
+check "U14d no release, not enabled: nothing" eq "$(ub "" "" node "" 0)" ""
+check "U14e a stopped app is not enabled" eq "$(ub r1 1 node "" 0)" ""
+# (an idle app: enabling its unit enables its wake socket (Also=), whose link is looked at; a new
+# idle app's socket was left not enabled, and did not come back at boot: e2e-idle I2)
+check "U14f an idle app with a release: enabled (its wake socket, through Also=)" eq "$(ub r1 "" node 6h 0)" "client enable -q --no-reload tando-a1;"
+check "U14j an idle app whose wake socket is enabled: nothing (not the multi-user link)" eq "$(ub r1 "" node 6h 2)" ""
+check "U14g a static app has no unit" eq "$(ub "" "" static "" 1)" ""
+check "U14h configure enables the unit only with a live release, and never for a new app" eval \
+  'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "^  cfg_reload \"\$new\"" &&
+   ! sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "systemctl enable" &&
+   sed -n "/^cfg_reload() {/,/^}/p" "$ROOT/server/tando-agent" | grep "enable" | grep -v "^ *#" | grep -c . | grep -qx 1 &&
+   sed -n "/^cfg_reload() {/,/^}/p" "$ROOT/server/tando-agent" | grep "unit_enable enable" | grep -q "S\[current\]"'
+check "U14i a verified operation's trailer runs unit_boot, and so does recover for an app with no release" eval \
+  'sed -n "/^op_trailer() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "^  unit_boot" &&
+   sed -n "/^rec_service() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "S\[current\]:-} \]\] || { unit_boot"'
+
+# ---- U15 restarts_keep: an app systemd gave up on (down) that tando starts again loses its
+# NRestarts (systemd begins again at 0), and tando-watch saw neither the crash loop nor its
+# restarts. Its count plus that start is kept in the state's restarts_lost, added up over loops.
+# (systemctl: a stub answering NRestarts; st: prints what it would save)
+rk() { # NRestarts restarts_lost -> what st saves
+  # shellcheck disable=SC2016
+  "$BASH" -c 'eval "$1"; systemctl() { echo "$NR"; }; st() { echo "$*"; }; A=a1
+    S_restarts_lost=$3; NR=$2 restarts_keep' _ "$(agent_fn restarts_keep | na)" "$1" "$2"
+}
+check "U15a the restarts of the loop plus the start are kept" eq "$(rk 4 "")" "restarts_lost 5"
+check "U15b ... added to those kept before" eq "$(rk 4 2)" "restarts_lost 7"
+check "U15c an unreadable count keeps the start" eq "$(rk "" 2)" "restarts_lost 3"
+check "U15d restart_app keeps them for a down app and clears them on any other restart" eval \
+  'sed -n "/^restart_app() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "then restarts_keep" &&
+   sed -n "/^restart_app() {/,/^}/p" "$ROOT/server/tando-agent" | grep -c "st restarts_lost \"\"" | grep -qx 2'
+
+# ---- U16 agent (lib/common.sh): a failed agent call ends the command with a message and the box
+# closed where the user sees it, also when the call's stdout is a file (configure's): under
+# parallel deploys, configure failed with nothing on stderr and the deploy ended with no word.
+# (agent_raw: a stub that fails; its stderr file empty, or with the server's line)
+ag() { # [server-line] -> what reached stdout|what reached stderr
+  rm -rf "${T:?}/ag"; mkdir -p "$T/ag"
+  [ -z "${1:-}" ] || echo "$1" > "$T/ag/err"
+  # shellcheck disable=SC2016
+  TMPD=$T/ag "$BASH" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; agent_raw() { return 1; }
+    TANDO_COLOR=never ui_init 60; HOST=h; ui_box_open "deploy a" h > /dev/null; agent sudo configure a > "$TMPD/cfg"' _ "$ROOT" 2> "$T/ag/stderr"
+  printf '%s|%s' "$(tr -d '\n' < "$T/ag/cfg")" "$(tr '\n' ' ' < "$T/ag/stderr")"
+}
+check "U16a an agent that failed silently is named, and the box closes on stderr, not into the call's file" \
+  eval 'ag | grep -q "^|tando: the server ended .configure. with status 1 and gave no reason.*╰"'
+check "U16b the server's own reason: no second message" eval 'ag "x" | grep -q "^|╰" '
+
+# ---- U17 upload: an rsync whose ssh session the server turned away (sshd MaxSessions on a shared
+# connection, parallel deploys) sent nothing and is tried again, not reported as a failed upload.
+# (rsync: a stub refused N times; agent_raw, ssh_wrapper, sleep: stubs)
+up1() { # refusals -> the number of rsync runs and upload's status
+  rm -rf "${T:?}/up"; mkdir -p "$T/up/stage"
+  # shellcheck disable=SC2016
+  TMPD=$T/up "$BASH" -c '. "$1/lib/ui.sh"; . "$1/lib/common.sh"; . "$1/lib/deploy.sh"
+    agent_raw() { echo token=abc; }; ssh_wrapper() { :; }; sleep() { :; }; phase_line() { :; }; box_say() { :; }
+    rsync() { echo x >> "$TMPD/runs"; [ "$(wc -l < "$TMPD/runs")" -gt "$N" ] && return 0
+      echo "mux_client_request_session: session request failed: Session open refused by peer"; return 255; }
+    APP=a HOST=h TARGET=u@h STAGE=$TMPD/stage N=$2; (upload) > /dev/null 2>&1; rc=$?; echo "$(wc -l < "$TMPD/runs" | tr -d " ") $rc"' _ "$ROOT" "$1"
+}
+check "U17a a refused session: rsync is run again and the upload goes on" eq "$(up1 2)" "3 0"
+check "U17b refused every time: it gives up after 6 runs" eq "$(up1 99)" "6 1"
 
 echo "core-unit: $n checks, $nf failed"
 [ "$nf" = 0 ]

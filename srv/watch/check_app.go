@@ -42,6 +42,7 @@ func checkBackup(t *tick, a *appTick) {
 		return
 	}
 	checkOffsite(t, a)
+	checkDrill(t, a)
 	if or(a.conf["backup"], "off") != "daily" {
 		return
 	}
@@ -58,6 +59,21 @@ func checkBackup(t *tick, a *appTick) {
 	case decimal.IsDigits(a.conf["created"]) && t.now-num(a.conf["created"], 0) > bh*3600:
 		t.sample(k, a.name, "backup", bad, "no backup recorded since the app was created "+dur(t.now-num(a.conf["created"], 0))+" ago", 1)
 	}
+}
+
+// checkDrill: the last restore drill of the app (tando backup drill; the host runs one a month). A
+// failed drill fires "drill" with the reason the agent recorded, and the next one that works
+// resolves it. An app that never had a drill, or one with backups off, is not judged.
+func checkDrill(t *tick, a *appTick) {
+	if a.state["drill_result"] == "" {
+		return
+	}
+	k := a.key("drill")
+	if a.state["drill_result"] == "fail" && or(a.conf["backup"], "off") == "daily" {
+		t.sample(k, a.name, "drill", bad, "the restore drill of the last backup failed: "+or(a.state["drill_why"], "no reason recorded"), 1)
+		return
+	}
+	t.sample(k, a.name, "drill", ok, "", 1)
 }
 
 // checkOffsite: the app's backups in the offsite bucket, from the state file tando-offsite keeps
@@ -118,21 +134,34 @@ func checkAppDisk(t *tick, a *appTick) {
 	}
 	t.vs.set("dumb."+a.name, mb)
 	k := a.key("disk")
-	limit := num(t.host["app_max_mb"], 8192)
+	limit, setting := appDiskLimit(t.host, a.conf)
 	// its database is its disk use too (the size PostgreSQL last gave, check_postgres.go)
 	files, db := num(mb, 0), int64(0)
 	if a.conf["database"] == "postgres" {
 		db = t.vs.n("pgsz."+a.name, 0) >> 20
 	}
+	use := a.name + " uses " + decimal.Itoa(files+db) + " MB of disk"
+	if db > 0 {
+		use += " (files " + mb + " MB, database " + decimal.Itoa(db) + " MB)"
+	}
+	// disk_warn (low): from disk_warn_pct (80) of its share up to the share itself
+	if t.cfg.on("disk_warn", a.name) {
+		r, wp := ok, t.cfg.num("disk_warn_pct", a.name)
+		if wp > 0 && (files+db)*100 >= limit*wp && files+db <= limit {
+			r = bad
+		}
+		t.sample(a.key("disk_warn"), a.name, "disk_warn", r, use+", "+decimal.Itoa((files+db)*100/limit)+"% of the "+decimal.Itoa(limit)+" MB allowed ("+setting+")", 1)
+	}
 	if files+db <= limit {
 		t.sample(k, a.name, "disk", ok, "", 1)
 		return
 	}
-	det := a.name + " uses " + decimal.Itoa(files+db) + " MB of disk"
-	if db > 0 {
-		det += " (files " + mb + " MB, database " + decimal.Itoa(db) + " MB)"
+	det := use + ", over the " + decimal.Itoa(limit) + " MB allowed"
+	if setting == "disk" {
+		det += " to it (disk in tando.conf)"
+	} else {
+		det += " per app (host setup app_max_mb=N)"
 	}
-	det += ", over the " + decimal.Itoa(limit) + " MB allowed per app (host setup app_max_mb=N)"
 	var fsp int64
 	mounts := t.w.mounts()
 	shared, isFS := t.w.df(filepath.Join(d, "shared"), mounts)
@@ -150,6 +179,25 @@ func checkAppDisk(t *tick, a *appTick) {
 		det += "; its file system is " + decimal.Itoa(fsp) + "% full: " + a.name + " was stopped (free space, then tando start -a " + a.name + ")"
 	}
 	t.sample(k, a.name, "disk", bad, det, 1)
+}
+
+// appDiskLimit: the MB of disk an app may use, and where that comes from: its own disk = (tando.conf,
+// like 2G or 500M), else the host's app_max_mb (8192).
+func appDiskLimit(host, conf map[string]string) (int64, string) {
+	if v := conf["disk"]; len(v) > 1 && decimal.IsDigits(v[:len(v)-1]) {
+		n := num(v[:len(v)-1], 0)
+		switch v[len(v)-1] {
+		case 'G':
+			n *= 1024
+		case 'M':
+		default:
+			n = 0
+		}
+		if n > 0 {
+			return n, "disk"
+		}
+	}
+	return num(host["app_max_mb"], 8192), "app_max_mb"
 }
 
 // classify is what this minute was for the app in its uptime record (a probe below may refine

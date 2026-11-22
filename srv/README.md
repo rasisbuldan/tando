@@ -455,7 +455,7 @@ domain packages for the machine and runs:
   backoff use `Clock.Boot` (time since boot, /proc/uptime: never steps, the same across restarts
   within a boot); the wall clock only aligns ticks on minutes and stamps them. A build with
   `-tags tandotest` (test/e2e-alerts.sh only) can make a tick panic or the process die
-  (`hook_on.go`); a real build cannot. `-tags profile` adds a CPU profile (cmd/tandod).
+  (`hook_on.go`); a real build cannot. `TANDOD_PROFILE=<file>` in its environment writes a CPU profile when it stops (cmd/tandod), and the `cost` verb (`tando-status cost`) breaks its CPU down by section (internal/cost).
 
 Tests: `sched_test.go` (a fake clock: minute boundaries, a slow tick, a suspend), `server_test.go`
 (the parser, a fuzz target, oversized, silent and non-root clients, the connection cap),

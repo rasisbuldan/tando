@@ -93,7 +93,7 @@ No other sizes. No italics. Weight 700 is not used.
 
 ## 4. Layout
 
-- **Shell:** CSS grid `[sidebar] [main]`. Sidebar 240 px expanded, 56 px collapsed, full height, sticky, its own scroll. Main scrolls the document.
+- **Shell:** one viewport high (`h-dvh`, `overflow: hidden` on html, body and the shell), `[sidebar] [main]`. Sidebar 240 px expanded, 56 px collapsed, full height, never sticky or moving, its own list scroll (`overscroll-contain`). `<main>` is the only scroll container (`overflow-y-auto overscroll-none`): the page never scrolls or rubber-bands, so the sidebar stays fixed at the top and bottom of any scroll (tested in `lib/layout.test.ts`; checked in WKWebView).
 - **Page header:** 56 px high, sticky at top of main, `bg-background`, bottom hairline: title (+ status badge), meta line slot, actions right. Below it a 24 px **freshness row**, always present, holding "updated 12 s ago" or the stale text: banners never insert space.
 - **Content:** max width 1440 px, left-aligned beside the sidebar; gutters 16 px (< 1024) and 24 px (>= 1024); sections separated by 16 px.
 - **Grid:** 12 columns, gap 12. Metric cards: 4 per row >= 1024, 2 per row 641-1023, 1 per row <= 640. Charts: 2 per row >= 1280, else 1.
@@ -104,30 +104,30 @@ No other sizes. No italics. Weight 700 is not used.
 
 ## 5. Sidebar
 
-Order (never changes with state):
+Order (never changes with state; a section with no rows is left out):
 
 ```
 [logo mark] tando                 [«]
 Overview
 Deploys
 Alerts                         3
-SERVERS
-● web-1                        2
-    ● shop                     2
-        Database          open  Stop
-    ● blog
-◌ db-2                            (not answering)
-    ◌ api
-─────────
-[theme]  v1.9.0
+SERVER
+● vps                          2
+◌ db-2                 not answering
+APPS
+● shop  vps                    2
+● blog  vps                 idle
+● api   db-2
+DATABASE
+▤ shop  vps                studio
 ```
 
-- **Row anatomy (32 px):** 16 px slot (icon for pages, 8 px dot for servers/apps), 8 gap, name (13/400, ellipsis), right-aligned count (12/500 tabular, `text-fail` when firing, `text-warn` when only pending). Apps indented 12 px. Servers and apps sorted by name.
-- **Dot:** ok running/reachable, fail down/firing, warn pending/restarting, info deploying, neutral stopped, stale ring (1px `--input`, transparent fill) not answering. The dot has `aria-hidden`; the row's accessible name includes the word ("shop, down, 2 alerts").
-- **States:** hover `bg-muted`; selected `bg-muted`, weight 600, 2 px `--foreground` bar at the left edge, `aria-current="page"`; alert: dot and count as above, the parent server shows the worst child dot; unreachable: stale ring dot, name `text-muted-foreground`, apps keep their last state dot as stale rings; collapsed: 56 px, icons and dots only, names in tooltips (300 ms delay), counts become a 6 px dot at the icon's top right.
-- **Keyboard:** the sidebar is one `role="tree"` (servers expandable). Up/Down move, Right expands/enters, Left collapses/goes to parent, Enter opens, Home/End jump. `[` toggles collapse. Tab leaves the tree into main content.
-- Server expand state is remembered; a server with a firing alert opens by default.
-- **Database row:** under an app with a database (never for one without; not while its server is not answering), a 32 px row indented under the app: database icon, "Database" in `text-muted-foreground`; "opening…" while a click is out. Enter or a click opens the studio in a new tab at once: no dialog, no confirmation (SPEC "Database studio"); a failure is one line in a small `role="alert"` notice, bottom right, with a dismiss button.
+- **Groups:** pages; then three eyebrow-headed lists, flat, no expand or collapse. Server: one row per server (links to its page). Apps: one row per app across all servers, sorted by name then server; with more than one server the server name follows the app, small and dim. Database: one row per app with a database, sorted the same way. Derived by `lib/sidebar.ts` (tested).
+- **Row anatomy (32 px):** 16 px slot (icon for pages and databases, 8 px dot for servers/apps), 8 gap, name (13/400, ellipsis), right-aligned count (12/500 tabular, `text-fail` when firing, `text-warn` when only pending). Idle apps (stopped, static, never deployed) are `text-muted-foreground` with the word at the right ("idle" shows as the state word: stopped, static, new).
+- **Dot:** ok running/reachable, fail down/firing, warn pending/restarting, info deploying, neutral stopped, stale ring (1px `--input`, transparent fill) not answering. The dot has `aria-hidden`; the row's accessible name includes the word ("shop on vps, down, 2 alerts").
+- **States:** hover `bg-muted`; selected `bg-muted`, weight 600, 2 px `--foreground` bar at the left edge, `aria-current="page"`; alert: dot and count as above, a server shows the worst dot of its apps; unreachable: stale ring dot, name `text-muted-foreground`, its apps keep their last state as stale rings, no Database rows; collapsed: 56 px, icons and dots only, names in tooltips (300 ms delay), counts become a 6 px dot at the icon's top right.
+- **Keyboard:** the sidebar is one flat `role="tree"`. Up/Down move, Home/End jump, Enter opens (a Database row opens the studio). `[` toggles collapse. Tab leaves the tree into main content.
+- **Database row:** database icon, the app name, the small hint "studio" at the right ("opening…" while a click is out). A click or Enter opens the studio in a new tab at once: no dialog, no confirmation (SPEC "Database studio"); a failure is one line in a small `role="alert"` notice, bottom right, with a dismiss button.
 
 ## 6. Components
 

@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
-import { Bell, ChevronDown, ChevronRight, LayoutDashboard, PanelLeft, Rocket, Monitor, Moon, Sun } from "lucide-react";
+import { Bell, LayoutDashboard, PanelLeft, Rocket, Monitor, Moon, Sun } from "lucide-react";
 import { Dot } from "./ui/badge";
 import { Tip } from "./ui/tooltip";
 import { Menu, MenuContent, MenuItem, MenuTrigger } from "./ui/dropdown-menu";
 import { cn } from "@/lib/cn";
-import { appKind, worstKind, type Kind } from "@/lib/shape";
+import { sidebarGroups } from "@/lib/sidebar";
 import type { HostView } from "@/lib/types";
 import { applyTheme, getTheme, lsGet, lsSet, type Theme } from "@/lib/theme";
 import { prefetchRoute } from "@/routes";
-import { StudioRow } from "./studio";
+import { DbRow } from "./studio";
 
 import { forwardRef, type ComponentProps } from "react";
 // a link whose class depends on the route; a plain string className so Radix Slot (tooltips) can merge it
@@ -51,25 +51,10 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
   const nav = useNavigate();
   const on = (to: string, end: boolean) => (end ? loc.pathname === to : loc.pathname === to || loc.pathname.startsWith(to + "/"));
   const treeRef = useRef<HTMLDivElement>(null);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>(() => { try { return JSON.parse(lsGet("tando-expanded") ?? "{}"); } catch { return {}; } });
   const [theme, setTheme] = useState<Theme>(getTheme);
+  const g = useMemo(() => sidebarGroups(hosts), [hosts]);
 
-  const rows = useMemo(() => (hosts ?? []).map((h) => {
-    const alerts = h.data?.alerts ?? [];
-    const firing = alerts.filter((a) => a.state === "firing").length, pending = alerts.filter((a) => a.state !== "firing").length;
-    const apps = [...(h.data?.apps ?? [])].sort((a, b) => a.app.localeCompare(b.app)).map((a) => {
-      const k = h.reachable ? appKind(a) : { kind: "stale" as Kind, word: appKind(a).word };
-      return { app: a.app, kind: k.kind, word: k.word, n: a.alerts_firing ?? 0, db: !!a.database };
-    });
-    const kind: Kind = !h.reachable ? "stale" : worstKind(apps.map((a) => a.kind).concat(firing ? ["fail"] : pending ? ["warn"] : []));
-    return { host: h.host, reachable: h.reachable, firing, pending, apps, kind };
-  }), [hosts]);
-  const total = rows.reduce((s, r) => ({ f: s.f + r.firing, p: s.p + r.pending }), { f: 0, p: 0 });
-
-  const isOpen = (h: string, firing: number) => expanded[h] ?? (firing > 0 || rows.length <= 3);
-  const setOpen = (h: string, v: boolean) => setExpanded((e) => { const n = { ...e, [h]: v }; lsSet("tando-expanded", JSON.stringify(n)); return n; });
-
-  // one role=tree: Up/Down move, Right expands/enters, Left collapses/goes to parent, Home/End jump
+  // one role=tree, flat: Up/Down move, Home/End jump, Enter opens
   const onKey = (e: KeyboardEvent) => {
     const items = Array.from(treeRef.current?.querySelectorAll<HTMLElement>("[role=treeitem]") ?? []);
     const i = items.indexOf(document.activeElement as HTMLElement);
@@ -81,18 +66,7 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
       case "ArrowUp": go(items[i - 1]); break;
       case "Home": go(items[0]); break;
       case "End": go(items[items.length - 1]); break;
-      case "ArrowRight": {
-        const h = cur.dataset.host;
-        if (cur.dataset.level === "server" && h) { if (cur.getAttribute("aria-expanded") === "false") { e.preventDefault(); setOpen(h, true); } else go(items[i + 1]); }
-        break;
-      }
-      case "ArrowLeft": {
-        const h = cur.dataset.host;
-        if (cur.dataset.level === "app" || cur.dataset.level === "studio") go(items.find((x) => x.dataset.level === "server" && x.dataset.host === h));
-        else if (cur.dataset.level === "server" && h && cur.getAttribute("aria-expanded") === "true") { e.preventDefault(); setOpen(h, false); }
-        break;
-      }
-      case "Enter": e.preventDefault(); if (cur.dataset.level === "studio") { cur.click(); break; } nav(cur.getAttribute("href") ?? "/"); if (sb.mobile) sb.setOpen(false); break;
+      case "Enter": e.preventDefault(); if (cur.dataset.level === "db") { cur.click(); break; } nav(cur.getAttribute("href") ?? "/"); if (sb.mobile) sb.setOpen(false); break;
     }
   };
 
@@ -110,7 +84,11 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
     </Tip>
   );
 
-  const alertCount = total.f ? { n: total.f, firing: true } : total.p ? { n: total.p, firing: false } : undefined;
+  const alertCount = g.firing ? { n: g.firing, firing: true } : g.pending ? { n: g.pending, firing: false } : undefined;
+
+  const head = (t: string) => (
+    <div className={cn("mt-4 mb-1 px-2 text-[11px] leading-4 font-semibold tracking-[0.04em] text-muted-foreground uppercase", collapsed && "px-0 text-center")}>{collapsed ? "·" : t}</div>
+  );
 
   const body = (
     <nav aria-label="Main" className={cn("flex h-full flex-col border-r border-border bg-card", collapsed ? "w-14" : "w-60")}>
@@ -121,50 +99,47 @@ function Body({ hosts, sb, version, collapsed }: { hosts: HostView[] | null; sb:
           <button type="button" aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} onClick={sb.toggle} className={cn("hov grid size-8 place-items-center rounded-md hover:bg-muted", !collapsed && "ml-auto")}><PanelLeft size={16} strokeWidth={1.75} aria-hidden="true" /></button>
         </Tip>
       </div>
-      <div ref={treeRef} role="tree" aria-label="Pages and servers" onKeyDown={onKey} className="min-h-0 flex-1 overflow-y-auto px-2">
+      <div ref={treeRef} role="tree" aria-label="Pages, servers, apps and databases" onKeyDown={onKey} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2">
         {page("/", "Overview", LayoutDashboard)}
         {page("/deploys", "Deploys", Rocket)}
         {page("/alerts", "Alerts", Bell, alertCount)}
-        <div className={cn("mt-4 mb-1 px-2 text-[11px] leading-4 font-semibold tracking-[0.04em] text-muted-foreground uppercase", collapsed && "text-center px-0")}>{collapsed ? "·" : "Servers"}</div>
+        {head("Server")}
         {hosts === null && !collapsed && <div aria-busy="true" className="h-16" />}
-        {rows.map((r) => {
-          const open = isOpen(r.host, r.firing);
-          const n = r.firing || r.pending;
-          const word = r.reachable ? "" : ", not answering";
+        {g.servers.map((r) => {
+          const n = r.firing || r.pending, to = `/s/${encodeURIComponent(r.host)}`;
           return (
-            <div key={r.host} role="group">
-              <div className="flex items-center">
-                <Tip text={collapsed ? r.host : ""} side="right">
-                  <NavLink to={`/s/${encodeURIComponent(r.host)}`} active={on(`/s/${encodeURIComponent(r.host)}`, true)} role="treeitem" data-level="server" data-host={r.host} aria-expanded={open} tabIndex={-1}
-                    aria-label={`${r.host}${word}${n ? `, ${n} alert${n > 1 ? "s" : ""}` : ""}`} onMouseEnter={() => prefetchRoute("/s/")} onFocus={() => prefetchRoute("/s/")}
-                    className={cn(ROW, "flex-1", on(`/s/${encodeURIComponent(r.host)}`, true) && SEL, !r.reachable && "text-muted-foreground")}>
-                    <Dot kind={r.kind} className="mx-1" />
-                    {!collapsed && <span className="truncate">{r.host}</span>}
-                    {!collapsed && !r.reachable && <span className="ml-auto text-xs text-muted-foreground">not answering</span>}
-                    {r.reachable && <Count n={n} firing={r.firing > 0} collapsed={collapsed} />}
-                  </NavLink>
-                </Tip>
-                {!collapsed && (
-                  <button type="button" tabIndex={-1} aria-label={open ? `Collapse ${r.host}` : `Expand ${r.host}`} onClick={() => setOpen(r.host, !open)} className="hov inset-focus grid size-8 shrink-0 place-items-center rounded-md hover:bg-muted">
-                    {open ? <ChevronDown size={16} strokeWidth={1.75} aria-hidden="true" /> : <ChevronRight size={16} strokeWidth={1.75} aria-hidden="true" />}
-                  </button>
-                )}
-              </div>
-              {open && !collapsed && r.apps.map((a) => (<div key={a.app}>
-                <NavLink to={`/s/${encodeURIComponent(r.host)}/${a.app}`} active={on(`/s/${encodeURIComponent(r.host)}/${a.app}`, false)} role="treeitem" data-level="app" data-host={r.host} tabIndex={-1}
-                  aria-label={`${a.app}, ${r.reachable ? a.word : "last state " + a.word + ", stale"}${a.n ? `, ${a.n} alert${a.n > 1 ? "s" : ""}` : ""}`}
-                  onMouseEnter={() => prefetchRoute("/s/x/y")} onFocus={() => prefetchRoute("/s/x/y")}
-                  className={cn(ROW, "pl-5", on(`/s/${encodeURIComponent(r.host)}/${a.app}`, false) && SEL, !r.reachable && "text-muted-foreground")}>
-                  <Dot kind={a.kind} className="mx-1" />
-                  <span className="truncate">{a.app}</span>
-                  {a.n > 0 && <span className="ml-auto text-xs leading-4 font-medium text-fail">{a.n}</span>}
-                </NavLink>
-                {a.db && r.reachable && <StudioRow host={r.host} app={a.app} />}
-              </div>))}
-            </div>
+            <Tip key={r.host} text={collapsed ? r.host : ""} side="right">
+              <NavLink to={to} active={on(to, true)} role="treeitem" data-level="server" tabIndex={-1}
+                aria-label={`${r.host}${r.reachable ? "" : ", not answering"}${n ? `, ${n} alert${n > 1 ? "s" : ""}` : ""}`} onMouseEnter={() => prefetchRoute("/s/")} onFocus={() => prefetchRoute("/s/")}
+                className={cn(ROW, on(to, true) && SEL, !r.reachable && "text-muted-foreground")}>
+                <Dot kind={r.kind} className="mx-1" />
+                {!collapsed && <span className="truncate">{r.host}</span>}
+                {!collapsed && !r.reachable && <span className="ml-auto text-xs text-muted-foreground">not answering</span>}
+                {r.reachable && <Count n={n} firing={r.firing > 0} collapsed={collapsed} />}
+              </NavLink>
+            </Tip>
           );
         })}
-        {hosts !== null && rows.length === 0 && !collapsed && <p className="m-0 px-2 text-[13px] text-muted-foreground">No servers. Add one with <code>tando host add</code>.</p>}
+        {hosts !== null && g.servers.length === 0 && !collapsed && <p className="m-0 px-2 text-[13px] text-muted-foreground">No servers. Add one with <code>tando host add</code>.</p>}
+        {g.apps.length > 0 && head("Apps")}
+        {g.apps.map((a) => {
+          const to = `/s/${encodeURIComponent(a.host)}/${a.app}`;
+          return (
+            <Tip key={a.host + "/" + a.app} text={collapsed ? `${a.app}${g.multi ? ` (${a.host})` : ""}` : ""} side="right">
+              <NavLink to={to} active={on(to, false)} role="treeitem" data-level="app" tabIndex={-1}
+                aria-label={`${a.app}${g.multi ? ` on ${a.host}` : ""}, ${a.reachable ? a.word : "last state " + a.word + ", stale"}${a.n ? `, ${a.n} alert${a.n > 1 ? "s" : ""}` : ""}`}
+                onMouseEnter={() => prefetchRoute("/s/x/y")} onFocus={() => prefetchRoute("/s/x/y")}
+                className={cn(ROW, on(to, false) && SEL, (!a.reachable || a.idle) && "text-muted-foreground")}>
+                <Dot kind={a.kind} className="mx-1" />
+                {!collapsed && <span className="truncate">{a.app}{g.multi && <span className="ml-1.5 text-xs text-muted-foreground">{a.host}</span>}</span>}
+                {!collapsed && a.idle && a.n === 0 && <span className="ml-auto text-xs">{a.word === "never deployed" ? "new" : a.word}</span>}
+                {a.n > 0 && <Count n={a.n} firing collapsed={collapsed} />}
+              </NavLink>
+            </Tip>
+          );
+        })}
+        {g.dbs.length > 0 && head("Database")}
+        {g.dbs.map((d) => <DbRow key={d.host + "/" + d.app} host={d.host} app={d.app} showHost={g.multi} collapsed={collapsed} />)}
       </div>
       <div className={cn("flex h-12 shrink-0 items-center gap-2 border-t border-border px-3", collapsed && "justify-center px-0")}>
         <Menu>
@@ -192,7 +167,7 @@ export function Sidebar({ hosts, sb, version }: { hosts: HostView[] | null; sb: 
     // at <= 640 px: a 56 px rail; the button opens the 280 px sheet over the content (no reflow)
     return (
       <>
-        <div className="sticky top-0 h-screen w-14"><Body hosts={hosts} sb={sb} version={version} collapsed /></div>
+        <div className="h-full w-14 shrink-0"><Body hosts={hosts} sb={sb} version={version} collapsed /></div>
         {sb.open && (
           <>
             <div className="fixed inset-0 z-30" aria-hidden="true" onClick={() => sb.setOpen(false)} />
@@ -202,5 +177,5 @@ export function Sidebar({ hosts, sb, version }: { hosts: HostView[] | null; sb: 
       </>
     );
   }
-  return <div className="sticky top-0 h-screen"><Body hosts={hosts} sb={sb} version={version} collapsed={sb.collapsed} /></div>;
+  return <div className="h-full shrink-0"><Body hosts={hosts} sb={sb} version={version} collapsed={sb.collapsed} /></div>;
 }

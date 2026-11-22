@@ -33,14 +33,15 @@ The release assets are `tando-dash-<v>-darwin-universal.tar.gz`, `-linux-amd64.t
 then `tando-dash`; `--check` proves two builds give the same bytes). The add-on's version is the
 client's: after a tando update run `tando addon install dashboard` again.
 
-### The Mac window
+### The Mac app
 
-On macOS the menu bar app (`tando menubar install`) has **Open dashboard** (⌘D): a window of its own
-instead of a browser tab. It uses the installed `tando-dash` (the row says "Install dashboard…" and
-shows the command when there is none), starts it when `dash.lock` names no running process, asks it
-for a fresh one-time link and loads it. One window, reused; at least 900x600, its size and place are
-remembered; ⌘R reloads, ⌘W closes the window (the app stays). Links to other sites open in your
-default browser; the window never shows anything but `127.0.0.1:<port>`. While `tando-dash` runs, the
+`tando menubar install` also builds **tando Dashboard.app** in `~/Applications`: a regular app (Dock
+icon, Cmd+Tab, Spotlight, app/Edit/View/Window menus) that is a thin WKWebView on the system WebKit.
+The menu bar's **Open dashboard** (⌘D) and `tando dashboard` open it. It uses the installed `tando-dash`
+(the menu row says "Install dashboard…" when there is none), starts it when `dash.lock` names no running
+process, asks it for a fresh one-time link and loads it. One window, at least 900x600, size and place
+remembered; ⌘R reloads, ⌘W closes the window (the app stays, doing nothing). Links to other sites open in
+your default browser; the window never shows anything but `127.0.0.1:<port>`. While `tando-dash` runs, the
 menu bar reads `cache/ls-all.json` when it is younger than its interval instead of running
 `tando ls --all --json`. Rebuild the app after a tando update: `tando menubar install`.
 

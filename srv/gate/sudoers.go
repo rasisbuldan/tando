@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// sudoersRule is the deploy user's sudo rule: the gate's root mode for its own app, four exact
-// argvs, nothing else. tty: whether to switch requiretty off.
+// sudoersRule is the deploy user's sudo rule: the gate's root mode for its own app, six exact
+// argvs (the preview verbs take their name on stdin, checked by root mode), nothing else. tty: whether to switch requiretty off.
 func sudoersRule(gate, app string, tty bool) []byte {
 	u := "tando-d-" + app
 	t := ""
@@ -18,7 +18,7 @@ func sudoersRule(gate, app string, tty bool) []byte {
 	}
 	return fmt.Appendf(nil, `# tando CI deploy user for %[1]s: exact commands, nothing else (managed by tando-gate)
 Defaults:%[2]s %[3]senv_reset, !lecture
-%[2]s ALL=(root) NOPASSWD: %[4]s root %[1]s begin, %[4]s root %[1]s end, %[4]s root %[1]s activate, %[4]s root %[1]s receive
+%[2]s ALL=(root) NOPASSWD: %[4]s root %[1]s begin, %[4]s root %[1]s end, %[4]s root %[1]s activate, %[4]s root %[1]s receive, %[4]s root %[1]s preview-up, %[4]s root %[1]s preview-rm
 `, app, u, t, gate)
 }
 

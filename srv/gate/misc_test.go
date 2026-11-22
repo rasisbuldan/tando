@@ -16,7 +16,10 @@ func TestReadParams(t *testing.T) {
 		want Params
 		err  string
 	}{
-		{"token=" + tTok + "\nbuild=1.5\nupload=0\n", Params{tTok, "1.5", "0"}, ""},
+		{"token=" + tTok + "\nbuild=1.5\nupload=0\n", Params{Token: tTok, Build: "1.5", Upload: "0"}, ""},
+		{"preview=alpha-x\nttl=7d\n", Params{Preview: "alpha-x", TTL: "7d"}, ""},
+		{"preview=Alpha-x\n", Params{}, "bad preview name"},
+		{"ttl=0d\n", Params{}, "bad ttl"},
 		{"token=" + tTok + "\n\n", Params{Token: tTok}, ""},
 		{"token=" + tTok, Params{}, ""}, // no newline: not read (bash)
 		{"=x\n", Params{}, ""},
@@ -152,7 +155,8 @@ func TestSSHDAndSudoers(t *testing.T) {
 	want := "# tando CI deploy user for alpha: exact commands, nothing else (managed by tando-gate)\n" +
 		"Defaults:tando-d-alpha !requiretty, env_reset, !lecture\n" +
 		"tando-d-alpha ALL=(root) NOPASSWD: " + tGate + " root alpha begin, " + tGate + " root alpha end, " +
-		tGate + " root alpha activate, " + tGate + " root alpha receive\n"
+		tGate + " root alpha activate, " + tGate + " root alpha receive, " + tGate + " root alpha preview-up, " +
+		tGate + " root alpha preview-rm\n"
 	if got := string(sudoersRule(tGate, "alpha", true)); got != want {
 		t.Errorf("rule:\n%s\nwant:\n%s", got, want)
 	}

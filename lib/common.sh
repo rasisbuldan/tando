@@ -402,7 +402,10 @@ C_release="" C_release_shell="" C_release_timeout=""   # the release command (li
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
 C_node_lite=""    # true: Node runs with V8 --lite-mode (less memory, about half the speed; node and next apps)
 C_idle_stop=""     # scale to zero: stop after this long without a connection (10m, 30s, 2h, off)
+C_preview_ttl="" C_preview_skip="" C_preview_env="" C_preview_release=""   # previews: how long one lives (7d), env names it gets and does not get, its release command (docs/PREVIEWS.md)
+C_response_timeout="" C_body_max="" C_cold_timeout=""   # Caddy's limits per request (checked by the server too)
 C_priority=""   # high or low: who the OOM killer takes last or first (checked by the server too)
+C_tmp_size="" C_io="" C_disk=""   # /tmp's size, disk MB/s, disk share for alerts (checked by the server too)
 
 # trim_v text -> TRIM: without leading and trailing white space (no fork; conf_load runs it per line)
 trim_v() { TRIM=${1#"${1%%[![:space:]]*}"}; TRIM=${TRIM%"${TRIM##*[![:space:]]}"}; }
@@ -661,8 +664,34 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       idle_stop) C_idle_stop=$v
         case $v in on|off|[1-9]s|[1-9]m|[1-9]h|[1-9][0-9]s|[1-9][0-9]m|[1-9][0-9]h|[1-9][0-9][0-9]s|[1-9][0-9][0-9]m|[1-9][0-9][0-9]h) ;;
           *) die "$f:$n: idle_stop is a time like 6h, 10m or 30s, on (6h) or off (got \"$v\")";; esac;;
+      preview_ttl) C_preview_ttl=$v
+        case $v in [1-9][smhd]|[1-9][0-9][smhd]|[1-9][0-9][0-9][smhd]|[1-9][0-9][0-9][0-9][smhd]) ;;
+          *) die "$f:$n: preview_ttl is a time like 7d, 12h or 90m (got \"$v\")";; esac;;
+      preview_env) C_preview_env=$(printf '%s' "$v" | tr ' ' ',' | tr -s ',')
+        case $C_preview_env in ""|*[!A-Za-z0-9_,]*|[0-9,]*|*,) die "$f:$n: preview_env is env names, like API_BASE, FEATURE_FLAGS (got \"$v\")";; esac;;
+      preview_release) C_preview_release=$v
+        case $v in on|off) ;; *) die "$f:$n: preview_release is on or off (got \"$v\")";; esac;;
+      preview_skip) C_preview_skip=$(printf '%s' "$v" | tr ' ' ',' | tr -s ',')
+        case $C_preview_skip in ""|*[!A-Za-z0-9_,]*|[0-9,]*|*,) die "$f:$n: preview_skip is env names, like STRIPE_SECRET_KEY, SMTP_PASSWORD (got \"$v\")";; esac;;
+      response_timeout) C_response_timeout=$v
+        { [ "$v" = off ] || { ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 99999 ]; }; } ||
+          die "$f:$n: response_timeout is seconds Caddy waits for an answer, like 60, or off (got \"$v\")";;
+      body_max) C_body_max=$v
+        n_=${v%B}; n_=${n_%[KMG]}
+        [ "$v" = off ] || { [ "$n_" != "${v%B}" ] && ui_int "$n_" && [ "$n_" -ge 1 ] && [ "$n_" -le 999999 ]; } ||
+          die "$f:$n: body_max is a size like 100MB or 2GB, or off (got \"$v\")";;
+      cold_timeout) C_cold_timeout=$v
+        ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 999 ] || die "$f:$n: cold_timeout is 1 to 999 seconds (got \"$v\")";;
       priority) C_priority=$v
         case $v in high|normal|low) ;; *) die "$f:$n: priority must be high, normal or low (got \"$v\")";; esac;;
+      tmp_size) C_tmp_size=$v
+        case $v in [1-9]*[KMG]) ui_int "${v%?}" || die "$f:$n: tmp_size is a size like 64M (got \"$v\")";;
+          *) die "$f:$n: tmp_size is a size like 64M (got \"$v\")";; esac;;
+      io) C_io=$v
+        ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 99999 ] || die "$f:$n: io is the disk bandwidth in MB/s, 1 to 99999 (got \"$v\")";;
+      disk) C_disk=$v
+        case $v in [1-9]*[MG]) ui_int "${v%?}" || die "$f:$n: disk is a size like 2G or 500M (got \"$v\")";;
+          *) die "$f:$n: disk is a size like 2G or 500M (got \"$v\")";; esac;;
       hold) C_hold=$v
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 999 ] || die "$f:$n: hold is 1 to 999 seconds (got \"$v\")";;
       stop_timeout) C_stop_timeout=$v
@@ -1043,9 +1072,11 @@ agent_raw() {
     rc=${PIPESTATUS[0]}
     # the server turned the session away before the command started (sshd MaxSessions on the
     # shared connection, or MaxStartups): nothing ran, so trying again is safe for every verb
-    [ "$rc" = 255 ] && [ $try -lt 3 ] && ssh_busy "${ERRF:-$TMPD/err}" || break
+    # (8 tries over about 10 s: parallel deploys on one connection each hold a session for up to
+    # 10 s while they follow their activation, so a slot frees within that)
+    [ "$rc" = 255 ] && [ $try -lt 8 ] && ssh_busy "${ERRF:-$TMPD/err}" || break
     try=$((try + 1))
-    sleep "0.$((RANDOM % 8 + 2))$try"
+    if [ $try -le 3 ]; then sleep "0.$((RANDOM % 8 + 2))$try"; else sleep "$((try / 3)).$((RANDOM % 10))"; fi
   done
   if [ "$rc" != 0 ] && ssh_explain "${ERRF:-$TMPD/err}"; then return "$rc"; fi
   [ -s "${ERRF:-$TMPD/err}" ] && agent_msgs < "${ERRF:-$TMPD/err}" >&2
@@ -1120,7 +1151,21 @@ ssh_explain() {
   esac
   return 0
 }
-agent() { agent_raw "$@" || bail 1; }
+# agent [sudo] verb args...: agent_raw, and a failure ends the command. Never silently: an agent
+# that failed and said nothing (killed, or a server under load) is named with its verb. The box is
+# closed on stderr: a caller's stdout here is often a file (agent ... > "$TMPD/cfg"), and a
+# deploy that failed in configure closed its box into that file and ended with no last line.
+agent() {
+  local rc v=$1
+  agent_raw "$@" && return 0
+  rc=$?
+  [ "$v" = sudo ] && v=$2
+  [ -s "${ERRF:-$TMPD/err}" ] ||
+    explain "the server ended '$v' with status $rc and gave no reason (a connection cut, or the server under load)" \
+      "try again; if it happens again: tando doctor ${HOST:-}"
+  [ "${UI_BOX:-0}" = 1 ] && ui_box_close >&2
+  exit 1
+}
 
 # The protocol between this client and the server's agent (the agent's info prints proto=; one
 # from 0.1.1 prints none, which counts as 1). PROTO_NEED: the oldest agent this client works

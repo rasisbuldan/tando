@@ -3,6 +3,7 @@ package watch
 import (
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"tando/srv/internal/decimal"
@@ -63,6 +64,7 @@ func checkHealth(t *tick) {
 	}
 	to := t.cfg.num("health_timeout", "")
 	res := t.w.Probe.Probe(t.ctx, reqs, time.Duration(to)*time.Second)
+	var hung []livenessCase
 	for i, a := range queued {
 		r := res[i]
 		k := a.key("health")
@@ -128,8 +130,21 @@ func checkHealth(t *tick) {
 		j := t.st.n(k+".n", 0) + 1
 		_, rest, _ := strings.Cut(a.probeURL, "//")
 		t.sample(k, a.name, "health", bad, det+"; "+rest+" ("+decimal.Itoa(j)+" in a row)", need)
-		t.liveness(a, det)
+		if n, url, due := t.livenessDue(a); due {
+			hung = append(hung, livenessCase{a: a, det: det, n: n, url: url})
+		}
 	}
+	t.livenessRestart(hung)
+}
+
+// livenessCase is an app whose failed probes reached `liveness` this run: asked on its own port
+// (all such apps at once) before it is restarted.
+type livenessCase struct {
+	a      *appTick
+	det    string
+	n      int64
+	url    string // its own port ("" when it has none: restarted without asking)
+	answer int
 }
 
 // itoa3 is an HTTP status as curl's %{http_code} prints it: three digits, 000 for none.
@@ -144,42 +159,69 @@ func itoa3(c int) string {
 	return s
 }
 
-// liveness: an app whose unit runs but that failed `liveness` health probes in a row (a process
-// thrashing at its memory cap, a deadlock: systemd sees nothing wrong) is restarted through the
-// agent (its lock, the Caddy site, the health check and the audit line), in a unit of its own so
-// this run does not wait. At most 3 restarts within an hour; after that only the health alert (a
-// release that is broken for good is not restarted every few minutes forever).
-func (t *tick) liveness(a *appTick, det string) {
+// livenessDue: an app whose unit runs but that failed `liveness` health probes in a row (a
+// process thrashing at its memory cap, a deadlock: systemd sees nothing wrong) is due for a
+// restart through the agent (its lock, the Caddy site, the health check and the audit line), in
+// a unit of its own so this run does not wait: livenessRestart, after its direct probe. It returns
+// the count of failed probes and the URL of that probe.
+func (t *tick) livenessDue(a *appTick) (n int64, url string, due bool) {
 	lim := t.cfg.num("liveness", a.name)
 	if lim <= 0 {
-		return
+		return 0, "", false
 	}
 	if rec := a.conf["recipe"]; rec == "" || rec == "static" {
-		return
+		return 0, "", false
 	}
 	k := a.name + ".live"
 	if lt := t.st.get(k + ".lt"); lt != "" && t.sameSample(t.now, t.st.n(k+".lt", 0)) {
-		return // a second run in this minute: failed probes count once a minute (machine.go)
+		return 0, "", false // a second run in this minute: failed probes count once a minute (machine.go)
 	}
 	if t.unitState("tando-"+a.name+".service") != "active" {
 		t.st.del(k+".n", k+".lt")
-		return
+		return 0, "", false
 	}
-	n := t.st.n(k+".n", 0) + 1
+	n = t.st.n(k+".n", 0) + 1
 	t.st.set(k+".lt", decimal.Itoa(t.now))
 	if n < lim {
 		t.st.set(k+".n", decimal.Itoa(n))
-		return
+		return 0, "", false
 	}
 	t.st.del(k + ".n")
-	// a saturated app is not a hung one: Caddy sheds requests over its limits (503 busy) and the
-	// probe through Caddy waits behind them. Asked directly on its port, a working app still
-	// answers (any status) within 20 s; only one that does not is restarted
 	if port := a.conf["port"]; decimal.IsDigits(port) {
-		if c := t.w.Probe.Direct(t.ctx, "http://127.0.0.1:"+port+or(a.conf["path"]+a.conf["health"], "/")); c >= 100 && c <= 599 {
-			return
-		}
+		url = "http://127.0.0.1:" + port + or(a.conf["path"]+a.conf["health"], "/")
 	}
+	return n, url, true
+}
+
+// livenessRestart restarts the apps that are due, at most 3 within an hour each; after that only
+// the health alert (a release that is broken for good is not restarted every few minutes
+// forever). A saturated app is not a hung one: Caddy sheds requests over its limits (503 busy)
+// and the probe through Caddy waits behind them. Asked directly on its port, a working app still
+// answers (any status) within 20 s; only one that does not is restarted. The direct probes run
+// at once, so the run waits 20 s at most however many apps hang.
+func (t *tick) livenessRestart(cs []livenessCase) {
+	var wg sync.WaitGroup
+	for i := range cs {
+		if cs[i].url == "" {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cs[i].answer = t.w.Probe.Direct(t.ctx, cs[i].url)
+		}()
+	}
+	wg.Wait()
+	for _, c := range cs {
+		if c.answer >= 100 && c.answer <= 599 {
+			continue
+		}
+		t.restartHung(c.a, c.det, c.n)
+	}
+}
+
+func (t *tick) restartHung(a *appTick, det string, n int64) {
+	k := a.name + ".live"
 	t0, r := t.st.n(k+".t0", 0), t.st.n(k+".r", 0)
 	if t.now-t0 > 3600 || t.now < t0 { // ("3 an hour", wall time; a clock stepped back starts the hour again)
 		t0, r = t.now, 0

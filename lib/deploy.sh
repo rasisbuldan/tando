@@ -42,7 +42,17 @@ configure() {
     [ -n "${C_hold:-}" ] && printf 'hold=%s\n' "$C_hold"
     [ -n "${C_node_lite:-}" ] && printf 'node_lite=%s\n' "$C_node_lite"
     [ -n "${C_idle_stop:-}" ] && printf 'idle_stop=%s\n' "$C_idle_stop"
+    [ -n "${C_response_timeout:-}" ] && printf 'response_timeout=%s\n' "$C_response_timeout"
+    [ -n "${C_body_max:-}" ] && printf 'body_max=%s\n' "$C_body_max"
+    [ -n "${C_cold_timeout:-}" ] && printf 'cold_timeout=%s\n' "$C_cold_timeout"
     [ -n "${C_priority:-}" ] && printf 'priority=%s\n' "$C_priority"
+    [ -n "${C_preview_ttl:-}" ] && printf 'preview_ttl=%s\n' "$C_preview_ttl"
+    [ -n "${C_preview_skip:-}" ] && printf 'preview_skip=%s\n' "$C_preview_skip"
+    [ -n "${C_preview_env:-}" ] && printf 'preview_env=%s\n' "$C_preview_env"
+    [ -n "${C_preview_release:-}" ] && printf 'preview_release=%s\n' "$C_preview_release"
+    [ -n "${C_tmp_size:-}" ] && printf 'tmp_size=%s\n' "$C_tmp_size"
+    [ -n "${C_io:-}" ] && printf 'io=%s\n' "$C_io"
+    [ -n "${C_disk:-}" ] && printf 'disk=%s\n' "$C_disk"
     [ -n "${C_assets:-}" ] && printf 'assets=%s\n' "$C_assets"
     [ "${C_compress:-}" = off ] && printf 'compress=off\n'   # (on is the default; an older agent knows no compress)
     [ -n "$C_job_timeout" ] && printf 'job_timeout=%s\n' "$C_job_timeout"
@@ -54,14 +64,21 @@ configure() {
     [ -n "$C_domain" ] && printf 'domain=%s\n' "$C_domain"
     [ -n "$C_www" ] && printf 'www=%s\n' "$C_www"
   } > "$TMPD/settings"
-  if [ "${1:-}" != check ] && [ -n "${BUSY_ID:-}" ]; then configure_wait
+  if [ "${1:-}" != check ] && [ -n "${BUSY_ID:-}" ]; then
+    # a release in its soak: this deploy supersedes it (the server ends the soak once this
+    # configure waits for it); it stays live until this one switches, not counted as verified
+    if [ "$BUSY_PHASE" = soak ] && [ "${BUSY_SUPERSEDE:-}" = 1 ] && valid_id "$BUSY_ID"; then
+      box_say "$UI_DIM" "        release $BUSY_ID is soaking: this deploy supersedes it"
+    fi
+    configure_wait
   else agent sudo configure "$APP" < "$TMPD/settings" > "$TMPD/cfg"; fi
   kv_read "$TMPD/cfg" link port created changed exists current needs node domains \
-    busy busy_phase busy_left busy_soak conf
+    busy busy_phase busy_left busy_soak conf supersede
   # configure check: something holds the app now (a release soaking, a rollback, a backup); the
   # real configure waits for it, and configure_wait says so if it still does then
   if [ "${1:-}" = check ]; then
     BUSY_ID=$K_busy BUSY_PHASE=$K_busy_phase BUSY_LEFT=$K_busy_left BUSY_SOAK=$K_busy_soak BUSY_T=$(now)
+    BUSY_SUPERSEDE=$K_supersede
   fi
 }
 
@@ -246,8 +263,16 @@ upload() { # sets UPLOAD_SECS, UPLOAD_FILES, UPLOAD_BYTES, TOKEN
   trap 'agent_raw sudo end "$APP" < "$TMPD/token" > /dev/null 2>&1; bail 130' INT TERM
   t0=$(clock)
   ssh_wrapper   # (rsync splits -e on spaces: the host's options go in a script, quoted)
-  if ! rsync -rlptz -c --delete --stats ${rp[@]+"${rp[@]}"} -e "$SSH_WRAPPER" "$STAGE/" \
-       "$TARGET:/opt/tando/apps/$APP/incoming/" > "$TMPD/rsync" 2>&1; then
+  # (a session the server turned away before rsync started, sshd MaxSessions on a connection
+  # that parallel deploys share: nothing was sent, tried again as agent_raw does)
+  local ok=0 try=0
+  while :; do
+    rsync -rlptz -c --delete --stats ${rp[@]+"${rp[@]}"} -e "$SSH_WRAPPER" "$STAGE/" \
+      "$TARGET:/opt/tando/apps/$APP/incoming/" > "$TMPD/rsync" 2>&1 && { ok=1; break; }
+    [ $try -lt 5 ] && ssh_busy "$TMPD/rsync" || break
+    try=$((try + 1)); sleep "$try.$((RANDOM % 10))"
+  done
+  if [ $ok = 0 ]; then
     agent_raw sudo end "$APP" < "$TMPD/token" > /dev/null 2>&1
     phase_line 3 upload fail ""
     if grep -q 'No space left on device\|Disk quota exceeded' "$TMPD/rsync"; then
@@ -308,7 +333,7 @@ show_phases() {
 # app or server (an edit, a pull, a pull request) asks once (--yes or --force: go on)
 target_guard() {
   local last="" want="$HOST $APP $PWD" a
-  [ -n "${DEPLOY_KEY:-}" ] && return 0
+  [ -n "${DEPLOY_KEY:-}${PREVIEW_DEPLOY:-}" ] && return 0
   [ -f .tando/target ] && last=$(cat .tando/target 2> /dev/null)
   # (the server renamed since: tando host rename left its old name as an alias of this one)
   case $last in "$HOST "*|"") ;; *) [ ! -f "$CFG/hosts/${last%% *}" ] && [ "$(host_alias "${last%% *}")" = "$HOST" ] && last="$HOST ${last#* }";; esac
@@ -548,7 +573,8 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   fi
   # tando.conf is checked by the server before anything is built (a deploy key cannot change it:
   # it deploys with the settings of the admin's last tando up)
-  if [ -z "${DEPLOY_KEY:-}" ]; then
+  # (a preview deploys what the parent's settings made on the server, as a deploy key does: tando preview)
+  if [ -z "${DEPLOY_KEY:-}${PREVIEW_DEPLOY:-}" ]; then
     configure check
     existed=$K_exists current=$K_current
     # (a dry run installs nothing on the server: it says what tando up or deploy would install)
@@ -641,9 +667,9 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
     box_say "$UI_DIM" "        over 50 MB; largest: $(stage_largest 3 | awk -F'\t' '{ printf "%s%s %s", (NR > 1 ? ", " : ""), $1, $2 }')"
   fi
 
-  if [ -z "${DEPLOY_KEY:-}" ]; then   # create the app now that there is something to deploy
+  if [ -z "${DEPLOY_KEY:-}${PREVIEW_DEPLOY:-}" ]; then   # create the app now that there is something to deploy
     configure
-    [ "$K_created" = 1 ] && ui_box_line "        created $APP on $HOST: user tando-$APP, port $K_port"
+    [ "$K_created" = 1 ] && ui_box_line "        created $APP on $HOST: user tando-$APP${K_port:+, port $K_port}"
     [ "$K_created" = 1 ] && : > "$TMPD/created"
   fi
 
@@ -685,6 +711,11 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   case $K_result in
     ok|verified)
       ui_box_close "live in $(ui_dur "$(since "$t0")")  $K_link"
+      after_live
+      return 0;;
+    superseded)   # (--wait: a newer deploy of the app ended its soak; it is live, not verified)
+      ui_box_close "live in $(ui_dur "$(since "$t0")")  $K_link"
+      note "a newer deploy ended its soak early: live, but not counted as verified (tando releases)"
       after_live
       return 0;;
   esac
@@ -749,7 +780,7 @@ act_follow() {
       fi
       ui_box_line "        live; watching it ${K_soak:-30} s before calling it verified"
     fi
-    case $K_result in ok|failed|rolledback|bad|verified|unknown) break;; esac
+    case $K_result in ok|failed|rolledback|bad|verified|superseded|unknown) break;; esac
     # (past it, one more answer is asked for first: a laptop that slept through the activation
     # reports its result, not that it has not finished)
     if [ "$(now)" -gt "$deadline" ]; then
@@ -777,7 +808,7 @@ after_live() {
     cat "$TMPD/dns.$d" >&2
     note "  then: tando domain add $d --wait"
   done
-  [ -n "${DEPLOY_KEY:-}" ] && return 0
+  [ -n "${DEPLOY_KEY:-}${PREVIEW_DEPLOY:-}" ] && return 0
   if [ -n "$C_database" ] && [ "${K_created:-0}" = 1 ]; then
     note "database $C_database created; the app gets DATABASE_URL (tando db url --show)"
   fi

@@ -25,6 +25,9 @@ gate/rootmode.go agent	tando-agent	tando-agent begin <valid:app> <param who: cal
 gate/rootmode.go agent	tando-agent	tando-agent end <valid:app> <valid:l.Token>
 gate/rootmode.go agent	tando-agent	tando-agent end <valid:app> <valid:p.Token>
 gate/rootmode.go agent	tando-agent	tando-agent end <valid:app> <valid:string(m[1])>
+gate/rootmode.go agent	tando-agent	tando-agent preview-rm <valid:app> <valid:pv>
+gate/rootmode.go agent	tando-agent	tando-agent preview-up <valid:app> <valid:pv>
+gate/rootmode.go agent	tando-agent	tando-agent preview-up <valid:app> <valid:pv> <valid:p.TTL>
 gate/sshd.go installSSHD	sshd	sshd -t
 gate/sshd.go installSSHD	systemctl	systemctl reload ssh
 gate/sshd.go installSSHD	systemctl	systemctl reload sshd
@@ -105,7 +108,7 @@ status/verb_info.go tool	caddy|getconf|node|python3	caddy|getconf|node|python3 G
 status/verb_info.go tool	caddy|getconf|node|python3	caddy|getconf|node|python3 version
 watch/check_caddy.go checkCaddyConfig	caddy	caddy validate --config <valid:joined path .../Caddyfile> --adapter caddyfile
 watch/check_down.go countRestarts	journalctl	journalctl -q --no-pager -o cat -u tando-<..> --since=@<..> -g "process exited, code="
-watch/check_health.go liveness	systemd-run	systemd-run --quiet --collect --no-block --unit=tando-<..> -p "Description=tando-watch: restart "<..> tando-agent restart <valid:a.name>
+watch/check_health.go restartHung	systemd-run	systemd-run --quiet --collect --no-block --unit=tando-<..> -p "Description=tando-watch: restart "<..> tando-agent restart <valid:a.name>
 watch/check_health.go unitState	systemctl	systemctl show -P ActiveState <param unit: callers pass constants or validated values>
 watch/check_host.go checkFirewall	nft	nft -f <valid:joined path .../firewall.nft>
 watch/check_host.go checkFirewall	nft	nft list table inet tando
@@ -124,4 +127,4 @@ watch/verbs_install.go systemctl	systemctl	systemctl enable -q tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl reset-failed tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl start tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl try-restart tandod.service
-# positions: 563 constant, 55 prefixed, 3 int, 47 validated, 3 value of an option, 12 after --, 0 other
+# positions: 569 constant, 55 prefixed, 3 int, 54 validated, 3 value of an option, 12 after --, 0 other

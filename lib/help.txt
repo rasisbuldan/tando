@@ -22,10 +22,10 @@ Start here
 
 Deploy     up · deploy · rollback [id] · releases · history
 Run        status · logs [-f] · start · stop · restart · top
-Configure  env · jobs [run|log|pause] · db · backup [offsite] · restore
+Configure  env · jobs [run|log|pause] · db · backup [drill|offsite] · restore
 Observe    ls · health · errors · alerts · requests · audit
 Servers    host add|ls|setup|status|care|update|reboot|rename|rm · domain
-CI         ci setup|ls|revoke|rotate|github|hook
+CI         ci setup|ls|revoke|rotate|github|hook · preview up|ls|rm
 More       init · destroy · unlock · recipes · adopt
 
 tando help <command>: details and an example.  Settings: tando help conf
@@ -286,9 +286,10 @@ a newer one appears (docs/COMMANDS.md, "Upgrading PostgreSQL").
 
 @@ backup
 flags: -a= -H= --yes --show --saved --import --rotate --json
-subs: ls=0-1 now=0-1 restore=1 pull=2 offsite=0+ default=ls
+subs: ls=0-1 now=0-1 drill=0-1 restore=1 pull=2 offsite=0+ default=ls
 usage: tando backup ls [app] [--json]
 usage: tando backup now [app]
+usage: tando backup drill [app]
 usage: tando backup restore <id> [--yes]
 usage: tando backup pull <id> <file>
 usage: tando backup offsite [status|set|test|hosts|sync|off]
@@ -297,6 +298,11 @@ Backups of the app's data directory and database (daily when the app has one).
 restore replaces the live data and asks first (--yes skips the question); the
 data from before is kept as a safety backup. ls and pull also work for an app
 that was destroyed (its final backup).
+drill restores the newest backup into a throwaway directory and database on
+the server (the live ones are never touched), checks file and table counts and
+pg_restore's exit, reports and removes the copy. The server does it monthly
+(tando host setup <host> backup_drill=off stops that); ls shows the last one,
+and a failed drill raises an alert.
 offsite: a copy of every backup in Cloudflare R2 or any S3 storage, encrypted
 on the server with a recovery key shown once (keep it: without it the copies
 cannot be read). set asks for the account id or endpoint, bucket and keys (or
@@ -439,15 +445,32 @@ usage: tando recipes
 What tando init detects, how each recipe runs and what it needs on the server.
 
 @@ ci
-flags: -a= -H= --ref= --repo= --branch= --node= --env= --force --remove
+flags: -a= -H= --ref= --repo= --branch= --node= --env= --force --remove --previews
 subs: setup=0 rotate=0 ls=0 revoke=1 github=0 hook=0
-usage: tando ci setup | rotate | ls | revoke <id|SHA256:...|all>
+usage: tando ci setup [--previews] | rotate | ls | revoke <id|SHA256:...|all>
 usage: tando ci github [--ref TAG|SHA] [--repo URL] [--branch B] [--node N] [--env NAME]
 usage:                 [--force]
 usage: tando ci hook [--branch B] [--force] | tando ci hook --remove
 Deploy keys for CI, run by the admin in the app's directory. setup creates a
-key that can deploy only this app and prints the CI secrets once; github writes
+key that can deploy only this app (with --previews: only its previews, never
+the app itself) and prints the CI secrets once; github writes
 .github/workflows/deploy.yml; hook installs a git pre-push hook. See docs/CI.md.
+
+@@ preview
+flags: -a= -H= --branch= --ttl= --json --yes
+subs: up=0 ls=0 rm=0 default=ls
+usage: tando preview up [--branch B] [--ttl 7d]
+usage: tando preview ls [--json] | tando preview rm [--branch B]
+A temporary copy of the app for a branch, at <app>-<branch> on its own link
+(from the branch name; a name that had to change gets a short checksum, so
+two branches never share one). It has the parent's settings, no
+database, no jobs, no backups, and stops after 6h without a request. It is
+removed after preview_ttl (default 7d) by the server. up deploys this
+directory to it (again to update it); rm removes it now; ls lists them.
+Its env: only what preview_env = NAME, NAME in tando.conf lists (never
+DATABASE_URL); no release command unless preview_release = on.
+In CI: a key for previews only (tando ci setup --previews): docs/CI.md.
+Example: tando preview up --branch feature/login
 
 @@ alerts
 flags: -a= -H= --watch= -n= --json
