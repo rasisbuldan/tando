@@ -7,9 +7,9 @@
 # with every app idle: running journald namespace instances and their RSS; then the creation of
 # 3 more apps (wall time and the daemon-reloads it caused); then the PID 1 question of the squeeze
 # audit (it grew to 535 MB once after wake sockets were driven into systemd's trigger limit):
-# STORM_APPS apps (default 20) made to fail at start, STORM_CYCLES rounds (default 10) of 8
-# requests to each (start limit -> the socket fails), recovery (reset-failed and start the
-# socket, as the monitor does) and a daemon-reload, PID 1 RSS after each round.
+# STORM_APPS apps (default 5) made to fail at start, STORM_CYCLES rounds (default 4) of 80 s
+# with a request a second to each (start limit, then the socket's trigger limit), recovery
+# (reset-failed and start the socket) and a daemon-reload, PID 1 RSS after each round.
 # OLD=<another tando checkout>: also creates 3 apps with that checkout's agent (host setup with
 # it first, back to this one afterwards), for a before/after.
 #
@@ -20,7 +20,7 @@ set -u
 # lint: allow RL03 the suites' own test/lib.sh
 . "$(cd "$(dirname "$0")/.." && pwd -P)/test/lib.sh"
 t_init density
-N=${1:-150} P=${2:-4} K=${STORM_APPS:-20} C=${STORM_CYCLES:-10}
+N=${1:-150} P=${2:-4} K=${STORM_APPS:-5} C=${STORM_CYCLES:-4}
 OUT=$E/results W=$E/w
 say() { echo "$*" | tee -a "$OUT"; }
 t_server_up || exit 1
@@ -99,16 +99,24 @@ say "storm: $K apps failing at start, $C rounds; PID 1 RSS (kB) before: $(pid1)"
 s=1; while [ $s -le "$K" ]; do srv "sudo touch /etc/tando-bench-crash-$(printf 'd%03d' $s)"; s=$((s + 1)); done
 c=1; line=""
 while [ $c -le "$C" ]; do
-  s=1
-  while [ $s -le "$K" ]; do
-    n=$(printf 'd%03d' $s)
-    for q in 1 2 3 4 5 6 7 8; do curl -s -o /dev/null --max-time 20 "$(t_url "$n")" & done
-    s=$((s + 1))
+  # a request a second to each for 80 s: 5 failed starts in 60 s (the app's start limit), then
+  # the wake socket's trigger limit (systemd fails the socket)
+  end=$((SECONDS + 80))
+  while [ $SECONDS -lt $end ]; do
+    s=1
+    while [ $s -le "$K" ]; do curl -s -o /dev/null --max-time 2 "$(t_url "$(printf 'd%03d' $s)")" & s=$((s + 1)); done
+    sleep 1
   done
   wait
   failed=$(srv "systemctl list-units --state=failed --no-legend --plain 'tando-d*_wake.socket' | wc -l" | tr -d ' ')
-  # recovery as the monitor's does it (recover-all), then a reload as a deploy would
-  srv 'sudo /opt/tando/bin/tando-agent recover-all > /dev/null 2>&1; sudo systemctl daemon-reload'
+  # recovery (as recover-all does it for a socket that failed), then a reload as a deploy would
+  s=1
+  while [ $s -le "$K" ]; do
+    n=$(printf 'd%03d' $s)
+    srv "sudo systemctl reset-failed tando-$n.service tando-${n}_wake.service tando-${n}_wake.socket; sudo systemctl start tando-${n}_wake.socket"
+    s=$((s + 1))
+  done
+  srv 'sudo systemctl daemon-reload'
   line="$line $(pid1)/$failed"
   c=$((c + 1))
 done
