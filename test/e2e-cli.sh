@@ -577,6 +577,7 @@ check "PV8 tando preview frob is a usage error" test $rc = 2
 out=$("$R" backup drill --help 2>&1)
 check "PV9 backup drill is in the help" eval 'printf "%s" "$out" | grep -Fq "tando backup drill [app]"'
 printf 'host\tx\nserver\t1\npreview\talpha-feature-login-d910\talpha\t%s\t1\t20261122-010112\thttp://alpha-feature-login-d910.apps.example.org\npreview\talpha-pr-7\talpha\t%s\t1\t-\thttp://alpha-pr-7.apps.example.org\n' "$(( $(date +%s) + 600000 ))" "$(( $(date +%s) + 7300 ))" > "$E/pv.rows"
+# shellcheck disable=SC2034  # (read in the eval of PV11)
 pvout=$( . "$ROOT/lib/ui.sh"; . "$ROOT/lib/common.sh"; . "$ROOT/lib/views.sh"; . "$ROOT/lib/cmd-preview.sh"; TMPD=$E; cp "$E/pv.rows" "$E/st"; APP=alpha HOST=vps; TANDO_COLOR=never; ui_init; preview_render 2>&1 )
 check "PV11 preview ls shows each name whole, its expiry and its whole link, and 'not deployed yet'" \
   eval 'printf "%s" "$pvout" | grep -q "alpha-feature-login-d910  expires in 6d" && printf "%s" "$pvout" | grep -q "http://alpha-feature-login-d910.apps.example.org" &&
