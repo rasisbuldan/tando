@@ -1063,8 +1063,9 @@ agent_raw() {
   # session's SSH_CONNECTION, so the audit line says from=dashboard (srv/logs Origin). Only this
   # value; never with a deploy key (its gate refuses such a command)
   [ -n "$s" ] && [ "${TANDO_FROM:-}" = dashboard ] && [ -z "${DEPLOY_KEY:-}" ] && s="TANDO_FROM=dashboard $s"
+  # (% too: a profile's cpu=25% for host setup; not special to the remote shell)
   for a in "$@"; do
-    case $a in ""|*[!A-Za-z0-9_.:=/@,+-]*) die "internal: unsafe argument '$a'";; esac
+    case $a in ""|*[!A-Za-z0-9_.:=/@,+%-]*) die "internal: unsafe argument '$a'";; esac
   done
   local try=0
   while :; do

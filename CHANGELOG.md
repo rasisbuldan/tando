@@ -12,6 +12,13 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 
 ### New
 
+- Guardrails for shared servers (docs/COMMANDS.md "Profiles and guardrails"): limit profiles
+  (`host setup profile.<name>=...`, `profile = <name>`) with mandatory CPU, task and job limits,
+  worker counts and job frequency; `mail_out = off`; a per-app outbound connection rate
+  (`conn_rate_out=`); per-app network byte counters, written by tando-metrics; `egress_ip` and
+  `bind_ip` per app; the awake governor for idle apps (`awake_max=`, `wake_rate=`); the
+  `cpu_sustained` alert; container apps' packets are now matched by their slice (they bypassed
+  every per-user network rule).
 - bench: `bench/fleet.sh` (100-app fleet and reboot test on a real server), `bench/rebuild-drill.sh` (rebuild and offsite restore drill) and `bench/container-egress.sh` (container apps bypass the per-uid network rules: measured, fix proposed); docs/THREAT-MODEL.md.
 - Preview apps: `tando preview up [--branch B] [--ttl 7d]` deploys this project as
   `<app>-<branch>` (24 characters at most; a checksum keeps two branches apart) on its own link:

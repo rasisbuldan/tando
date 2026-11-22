@@ -637,11 +637,11 @@ cmd_domain_check() {
   local since; since=$(date '+%Y-%m-%d %H:%M:%S' -d '-5 sec')
   while ((t < 90)); do
     if [[ $dt == off ]]; then
-      code=$(curl -s -A "$PROBE_UA" -H "@$PROBE_HDR" -o /dev/null -m 5 -w '%{http_code}' -H "Host: $d" "http://127.0.0.1$(health_path)")
+      code=$(curl -s -A "$PROBE_UA" -H "@$PROBE_HDR" -o /dev/null -m 5 -w '%{http_code}' -H "Host: $d" "http://$(caddy_host)$(health_path)")
     else
       opts=(); [[ $dt == internal ]] && opts=(--cacert "$ca")
       code=$(curl -s -A "$PROBE_UA" -H "@$PROBE_HDR" -o /dev/null -m 5 -w '%{http_code}' "${opts[@]}" \
-        --resolve "$d:443:127.0.0.1" "https://$d$(health_path)" 2> /dev/null)
+        --resolve "$d:443:$(caddy_host)" "https://$d$(health_path)" 2> /dev/null)
     fi
     [[ $code == [23]?? ]] && { [[ $dt == off ]] && echo "live=http://$d${C[path]:-}" || echo "live=https://$d${C[path]:-}"
       echo "expires=$(cert_expiry "$d")"; return 0; }
@@ -1217,6 +1217,9 @@ props() { # port [kind]
     # as quadlet does: podman starts the container and exits, conmon stays as the main process
     # (Type=notify), the container's cgroup is created inside the unit's (Delegate). No mount
     # namespace options: podman's network namespaces must stay visible to later podman calls
+    # its slice exists now (the unit's cgroup is made before this runs): the network rules by
+    # slice (fw_ctr_load) take its id, which is new when the slice was made again
+    [[ $kind == service ]] && echo "ExecStartPre=-+$AGENT fw-sync"
     printf '%s\n' Type=notify NotifyAccess=all Delegate=yes KillMode=mixed \
       "ExecStop=$AGENT container-stop $A" "MemoryMax=${C[memory]:-256M}" SuccessExitStatus=143 \
       "Environment=PORT=$p" "Slice=$(app_slice)" "OOMScoreAdjust=$(oom_adj)"
@@ -1812,15 +1815,18 @@ probe() {
   done
 }
 
+# caddy_host: the address Caddy serves this app's site on: its bind_ip, else loopback (for a URL:
+# an IPv6 address in brackets)
+caddy_host() { local a=${C[bind_ip]:-127.0.0.1}; [[ $a == *:* ]] && a="[$a]"; echo "$a"; }
 # health check through Caddy, the way a visitor reaches the app
 via_caddy() { # [unit to watch]
   local name t=${C[health_timeout]:-60} base opts=()
   name=$(site)
   if [[ -n ${C[check_url]:-} ]]; then name=${C[check_url]#*://}; name=${name%%/*}; fi
   if [[ ${C[check_url]:-} == http://* || ( -z ${C[check_url]:-} && ${H[tls]:-off} == off ) ]]; then
-    base=http://127.0.0.1 opts=(-H "Host: $name")
+    base=http://$(caddy_host) opts=(-H "Host: $name")
   else
-    base=https://$name opts=(-k --resolve "$name:443:127.0.0.1")
+    base=https://$name opts=(-k --resolve "$name:443:$(caddy_host)")
   fi
   probe "$t" "${1:-}" "${opts[@]}" "$base$(health_path)" && static_ok "$base" "${opts[@]}" || return 1
   # the answer counts only when the process on the app's port is the app's own (a stranger that
@@ -2778,7 +2784,7 @@ DB_CONNS=20     # connections to pgbouncer and PostgreSQL an app may hold, per c
 fw_sync() {
   command -v nft > /dev/null || return 0
   local f=$R/firewall.nft a u p sp lo hi db x others tmp i pool mo eg cm="" om="" im=""
-  local -A own=() pgu=() outside=() mail=() snat4=() snat6=()
+  local -A own=() pgu=() outside=() mail=() snat4=() snat6=() ctr=()
   local co=${H[conn_out]:-$CONN_OUT} dr=${H[dns_rate]:-$DNS_RATE} cr=${H[conn_rate_out]:-$CONN_RATE_OUT}
   [[ $co =~ ^[1-9][0-9]{0,5}$ ]] || co=$CONN_OUT; [[ $dr =~ ^[1-9][0-9]{0,5}$ ]] || dr=$DNS_RATE
   [[ $cr =~ ^[1-9][0-9]{0,5}$ ]] || cr=$CONN_RATE_OUT
@@ -2815,6 +2821,9 @@ fw_sync() {
     if [[ " $mo" == *" off "* ]]; then mail[$u]=1
     elif [[ $mo == *p:* ]]; then x=${mo#*p:}; x=${x%% *}; [[ ,${H[profile.$x]:-}, == *,mail_out=off,* && " $mo" != *" on "* ]] && mail[$u]=1
     fi
+    # a container app: its packets leave from slirp4netns and conmon, which run as root inside the
+    # app's unit, so the uid rules never see them: the same rules match its slice (containers)
+    grepq -x 'recipe=container' "$R/apps/$a/app.conf" && ctr[$a]=$u
     eg=$(sed -n 's/^egress_ip=//p' "$R/apps/$a/app.conf")
     for x in ${eg//,/ }; do
       if [[ $x == *:* ]]; then snat6[$u]=$x; else snat4[$u]=$x; fi
@@ -2837,38 +2846,12 @@ fw_sync() {
     echo "  counter app_mail {}"
     echo "  counter app_rate {}"
     for u in "${!own[@]}"; do echo "  counter out_$u {}"; echo "  counter in_$u {}"; done
+    echo "  chain containers {}"
     echo "  chain output {"
     echo "    type filter hook output priority 0; policy accept;"
-    for u in "${!own[@]}"; do
-      # the kernel's connection table is the host's: one app's uid holds at most conn_out TCP and
-      # UDP connections at once (a connect-retry loop would fill nf_conntrack_max, and every new
-      # connection to Caddy would then be dropped), and sends at most dns_rate DNS packets a
-      # second (the resolver every app shares; DNS is not in conn_out: a lookup's entry stays 30 s)
-      echo "    meta skuid $u meta l4proto { tcp, udp } th dport != 53 ct state new ct count over $co counter name app_conn reject"
-      echo "    meta skuid $u meta l4proto { tcp, udp } th dport 53 limit rate over $dr/second burst $((dr * 2)) packets counter name app_dns reject"
-      [[ -z ${own[$u]} ]] || echo "    oifname \"lo\" meta skuid $u tcp dport { ${own[$u]} } accept"
-      echo "    oifname \"lo\" meta skuid $u tcp dport { $lo-$hi, $PF_LO-$PF_HI, 2019$others } reject with tcp reset"
-      # (5432: PostgreSQL itself, 6432: pgbouncer in front of it)
-      # an app with a database: at most db_conns x db_pool connections to them at once
-      # (pgbouncer's max_client_conn is shared by all apps; unauthenticated connections to
-      # PostgreSQL count against no role's limit)
-      if [[ -n ${pgu[$u]:-} ]]; then
-        echo "    oifname \"lo\" meta skuid $u tcp dport { 5432, 6432 } ct state new ct count over ${pgu[$u]} counter name app_db reject with tcp reset"
-      else
-        echo "    oifname \"lo\" meta skuid $u tcp dport { 5432, 6432 } reject with tcp reset"
-      fi
-      # the cloud provider's metadata service (instance keys and tokens on many clouds): an app
-      # tricked into fetching a URL (SSRF) must not reach it
-      echo "    meta skuid $u ip daddr 169.254.169.254 reject"
-      echo "    meta skuid $u ip6 daddr fd00:ec2::254 reject"
-      # SocketBindDeny filters bind(), but listen() on an unbound socket autobinds 0.0.0.0:<any>:
-      # the app's packets in a connection opened from outside (not over lo) are dropped
-      echo "    oifname != \"lo\" meta skuid $u ct direction reply drop"
-      # no outbound mail (mail_out = off): spam from a compromised or abusive app
-      [[ -z ${mail[$u]:-} ]] || echo "    meta skuid $u tcp dport { $MAIL_PORTS } counter name app_mail reject with tcp reset"
-      # at most conn_rate_out new outbound connections a second (a scan, a flood; DNS has its own)
-      echo "    oifname != \"lo\" meta skuid $u meta l4proto { tcp, udp } th dport != 53 ct state new limit rate over $cr/second burst $((cr * 2)) packets counter name app_rate reject"
-    done
+    # (a container app's slice first: chain containers, loaded after this file, fw_ctr_rules)
+    echo "    jump containers"
+    for u in "${!own[@]}"; do fw_app_rules "meta skuid $u" "$u"; done
     # what each app's uid sends and receives over the network (not loopback): its packets out, and
     # the packets of the connections it opened (their conntrack entry carries its uid as mark)
     if [[ -n $cm ]]; then
@@ -2877,7 +2860,7 @@ fw_sync() {
     fi
     echo "  }"
     if [[ -n $cm ]]; then
-      echo "  chain input {"
+      echo "  chain bytes_in {"
       echo "    type filter hook input priority 0; policy accept;"
       echo "    iifname != \"lo\" ct mark { $cm } counter name ct mark map { $im }"
       echo "  }"
@@ -2885,24 +2868,79 @@ fw_sync() {
     if ((${#snat4[@]} + ${#snat6[@]})); then
       echo "  chain egress {"
       echo "    type nat hook postrouting priority srcnat; policy accept;"
-      for u in "${!snat4[@]}"; do echo "    oifname != \"lo\" meta skuid $u meta nfproto ipv4 snat ip to ${snat4[$u]}"; done
-      for u in "${!snat6[@]}"; do echo "    oifname != \"lo\" meta skuid $u meta nfproto ipv6 snat ip6 to ${snat6[$u]}"; done
+      for u in "${!snat4[@]}"; do echo "    oifname != \"lo\" meta skuid $u meta nfproto ipv4 counter snat ip to ${snat4[$u]}"; done
+      for u in "${!snat6[@]}"; do echo "    oifname != \"lo\" meta skuid $u meta nfproto ipv6 counter snat ip6 to ${snat6[$u]}"; done
       echo "  }"
     fi
     rate_limit_rules
     echo "}"
   } > "$tmp"
   # the same rules as loaded: nothing to do (a host setup again rewrites nothing)
-  if cmp -s "$tmp" "$f" && nft list table inet tando &> /dev/null; then rm -f "$tmp"; exec 4>&-; return 0; fi
+  if cmp -s "$tmp" "$f" && nft list table inet tando &> /dev/null; then rm -f "$tmp"; fw_ctr_load; exec 4>&-; return 0; fi
   for i in 1 2 3; do
     if nft -c -f "$tmp" 2> "$tmp.err" && sync "$tmp" && mv -f "$tmp" "$f" && nft -f "$f" 2> "$tmp.err"; then
-      rm -f "$tmp" "$tmp.err"; exec 4>&-; return 0
+      rm -f "$tmp" "$tmp.err"; fw_ctr_load; exec 4>&-; return 0
     fi
     sleep 1
   done
   echo "tando-agent: could not load the loopback rules (the rules from before stay): $(head -c 300 "$tmp.err" | tr '\n' ' ')" >&2
   rm -f "$tmp" "$tmp.err"; exec 4>&-
   return 1
+}
+
+# fw_app_rules match uid: the rules of one app's packets (fw_sync's own, pgu, mail, co, dr, cr, lo,
+# hi, others): those that match "meta skuid <uid>", or a container app's slice (socket cgroupv2)
+fw_app_rules() {
+  local mt=$1 u=$2
+  # the kernel's connection table is the host's: one app's uid holds at most conn_out TCP and
+  # UDP connections at once (a connect-retry loop would fill nf_conntrack_max, and every new
+  # connection to Caddy would then be dropped), and sends at most dns_rate DNS packets a
+  # second (the resolver every app shares; DNS is not in conn_out: a lookup's entry stays 30 s)
+  echo "    $mt meta l4proto { tcp, udp } th dport != 53 ct state new ct count over $co counter name app_conn reject"
+  echo "    $mt meta l4proto { tcp, udp } th dport 53 limit rate over $dr/second burst $((dr * 2)) packets counter name app_dns reject"
+  [[ -z ${own[$u]} ]] || echo "    oifname \"lo\" $mt tcp dport { ${own[$u]} } accept"
+  echo "    oifname \"lo\" $mt tcp dport { $lo-$hi, $PF_LO-$PF_HI, 2019$others } reject with tcp reset"
+  # (5432: PostgreSQL itself, 6432: pgbouncer in front of it)
+  # an app with a database: at most db_conns x db_pool connections to them at once
+  # (pgbouncer's max_client_conn is shared by all apps; unauthenticated connections to
+  # PostgreSQL count against no role's limit)
+  if [[ -n ${pgu[$u]:-} ]]; then
+    echo "    oifname \"lo\" $mt tcp dport { 5432, 6432 } ct state new ct count over ${pgu[$u]} counter name app_db reject with tcp reset"
+  else
+    echo "    oifname \"lo\" $mt tcp dport { 5432, 6432 } reject with tcp reset"
+  fi
+  # the cloud provider's metadata service (instance keys and tokens on many clouds): an app
+  # tricked into fetching a URL (SSRF) must not reach it
+  echo "    $mt ip daddr 169.254.169.254 reject"
+  echo "    $mt ip6 daddr fd00:ec2::254 reject"
+  # SocketBindDeny filters bind(), but listen() on an unbound socket autobinds 0.0.0.0:<any>:
+  # the app's packets in a connection opened from outside (not over lo) are dropped
+  echo "    oifname != \"lo\" $mt ct direction reply drop"
+  # no outbound mail (mail_out = off): spam from a compromised or abusive app
+  [[ -z ${mail[$u]:-} ]] || echo "    $mt tcp dport { $MAIL_PORTS } counter name app_mail reject with tcp reset"
+  # at most conn_rate_out new outbound connections a second (a scan, a flood; DNS has its own)
+  echo "    oifname != \"lo\" $mt meta l4proto { tcp, udp } th dport != 53 ct state new limit rate over $cr/second burst $((cr * 2)) packets counter name app_rate reject"
+}
+# fw_ctr_load: (inside fw_sync: its arrays) chain containers, the rules of every container app by
+# its slice. Not in firewall.nft: nft resolves a cgroup path when it loads the rule, and at boot
+# (tando-firewall.service, before any app) no slice exists, so the whole file would fail. Loaded
+# after it by every fw_sync, and by each start of a container app (its unit's ExecStartPre: a slice
+# made again has a new id). A slice that is not there now (the app is stopped) gets no rules. A
+# failure is a warning: the uid rules stand.
+fw_ctr_load() {
+  local a c="" t
+  for a in "${!ctr[@]}"; do
+    t="tando.slice/tando-${a//-/\\x2d}.slice"
+    [[ -d /sys/fs/cgroup/$t ]] || continue
+    c+=$(fw_app_rules "socket cgroupv2 level 2 \"$t\"" "${ctr[$a]}")$'\n'
+    # its bytes, as the uid's (out_<uid>, in_<uid> through the conntrack mark)
+    c+="    oifname != \"lo\" socket cgroupv2 level 2 \"$t\" ct state new ct mark set ${ctr[$a]}"$'\n'
+    c+="    oifname != \"lo\" socket cgroupv2 level 2 \"$t\" counter name out_${ctr[$a]}"$'\n'
+  done
+  printf 'flush chain inet tando containers\ntable inet tando {\n  chain containers {\n%s  }\n}\n' "$c" > "$R/.firewall-containers.nft" &&
+    nft -f "$R/.firewall-containers.nft" 2> "$R/.firewall-containers.err" ||
+    echo "tando-agent: the rules of container apps by their slice could not be loaded (the uid rules stand): $(head -c 300 "$R/.firewall-containers.err" | tr '\n' ' ')" >&2
+  return 0
 }
 
 fw_install() {
@@ -3790,6 +3828,8 @@ cmd_configure() {
     done
   fi
   profile_apply
+  [[ -n ${C[egress_ip]:-} && ${C[recipe]:-} == container ]] &&
+    die "egress_ip is not supported for recipe = container yet: its traffic leaves through slirp4netns, which the per-app address rule cannot tell apart"
   # the apps' database pools must fit in PostgreSQL's connections (before anything is written)
   [[ ${C[database]:-} == postgres && ${H[postgres]:-} == yes ]] &&
     db_pool_check "${C[db_pool]:-$DB_POOL}" "/etc/postgresql/${H[postgres_version]:-}/main/conf.d/tando.conf"
@@ -8388,6 +8428,7 @@ case $verb in
   job-run) cmd_job_run "$@";;
   idle-stopped) cmd_idle_stopped "$@";;
   wake-admit) cmd_wake_admit "$@";;
+  fw-sync) need_root; load "$R/host.conf" H; fw_sync;;   # (a container app's ExecStartPre: fw_ctr_load)
   wake-check) cmd_wake_check;;
   job-begin) cmd_job_begin "$@";; job-end) cmd_job_end "$@";; job-due) cmd_job_due "$@";; job-gone) cmd_job_gone "$@";; job-pause) cmd_job_pause "$@";; job-log) cmd_job_log "$@";;
   host)   # host care (docs/HOSTCARE.md): the server itself, answered by tando-host (Go, srv/hostcare)

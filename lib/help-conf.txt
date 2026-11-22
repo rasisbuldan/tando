@@ -39,6 +39,10 @@ Limits
   response_timeout seconds Caddy waits for an answer, then a 504; streams are not cut (default 60, or off)
   body_max        largest request body, over it a 413: 100MB, 2GB, off (default 100MB)
   priority        high or low: killed last or first when memory runs out
+  profile         the server's limit profile (set by its admin): ceilings, mandatory cpu and tasks
+  mail_out        off: no outbound mail (ports 25, 465, 587, 2525) (default on)
+  bind_ip         serve the site only on this address of the server (set by its admin)
+  egress_ip       outbound connections leave from this address (set by its admin)
   preview_ttl     how long a preview app lives, like 7d, 12h (default 7d; tando preview)
   preview_env     env names a preview gets: API_BASE, FEATURE_FLAGS (default none; never DATABASE_URL)
   preview_skip    env names a preview does not get: STRIPE_SECRET_KEY, SMTP_PASSWORD

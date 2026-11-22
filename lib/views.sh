@@ -437,6 +437,7 @@ render_ls() {
   ls_awk -v mode=ls -v now="$NOW" -v allrows="${ALLROWS:+1}" -v limit="$LS_ROWS" -v sumf="$TMPD/sum" < "$TMPD/st" > "$TMPD/rows"
   local cnt="" cut=""
   { read -r n; read -r cnt; read -r cut; } < "$TMPD/sum"
+  case $n in ""|*[!0-9]*) n=0;; esac   # (no app: the summary is empty)
   ui_box_open "tando ls" "$HOST"
   watch_stale_line
   skew_line
