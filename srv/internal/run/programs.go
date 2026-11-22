@@ -44,4 +44,5 @@ var Programs = []string{
 	"userdel",
 	"usermod",
 	"visudo",
+	"zstd",
 }

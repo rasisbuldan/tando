@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"tando/srv/internal/apps"
+	"tando/srv/internal/valid"
 )
 
 // app.deploy: an immutable artifact (built elsewhere) fetched by the node, verified, unpacked and
@@ -268,6 +269,9 @@ func (c *Ctl) deployArtifact(ctx context.Context, r Request, a DeployArgs, spec 
 // deployTree is the laptop deploy's path from its upload on: configure, begin, the tree into
 // incoming/, activate, and the activation followed to its result.
 func (c *Ctl) deployTree(ctx context.Context, app, tree, settings string) (map[string]string, *Error) {
+	if !valid.App(app) {
+		return nil, &Error{"bad_request", "bad app name"}
+	}
 	cfg, e := c.agent(ctx, settings, "configure", app)
 	if e != nil {
 		return nil, e
@@ -301,6 +305,9 @@ func (c *Ctl) deployTree(ctx context.Context, app, tree, settings string) (map[s
 
 // follow polls deploy-status until the activation's result.
 func (c *Ctl) follow(ctx context.Context, app, id string, res map[string]string) (map[string]string, *Error) {
+	if !valid.App(app) || !valid.ID(id) {
+		return res, &Error{"internal", "activate gave no release id"}
+	}
 	for {
 		st, e := c.agent(ctx, "", "deploy-status", app, id)
 		if e != nil {

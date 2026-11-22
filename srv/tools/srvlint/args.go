@@ -67,9 +67,13 @@ var validated = map[string]string{
 
 	// control plane mode (srv/ctl): the app is valid.App in Parse before any verb runs, and an app
 	// of apps.Names (exists); the rest are the verbs table's constants or checked arguments
-	"ctl /opt/tando/bin/tando-agent r.App": "valid.App in Parse (schema.go) and exists(): starts with a letter",
-	"ctl /opt/tando/bin/tando-agent v":     "svc's verb: restart, start or stop, constants of the verbs table",
-	"ctl /opt/tando/bin/tando-agent a.To":  "valid.ID (rollback): a release id, starts with a digit",
+	"ctl /opt/tando/bin/tando-agent r.App":    "valid.App in Parse (schema.go) and exists(): starts with a letter",
+	"ctl /opt/tando/bin/tando-agent v":        "svc's verb: restart, start or stop, constants of the verbs table",
+	"ctl /opt/tando/bin/tando-agent a.To":     "valid.ID (rollback): a release id, starts with a digit",
+	"ctl /opt/tando/bin/tando-agent app":      "deployTree, follow: called with r.App only (valid.App in Parse), checked again with valid.App at their entry",
+	"ctl /opt/tando/bin/tando-agent id":       "follow: valid.ID before the loop (the id activate printed)",
+	"ctl /opt/tando/bin/tando-agent n":        "drain: an app of apps.Names (valid.App)",
+	"ctl /opt/tando/bin/tando-agent c.Caller": "New sets it to the constant tando-ctl (begin's client name)",
 
 	// host care: the apps whose backup is taken before a reboot
 	"hostcare /opt/tando/bin/tando-agent app": "staleBackups: names of backups(), each valid.App (starts with a letter)",

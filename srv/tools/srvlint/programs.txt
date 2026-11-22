@@ -1,4 +1,5 @@
 ctl	tando-agent
+ctl	zstd
 daemon	systemctl
 gate	atq
 gate	atrm
