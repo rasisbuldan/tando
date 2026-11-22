@@ -23,6 +23,7 @@ import (
 
 	"tando/srv/internal/apps"
 	"tando/srv/internal/cgroup"
+	"tando/srv/internal/cost"
 	"tando/srv/internal/decimal"
 	"tando/srv/internal/env"
 	"tando/srv/internal/fsinfo"
@@ -73,6 +74,7 @@ type Live struct {
 	Env    env.Env
 	Units  Units
 	Statfs func(path string) (used, size uint64, err error) // nil: fsinfo.Statfs of "/"
+	Cost   *cost.Meter                                      // tandod's cost breakdown (nil: none)
 
 	mu   sync.Mutex
 	ring []cpoint // oldest first, at most Keep; compact (see capp)
@@ -183,6 +185,7 @@ func (l *Live) Run(ctx context.Context) {
 
 func (l *Live) safeSample() {
 	defer func() { recover() }()
+	defer l.Cost.Start("live loop")()
 	l.Sample()
 }
 

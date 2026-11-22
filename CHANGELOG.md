@@ -224,6 +224,13 @@ Steps and checks: docs/release-notes/0.3.0.md.
 - Monitoring: how an app last ended (`last: exit status 3`) is read from the system journal only
   when the app restarted or its state changed, never for a stopped or static app. A stopped or
   failed app used to start a `journalctl` over the whole system journal every minute.
+- Monitoring: tandod spends about half the CPU it did (153 to 80 ms a minute on a 25-app test
+  server with log traffic). The log scan's error counts, the metrics' previous counters and the
+  request log position are no longer flushed to disk every minute (a new error group still is). A
+  hung app's direct liveness probes run at once (the run waits 20 s at most, not 20 s per app), and
+  up to 64 health probes run in parallel. `tando-status cost` on the server breaks tandod's CPU
+  down by section; `TANDOD_PROFILE=<file>` in its environment writes a CPU profile
+  (docs/MONITORING.md, "Where tandod's CPU goes").
 
 ### Fixed
 

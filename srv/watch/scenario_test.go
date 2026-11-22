@@ -329,6 +329,27 @@ func TestLivenessCap(t *testing.T) {
 	}
 }
 
+// Apps that hang are asked on their own ports at once: the run waits for one direct probe (20 s
+// at most), not one per app.
+func TestLivenessProbesAtOnce(t *testing.T) {
+	f := newFakeHost(t)
+	f.app("hog")
+	f.app("hog2")
+	f.ticks(2)
+	f.probe["http://hog.localhost/health"] = probeRes{exit: 28}
+	f.probe["http://hog2.localhost/health"] = probeRes{exit: 28}
+	f.ticks(2)
+	f.slow = 400 * time.Millisecond
+	t0 := time.Now()
+	f.ticks(1) // the third failed probe in a row: both are due
+	if d := time.Since(t0); d > 700*time.Millisecond {
+		t.Errorf("the run took %v: the direct probes ran one after the other", d)
+	}
+	if n := len(f.called("systemd-run")); n != 2 {
+		t.Errorf("%d restarts, want 2", n)
+	}
+}
+
 func TestDiskGuard(t *testing.T) {
 	for _, tt := range []struct {
 		du       string

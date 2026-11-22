@@ -35,6 +35,7 @@ type fakeHost struct {
 	calls   [][]string                   // every command started
 	probe   map[string]probeRes          // health probe result by URL (default: 200 ok)
 	direct  int                          // liveness's direct probe status
+	slow    time.Duration                // how long the direct probe takes
 	sends   []sent
 	code    int // the receivers' answer
 	pings   int
@@ -210,7 +211,10 @@ func (f *fakeHost) Probe(ctx context.Context, reqs []probeReq, timeout time.Dura
 	return res
 }
 
-func (f *fakeHost) Direct(ctx context.Context, url string) int { return f.direct }
+func (f *fakeHost) Direct(ctx context.Context, url string) int {
+	time.Sleep(f.slow)
+	return f.direct
+}
 
 func (f *fakeHost) Cert(ctx context.Context, site string, verify bool) (time.Time, time.Time, error) {
 	return f.now.Add(-80 * 24 * time.Hour), f.now.Add(10 * 24 * time.Hour), nil

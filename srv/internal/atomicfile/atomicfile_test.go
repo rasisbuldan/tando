@@ -72,3 +72,24 @@ func TestWriteIfChanged(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteVolatile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f")
+	n := Flushes()
+	if err := WriteVolatile(p, []byte("a\n"), Mode(0o640)); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "a\n" {
+		t.Fatalf("%q", b)
+	}
+	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o640 {
+		t.Errorf("mode %v", fi.Mode())
+	}
+	if Flushes() != n {
+		t.Errorf("WriteVolatile flushed")
+	}
+	Write(p, []byte("b\n"), Mode(0o640))
+	if Flushes() != n+1 {
+		t.Errorf("Write did not flush")
+	}
+}

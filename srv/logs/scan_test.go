@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"tando/srv/internal/atomicfile"
 	"tando/srv/internal/out"
 )
 
@@ -83,6 +84,13 @@ func TestScan(t *testing.T) {
 		rows[2] != "hours\tdbcd785a\t"+hour+":3" || rows[3] != "hours\ta84a58c0\t"+hour+":1" ||
 		!strings.HasPrefix(rows[4], "sample\t") {
 		t.Fatalf("%q %v", rows, err)
+	}
+	// known groups' counts alone are not flushed to disk (a new group is)
+	journal = ts(5) + "ERROR db timeout after 103 ms\n-- cursor: s=four\n"
+	n := atomicfile.Flushes()
+	scan()
+	if g := h.read("lib/logscan/boom/groups.tsv"); !strings.Contains(g, "\t4\t") || !strings.HasSuffix(g, "\ncursor\ts=four\n") || atomicfile.Flushes() != n {
+		t.Fatalf("flushes %d -> %d; %q", n, atomicfile.Flushes(), g)
 	}
 	_, err = h.rows(func(w *out.Writer) error { return h.l.Errors(ctx(), "boom", "1d", "", w) })
 	wantErr(t, err, "bad window or count")

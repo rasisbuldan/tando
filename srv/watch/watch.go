@@ -55,6 +55,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"tando/srv/internal/cost"
 	"tando/srv/internal/env"
 )
 
@@ -82,6 +83,7 @@ type Watch struct {
 	Scan   LogScanner                // the apps' logs: tando-logs watch-scan (tandod: in-process)
 	Sample func(ctx context.Context) // the metrics sample before the checks (tandod: in-process)
 	Cache  *Cache                    // what a long-running caller keeps between ticks (nil: none)
+	Cost   *cost.Meter               // tandod's cost breakdown, by section (nil: none)
 }
 
 // New is the real machine under e.
