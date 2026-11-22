@@ -6,6 +6,15 @@ first, grouped by area.
 
 ## Unreleased
 
+- Deploys: a deploy no longer waits out the soak of the release before it (back-to-back deploys
+  took the rest of that soak, up to 30 s, on top of their own time). It supersedes it: the soak
+  ends at once, that release stays live until the new one switches and is recorded as
+  `superseded` (in `tando releases` and `tando history`): live, not verified. A new release that
+  fails after its switch goes back to the last verified release, never to a superseded one.
+- Faster health checks: the pre-flight and the check through Caddy poll every 0.1 s for their
+  first two seconds (they waited up to 0.5 s between polls), asking systemd for the unit's state
+  in one call every fourth poll. State writes during a deploy fork less (the metadata group is
+  looked up once per process, a temp file is made with its group and mode in one step).
 - New: `idle_stop = 6h` in tando.conf (scale to zero; `on` = 6h): the app's web process stops
   after that long without a request and its next request starts it (workers and jobs run on) (systemd socket activation and systemd-socket-proxyd
   behind Caddy; the first request waits about 0.1-0.3 s for a small app). `tando ls` says

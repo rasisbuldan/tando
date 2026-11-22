@@ -528,6 +528,7 @@ release_ranges() {
   awk -F'\t' -v id="$id" -v now="$(now)" '
     function sw(t, r) { n++; T[n] = t; I[n] = r }
     $4 == "ok" && ($3 == "deploy" || $3 == "rollback") { v = $11 + 0; sw($1 - v, $2); good = $2; next }
+    $4 == "superseded" && $3 == "deploy" { v = $11 + 0; sw($1 - v, $2); next }
     $4 == "rolledback" { v = $11 + 0; sw($1 - v, $2); sw($1 + 0, good); next }
     END {
       out = ""
@@ -1095,13 +1096,13 @@ AWK
 
 # every switch of the live release (from history.tsv), oldest first, as "epoch:id,..." (last 50)
 release_switches() {
-  awk -F'\t' '$4 == "ok" && ($3 == "deploy" || $3 == "rollback") { s[++n] = int($1 - ($11 + 0)) ":" $2 }
+  awk -F'\t' '($4 == "ok" && ($3 == "deploy" || $3 == "rollback")) || ($4 == "superseded" && $3 == "deploy") { s[++n] = int($1 - ($11 + 0)) ":" $2 }
     END { for (i = (n > 50 ? n - 49 : 1); i <= n; i++) printf "%s%s", (i > (n > 50 ? n - 49 : 1) ? "," : ""), s[i] }' \
     "$R/apps/$A/history.tsv" 2> /dev/null
 }
 # the release that went live last, and when (from history.tsv): "id epoch" or nothing
 live_release() {
-  awk -F'\t' '$4 == "ok" && ($3 == "deploy" || $3 == "rollback") { id = $2; t = $1 - ($11 + 0) }
+  awk -F'\t' '($4 == "ok" && ($3 == "deploy" || $3 == "rollback")) || ($4 == "superseded" && $3 == "deploy") { id = $2; t = $1 - ($11 + 0) }
     $4 == "rolledback" { t = $1 } END { if (id != "") printf "%s %d\n", id, t }' "$R/apps/$A/history.tsv" 2> /dev/null
 }
 

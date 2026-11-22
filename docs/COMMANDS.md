@@ -58,7 +58,11 @@ through Caddy, then a soak (30 s, `soak = N`) in which a crash rolls back. Retur
 `--yes`: tando.conf now names another app or server than the last deploy from here.
 When the upload and the settings are exactly those of the live, verified release, nothing is
 activated: "already live", no new release, no restart (`tando restart` restarts it). A deploy that
-finds another one's release soaking is queued and says what it waits for. While another deploy
+finds the app's last release still in its soak supersedes it: the soak ends at once (it says so)
+and that release stays live until the new one switches, recorded as `superseded` (live, not
+verified: if the new release fails after its switch, the app goes back to the last *verified*
+release, never to the superseded one). A deploy that finds another operation holding the app (a
+rollback, a backup) waits for it and says what it waits for. While another deploy
 (also from another terminal of the same user) is uploading, a deploy is refused at once.
 `release = <command>` in tando.conf runs once per deploy on the server, between pre-flight and
 switch (database migrations): see [The release command](#the-release-command).

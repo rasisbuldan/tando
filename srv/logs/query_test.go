@@ -135,6 +135,28 @@ func TestQuery(t *testing.T) {
 	wantErr(t, h.l.Query(context.Background(), "../x", nil, nil, w), "invalid app name")
 }
 
+// A deploy whose soak a newer deploy cut short (superseded) was live until the next switch; a
+// later deploy that is rolled back goes back to the last ok one, never to the superseded one.
+func TestReleaseSuperseded(t *testing.T) {
+	h := newHost(t)
+	h.app("sup")
+	h.write("opt/apps/sup/history.tsv", strings.Join([]string{
+		"1794580010\t20261108-000001\tdeploy\tok\t9\t-\t-\t1\t2\t0\t3\t-",
+		"1794580040\t20261108-000002\tdeploy\tsuperseded\t9\t-\t-\t1\t2\t0\t4\tsuperseded by a newer deploy",
+		"1794580070\t20261108-000003\tdeploy\trolledback\t9\t-\t-\t1\t2\t0\t5\tverify failed",
+	}, "\n")+"\n")
+	a, _ := h.l.app("sup")
+	if r := a.releaseRanges("20261108-000002", h.now); fmt.Sprint(r) != "[[1.794580036e+15 1.794580065e+15]]" {
+		t.Fatalf("the superseded release was live from its switch to the next: %v", r)
+	}
+	if r := a.releaseRanges("20261108-000001", h.now); fmt.Sprint(r) != fmt.Sprint([][2]float64{{1794580007e6, 1794580036e6}, {1794580070e6, float64(h.now+1) * 1e6}}) {
+		t.Fatalf("the rollback went back to the last ok release: %v", r)
+	}
+	if s := a.switches(); len(s) != 2 || s[1].ID != "20261108-000002" {
+		t.Fatal(s)
+	}
+}
+
 func TestRelease(t *testing.T) {
 	h := newHost(t)
 	h.app("filt")

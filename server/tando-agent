@@ -190,13 +190,21 @@ save() {
   local k tmp="$1.tmp.$$" i
   # (test fault points: before and after every write of a state file; fail = a disk too full)
   fp "pre:${1##*/}" || { echo "tando-agent: could not write $1: the disk is full (test fault)" >&2; return 1; }
+  local pre
   for i in 1 2; do
+    # an app's metadata file: its temp file is made with its group and mode first (one install,
+    # not a chown and a chmod after it: a deploy writes these some 20 times); the write keeps them
+    pre=0
+    case ${1##*/} in
+      app.conf|state|activation|upload|history.tsv)
+        meta_grp && install -m 640 -o root -g "$META_G" /dev/null "$tmp" 2> /dev/null && pre=1;;
+    esac
     if ( umask 077; for k in "${!_m[@]}"; do printf '%s=%s\n' "$k" "${_m[$k]}"; done | sort > "$tmp" ); then
       # unchanged: nothing written (a re-run touches nothing)
       if cmp -s "$tmp" "$1"; then rm -f "$tmp"; return 0; fi
       # flushed before the rename, so a power cut leaves the old file or the new one, never an
       # empty one (the activation's progress file is only a display: not flushed)
-      if meta_mode "$tmp" "${1##*/}" && { [[ ${1##*/} == activation ]] || sync "$tmp"; } && mv -f "$tmp" "$1"; then
+      if { ((pre)) || meta_mode "$tmp" "${1##*/}"; } && { [[ ${1##*/} == activation ]] || sync "$tmp"; } && mv -f "$tmp" "$1"; then
         # the rename itself reaches the disk too (the directory's entry): a power cut after this
         # never brings back the old file under a later write that was synced
         [[ ${1##*/} == activation ]] || sync "${1%/*}" 2> /dev/null
@@ -224,10 +232,17 @@ save() {
 # root and the group tando-m-<app> only: the app's user and its deploy user (tando-gate), so the
 # read-only verbs work for both and no other app's user can read it. activation.log (application
 # output of a failed activation) is root's only.
+# meta_grp: the app's metadata group tando-m-<app> exists and is usable (meta_group_ok): META_G.
+# Remembered for the rest of the process once found (save asks on every write: two getent each)
+meta_grp() {
+  [[ -n ${A:-} ]] || return 1
+  [[ ${META_G:-} == "tando-m-$A" ]] && return 0
+  getent group "tando-m-$A" > /dev/null && meta_group_ok && META_G=tando-m-$A
+}
 meta_mode() { # file name
   case $2 in
     app.conf|state|activation|upload|history.tsv)
-      if [[ -n ${A:-} ]] && getent group "tando-m-$A" > /dev/null && meta_group_ok; then
+      if meta_grp; then
         chown "root:tando-m-$A" "$1" && chmod 640 "$1"
       else chmod 600 "$1"; fi;;
     host.conf) chmod 644 "$1";;
@@ -582,7 +597,8 @@ lock() {
   lockfile "$D/lock"
   exec 9>"$D/lock"
   if ! flock -n 9; then
-    { : > "$D/lock.wait.$BASHPID"; } 2> /dev/null
+    # (the marker names the verb: a deploy's configure or activation supersedes a soak, finish)
+    { printf '%s\n' "${verb:-?}" > "$D/lock.wait.$BASHPID"; } 2> /dev/null
     flock -w "${1:-300}" 9; local rc=$?
     rm -f "$D/lock.wait.$BASHPID"
     ((rc == 0)) || { [[ -n ${LOCK_GIVEUP:-} ]] && "$LOCK_GIVEUP"; die "$A is busy: $(lock_holder) holds it (tando status shows it)"; }
@@ -1233,8 +1249,12 @@ probe_header() {
 }
 probe() {
   probe_header
-  local to=$1 end unit=$2 code rc n0=0 n state err_since="" body step=0
-  local -a nap=(0.05 0.1 0.2)   # first polls come fast (an app is often up in 0.3 s), then every 0.5 s
+  local to=$1 end unit=$2 code rc n0=0 n state err_since="" body step=0 k v
+  # the first polls come fast: an app is often up within a second, and each 0.5 s step it waited
+  # for added up to that much to the pre-flight and again to the verify. 0.05, then every 0.1 s for
+  # about two seconds (the unit's state asked every 4th time only: a curl is the whole cost of a
+  # poll, about 10 ms of CPU on one vCPU), every 0.25 s up to about four, then every 0.5 s
+  local -a nap=(0.05)
   mono; end=$((MONO + $1))
   shift 2
   # straight to a port (the pre-flight, adopt's checks): never the secret, the app would learn it
@@ -1268,9 +1288,12 @@ probe() {
       err_since=""
     fi
     ((MONO < end)) || { PROBE_WHY="no healthy answer within $to s (last: $LAST_ANSWER)"; rm -f "$body"; return 1; }
-    if [[ -n $unit ]]; then
-      state=$(systemctl show -P ActiveState "$unit")
-      n=$(systemctl show -P NRestarts "$unit")
+    if [[ -n $unit ]] && ((step >= 20 || step % 4 == 3)); then
+      # (one systemctl call for both)
+      state="" n=""
+      while IFS='=' read -r k v; do
+        case $k in NRestarts) n=$v;; ActiveState) state=$v;; esac
+      done <<< "$(systemctl show -p NRestarts -p ActiveState "$unit")"
       if (( ${n:-0} - ${n0:-0} >= 2 )); then
         PROBE_WHY="the app is crash-looping ($((n - n0)) restarts; last: $LAST_ANSWER)"; rm -f "$body"; return 1
       fi
@@ -1278,7 +1301,8 @@ probe() {
         failed|inactive) PROBE_WHY="the app exited ($state; last: $LAST_ANSWER)"; rm -f "$body"; return 1;;
       esac
     fi
-    sleep "${nap[step]:-0.5}"; step=$((step + 1))
+    if ((step < 20)); then sleep "${nap[step]:-0.1}"; elif ((step < 28)); then sleep 0.25; else sleep 0.5; fi
+    step=$((step + 1))
   done
 }
 
@@ -1426,7 +1450,7 @@ op_trailer() {
   hist_has "$id" "$kind" "$since" || { fp "$kind.hist" && hist "$id" "$kind" "$res" "${S[outcome_note]:-}"; } || return 1
   # (job units that could not be written: not done; recovery syncs them again, tando-watch asks)
   { fp "$kind.jobs" && jobs_follow; } || { echo "tando-agent: the job units of $A could not be updated yet: recovery retries" >&2; return 1; }
-  [[ $kind == deploy && $res != ok ]] && fp "$kind.drop" && drop_release "$id"
+  [[ $kind == deploy && $res != ok && $res != superseded ]] && fp "$kind.drop" && drop_release "$id"
   st outcome_done "$o"      # (recover need not look at it again)
 }
 
@@ -1657,7 +1681,7 @@ soak_why() { # [unit, default the app's]
 
 # Verify the live target of a deploy or rollback through Caddy, or go back to the fallback.
 finish() { # kind [note]
-  local id=${S[target]} kind=$1 t ok=0 n0 n soak soaked=0 k v state
+  local id=${S[target]} kind=$1 t ok=0 n0 n soak soaked=0 k v state sup=0
   t=$(ds); pg phase verify
   caddy_up || { PROBE_WHY="Caddy is not running and did not start (sudo journalctl -u caddy)"; }
   if ! fp fin.verify; then PROBE_WHY="health check failed (test fault)"
@@ -1686,7 +1710,8 @@ finish() { # kind [note]
     # (the monotonic clock: a wall clock set back during the soak must not stretch it)
     local end; mono; end=$((MONO + soak))
     while mono; ((MONO < end)); do
-      sleep 1
+      # a newer deploy of this app waits for the lock: it supersedes this soak (soak_nap)
+      if ! soak_nap && fp fin.supersede; then sup=1; break; fi
       # (an empty answer is systemd not answering in time, not a restart: asked again next second)
       # (one systemctl call for both: the restart count and the state)
       n="" state=""
@@ -1703,6 +1728,16 @@ finish() { # kind [note]
       fi
     done
   fi
+  if ((ok && sup)); then
+    # superseded: live, and it passed its check through Caddy, but its soak was cut short, so it
+    # is not counted as verified: last_good stays the last verified release, which is what a
+    # failure of the newer deploy goes back to (never to this one). ONE state write, as end_op
+    mono; P[t_verify]=$(el "$t")
+    local m="superseded by a newer deploy $((soak - end + MONO)) s into its soak of $soak s; live but not verified (a failed deploy goes back to ${S[last_good]:-nothing})"
+    AUDIT_NOTE="release $id: superseded"
+    end_op "$id" "$kind" superseded "$m" "$m" "status_$id" superseded current "$id"
+    return 0
+  fi
   if ((ok)); then
     S[status_$id]=verified
     [[ $kind == rollback && -n ${S[prev]:-} ]] && S[status_${S[prev]}]=rolledback   # left, not failed
@@ -1712,6 +1747,31 @@ finish() { # kind [note]
   fi
   P[t_verify]=$(el "$t")
   revert "$kind" "$PROBE_WHY" "${2:-$PROBE_WHY}" "$soaked"
+  return 1
+}
+
+# soak_nap: the soak's pause of a second, in quarters; false as soon as a newer deploy of this app
+# waits for it (deploy_waits)
+soak_nap() {
+  local i
+  for i in 1 2 3 4; do
+    deploy_waits && return 1
+    sleep 0.25
+  done
+  return 0
+}
+# deploy_waits: a newer deploy of this app is held up by this soak: its configure or its activation
+# waits for the app's lock (lock.wait.<pid> of a live tando-agent names the verb), or this soak is
+# recovery's, run by such a verb that found the soaking activation cut off (killed, a reboot)
+deploy_waits() {
+  local f v c
+  case ${FPC:-}:${verb:-} in rec:configure|rec:run-activation|rec:activate) return 0;; esac
+  for f in "$D"/lock.wait.*; do
+    [[ -f $f && -d /proc/${f##*.} ]] || continue
+    v="" c=""
+    { read -r v < "$f"; read -r c < "/proc/${f##*.}/comm"; } 2> /dev/null
+    [[ ( $c == tando-agent || $c == bash ) && ( $v == configure || $v == run-activation ) ]] && return 0
+  done
   return 1
 }
 
@@ -3063,7 +3123,8 @@ cmd_configure() {
     # another activation (or a rollback, backup, env change) holds the app: the deploy will wait
     # for it in configure; the client says what for and about how long (busy_left: seconds of
     # soak left, "-" when unknown)
-    ((new)) || busy_info
+    # (supersede=1: a soak ends when this deploy's configure waits for it; finish, deploy_waits)
+    ((new)) || { busy_info; echo "supersede=1"; }
     return 0
   fi
   [[ -z $needs ]] || die "$A needs${needs} on <host>, which is not installed: tando up installs it (or tando host setup <host>${needs// / }=yes)"

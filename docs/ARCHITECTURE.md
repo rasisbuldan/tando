@@ -167,7 +167,14 @@ in a `writable`, `public_dirs` or assets directory, is copied (`unshare_release`
 to one release shows in another. Never a link to `incoming/` (the uploader writes there). Then
 link shared dirs, make `writable` dirs app-owned. preflight: the same sandbox on port+100, health-checked; a Next.js release also has to load
 its `sharp` module and answer for the pages' optimised images. switch: pre-deploy
-backup, atomic `current` swap, restart. verify: through Caddy. `recover` (boot and every mutating
+backup, atomic `current` swap, restart. verify: through Caddy, then the soak (`soak`, 30 s; NRestarts
+and ActiveState every second). A newer deploy of the app supersedes a soak: when its `configure`
+or its activation waits for the lock (`lock.wait.<pid>` names the verb), or recovers the soaking
+activation after a kill (`deploy_waits`), the soak ends at once with one state write (`end_op`,
+result `superseded`, `status_<id>=superseded`, `current` stays, `last_good` does not move). So the
+newer deploy's fallback is still the last verified release: a failure after its switch goes back
+there, never to the superseded one; a failure before its switch leaves the superseded release
+live. Fault point `fin.supersede` (before that write); test/faults/m7 kills at each step. `recover` (boot and every mutating
 verb) reverts copy/preflight and finishes or reverts switch/verify/rollback.
 
 A deploy's settings (its tando.conf) wait in `confs/<id>` from `configure` to the switch, where
