@@ -339,11 +339,13 @@ func TestLivenessProbesAtOnce(t *testing.T) {
 	f.probe["http://hog.localhost/health"] = probeRes{exit: 28}
 	f.probe["http://hog2.localhost/health"] = probeRes{exit: 28}
 	f.ticks(2)
-	f.slow = 400 * time.Millisecond
-	t0 := time.Now()
+	f.meet = 2 // both direct probes must be running at the same time (no wall clock involved)
 	f.ticks(1) // the third failed probe in a row: both are due
-	if d := time.Since(t0); d > 700*time.Millisecond {
-		t.Errorf("the run took %v: the direct probes ran one after the other", d)
+	f.mu.Lock()
+	lonely, here := f.lonely, f.here
+	f.mu.Unlock()
+	if lonely || here != 2 {
+		t.Errorf("the direct probes ran one after the other (lonely %v, %d arrived)", lonely, here)
 	}
 	if n := len(f.called("systemd-run")); n != 2 {
 		t.Errorf("%d restarts, want 2", n)
