@@ -150,6 +150,28 @@ out=$(psql_as tando_notes "$pw" tando_notes2 'SELECT 1')
 check "D4b another app's database: refused ($(echo "$out" | tail -1))" eval 'echo "$out" | grep -q "permission denied"'
 out=$(psql_as tando_notes "$pw" postgres 'SELECT 1')
 check "D4c the postgres database: refused" eval 'echo "$out" | grep -q "permission denied"'
+# K. bounded shared fate: one app's uid holds at most 20 x db_pool (100) connections to pgbouncer
+# and PostgreSQL (pgbouncer's max_client_conn is every app's); PostgreSQL's memory is protected
+cat > "$E/kc.js" <<'JS'
+const net = require('net'), N = Number(process.argv[2]); let ok = 0, bad = 0, n = 0;
+for (let i = 0; i < N; i++) {
+  const s = net.connect(6432, '127.0.0.1');
+  s.on('connect', () => { ok++; done(); }); s.on('error', () => { bad++; done(); });
+}
+function done() { if (++n === N) { console.log('ok=' + ok + ' bad=' + bad); setTimeout(() => process.exit(0), 3000); } }
+JS
+kd=$(srv 'd=$(mktemp -d) && chmod 755 "$d" && cat > "$d/kc.js" && chmod 644 "$d/kc.js" && echo "$d"' < "$E/kc.js")
+srv "cd / && sudo -u tando-notes node $kd/kc.js 130" > "$E/kc1.out" 2>&1 &
+kp=$!; sleep 1
+o2=$(srv "cd / && sudo -u tando-notes2 node $kd/kc.js 5" 2>&1); wait $kp; o1=$(cat "$E/kc1.out")
+check "K1 notes opens 130 connections to pgbouncer at once: at most 100 connect, the rest refused ($o1); notes2 meanwhile connects ($o2)" \
+  eval 'ok=$(echo "$o1" | sed -n "s/.*ok=\([0-9]*\).*/\1/p"); [ -n "$ok" ] && [ "$ok" -le 100 ] && [ "$ok" -ge 80 ] &&
+        echo "$o1" | grep -q "bad=[1-9]" && [ "$o2" = "ok=5 bad=0" ] &&
+        srv "sudo nft list chain inet tando output" | grep -q "dport { 5432, 6432 } ct state new ct count over 100 "'
+lowpg=$(srv "systemctl show -P MemoryLow postgresql@$pv-main"); lowsys=$(srv "systemctl show -P MemoryLow system.slice")
+check "K2 PostgreSQL keeps its shared buffers and more from reclaim (MemoryLow $lowpg, system.slice $lowsys); postgres is in tando-core" \
+  eval '[ "${lowpg:-0}" -ge $(( ($(sbmb) + 32) * 1048576 )) ] && [ "${lowsys:-0}" -gt "${lowpg:-0}" ] &&
+        srv "id -nG postgres" | grep -qw tando-core'
 
 # P2. the role's limits: defaults on both apps; tando db shows what PostgreSQL holds
 "$R" db > "$E/db1.out" 2>&1; cat "$E/db1.out" >&2

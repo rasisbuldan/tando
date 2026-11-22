@@ -175,7 +175,14 @@ func (a *app) scanJournal(ctx context.Context, w *out.Writer, sigs [6]fsig) (nre
 		if s.Cursor != "" {
 			data = append(append(data[:len(data):len(data)], "cursor\t"...), s.Cursor+"\n"...)
 		}
-		atomicfile.Write(filepath.Join(d, "groups.tsv"), data, atomicfile.Mode(0o644))
+		// a new or dropped group is flushed to disk (lost, its "new error" would be told again);
+		// counts alone are not: a power cut costs a minute of counts, and the flush cost a disk
+		// write and about 10 ms of CPU a minute for every app that logs errors
+		write := atomicfile.WriteVolatile
+		if len(r.New) > 0 || len(r.Dropped) > 0 || j.base {
+			write = atomicfile.Write
+		}
+		write(filepath.Join(d, "groups.tsv"), data, atomicfile.Mode(0o644))
 		saveSamples(filepath.Join(d, "samples"), r.Dropped, j.samples, j.order)
 		scanRows(w, a.name, r, j.base, j.live, j.liveT)
 	}
@@ -607,7 +614,8 @@ func (a *app) scanRequestsRaw(w *out.Writer) (tot, e5, p95, skip int64) {
 		end = pos + nb
 	}
 	if pino != ino || end != pos {
-		atomicfile.Write(filepath.Join(d, "req"), []byte(ino+" "+decimal.Itoa(end)+"\n"), atomicfile.Mode(0o644))
+		// (not flushed: a position lost in a power cut starts the next scan at the log's end)
+		atomicfile.WriteVolatile(filepath.Join(d, "req"), []byte(ino+" "+decimal.Itoa(end)+"\n"), atomicfile.Mode(0o644))
 	}
 	return
 }

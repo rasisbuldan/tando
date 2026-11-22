@@ -24,6 +24,17 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   removes the copy (the live data is never touched). The server does it monthly after the backup
   queue (`backup_drill = monthly|off` in `tando host setup`); `backup ls` shows the last result,
   `doctor` warns and an alert fires when a drill fails.
+- Isolation: limits on what apps share (docs/COMMANDS.md, "Limits and load").
+  - Kernel tables: one app's user holds at most `conn_out` (2048) connections at once, sends at
+    most `dns_rate` (200) DNS packets a second, and holds at most 20 x `db_pool` (100)
+    connections to pgbouncer and PostgreSQL (`tando host setup <host> conn_out=N dns_rate=N`).
+  - Disk: an app's `/tmp` and `/var/tmp` are a tmpfs of `tmp_size` (64M) in its memory, no longer
+    a directory on the root disk. `disk = 2G` in tando.conf sets its own disk share; the new
+    alert `disk_warn` (low) fires at 80% of it. On ext2/3/4 the reserved blocks go to group
+    `tando-core` (PostgreSQL, Caddy) too.
+  - Memory and CPU: Caddy, sshd, tandod, PostgreSQL and pgbouncer get `MemoryLow`; an app's
+    journald runs in its slice (a log flood counts against the app); `priority` sets the CPU
+    weight (high 200, low 50); `io = 50` caps an app's disk bandwidth in MB/s.
 - Scale: a server holds 100 apps and more (tuned for 4 vCPU / 8 GB). Upgrade with
   `tando host setup <host>`; apps keep their ports, users and settings. docs/ARCHITECTURE.md,
   "Many apps on one server".
@@ -169,6 +180,11 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 Run `tando host setup <host>` on each server after updating tando; it applies the items below.
 Steps and checks: docs/release-notes/0.3.0.md.
 
+- An app's `/tmp` and `/var/tmp` are a 64 MB tmpfs in its memory (was: a private directory on
+  the disk), from its next deploy or host setup. An app that writes large temporary files (uploads
+  to the system temp directory) sets `tmp_size = 512M`, or `memory =` higher with it. New caps per
+  app's user: 2048 connections at once (`conn_out`), 200 DNS packets a second (`dns_rate`), 20 x
+  `db_pool` connections to the database; `tando doctor` ("app limits") counts what they refused.
 - PostgreSQL moves to pgbouncer on the app's next deploy. An app's `DATABASE_URL` then points at
   pgbouncer (transaction pooling); `LISTEN`/`NOTIFY`, session advisory locks, session `SET` and
   prepared statements on old drivers do not survive that: set `db_direct = true` for such an app
@@ -220,6 +236,13 @@ Steps and checks: docs/release-notes/0.3.0.md.
 - Monitoring: how an app last ended (`last: exit status 3`) is read from the system journal only
   when the app restarted or its state changed, never for a stopped or static app. A stopped or
   failed app used to start a `journalctl` over the whole system journal every minute.
+- Monitoring: tandod spends about half the CPU it did (153 to 80 ms a minute on a 25-app test
+  server with log traffic). The log scan's error counts, the metrics' previous counters and the
+  request log position are no longer flushed to disk every minute (a new error group still is). A
+  hung app's direct liveness probes run at once (the run waits 20 s at most, not 20 s per app), and
+  up to 64 health probes run in parallel. `tando-status cost` on the server breaks tandod's CPU
+  down by section; `TANDOD_PROFILE=<file>` in its environment writes a CPU profile
+  (docs/MONITORING.md, "Where tandod's CPU goes").
 
 ### Fixed
 

@@ -38,7 +38,7 @@ type probeRes struct {
 	body string
 }
 
-// Prober runs the health probes (all at once, at most 16 in parallel) and the direct probe of
+// Prober runs the health probes (all at once, at most probeParallel in parallel) and the direct probe of
 // the liveness check.
 type Prober interface {
 	Probe(ctx context.Context, reqs []probeReq, timeout time.Duration) []probeRes
@@ -106,7 +106,7 @@ func (p httpProber) Probe(ctx context.Context, reqs []probeReq, timeout time.Dur
 	res := make([]probeRes, len(reqs))
 	c := loopClient(p.loopback, timeout)
 	h := headerLines(p.header)
-	sem := make(chan struct{}, 16)
+	sem := make(chan struct{}, probeParallel)
 	var wg sync.WaitGroup
 	for i, r := range reqs {
 		wg.Add(1)
@@ -120,6 +120,10 @@ func (p httpProber) Probe(ctx context.Context, reqs []probeReq, timeout time.Dur
 	wg.Wait()
 	return res
 }
+
+// probeParallel: health probes at once. Each waits health_timeout at most, so a run waits that
+// long once for up to this many apps that hang, not once per app.
+const probeParallel = 64
 
 func probe(ctx context.Context, c *http.Client, u string, h [][2]string, keep int64) probeRes {
 	start := time.Now()

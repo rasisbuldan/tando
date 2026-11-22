@@ -610,7 +610,8 @@ nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Setting
 `ci_max_file_mb=`, `unit_drop=`, `journal_max=` (not in help.txt), and the per-client limits on ports
 80/443: `rate_limit=on|off|auto` (auto: on when tando owns Caddy), `conn_limit=N` (connections at
 once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections per second, burst
-3x; default 100). Scale (docs/ARCHITECTURE.md, "Many apps on one server"): `port_min=`,
+3x; default 100), and per app's user `conn_out=N` (connections at once, default 2048), `dns_rate=N`
+(DNS packets a second, default 200) ("Limits and load"). Scale (docs/ARCHITECTURE.md, "Many apps on one server"): `port_min=`,
 `port_max=` (app ports, default 4100-4999), `preflight_min=`, `preflight_max=` (pre-flight ports,
 default 14100-14999; the ranges must not overlap or hold 2019 or 5432), `uid_min=`, `uid_max=`
 (new app users' ids, default 30000-39999), `mem_overcommit=` (default 1.5; 0 turns the check off),
@@ -819,6 +820,21 @@ the next deploy; per host with `tando host setup <host> key=value`.
 | host `conn_limit=` | 200 | connections at once per client address (IPv6: per /64) on ports 80/443 | further connections are reset |
 | host `conn_rate=` | 100 | new connections a second per client address, burst 3x | further SYNs are dropped: the client retries a second later |
 | host `rate_limit=` | auto | on, off, or auto: on only where tando owns Caddy (it installed it, or the Caddyfile has no other site) | `tando doctor` row "client limits" shows how often they tripped |
+| `priority =` | normal | CPU weight of the app's slice under contention: high 200, normal 100, low 50 (and the OOM order, MemoryLow for high) | a busy `low` app yields CPU to the others first |
+| `tmp_size =` | 64M | the app's `/tmp` and `/var/tmp`: each a tmpfs of its own, counted in its memory (not a directory on the disk every app shares; a venv or container build keeps a private /tmp on disk) | writes fail with "No space left on device" |
+| `io =` | none | MB/s of reads and of writes on the disk of the app's directory (`IORead/WriteBandwidthMax`; only where the cgroup io controller is) | the app's disk I/O is slowed |
+| `disk =` | host `app_max_mb` | the app's disk share for alerts (`2G`, `500M`): its files and database | alert `disk_warn` (low) from 80%, `disk` over it; no hard quota |
+| host `conn_out=` | 2048 | TCP and UDP connections one app's user holds at once (the kernel's connection table is the host's) | further connects are refused at once (`ECONNREFUSED`) |
+| host `dns_rate=` | 200 | DNS packets a second one app's user sends (burst 2x), the resolver all apps share | further lookups fail at once |
+| (`db_pool` x 20) | 100 | connections one app's user holds to pgbouncer and PostgreSQL together (pgbouncer's 5000 client slots are every app's) | further connects are refused |
+
+The core is protected the other way round: `host setup` gives Caddy (64 MB), sshd (32 MB),
+tandod (32 MB), pgbouncer (32 MB) and PostgreSQL (its shared buffers + 32 MB) a `MemoryLow=`
+(reclaim takes from apps first) and `system.slice` their sum. On ext2/3/4, the blocks the file
+system of /opt/tando reserves (often 5%) go to group `tando-core` too (PostgreSQL and Caddy are
+in it; root always has them): an app that fills the disk leaves the database and Caddy room. The
+running PostgreSQL and Caddy get the group at their next restart. The `tando doctor` row "app
+limits" counts what the per-app rules refused.
 
 ### Scale to zero: idle_stop
 

@@ -44,6 +44,9 @@ configure() {
     [ -n "${C_priority:-}" ] && printf 'priority=%s\n' "$C_priority"
     [ -n "${C_preview_ttl:-}" ] && printf 'preview_ttl=%s\n' "$C_preview_ttl"
     [ -n "${C_preview_skip:-}" ] && printf 'preview_skip=%s\n' "$C_preview_skip"
+    [ -n "${C_tmp_size:-}" ] && printf 'tmp_size=%s\n' "$C_tmp_size"
+    [ -n "${C_io:-}" ] && printf 'io=%s\n' "$C_io"
+    [ -n "${C_disk:-}" ] && printf 'disk=%s\n' "$C_disk"
     [ -n "${C_assets:-}" ] && printf 'assets=%s\n' "$C_assets"
     [ "${C_compress:-}" = off ] && printf 'compress=off\n'   # (on is the default; an older agent knows no compress)
     [ -n "$C_job_timeout" ] && printf 'job_timeout=%s\n' "$C_job_timeout"

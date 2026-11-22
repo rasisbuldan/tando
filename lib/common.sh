@@ -403,6 +403,7 @@ C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""
 C_idle_stop=""     # scale to zero: stop after this long without a connection (10m, 30s, 2h, off)
 C_preview_ttl="" C_preview_skip=""   # previews: how long one lives (7d), env names it does not get (docs/COMMANDS.md "Preview apps")
 C_priority=""   # high or low: who the OOM killer takes last or first (checked by the server too)
+C_tmp_size="" C_io="" C_disk=""   # /tmp's size, disk MB/s, disk share for alerts (checked by the server too)
 
 # trim_v text -> TRIM: without leading and trailing white space (no fork; conf_load runs it per line)
 trim_v() { TRIM=${1#"${1%%[![:space:]]*}"}; TRIM=${TRIM%"${TRIM##*[![:space:]]}"}; }
@@ -666,6 +667,14 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         case $C_preview_skip in ""|*[!A-Za-z0-9_,]*|[0-9,]*|*,) die "$f:$n: preview_skip is env names, like STRIPE_SECRET_KEY, SMTP_PASSWORD (got \"$v\")";; esac;;
       priority) C_priority=$v
         case $v in high|normal|low) ;; *) die "$f:$n: priority must be high, normal or low (got \"$v\")";; esac;;
+      tmp_size) C_tmp_size=$v
+        case $v in [1-9]*[KMG]) ui_int "${v%?}" || die "$f:$n: tmp_size is a size like 64M (got \"$v\")";;
+          *) die "$f:$n: tmp_size is a size like 64M (got \"$v\")";; esac;;
+      io) C_io=$v
+        ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 99999 ] || die "$f:$n: io is the disk bandwidth in MB/s, 1 to 99999 (got \"$v\")";;
+      disk) C_disk=$v
+        case $v in [1-9]*[MG]) ui_int "${v%?}" || die "$f:$n: disk is a size like 2G or 500M (got \"$v\")";;
+          *) die "$f:$n: disk is a size like 2G or 500M (got \"$v\")";; esac;;
       hold) C_hold=$v
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 999 ] || die "$f:$n: hold is 1 to 999 seconds (got \"$v\")";;
       stop_timeout) C_stop_timeout=$v

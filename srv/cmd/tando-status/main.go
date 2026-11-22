@@ -33,7 +33,7 @@ import (
 	"tando/srv/status"
 )
 
-var errUsage = errors.New("usage: tando-status status [app] | follow [app] | deploy-status <app> <id> [wait=<phase>] | releases <app> | history [app] [n] | busy <app> | info | version")
+var errUsage = errors.New("usage: tando-status status [app] | follow [app] | deploy-status <app> <id> [wait=<phase>] | releases <app> | history [app] [n] | busy <app> | info | cost | version")
 
 func main() {
 	syscall.Umask(0o022) // (a recreated releases/ is 755 whatever umask sudo passed on)
@@ -78,7 +78,7 @@ func run(args []string) error {
 		// runs for as long as someone watches, so the collector is on again
 		debug.SetGCPercent(100)
 		return c.Follow(ctx, w, arg(args, 0), proto.AskStatus, proto.AskLive, 5*time.Second, time.Minute)
-	case "live", "ring":
+	case "live", "ring", "cost":
 		var a []string
 		if arg(args, 0) != "" {
 			a = []string{arg(args, 0)}

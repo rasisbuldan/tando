@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 )
 
 // Perm is the mode and owner a written file gets.
@@ -25,7 +26,20 @@ type Perm struct {
 func Mode(m fs.FileMode) Perm { return Perm{Mode: m, UID: -1, GID: -1} }
 
 // Write replaces path with data.
-func Write(path string, data []byte, p Perm) error {
+func Write(path string, data []byte, p Perm) error { return write(path, data, p, true) }
+
+var flushes atomic.Int64
+
+// Flushes is how many files Write has flushed to disk in this process.
+func Flushes() int64 { return flushes.Load() }
+
+// WriteVolatile replaces path with data as Write does (a reader sees the old content or the new),
+// without the flushes: for files rewritten every minute whose loss in a power cut costs one
+// minute's work again, never a wrong answer (the metrics' previous counters, the log scan's
+// counts). Each flush cost tandod about 10 ms of CPU and a disk write every minute per file.
+func WriteVolatile(path string, data []byte, p Perm) error { return write(path, data, p, false) }
+
+func write(path string, data []byte, p Perm, flush bool) error {
 	dir, base := filepath.Split(path)
 	if dir == "" {
 		dir = "."
@@ -35,7 +49,7 @@ func Write(path string, data []byte, p Perm) error {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	tmp := f.Name()
-	err = fill(f, data, p)
+	err = fill(f, data, p, flush)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -46,6 +60,9 @@ func Write(path string, data []byte, p Perm) error {
 		os.Remove(tmp)
 		return fmt.Errorf("write %s: %w", path, err)
 	}
+	if !flush {
+		return nil
+	}
 	// the rename itself reaches the disk with the directory
 	if d, err := os.Open(dir); err == nil {
 		d.Sync()
@@ -54,12 +71,15 @@ func Write(path string, data []byte, p Perm) error {
 	return nil
 }
 
-func fill(f *os.File, data []byte, p Perm) error {
+func fill(f *os.File, data []byte, p Perm, flush bool) error {
 	if _, err := f.Write(data); err != nil {
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		return err
+	if flush {
+		flushes.Add(1)
+		if err := f.Sync(); err != nil {
+			return err
+		}
 	}
 	if err := f.Chmod(p.Mode); err != nil { // (CreateTemp made it 0600)
 		return err

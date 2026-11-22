@@ -21,7 +21,7 @@ JS
 setup_deploy $A 1 ok up; ok "the busy app is up (rc=$DRC)" test "$DRC" = 0
 setup_deploy $B 1 ok up; ok "the neighbour is up (rc=$DRC)" test "$DRC" = 0
 # limits set in app.conf (as tando.conf's max_conns/max_requests/cpu/tasks would), applied by a restart
-srv "sudo bash -c 'printf \"max_conns=2\nmax_requests=4\nhold=5\ncpu=20%%\ntasks=200\n\" >> /opt/tando/apps/$A/app.conf'"
+srv "sudo bash -c 'printf \"max_conns=2\nmax_requests=4\nhold=5\ncpu=20%%\ntasks=200\npriority=low\nio=50\n\" >> /opt/tando/apps/$A/app.conf'"
 "$R" host setup test public_port="$HP" > /dev/null 2>&1      # (re-renders every app's units and slice)
 srv "sudo /opt/tando/bin/tando-agent restart $A" > /dev/null 2>&1
 ok "Caddy caps the busy app (max_conns_per_host 2, unhealthy_request_count 4)" \
@@ -29,6 +29,13 @@ ok "Caddy caps the busy app (max_conns_per_host 2, unhealthy_request_count 4)" \
 sl=/sys/fs/cgroup/tando.slice/tando-$A.slice
 ok "its slice holds the app's units with cpu 20%, tasks 200, memory 3x 128M" \
   srv "grep -q '^20000 100000' $sl/cpu.max && grep -qx 200 $sl/pids.max && grep -qx 402653184 $sl/memory.max && test -d $sl/tando-$A.service"
+# CPU by priority (low: weight 50, the neighbour 100); io = 50 MB/s on the disk of the app's
+# directory, where the io controller is (the container's overlayfs has no block device: the slice
+# carries the setting, systemd finds no device to apply it to)
+w=$(srv "cat $sl/cpu.weight /sys/fs/cgroup/tando.slice/tando-$B.slice/cpu.weight" | tr '\n' ' ')
+ok "priority = low: the busy app's slice has CPU weight 50, the neighbour's 100 ($w)" test "$w" = "50 100 "
+ok "io = 50: read and write bandwidth caps of 50 MB/s in its slice" \
+  srv "grep -qx 'IOReadBandwidthMax=/opt/tando/apps/$A 50M' /etc/systemd/system/tando-$A.slice && grep -qx 'IOWriteBandwidthMax=/opt/tando/apps/$A 50M' /etc/systemd/system/tando-$A.slice"
 pid=$(srv "systemctl show -P MainPID tando-$A")
 # 40 requests at once: 4 in flight, about one served a second, the rest shed with 503 busy after the hold
 curl -s -i --parallel --parallel-immediate --parallel-max 40 -m 40 -o "$W/fb_#1" -w '%{http_code} %{time_total}\n' \
