@@ -98,7 +98,6 @@ preview_when() { # epoch -> "in 6d 23h" / "in 3h 5m" / "in 4m" / "now"
 }
 
 preview_ls() {
-  local r name parent exp created cur link
   resolve 1
   agent_raw sudo preview-ls "$APP" > "$TMPD/st" || exit 1
   if [ -n "$JSON" ]; then
@@ -108,17 +107,22 @@ preview_ls() {
     printf '}\n'
     return 0
   fi
-  {
-    printf 'PREVIEW\tEXPIRES\tRELEASE\tLINK\n'
-    while IFS=$TAB read -r r name parent exp created cur link; do
-      [ "$r" = preview ] || continue
-      [ "$cur" = - ] && cur="not deployed"
-      printf '%s\t%s\t%s\t%s\n' "$name" "$(preview_when "$exp")" "$cur" "$link"
-    done < "$TMPD/st"
-  } > "$TMPD/rows"
+  preview_render
+}
+
+# preview_render: the box of tando preview ls from the rows in $TMPD/st: a line per preview (name,
+# expiry, release) and its link below, wrapped (a link is longer than a table column)
+preview_render() {
+  local r name parent exp created cur link n=0
   ui_box_open "previews $APP" "$HOST"
-  if [ "$(wc -l < "$TMPD/rows")" -gt 1 ]; then ui_table "l,l,l,l" < "$TMPD/rows"
-  else ui_box_line "No previews. tando preview up deploys this branch as $APP-<branch>."; fi
+  while IFS=$TAB read -r r name parent exp created cur link; do
+    [ "$r" = preview ] || continue
+    n=$((n + 1))
+    [ "$cur" = - ] && cur="not deployed yet"
+    ui_box_line "$name  ${UI_DIM}expires $(preview_when "$exp"), release $cur${UI_NC}"
+    ui_box_wrap "  $link"
+  done < "$TMPD/st"
+  [ "$n" -gt 0 ] || ui_box_line "No previews. tando preview up deploys this branch as $APP-<branch>."
   ui_box_close "they stop when idle and are removed when they expire (preview_ttl, 7d)"
 }
 

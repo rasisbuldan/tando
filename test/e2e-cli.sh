@@ -576,6 +576,11 @@ out=$("$R" preview frob 2>&1); rc=$?
 check "PV8 tando preview frob is a usage error" test $rc = 2
 out=$("$R" backup drill --help 2>&1)
 check "PV9 backup drill is in the help" eval 'printf "%s" "$out" | grep -Fq "tando backup drill [app]"'
+printf 'host\tx\nserver\t1\npreview\talpha-feature-login-d910\talpha\t%s\t1\t20261122-010112\thttp://alpha-feature-login-d910.apps.example.org\npreview\talpha-pr-7\talpha\t%s\t1\t-\thttp://alpha-pr-7.apps.example.org\n' "$(( $(date +%s) + 600000 ))" "$(( $(date +%s) + 7300 ))" > "$E/pv.rows"
+pvout=$( . "$ROOT/lib/ui.sh"; . "$ROOT/lib/common.sh"; . "$ROOT/lib/views.sh"; . "$ROOT/lib/cmd-preview.sh"; TMPD=$E; cp "$E/pv.rows" "$E/st"; APP=alpha HOST=vps; TANDO_COLOR=never; ui_init; preview_render 2>&1 )
+check "PV11 preview ls shows each name whole, its expiry and its whole link, and 'not deployed yet'" \
+  eval 'printf "%s" "$pvout" | grep -q "alpha-feature-login-d910  expires in 6d" && printf "%s" "$pvout" | grep -q "http://alpha-feature-login-d910.apps.example.org" &&
+        printf "%s" "$pvout" | grep -q "alpha-pr-7  expires in 2h .*not deployed yet"'
 check "PV10 none of the preview checks reached a server (ssh/rsync calls: $(calls))" test "$(calls)" = 0
 rm -rf "${E:?}/w/hello/.tando"
 t_done
