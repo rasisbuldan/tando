@@ -3114,7 +3114,7 @@ DB_CONNS=20     # connections to pgbouncer and PostgreSQL an app may hold, per c
 fw_sync() {
   command -v nft > /dev/null || return 0
   local f=$R/firewall.nft a u p sp lo hi db x others tmp i pool mo eg cm="" om="" im=""
-  local -A own=() pgu=() outside=() mail=() snat4=() snat6=() ctr=()
+  local -A own=() pgu=() outside=() mail=() snat4=() snat6=() ctr=() egown=()
   local co=${H[conn_out]:-$CONN_OUT} dr=${H[dns_rate]:-$DNS_RATE} cr=${H[conn_rate_out]:-$CONN_RATE_OUT}
   [[ $co =~ ^[1-9][0-9]{0,5}$ ]] || co=$CONN_OUT; [[ $dr =~ ^[1-9][0-9]{0,5}$ ]] || dr=$DNS_RATE
   [[ $cr =~ ^[1-9][0-9]{0,5}$ ]] || cr=$CONN_RATE_OUT
@@ -3157,6 +3157,7 @@ fw_sync() {
     eg=$(sed -n 's/^egress_ip=//p' "$R/apps/$a/app.conf")
     for x in ${eg//,/ }; do
       if [[ $x == *:* ]]; then snat6[$u]=$x; else snat4[$u]=$x; fi
+      egown[$x]=$u
     done
   done
   # the per-uid byte counters (out_<uid>, in_<uid>: what tando-metrics reads) and their maps: one
@@ -3176,6 +3177,7 @@ fw_sync() {
     echo "  counter app_mail {}"
     echo "  counter app_rate {}"
     echo "  counter app_meta {}"
+    echo "  counter app_egress {}"
     for u in "${!own[@]}"; do echo "  counter out_$u {}"; echo "  counter in_$u {}"; done
     echo "  chain containers {}"
     echo "  chain output {"
@@ -3183,10 +3185,18 @@ fw_sync() {
     # (a container app's slice first: chain containers, loaded after this file, fw_ctr_rules)
     echo "    jump containers"
     for u in "${!own[@]}"; do fw_app_rules "meta skuid $u" "$u"; done
+    # an app's egress address is its own: any other app's packets from it (a socket bound to it,
+    # IP_PKTINFO) are dropped, IPv4 and IPv6
+    for x in "${!egown[@]}"; do
+      eg=""; for u in "${!own[@]}"; do [[ $u == "${egown[$x]}" ]] || eg+="${eg:+, }$u"; done
+      [[ -n $eg ]] || continue
+      if [[ $x == *:* ]]; then echo "    oifname != \"lo\" meta skuid { $eg } ip6 saddr $x counter name app_egress drop"
+      else echo "    oifname != \"lo\" meta skuid { $eg } ip saddr $x counter name app_egress drop"; fi
+    done
     # what each app's uid sends and receives over the network (not loopback): its packets out, and
     # the packets of the connections it opened (their conntrack entry carries its uid as mark)
     if [[ -n $cm ]]; then
-      echo "    oifname != \"lo\" meta skuid { $cm } ct state new ct mark set meta skuid"
+      echo "    oifname != \"lo\" meta skuid { $cm } ct state new ct mark 0 ct mark set meta skuid"
       echo "    oifname != \"lo\" counter name meta skuid map { $om }"
     fi
     echo "  }"
@@ -3268,7 +3278,7 @@ fw_ctr_load() {
     [[ -d /sys/fs/cgroup/$t ]] || continue
     c+=$(fw_app_rules "socket cgroupv2 level 2 \"$t\"" "${ctr[$a]}")$'\n'
     # its bytes, as the uid's (out_<uid>, in_<uid> through the conntrack mark)
-    c+="    oifname != \"lo\" socket cgroupv2 level 2 \"$t\" ct state new ct mark set ${ctr[$a]}"$'\n'
+    c+="    oifname != \"lo\" socket cgroupv2 level 2 \"$t\" ct state new ct mark 0 ct mark set ${ctr[$a]}"$'\n'
     c+="    oifname != \"lo\" socket cgroupv2 level 2 \"$t\" counter name out_${ctr[$a]}"$'\n'
   done
   if printf 'flush chain inet tando containers\ntable inet tando {\n  chain containers {\n%s  }\n}\n' "$c" > "$R/.firewall-containers.nft" &&
@@ -4206,6 +4216,7 @@ cmd_configure() {
       profile) [[ $v =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "bad profile: $v";;
       mail_out) [[ $v == on || $v == off ]] || die "bad mail_out: $v (on or off)";;
       bind_ip|egress_ip) x=""
+        [[ $v == none ]] && { C[$k]=none; continue; }   # (none: cleared)
         [[ $k == bind_ip ]] && main_ip "$v" && die "bind_ip = $v is the server's main address, which every other app is served on: give $A another address of the server"
         [[ $k == egress_ip ]] && [[ $v =~ ^[^,:]+(,[^,]*:[^,]*)?$ || $v =~ ^[^,]*:[^,]*$ ]] || [[ $k == bind_ip && $v != *,* ]] ||
           die "bad $k: $v (one address$([[ $k == egress_ip ]] && echo ", or an IPv4 and an IPv6 address: 192.0.2.10,2001:db8::10"))"
@@ -4274,16 +4285,31 @@ cmd_configure() {
     C[$k]=$v
   done <<< "$input"
   release_ok
-  # a deploy key (tando ci) leaves the admin's settings as they were: profile, bind_ip, egress_ip
-  if [[ ${SUDO_USER:-root} == tando-d-* ]]; then
-    for k in $ADMIN_KEYS; do
-      if [[ -n ${C[$k]:-} && ${C[$k]} != "${ADM[$k]:-}" ]]; then
-        die "$k of $A is set by the server's admin (${ADM[$k]:-none}): a deploy key cannot change it; remove $k from tando.conf or ask the admin"
-      fi
-      [[ -n ${ADM[$k]:-} ]] && C[$k]=${ADM[$k]}
+  # the admin's settings (profile, bind_ip, egress_ip) stay as they were unless tando.conf gives
+  # them (none: cleared); a deploy key (tando ci) cannot change them. A preview made by its
+  # parent's deploy key takes the parent's profile (preview-up gives no addresses)
+  if [[ ${SUDO_USER:-root} == tando-d-* && -n ${C[preview_of]:-} && -z ${ADM[profile]:-} ]] && valid_app "${C[preview_of]}"; then
+    x=$(sed -n 's/^profile=//p' "$R/apps/${C[preview_of]}/app.conf" 2> /dev/null)
+    [[ -n $x ]] && ADM[profile]=$x
+  fi
+  for k in $ADMIN_KEYS; do
+    if [[ ${SUDO_USER:-root} == tando-d-* && -n ${C[$k]:-} && ${C[$k]} != "${ADM[$k]:-}" ]]; then
+      die "$k of $A is set by the server's admin (${ADM[$k]:-none}): a deploy key cannot change it; remove $k from tando.conf or ask the admin"
+    fi
+    if [[ ${C[$k]:-} == none ]]; then unset "C[$k]"
+    elif [[ -z ${C[$k]:-} && -n ${ADM[$k]:-} ]]; then C[$k]=${ADM[$k]}; fi
+  done
+  profile_apply
+  # an egress address is one app's: no other app may send from it (fw_sync drops it for them)
+  if [[ -n ${C[egress_ip]:-} ]]; then
+    for x in ${C[egress_ip]//,/ }; do
+      for f in "$R"/apps/*/app.conf; do
+        [[ $f == "$D/app.conf" ]] && continue
+        sed -n 's/^egress_ip=//p' "$f" | tr ',' '\n' | grepq -ixF -- "$x" &&
+          die "egress_ip = $x is the egress address of another app ($(basename "${f%/app.conf}")): one address, one app"
+      done
     done
   fi
-  profile_apply
   [[ -n ${C[egress_ip]:-} && ${C[recipe]:-} == container ]] &&
     die "egress_ip is not supported for recipe = container yet: its traffic leaves through slirp4netns, which the per-app address rule cannot tell apart"
   # the apps' database pools must fit in PostgreSQL's connections (before anything is written)
@@ -6265,7 +6291,7 @@ cmd_preview_up() { # parent preview [ttl]
       # the release command (migrations) only when the parent says preview_release = on: with the
       # parent's external database or services in the env it would change those
       if [[ ${PC[preview_release]:-off} == on ]]; then conf_text PC; else conf_text PC | grep -Ev '^release(_shell|_timeout)?='; fi |
-        grep -Ev '^(job\.|database=|backup=|idle_stop=|db_|job_timeout=|job_spread=|job_missed=|preview_)'
+        grep -Ev '^(job\.|database=|backup=|idle_stop=|db_|job_timeout=|job_spread=|job_missed=|preview_|bind_ip=|egress_ip=)'
       echo "backup=off"
       case ${PC[recipe]:-node} in static|container) ;;
         *) k=${PC[idle_stop]:-6h}; [[ $k == off || -z $k ]] && k=6h; echo "idle_stop=$k";; esac

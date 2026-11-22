@@ -688,7 +688,7 @@ conf_load() { # [file]; a file already loaded in this run is not read again
           *) die "$f:$n: profile is a name of the server's profiles, like small (got \"$v\")";; esac;;
       mail_out) C_mail_out=$v
         case $v in on|off) ;; *) die "$f:$n: mail_out must be on or off (got \"$v\")";; esac;;
-      bind_ip|egress_ip) case $v in *[!0-9a-fA-F.:,]*|"") die "$f:$n: $k is one of the server's IP addresses (got \"$v\")";; esac
+      bind_ip|egress_ip) case $v in none) ;; *[!0-9a-fA-F.:,]*|"") die "$f:$n: $k is one of the server's IP addresses (got \"$v\")";; esac
         if [ "$k" = bind_ip ]; then C_bind_ip=$v; else C_egress_ip=$v; fi;;
       priority) C_priority=$v
         case $v in high|normal|low) ;; *) die "$f:$n: priority must be high, normal or low (got \"$v\")";; esac;;
