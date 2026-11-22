@@ -24,6 +24,8 @@
 }
 
 @layer base {
+  /* the page never scrolls or rubber-bands: the main pane is the only scroller, the sidebar stays put */
+  html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
   html { color-scheme: light; }
   html.dark { color-scheme: dark; }
   body { margin: 0; background: var(--background); color: var(--foreground);

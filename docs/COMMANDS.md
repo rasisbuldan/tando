@@ -1085,10 +1085,11 @@ only. A menu bar icon for every registered server, and an outside heartbeat from
   signs it ad hoc (`codesign -s -`), writes `$TANDO_CONFIG_DIR/menubar.conf` (which `tando` to run:
   the launcher you ran install with, since a LaunchAgent has no PATH of yours) and the LaunchAgent
   `~/Library/LaunchAgents/local.tando.menubar.plist` (RunAtLoad: it starts at login; Quit stops it
-  until the next login), and starts it. `--dry-run` prints all of that and changes nothing. Run it
+  until the next login), and starts it. It also builds `~/Applications/tando Dashboard.app` (below).
+  `--dry-run` prints all of that and changes nothing. Run it
   again after a tando update: it rebuilds the app and keeps your settings.
-- `uninstall` stops it and removes the app, the LaunchAgent and menubar.conf. `status`: installed,
-  running, which tando, the interval. `build --out DIR` only compiles and signs `DIR/tando.app`.
+- `uninstall` stops it and removes both apps, the LaunchAgent and menubar.conf. `status`: installed,
+  running, which tando, the interval. `build --out DIR` only compiles and signs `DIR/tando.app` and `DIR/tando Dashboard.app`.
 - **What it checks**, every `interval` seconds (menubar.conf, default 60), one check at a time, each
   stopped after `timeout` seconds (default 45): `tando ls --all --json` (one ssh connection per
   server: the apps, their state and the firing alerts), then a GET of every running app's link from
@@ -1103,15 +1104,20 @@ only. A menu bar icon for every registered server, and an outside heartbeat from
   with "Open <link>" and "Open status in Terminal", which runs `tando status <app> -H <server>`); a
   server it cannot reach, with the reason; the firing alerts; Open dashboard (⌘D, below); Refresh now
   (⌘R); Open status in Terminal (`tando ls --all`); Quit.
-- **Open dashboard** (⌘D) opens the dashboard add-on in a window of its own (a WKWebView; one window,
-  reused; native title bar; at least 900x600, its size and place are remembered; ⌘R reloads, ⌘W closes
-  the window and not the app; links to other sites open in your default browser, and the window never
-  shows anything but `127.0.0.1:<port>`). It finds `tando-dash` (`~/.local/lib/tando-dash/current`,
-  `~/.local/bin`, `PATH`), starts it (`--no-open`) when `~/.config/tando/dash.lock` names no running
-  process (a lock left by a crash is told by its dead pid), and asks it for a fresh one-time link
-  (`POST /api/newcode` with the lock's key). Without the add-on the row reads "Install dashboard…" and
-  shows the one command, `tando addon install dashboard`. Closing the window ends the page; the idle
-  `tando-dash` stops by itself. `tando-menubar --dash-url` does all of this but the window and prints the link.
+- **Open dashboard** (⌘D) launches or activates the dashboard app, `~/Applications/tando Dashboard.app`
+  (built by `tando menubar install`; `tando dashboard` with no arguments opens it too on macOS). It is
+  a regular app: Dock icon, Cmd+Tab, Spotlight and Launchpad, with an app menu (Quit), Edit (copy and
+  paste work), View (⌘R reload) and Window (⌘W closes the window and not the app; the page is blanked,
+  so nothing runs while it is closed). A thin WKWebView on the system WebKit, about 170 KB, no Electron.
+  One window, at least 900x600, size and place remembered; links to other sites open in your default
+  browser, and the window never shows anything but `127.0.0.1:<port>`. It finds `tando-dash`
+  (`~/.local/lib/tando-dash/current`, `~/.local/bin`, `PATH`), starts it (`--no-open`) when
+  `~/.config/tando/dash.lock` names no running process (a lock left by a crash is told by its dead pid),
+  and asks it for a fresh one-time link (`POST /api/newcode` with the lock's key). The menu bar app
+  itself stays out of the Dock. Without the dashboard app installed, the menu bar shows the dashboard in
+  a window of its own (fallback); without the add-on the row reads "Install dashboard…" and shows
+  `tando addon install dashboard`. The idle `tando-dash` stops by itself. `tando-menubar --dash-url`
+  does the lookup and prints the link.
 - **The cache.** While `tando-dash` runs it writes `~/.config/tando/cache/ls-all.json` (the shape of
   `tando ls --all --json`). A check that finds it younger than `interval` reads it instead of running
   `tando ls --all --json` (no second set of ssh connections); an older or unreadable file is ignored.

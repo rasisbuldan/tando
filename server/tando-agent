@@ -144,7 +144,8 @@ case ${1:-} in
           need_root; [[ -z ${2:-} ]] || valid_app "$2" || die "invalid app name"
           shopt -s execfail; exec "$R/bin/tando-status" follow ${2:+"$2"};;
         deploy-status|releases) valid_app "${2:-}" || die "invalid app name";;
-        history) [[ ${3:-20} =~ ^[0-9]+$ ]] || die "bad count"
+        history) [[ -n ${2:-} && -z ${3:-} && $2 =~ ^[0-9]+$ ]] && set -- history "" "$2"   # a lone number is the count
+                 [[ ${3:-20} =~ ^[0-9]+$ ]] || die "bad count"
                  [[ -z ${2:-} ]] || valid_app "$2" || die "invalid app name";;
         busy) need_root; valid_app "${2:-}" || die "invalid app name";;
       esac
@@ -6007,7 +6008,8 @@ cmd_releases_verb() {
   return 0
 }
 
-cmd_history() { # [app] [n]
+cmd_history() { # [app] [n]   (a lone number is the count)
+  [[ -n ${1:-} && -z ${2:-} && $1 =~ ^[0-9]+$ ]] && set -- "" "$1"
   local n=${2:-20} f
   [[ $n =~ ^[0-9]+$ ]] || die "bad count"
   if [[ -n ${1:-} ]]; then

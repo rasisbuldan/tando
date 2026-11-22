@@ -73,7 +73,7 @@ the review itself is not in the repository). The design guideline is docs/DESIGN
 - Chart "now" is the server's clock; show skew when over 30 s. Times in GMT, as the CLI.
 - Deploy markers on time charts. The Nov 2026 memory definition change shows as a note.
 
-## Pages (left sidebar: Overview, Alerts, Deploys; then servers with their apps)
+## Pages (left sidebar: Overview, Deploys, Alerts; then Server, Apps and Database lists)
 1. **Overview:** needs attention first; per server: reachable, load, memory, disk, headroom (sum
    of memory caps vs RAM; disk "full in N days" when enough points); every app in one table,
    sortable by state, memory, CPU, restarts, last deploy.
@@ -100,7 +100,7 @@ the review itself is not in the repository). The design guideline is docs/DESIGN
 
 ## Database studio (owner, 21 Nov: a new tab, opened directly; never a view inside the dashboard)
 - The server's studio is always on (docs/STUDIO.md). Under each app with a database (`database` in
-  its status row) the sidebar has a "Database" row; the app header and the Database tab have "Open
+  its status row) the sidebar's Database group has a row for it (it opens the studio directly); the app header and the Database tab have "Open
   database"; the Server page has "Database studio" (it opens on the server's first app with a
   database; the studio's own page switches apps). **A click opens the studio in a new tab at once:
   no dialog, no confirmation.** The page opens the tab on the click itself (a pop-up blocker lets

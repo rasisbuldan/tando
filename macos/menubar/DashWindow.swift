@@ -1,119 +1,11 @@
-// macos/menubar/DashWindow.swift: the "Open dashboard" window. It finds tando-dash (the add-on:
-// `tando addon install dashboard`), starts it when dash.lock shows none running, asks it for a fresh
-// one-time link (POST /api/newcode with the lock's key, as a second tando-dash does) and shows
-// the dashboard in one WKWebView window that is reused. The window only ever shows
-// 127.0.0.1:<port>; other web addresses open in the default browser. The decisions are in
-// DashModel.swift (pure, tested); this file does the process, network and window work.
+// macos/menubar/DashWindow.swift: the dashboard window: one WKWebView window that is reused. The
+// dashboard app (macos/dashapp) is its home; the menu bar app uses it only as a fallback when that
+// app is not installed. It only ever shows 127.0.0.1:<port>; other web addresses open in the
+// default browser. Finding and starting tando-dash is DashCore.swift; the decisions DashModel.swift.
 
 import AppKit
 import Foundation
 import WebKit
-
-/// $HOME when set (a LaunchAgent has it; the tests point it at a temp directory), else the account's
-func dashHome() -> String {
-    ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
-}
-func dashConfigDir() -> String {
-    ProcessInfo.processInfo.environment["TANDO_CONFIG_DIR"] ?? (dashHome() + "/.config/tando")
-}
-func dashLockFile() -> DashLock? {
-    DashLock.parse(FileManager.default.contents(atPath: dashConfigDir() + "/dash.lock"))
-}
-func dashBinary() -> String? {
-    let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
-    return findDash(home: dashHome(), path: path) { FileManager.default.isExecutableFile(atPath: $0) }
-}
-
-enum DashOutcome {
-    case ready(URL, DashLock)   // the one-time link to load
-    case notInstalled
-    case failed(String)
-}
-
-/// Blocking (up to about 15 s when tando-dash has to start): call it off the main thread.
-func resolveDash(tando: String) -> DashOutcome {
-    guard let bin = dashBinary() else { return .notInstalled }
-    var lock = dashLockFile()
-    switch decideDash(installed: true, lock: lock, alive: pidAlive) {
-    case .notInstalled:
-        return .notInstalled
-    case .start:
-        if let why = startDash(bin, tando: tando) { return .failed(why) }
-        lock = dashLockFile()
-    case .askCode(let l):
-        lock = l
-    }
-    guard let l = lock else { return .failed("tando-dash did not say where it listens (dash.lock)") }
-    switch fetchCode(l) {
-    case .failure(let e): return .failed(e.why)
-    case .success(let code):
-        guard let u = dashOpenURL(l, code: code) else { return .failed("tando-dash sent a link the app does not accept") }
-        return .ready(u, l)
-    }
-}
-
-/// Starts `tando-dash --no-open` detached (it stops by itself after its idle time) and waits for
-/// dash.lock to name a live process. nil on success, else one line for the window.
-func startDash(_ bin: String, tando: String) -> String? {
-    let log = dashHome() + "/Library/Logs/tando-dash.log"
-    try? FileManager.default.createDirectory(atPath: (log as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-    FileManager.default.createFile(atPath: log, contents: nil, attributes: [.posixPermissions: 0o600])
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: bin)
-    p.arguments = ["--no-open"]
-    var env = ProcessInfo.processInfo.environment
-    if !tando.isEmpty { env["TANDO_DASH_TANDO"] = tando }
-    let dir = (tando as NSString).deletingLastPathComponent
-    env["PATH"] = [dir, env["PATH"] ?? "", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-        .filter { !$0.isEmpty }.joined(separator: ":")
-    p.environment = env
-    p.standardInput = FileHandle.nullDevice
-    if let h = FileHandle(forWritingAtPath: log) { p.standardOutput = h; p.standardError = h }
-    do { try p.run() } catch { return "could not run \(bin): \(error.localizedDescription)" }
-    let end = Date().addingTimeInterval(15)
-    var exitedAt: Date? = nil
-    while Date() < end {
-        if let l = dashLockFile(), pidAlive(l.pid) { return nil }
-        if !p.isRunning {
-            // a second tando-dash exits at once after reusing the first: give the lock a moment
-            if exitedAt == nil { exitedAt = Date() }
-            if Date().timeIntervalSince(exitedAt!) > 1 {
-                let text = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
-                let last = text.split(separator: "\n").last.map(String.init) ?? ""
-                return last.isEmpty ? "tando-dash stopped (exit \(p.terminationStatus))" : last
-            }
-        }
-        Thread.sleep(forTimeInterval: 0.1)
-    }
-    return "tando-dash did not start within 15 s (see ~/Library/Logs/tando-dash.log)"
-}
-
-func fetchCode(_ l: DashLock) -> Result<String, CheckError> {
-    let cfg = URLSessionConfiguration.ephemeral
-    cfg.timeoutIntervalForRequest = 5
-    cfg.httpCookieStorage = nil
-    cfg.urlCache = nil
-    let session = URLSession(configuration: cfg)
-    defer { session.invalidateAndCancel() }
-    var r = URLRequest(url: l.newcodeURL)
-    r.httpMethod = "POST"
-    r.setValue("application/json", forHTTPHeaderField: "Content-Type")   // the server insists on it for every POST
-    r.setValue(l.key, forHTTPHeaderField: "X-Tando-Dash-Key")
-    r.setValue("tando-menubar", forHTTPHeaderField: "User-Agent")
-    let sem = DispatchSemaphore(value: 0)
-    var out: Result<String, CheckError> = .failure(CheckError(why: "tando-dash did not answer"))
-    session.dataTask(with: r) { data, resp, err in
-        if let http = resp as? HTTPURLResponse {
-            if http.statusCode == 200, let c = parseNewCode(data) { out = .success(c) }
-            else { out = .failure(CheckError(why: "tando-dash refused the request (HTTP \(http.statusCode))")) }
-        } else if let e = err {
-            out = .failure(CheckError(why: "tando-dash (pid \(l.pid)) does not answer on port \(l.port): \(e.localizedDescription)"))
-        }
-        sem.signal()
-    }.resume()
-    _ = sem.wait(timeout: .now() + 8)
-    return out
-}
 
 // ---- the window ----------------------------------------------------------------------------------
 
@@ -125,8 +17,11 @@ final class DashWindowController: NSObject, WKNavigationDelegate, WKUIDelegate, 
     private var opening = false
     private var failed = false     // the page in the window is a message, not the dashboard
 
-    init(tando: String) {
+    private let regular: Bool      // the dashboard app: a full main menu (app, Edit, View, Window)
+
+    init(tando: String, regular: Bool = false) {
         self.tando = tando
+        self.regular = regular
         super.init()
         installMainMenu()
     }
@@ -268,31 +163,48 @@ final class DashWindowController: NSObject, WKNavigationDelegate, WKUIDelegate, 
         message("The dashboard is not reachable", detail: "\(e.localizedDescription)\nPress \u{2318}R to start it again.", isError: true)
     }
 
-    // ---- key equivalents: an accessory app has no menu bar, but a main menu still handles keys
+    // ---- the main menu: in the dashboard app it is the menu bar (app, Edit with copy and paste,
+    // View, Window); in the menu bar app's fallback only the key equivalents work
     private func installMainMenu() {
         let main = NSMenu()
-        let item = { (title: String, action: Selector?, key: String, target: AnyObject?) -> NSMenuItem in
+        let item = { (title: String, action: Selector?, key: String, target: AnyObject?, mods: NSEvent.ModifierFlags) -> NSMenuItem in
             let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
             i.target = target
+            i.keyEquivalentModifierMask = mods
             return i
         }
-        let appItem = NSMenuItem(); appItem.submenu = NSMenu(title: "tando")
-        main.addItem(appItem)
+        let cmd = NSEvent.ModifierFlags.command
+        let add = { (menu: NSMenu) in
+            let i = NSMenuItem(); i.submenu = menu; main.addItem(i)
+        }
+        let name = regular ? "tando Dashboard" : "tando"
+        let appMenu = NSMenu(title: name)
+        if regular {
+            appMenu.addItem(item("About \(name)", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), "", nil, cmd))
+            appMenu.addItem(.separator())
+            appMenu.addItem(item("Hide \(name)", #selector(NSApplication.hide(_:)), "h", nil, cmd))
+            appMenu.addItem(item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", nil, [.command, .option]))
+            appMenu.addItem(.separator())
+            appMenu.addItem(item("Quit \(name)", #selector(NSApplication.terminate(_:)), "q", nil, cmd))
+        }
+        add(appMenu)
         let edit = NSMenu(title: "Edit")
-        edit.addItem(item("Cut", #selector(NSText.cut(_:)), "x", nil))
-        edit.addItem(item("Copy", #selector(NSText.copy(_:)), "c", nil))
-        edit.addItem(item("Paste", #selector(NSText.paste(_:)), "v", nil))
-        edit.addItem(item("Select All", #selector(NSText.selectAll(_:)), "a", nil))
-        let editItem = NSMenuItem(); editItem.submenu = edit
-        main.addItem(editItem)
+        edit.addItem(item("Undo", Selector(("undo:")), "z", nil, cmd))
+        edit.addItem(item("Redo", Selector(("redo:")), "z", nil, [.command, .shift]))
+        edit.addItem(.separator())
+        edit.addItem(item("Cut", #selector(NSText.cut(_:)), "x", nil, cmd))
+        edit.addItem(item("Copy", #selector(NSText.copy(_:)), "c", nil, cmd))
+        edit.addItem(item("Paste", #selector(NSText.paste(_:)), "v", nil, cmd))
+        edit.addItem(item("Select All", #selector(NSText.selectAll(_:)), "a", nil, cmd))
+        add(edit)
         let view = NSMenu(title: "View")
-        view.addItem(item("Reload", #selector(reload(_:)), "r", self))
-        let viewItem = NSMenuItem(); viewItem.submenu = view
-        main.addItem(viewItem)
+        view.addItem(item("Reload", #selector(reload(_:)), "r", self, cmd))
+        add(view)
         let win = NSMenu(title: "Window")
-        win.addItem(item("Close", #selector(closeWindow(_:)), "w", self))
-        let winItem = NSMenuItem(); winItem.submenu = win
-        main.addItem(winItem)
+        win.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m", nil, cmd))
+        win.addItem(item("Close", #selector(closeWindow(_:)), "w", self, cmd))
+        add(win)
         NSApp.mainMenu = main
+        if regular { NSApp.windowsMenu = win }
     }
 }
