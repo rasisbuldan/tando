@@ -211,19 +211,19 @@ Steps and checks: docs/release-notes/0.3.0.md.
 
 ### Fixed
 
-- Fixed: parallel `tando up` of new apps on one server. Two of them could pick the same user or
+- Parallel `tando up` of new apps on one server. Two of them could pick the same user or
   group id (the second failed with "groupadd ... failed"); ids are now picked under one lock. A
   new app's configure no longer holds the staged-env lock to its end (with many apps others
   waited over 60 s and failed "another env change of an app not created yet takes over 60 s").
   An agent call that failed with no message now says so, and the deploy box is closed (a failure
   in configure ended the deploy with no last line). The upload and agent calls try again for
   about 10 s when sshd turns a session away (MaxSessions on a shared connection).
-- Fixed: an app whose first deploy failed is no longer left with an enabled unit that fails at
+- An app whose first deploy failed is no longer left with an enabled unit that fails at
   every boot: the unit is enabled once a release is verified (recover disables one left by an
   older tando).
 - Static sites take no port and no pre-flight port (Caddy serves their files); one that becomes
   a process (another recipe) gets them at that deploy. Existing static sites keep theirs.
-- Fixed: a crash loop that systemd gave up on and tando's recovery started again was lost: the
+- A crash loop that systemd gave up on and tando's recovery started again was lost: the
   start began systemd's restart count again, so neither the alert nor the restarts metric saw it.
   The count is kept in the app's state (`restarts_lost`) until its next restart or deploy.
 - A new app could get another app's pre-flight port (its port + 100) as its own port once the port
