@@ -162,7 +162,32 @@ node_framework() {
   return 0
 }
 
-# detection order: next, node, python, container (Dockerfile), static
+# workers_entry: sets entry and why when this is a Workers API project (the recipe workerd): a
+# wrangler config (its main, else a usual file name), or an entry that exports a fetch handler and
+# starts no server of its own. Fails when it is not one.
+workers_entry() {
+  local w="" m="" f
+  for f in wrangler.toml wrangler.json wrangler.jsonc; do [ -f "$f" ] && { w=$f; break; }; done
+  if [ -n "$w" ]; then
+    case $w in
+      wrangler.toml) m=$(sed -n 's/^main[[:space:]]*=[[:space:]]*["'\'']\([^"'\'']*\)["'\''].*/\1/p' "$w" | head -1);;
+      *) m=$(sed -n 's/.*"main"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$w" | head -1);;
+    esac
+    m=${m#./}
+    [ -n "$m" ] || m=$(first_file src/index.js src/index.mjs src/index.ts index.js index.mjs worker.js) || m=src/index.js
+    entry=$m why="$w, main $m"
+    return 0
+  fi
+  for f in src/index.js src/index.mjs index.js index.mjs worker.js; do
+    [ -f "$f" ] || continue
+    grep -q 'export default' "$f" && grep -q 'fetch' "$f" && ! grep -qE '\.listen\(|[^a-zA-Z]serve\(' "$f" || continue
+    entry=$f why="$f exports a fetch handler"
+    return 0
+  done
+  return 1
+}
+
+# detection order: workerd, next, node, python, container (Dockerfile), static
 cmd_init() {
   [ -f tando.conf ] && { note "tando.conf exists"; return 0; }
   # shellcheck disable=SC2153 # HOST: set by -H (lib/common.sh)
@@ -181,7 +206,12 @@ cmd_init() {
   fi
   local fw="" why="" spa="" v
   [ -f package.json ] && ws_member_check
-  if [ -f package.json ] && pkg_dep next; then
+  if workers_entry; then
+    recipe=workerd fw="Cloudflare Workers" start=$entry
+    case $entry in *.ts|*.tsx) note "workerd: $entry is TypeScript: bundle it to JavaScript" \
+      "(build =, out =) and set start to the bundle";; esac
+    note "workerd: the Workers API only (no files, no Node APIs beyond nodejs_compat)"
+  elif [ -f package.json ] && pkg_dep next; then
     recipe=next build="npm run build" start="node server.js" fw=Next.js why="next in package.json"
     cfg=$(next_config)
     if [ -n "$cfg" ]; then
@@ -409,6 +439,7 @@ python_server_pkg() {
 cmd_recipes() {
   {
     printf 'RECIPE\tDETECTED BY\tRUNS\tSERVER NEEDS\n'
+    printf 'workerd\twrangler.toml (or an entry exporting fetch)\tworkerd, one process per app, Workers API\tworkerd binary (tando up installs it)\n'
     printf 'next\tpackage.json with next\tnode server.js from .next/standalone\tnode\n'
     printf 'node\tserver.js, index.js, app.js, main.js or package.json\tstart, as the app user\tnode\n'
     printf 'python\tapp.py, main.py, wsgi.py, asgi.py or requirements.txt\ta venv built on the server\tpython=yes\n'
