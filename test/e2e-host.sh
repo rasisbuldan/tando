@@ -61,6 +61,20 @@ check "H1c the summary is root 600 in a root 700 directory, no temp file beside 
 # written by rename: the inode changes on every run (never rewritten in place)
 i1=$(srv 'sudo stat -c %i /var/lib/tando/hostcare/summary'); hcheck; i2=$(srv 'sudo stat -c %i /var/lib/tando/hostcare/summary')
 check "H1d the summary is replaced whole (inode $i1 -> $i2)" eval '[ -n "$i1" ] && [ "$i1" != "$i2" ]'
+# K: the core keeps memory and disk when apps take theirs. MemoryLow drop-ins for Caddy, sshd and
+# tandod (live in their cgroups), system.slice gets the sum; group tando-core (Caddy in it) gets the
+# ext4 reserved blocks: the function itself, on a loop-mounted ext4 (the container's / is overlayfs)
+lows=$(srv 'for u in caddy ssh tandod; do systemctl show -P MemoryLow $u.service; cat /sys/fs/cgroup/system.slice/$u.service/memory.low; done; systemctl show -P MemoryLow system.slice' | tr '\n' ' ')
+check "H1k MemoryLow Caddy 64M, sshd 32M, tandod 32M, live in their cgroups; system.slice their sum ($lows)" \
+  eval '[ "$lows" = "67108864 67108864 33554432 33554432 33554432 33554432 134217728 " ] && grep -q "128 MB kept for Caddy" "$E/setup.out"'
+res=$(srv 'sudo bash -c "truncate -s 32M /root/core.img && mkfs.ext4 -q -F /root/core.img && mkdir -p /mnt/core && mount -o loop /root/core.img /mnt/core &&
+  grepq() { grep \"\$@\" > /dev/null; }; eval \"\$(sed -n \"/^core_reserve() {/,/^}/p\" /opt/tando/bin/tando-agent)\"; core_reserve /mnt/core; echo \"res=\$CORE_RES\";
+  d=\$(findmnt -no SOURCE /mnt/core); tune2fs -l \$d | grep \"^Reserved blocks gid\"; grep \" /mnt/core \" /proc/mounts; umount /mnt/core; rm -f /root/core.img"' 2>&1)
+gid=$(srv 'getent group tando-core | cut -d: -f3')
+check "H1l core_reserve gives an ext4's reserved blocks to tando-core (gid $gid), now and from the next mount; caddy is in it ($(echo "$res" | tr '\n' ' ' | cut -c1-200))" \
+  eval '[ -n "$gid" ] && echo "$res" | grep -q "^res=/dev/loop[0-9]* reserve: root, PostgreSQL, Caddy" &&
+        echo "$res" | grep -q "^Reserved blocks gid: *$gid " && echo "$res" | grep -q "resgid=$gid" &&
+        srv "id -nG caddy" | grep -qw tando-core'
 alert_rows() { [ "$(summary | grep -c "^alert	")" = 10 ]; }
 check "H1e every alert check has a row" alert_rows
 "$R" doctor test > "$E/doctor.out" 2>&1

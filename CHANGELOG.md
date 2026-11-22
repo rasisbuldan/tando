@@ -6,6 +6,17 @@ first, grouped by area.
 
 ## Unreleased
 
+- Isolation: limits on what apps share (docs/COMMANDS.md, "Limits and load").
+  - Kernel tables: one app's user holds at most `conn_out` (2048) connections at once, sends at
+    most `dns_rate` (200) DNS packets a second, and holds at most 20 x `db_pool` (100)
+    connections to pgbouncer and PostgreSQL (`tando host setup <host> conn_out=N dns_rate=N`).
+  - Disk: an app's `/tmp` and `/var/tmp` are a tmpfs of `tmp_size` (64M) in its memory, no longer
+    a directory on the root disk. `disk = 2G` in tando.conf sets its own disk share; the new
+    alert `disk_warn` (low) fires at 80% of it. On ext2/3/4 the reserved blocks go to group
+    `tando-core` (PostgreSQL, Caddy) too.
+  - Memory and CPU: Caddy, sshd, tandod, PostgreSQL and pgbouncer get `MemoryLow`; an app's
+    journald runs in its slice (a log flood counts against the app); `priority` sets the CPU
+    weight (high 200, low 50); `io = 50` caps an app's disk bandwidth in MB/s.
 - New: `idle_stop = 6h` in tando.conf (scale to zero; `on` = 6h): the app's web process stops
   after that long without a request and its next request starts it (workers and jobs run on) (systemd socket activation and systemd-socket-proxyd
   behind Caddy; the first request waits about 0.1-0.3 s for a small app). `tando ls` says

@@ -16,6 +16,7 @@ KEEP=5                 # releases kept per app (current and last_good are always
 SOAK=30                # seconds a new release must stay up after the check through Caddy (soak =)
 UPLOAD_TIMEOUT=900     # seconds after which an unfinished upload lease is considered abandoned
 SHM_SIZE=16M           # each unit's private /dev/shm (counted in its memory)
+TMP_SIZE=64M           # each unit's /tmp and /var/tmp, tmpfs (tmp_size =; counted in its memory)
 HOLD=15s               # how long Caddy holds a request while the app (re)starts
 PROBE_UA=tando-probe   # health checks carry it, and the secret header below
 # X-Tando-Probe: <random>, root-only: Caddy leaves requests with it out of the request logs (a
@@ -315,6 +316,8 @@ journal_dir() {
   write_if_changed "/etc/systemd/system/systemd-journald@tando-$A.service.d/tando.conf" <<EOF
 [Service]
 ExecStartPost=-/bin/sh -c 'chgrp $g $d && chmod 0750 $d'
+# in the app's slice: a log flood's CPU and memory count against the app, not the host
+Slice=$(app_slice)
 EOF
   ((WIC_CHANGED)) && dreload
   systemd-tmpfiles --create "$f" 2> /dev/null || true
@@ -712,6 +715,59 @@ prio_sync() {
   ((WIC_CHANGED)) && dreload
   return 0
 }
+# cpu_weight: the slice's share of CPU under contention, by priority (high 200, normal 100, low 50)
+cpu_weight() { case ${C[priority]:-} in high) echo 200;; low) echo 50;; *) echo 100;; esac; }
+# io_ctl: the cgroup io controller is on this host (io = needs it; containers may lack it)
+io_ctl() { grepq -w io /sys/fs/cgroup/cgroup.controllers 2> /dev/null; }
+# core_protect: memory that reclaim leaves to what every app needs (MemoryLow drop-ins): Caddy,
+# sshd, tandod, PostgreSQL (its shared buffers and more) and pgbouncer; system.slice gets their sum
+# (a child's protection counts only up to its parent's). And the core reserve (core_reserve).
+# CORE_DETAIL says what it did, for host setup's step.
+core_protect() {
+  local u mb sum=0 x d
+  CORE_DETAIL=""
+  for x in caddy.service:64 ssh.service:32 tandod.service:32 pgbouncer.service:32 postgresql@.service:pg; do
+    u=${x%%:*} mb=${x#*:}
+    # (tandod's is written before its unit: alerts install puts it there after host setup)
+    [[ $u == tandod.service ]] || systemctl cat "$u" &> /dev/null || continue
+    [[ $mb == pg ]] && { pg_sizing; mb=$((PGS_SB + 32)); }
+    sum=$((sum + mb))
+    d=/etc/systemd/system/$u.d; mkdir -p "$d"; WIC_CHANGED=0
+    printf '# written by tando: memory reclaim leaves to it while apps have more\n[Service]\nMemoryLow=%sM\n' "$mb" |
+      write_if_changed "$d/tando-low.conf"
+    ((WIC_CHANGED)) && dreload
+  done
+  if ((sum > 0)); then
+    mkdir -p /etc/systemd/system/system.slice.d; WIC_CHANGED=0
+    printf '# written by tando: the sum of the MemoryLow of the services apps need\n[Slice]\nMemoryLow=%sM\n' "$sum" |
+      write_if_changed /etc/systemd/system/system.slice.d/tando-low.conf
+    ((WIC_CHANGED)) && dreload
+    CORE_DETAIL="$sum MB kept for Caddy, sshd, tandod and the database"
+  fi
+  core_reserve "$R"
+  CORE_DETAIL+="${CORE_DETAIL:+; }$CORE_RES"
+  return 0
+}
+# core_reserve dir: on ext2/3/4, the blocks the file system of dir reserves (often 5%) are for
+# group tando-core too (PostgreSQL and Caddy are in it; root always has them): an app that fills
+# the disk leaves them room. tune2fs for the next mount, a remount for now. Inodes have no reserve.
+core_reserve() {
+  local src fst mnt gid cur u
+  CORE_RES=""
+  getent group tando-core > /dev/null || groupadd -r tando-core || return 0
+  gid=$(getent group tando-core | cut -d: -f3)
+  for u in postgres caddy; do
+    id -u "$u" &> /dev/null && ! id -nG "$u" | grepq -w tando-core && usermod -aG tando-core "$u"
+  done
+  read -r src fst mnt < <(df --output=source,fstype,target "$1" 2> /dev/null | tail -1)
+  if [[ $fst != ext[234] || ! -b $src ]]; then CORE_RES="no block reserve on ${fst:-this file system}"; return 0; fi
+  cur=$(tune2fs -l "$src" 2> /dev/null | sed -n 's/^Reserved blocks gid: *\([0-9]*\).*/\1/p')
+  if [[ $cur != "$gid" ]]; then
+    tune2fs -g "$gid" "$src" > /dev/null 2>&1 || { CORE_RES="could not give the reserve of $src to tando-core"; return 0; }
+    mount -o "remount,resgid=$gid" "$mnt" 2> /dev/null
+  fi
+  CORE_RES="$src reserve: root, PostgreSQL, Caddy"
+}
 write_slice() {
   local mem=${C[memory]:-256M} mb cpu=${C[cpu]:-}
   [[ $mem =~ ^([0-9]+)([KMG])$ ]] || mem=256M
@@ -724,11 +780,16 @@ write_slice() {
     for n in $(worker_names); do wmb=$((wmb + $(size_mb "${C[worker.$n.memory]:-$mem}"))); done
   [[ $cpu == *% ]] || { [[ -n $cpu ]] && cpu=$(awk -v c="$cpu" 'BEGIN { printf "%d%%", c * 100 }'); }
   { printf '[Unit]\nDescription=tando app %s: all its units together\n\n[Slice]\n' "$A"
-    printf 'MemoryMax=%sM\nTasksMax=%s\nCPUWeight=100\n' $((mb * 3 + wmb)) "${C[tasks]:-1024}"
+    printf 'MemoryMax=%sM\nTasksMax=%s\nCPUWeight=%s\n' $((mb * 3 + wmb)) "${C[tasks]:-1024}" "$(cpu_weight)"
     # (if, not &&: the group's status is its last command's, and "|| return 1" below read a
     # priority that is not high as a failed write: no slice file at all)
     if [[ -n $cpu ]]; then printf 'CPUQuota=%s\n' "$cpu"; fi
     if [[ ${C[priority]:-} == high ]]; then printf 'MemoryLow=%sM\n' "$mb"; fi
+    # io = MB/s: read and write bandwidth on the disk of the app's directory (io.max works under
+    # any I/O scheduler, IOWeight only under BFQ or iocost); only where the io controller is there
+    if [[ ${C[io]:-} =~ ^[1-9][0-9]{0,4}$ ]] && io_ctl; then
+      printf 'IOReadBandwidthMax=%s %sM\nIOWriteBandwidthMax=%s %sM\n' "$D" "${C[io]}" "$D" "${C[io]}"
+    fi
   } > "/etc/systemd/system/.$(app_slice).new" || return 1
   WIC_CHANGED=0
   write_if_changed "/etc/systemd/system/$(app_slice)" < "/etc/systemd/system/.$(app_slice).new"
@@ -780,8 +841,15 @@ props() { # port [kind]
     [[ -x $LOGS ]] && "$LOGS" unit-props "$A"   # conmon passes the container's output to it
     return
   fi
+  # /tmp and /var/tmp: a tmpfs of tmp_size (64M) each, charged to the unit's memory as /dev/shm
+  # is, not a private directory on the disk every app, PostgreSQL and tando share (a build keeps
+  # PrivateTmp: its package caches are large, and it ends)
+  local tsz=${C[tmp_size]:-$TMP_SIZE} tmp=PrivateTmp=yes
+  [[ $tsz =~ ^[1-9][0-9]*[KMG]$ ]] || tsz=$TMP_SIZE
+  [[ $kind == build || ",${H[unit_drop]:-}," == *,PrivateTmp,* ]] ||
+    tmp="TemporaryFileSystem=/tmp:size=$tsz,mode=1777 /var/tmp:size=$tsz,mode=1777"
   for x in "User=$AU" "Group=$AU" NoNewPrivileges=yes ProtectSystem=strict \
-      ProtectHome=yes PrivateTmp=yes PrivateDevices=yes PrivateIPC=yes \
+      ProtectHome=yes "$tmp" PrivateDevices=yes PrivateIPC=yes \
       "TemporaryFileSystem=/dev/shm:size=$SHM_SIZE,mode=1777" "ReadWritePaths=$rw" \
       "${sock[@]}" "MemoryMax=${C[memory]:-256M}" MemorySwapMax=0 \
       ${C[memory_high]:+"MemoryHigh=${C[memory_high]}"} \
@@ -2150,10 +2218,15 @@ rate_limit_rules() {
 # file; two at once (parallel `up` of new apps) wrote the same temp file and loaded half of it.
 # Its own temp file, checked by nft before it replaces the old one; nft -f is one transaction, so
 # a refused load keeps the rules from before. A failure is an error (return 1), not a warning.
+CONN_OUT=2048   # connections one app's uid may hold at once (host setup conn_out=)
+DNS_RATE=200    # DNS packets a second one app's uid may send (host setup dns_rate=)
+DB_CONNS=20     # connections to pgbouncer and PostgreSQL an app may hold, per connection of its db_pool
 fw_sync() {
   command -v nft > /dev/null || return 0
-  local f=$R/firewall.nft a u p sp lo hi db x others tmp i
+  local f=$R/firewall.nft a u p sp lo hi db x others tmp i pool
   local -A own=() pgu=() outside=()
+  local co=${H[conn_out]:-$CONN_OUT} dr=${H[dns_rate]:-$DNS_RATE}
+  [[ $co =~ ^[1-9][0-9]{0,5}$ ]] || co=$CONN_OUT; [[ $dr =~ ^[1-9][0-9]{0,5}$ ]] || dr=$DNS_RATE
   lockfile "$R/.fw.lock"; exec 4>"$R/.fw.lock"
   flock -w 60 4 || { echo "tando-agent: another update of the loopback rules takes over 60 s" >&2; return 1; }
   tmp=$(mktemp "$R/.firewall.nft.XXXXXX") || { exec 4>&-; return 1; }
@@ -2176,7 +2249,9 @@ fw_sync() {
     # staged in confs/ count too: a release that adds the database reaches it from its pre-flight
     # on, before app.conf takes its settings at the switch (a failed deploy's stay open a day at most)
     [[ $db == postgres ]] || db=$(grep -shx 'database=postgres' "$R/apps/$a/confs/"* | head -1)
-    [[ ${db#database=} == postgres ]] && pgu[$u]=1
+    # its cap on connections to them: db_conns x its db_pool (the largest of apps sharing a user)
+    pool=$(sed -n 's/^db_pool=//p' "$R/apps/$a/app.conf"); [[ $pool =~ ^[1-9][0-9]{0,2}$ ]] || pool=$DB_POOL
+    [[ ${db#database=} == postgres ]] && ((pool * DB_CONNS > ${pgu[$u]:-0})) && pgu[$u]=$((pool * DB_CONNS))
   done
   unset 'outside[2019]'
   others=""; for x in "${!outside[@]}"; do others+=", $x"; done
@@ -2184,13 +2259,29 @@ fw_sync() {
     echo "table inet tando {}"
     echo "flush table inet tando"
     echo "table inet tando {"
+    echo "  counter app_conn {}"
+    echo "  counter app_db {}"
+    echo "  counter app_dns {}"
     echo "  chain output {"
     echo "    type filter hook output priority 0; policy accept;"
     for u in "${!own[@]}"; do
+      # the kernel's connection table is the host's: one app's uid holds at most conn_out TCP and
+      # UDP connections at once (a connect-retry loop would fill nf_conntrack_max, and every new
+      # connection to Caddy would then be dropped), and sends at most dns_rate DNS packets a
+      # second (the resolver every app shares; DNS is not in conn_out: a lookup's entry stays 30 s)
+      echo "    meta skuid $u meta l4proto { tcp, udp } th dport != 53 ct state new ct count over $co counter name app_conn reject"
+      echo "    meta skuid $u meta l4proto { tcp, udp } th dport 53 limit rate over $dr/second burst $((dr * 2)) packets counter name app_dns reject"
       echo "    oifname \"lo\" meta skuid $u tcp dport { ${own[$u]} } accept"
       echo "    oifname \"lo\" meta skuid $u tcp dport { $lo-$hi, $PF_LO-$PF_HI, 2019$others } reject with tcp reset"
       # (5432: PostgreSQL itself, 6432: pgbouncer in front of it)
-      [[ -n ${pgu[$u]:-} ]] || echo "    oifname \"lo\" meta skuid $u tcp dport { 5432, 6432 } reject with tcp reset"
+      # an app with a database: at most db_conns x db_pool connections to them at once
+      # (pgbouncer's max_client_conn is shared by all apps; unauthenticated connections to
+      # PostgreSQL count against no role's limit)
+      if [[ -n ${pgu[$u]:-} ]]; then
+        echo "    oifname \"lo\" meta skuid $u tcp dport { 5432, 6432 } ct state new ct count over ${pgu[$u]} counter name app_db reject with tcp reset"
+      else
+        echo "    oifname \"lo\" meta skuid $u tcp dport { 5432, 6432 } reject with tcp reset"
+      fi
       # the cloud provider's metadata service (instance keys and tokens on many clouds): an app
       # tricked into fetching a URL (SSRF) must not reach it
       echo "    meta skuid $u ip daddr 169.254.169.254 reject"
@@ -2323,6 +2414,7 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
       app_max_mb=*) [[ ${kv#*=} =~ ^[0-9]{2,9}$ ]] || die "bad app_max_mb"; H[app_max_mb]=${kv#*=};;
       rate_limit=on|rate_limit=off|rate_limit=auto) H[rate_limit]=${kv#*=};;   # per-client limits (fw_sync)
       conn_limit=*|conn_rate=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
+      conn_out=*|dns_rate=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;   # per app (fw_sync)
       ci_max_mb=*|ci_max_files=*|ci_max_file_mb=*)   # upload limits of deploy keys (tando-gate)
         [[ ${kv#*=} =~ ^[0-9]{1,9}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
       *) die "bad setting: $kv";;
@@ -2490,11 +2582,12 @@ EOF
       die "could not update the units and Caddy site of ${a##*/}"
   done
   DR_FLAG=$drf prio_sync
+  DR_FLAG=$drf core_protect
   [[ -f $drf ]] && { rm -f "$drf"; systemctl daemon-reload; }
   backup_sched_install || die "could not enable the backup queue (tando-backups.timer)"
   caddy_install_staged || die "$WC_WHY; the sites are as they were: run tando host setup again once that is fixed"
   fw_sync || die "the per-app loopback rules could not be loaded (above); run tando host setup again"
-  step apps ok "$n app$( ((n == 1)) || echo s)"
+  step apps ok "$n app$( ((n == 1)) || echo s); $CORE_DETAIL"
   echo ok=1
 }
 
@@ -2673,6 +2766,14 @@ cmd_doctor() {
   if command -v nft > /dev/null && nft list table inet tando &> /dev/null; then
     row check ok "loopback rules" "apps reach only their own ports (nftables)"
   else row check warn "loopback rules" "not loaded: apps can reach each other's ports on 127.0.0.1"; fi
+  # per-app limits (fw_sync): how often they refused since the rules loaded
+  if nft list counter inet tando app_conn &> /dev/null; then
+    local ac ad an
+    ac=$(nft list counter inet tando app_conn 2> /dev/null | sed -n 's/.*packets \([0-9]*\).*/\1/p')
+    ad=$(nft list counter inet tando app_db 2> /dev/null | sed -n 's/.*packets \([0-9]*\).*/\1/p')
+    an=$(nft list counter inet tando app_dns 2> /dev/null | sed -n 's/.*packets \([0-9]*\).*/\1/p')
+    row check ok "app limits" "per app: ${H[conn_out]:-$CONN_OUT} conns, ${H[dns_rate]:-$DNS_RATE} DNS/s, db_pool x $DB_CONNS to the database; refused ${ac:-0}, ${an:-0}, ${ad:-0}"
+  fi
   # per-client limits on the web ports (rate_limit_rules): how often they tripped since the rules loaded
   local rlc rlr
   if nft list counter inet tando rl_conn &> /dev/null; then
@@ -2907,7 +3008,8 @@ cmd_configure() {
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" "C[priority]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" "C[db_pool]" "C[db_direct]" \
-    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]" "C[idle_stop]"
+    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]" "C[idle_stop]" \
+    "C[tmp_size]" "C[io]" "C[disk]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -2954,6 +3056,10 @@ cmd_configure() {
       max_conns|max_requests) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] || die "bad $k: $v";;
       stop_timeout) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || die "bad stop_timeout: $v (seconds)";;
       priority) [[ $v == high || $v == low || $v == normal ]] || die "bad priority: $v (high, normal or low)";;
+      # the app's /tmp (tmpfs, in its memory), its disk bandwidth (MB/s) and its disk share (alerts)
+      tmp_size) [[ $v =~ ^[1-9][0-9]{0,5}[KMG]$ ]] || die "bad tmp_size: $v (like 64M)";;
+      io) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] || die "bad io: $v (MB/s, like 50)";;
+      disk) [[ $v =~ ^[1-9][0-9]{0,5}[MG]$ ]] || die "bad disk: $v (like 2G)";;
       # the fingerprinted files of the release (assets_spec): off, a directory in the release and
       # optionally the URL prefix they are served under
       assets) [[ $v == off || $v =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*(\ *,\ *(/[A-Za-z0-9_.~-]+)+/?)?$ && /$v/ != */../* && /$v/ != */./* ]] ||
@@ -6339,10 +6445,10 @@ CONF_KEYS_A=(recipe image container_port build_memory start start_shell release 
   health path data writable backup database db_statement_timeout db_idle_tx_timeout db_temp_limit
   memory health_timeout soak cpu tasks max_conns max_requests stop_timeout hold log_max log_keep
   log_rate access_log request_log_max health_expect health_fails health_recover job_timeout job_spread
-  job_missed assets compress priority db_pool db_direct idle_stop)
+  job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk)
 CONF_KEYS=" ${CONF_KEYS_A[*]} "
 # what a record of the first agent that recorded every setting knew (conf=1 without keys=)
-CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority db_pool db_direct idle_stop } job.* "
+CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk } job.* "
 conf_key() {
   case $1 in job.*|worker.*) return 0;; *[[:space:]]*|'') return 1;; esac
   [[ $CONF_KEYS == *" $1 "* ]]
