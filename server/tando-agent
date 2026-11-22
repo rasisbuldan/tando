@@ -971,7 +971,8 @@ profile_check() {
       if (k ~ /^job\.[^.]+\.timeout$/) jt[k] = v }
     END {
       if ("memory" in P) {
-        if ("memory" in A && mb(A["memory"]) > mb(P["memory"])) print "bad memory = " A["memory"] " is over " P["memory"]
+        if (!("memory" in A)) print "set memory=" P["memory"]
+        else if (mb(A["memory"]) > mb(P["memory"])) print "bad memory = " A["memory"] " is over " P["memory"]
         for (k in wm) if (mb(wm[k]) > mb(P["memory"])) print "bad " k " = " wm[k] " is over " P["memory"]
       }
       if ("cpu" in P) {
@@ -1050,7 +1051,8 @@ profile_apply() {
     for k in "${!C[@]}"; do
       [[ $k =~ ^job\.[a-z][a-z0-9-]*$ ]] || continue
       g=$(job_gap "$(trim "${C[$k]%%|*}")")
-      ((g > 0 && g < min)) && why+="${why:+; }${k#job.} runs every ${g}s, more often than every ${min}s"
+      if ((g == 0)); then why+="${why:+; }cannot tell how often ${k#job.} runs (its schedule has no next runs)"
+      elif ((g < min)); then why+="${why:+; }${k#job.} runs every ${g}s, more often than every ${min}s"; fi
     done
   fi
   [[ -z $why ]] || die "profile $p of this server does not allow this: $why"
@@ -1064,6 +1066,14 @@ prof_get() {
   s=",$s,"
   [[ $s == *",$1="* ]] || return 1
   s=${s#*",$1="}; echo "${s%%,*}"
+}
+# mem_cap: the app's memory (C[memory], default 256M), at most its profile's: units are written
+# with it, so a rollback to a release from before the profile does not raise it
+mem_cap() {
+  local m=${C[memory]:-256M} p
+  [[ $m =~ ^[0-9]+[KMG]$ ]] || m=256M
+  if p=$(prof_get memory) && (($(size_mb "$p") < $(size_mb "$m"))); then m=$p; fi
+  echo "$m"
 }
 # node_ips: the addresses of this server (not loopback, not link-local); node_ip addr: one of them
 node_ips() { ip -o addr show 2> /dev/null | awk '$4 !~ /^(127\.|::1\/|fe80:)/ { sub(/\/.*/, "", $4); print $4 }'; }
@@ -1143,7 +1153,8 @@ core_reserve() {
   CORE_RES="$src reserve: root, PostgreSQL, Caddy"
 }
 write_slice() {
-  local mem=${C[memory]:-256M} mb cpu=${C[cpu]:-}
+  local mem mb cpu=${C[cpu]:-}
+  mem=$(mem_cap)
   [[ $mem =~ ^([0-9]+)([KMG])$ ]] || mem=256M
   [[ $mem =~ ^([0-9]+)([KMG])$ ]]; mb=${BASH_REMATCH[1]}
   case ${BASH_REMATCH[2]} in K) mb=$((mb / 1024));; G) mb=$((mb * 1024));; esac
@@ -1206,7 +1217,7 @@ props() { # port [kind]
   # and is restarted. NODE_OPTIONS in the app's env replaces this (the env file wins over
   # Environment=), so does --max-old-space-size in the start command; adopted apps keep theirs.
   if [[ ( ${C[recipe]:-} == node || ${C[recipe]:-} == next ) && -z ${C[adopted_from]:-} &&
-        ${C[start]:-} != *max-old-space-size* && ${C[memory]:-256M} =~ ^([0-9]+)([KMG])$ ]]; then
+        ${C[start]:-} != *max-old-space-size* && $(mem_cap) =~ ^([0-9]+)([KMG])$ ]]; then
     local mb=${BASH_REMATCH[1]}
     case ${BASH_REMATCH[2]} in K) mb=$((mb / 1024));; G) mb=$((mb * 1024));; esac
     mb=$((mb * 7 / 10)); ((mb >= 64)) && envs+=" NODE_OPTIONS=--max-old-space-size=$mb"
@@ -1218,10 +1229,11 @@ props() { # port [kind]
     # (Type=notify), the container's cgroup is created inside the unit's (Delegate). No mount
     # namespace options: podman's network namespaces must stay visible to later podman calls
     # its slice exists now (the unit's cgroup is made before this runs): the network rules by
-    # slice (fw_ctr_load) take its id, which is new when the slice was made again
-    [[ $kind == service ]] && echo "ExecStartPre=-+$AGENT fw-sync"
+    # slice (fw_ctr_load) take its id, which is new when the slice was made again. Fail closed:
+    # the unit (the app, its pre-flight, the env check) does not start unless they are loaded
+    echo "ExecStartPre=+$AGENT fw-ctr $A"
     printf '%s\n' Type=notify NotifyAccess=all Delegate=yes KillMode=mixed \
-      "ExecStop=$AGENT container-stop $A" "MemoryMax=${C[memory]:-256M}" SuccessExitStatus=143 \
+      "ExecStop=$AGENT container-stop $A" "MemoryMax=$(mem_cap)" SuccessExitStatus=143 \
       "Environment=PORT=$p" "Slice=$(app_slice)" "OOMScoreAdjust=$(oom_adj)"
     [[ -x $LOGS ]] && "$LOGS" unit-props "$A"   # conmon passes the container's output to it
     return
@@ -1236,7 +1248,7 @@ props() { # port [kind]
   for x in "User=$AU" "Group=$AU" NoNewPrivileges=yes ProtectSystem=strict \
       ProtectHome=yes "$tmp" PrivateDevices=yes PrivateIPC=yes \
       "TemporaryFileSystem=/dev/shm:size=$SHM_SIZE,mode=1777" "ReadWritePaths=$rw" \
-      "${sock[@]}" "MemoryMax=${C[memory]:-256M}" MemorySwapMax=0 \
+      "${sock[@]}" "MemoryMax=$(mem_cap)" MemorySwapMax=0 \
       ${C[memory_high]:+"MemoryHigh=${C[memory_high]}"} \
       SuccessExitStatus=143 "${ef[@]}" "EnvironmentFile=$D/env" "Environment=$envs" \
       "Slice=$(app_slice)" "OOMScoreAdjust=$(oom_adj)" "${SD_HARD[@]}"; do
@@ -3137,7 +3149,7 @@ fw_sync() {
     # outbound traffic leaves from (egress_ip: SNAT of its uid's connections; one of each family)
     mo=$(sed -n 's/^mail_out=//p; s/^profile=/p:/p' "$R/apps/$a/app.conf" | tr '\n' ' ')
     if [[ " $mo" == *" off "* ]]; then mail[$u]=1
-    elif [[ $mo == *p:* ]]; then x=${mo#*p:}; x=${x%% *}; [[ ,${H[profile.$x]:-}, == *,mail_out=off,* && " $mo" != *" on "* ]] && mail[$u]=1
+    elif [[ $mo == *p:* ]]; then x=${mo#*p:}; x=${x%% *}; [[ ,${H[profile.$x]:-}, == *,mail_out=off,* ]] && mail[$u]=1   # (the profile's off wins)
     fi
     # a container app: its packets leave from slirp4netns and conmon, which run as root inside the
     # app's unit, so the uid rules never see them: the same rules match its slice (containers)
@@ -3195,10 +3207,10 @@ fw_sync() {
     echo "}"
   } > "$tmp"
   # the same rules as loaded: nothing to do (a host setup again rewrites nothing)
-  if cmp -s "$tmp" "$f" && nft list table inet tando &> /dev/null; then rm -f "$tmp"; fw_ctr_load; exec 4>&-; return 0; fi
+  if cmp -s "$tmp" "$f" && nft list table inet tando &> /dev/null; then rm -f "$tmp"; fw_ctr_load; i=$?; exec 4>&-; return $i; fi
   for i in 1 2 3; do
     if nft -c -f "$tmp" 2> "$tmp.err" && sync "$tmp" && mv -f "$tmp" "$f" && nft -f "$f" 2> "$tmp.err"; then
-      rm -f "$tmp" "$tmp.err"; fw_ctr_load; exec 4>&-; return 0
+      rm -f "$tmp" "$tmp.err"; fw_ctr_load; i=$?; exec 4>&-; return $i
     fi
     sleep 1
   done
@@ -3259,10 +3271,24 @@ fw_ctr_load() {
     c+="    oifname != \"lo\" socket cgroupv2 level 2 \"$t\" ct state new ct mark set ${ctr[$a]}"$'\n'
     c+="    oifname != \"lo\" socket cgroupv2 level 2 \"$t\" counter name out_${ctr[$a]}"$'\n'
   done
-  printf 'flush chain inet tando containers\ntable inet tando {\n  chain containers {\n%s  }\n}\n' "$c" > "$R/.firewall-containers.nft" &&
-    nft -f "$R/.firewall-containers.nft" 2> "$R/.firewall-containers.err" ||
-    echo "tando-agent: the rules of container apps by their slice could not be loaded (the uid rules stand): $(head -c 300 "$R/.firewall-containers.err" | tr '\n' ' ')" >&2
-  return 0
+  if printf 'flush chain inet tando containers\ntable inet tando {\n  chain containers {\n%s  }\n}\n' "$c" > "$R/.firewall-containers.nft" &&
+     nft -f "$R/.firewall-containers.nft" 2> "$R/.firewall-containers.err"; then
+    return 0
+  fi
+  echo "tando-agent: the rules of container apps by their slice could not be loaded: $(head -c 300 "$R/.firewall-containers.err" | tr '\n' ' ')" >&2
+  return 1
+}
+# fw-ctr <app>: (a container unit's ExecStartPre, as root) the network rules of every container app
+# by its slice, loaded now; fails unless this app's are in the chain (its unit then does not start)
+cmd_fw_ctr() {
+  need_root; app "$1"
+  local t="tando.slice/tando-${A//-/\\x2d}.slice"
+  [[ ${C[recipe]:-} == container ]] || return 0
+  command -v nft > /dev/null || die "no nft: the network rules of $A cannot be loaded, so it does not start"
+  [[ -d /sys/fs/cgroup/$t ]] || die "no slice $t: the network rules of $A cannot match it, so it does not start"
+  fw_sync || die "the network rules could not be loaded, so $A does not start"
+  nft list chain inet tando containers 2> /dev/null | grepq -F "\"$t\"" ||
+    die "the network rules of $A by its slice are not loaded, so it does not start: tando doctor"
 }
 
 fw_install() {
@@ -3282,6 +3308,9 @@ ConditionPathExists=$R/firewall.nft
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f $R/firewall.nft
+# the chain of the container apps by their slice (fw_ctr_load), empty in firewall.nft: loaded again
+# for those running (a restart of nftables flushes everything)
+ExecStartPost=-$AGENT fw-sync
 
 [Install]
 WantedBy=multi-user.target
@@ -8162,6 +8191,12 @@ sync_jobs() {
     to=${_jobs[$k.timeout]:-${_jobs[job_timeout]:-$JOB_TIMEOUT}}
     [[ $to =~ ^[1-9][0-9]{0,4}$ ]] || to=$JOB_TIMEOUT
     x=$(prof_get job_timeout) && ((to > x)) && to=$x   # (the profile's ceiling: profile_apply)
+    # a job that runs more often than the profile's job_every (a rollback to a release from before
+    # it, or a profile changed since) is left out
+    if x=$(prof_get job_every); then
+      x=$(dur_secs "$x"); st=$(job_gap "$cal")
+      if ((st < x)); then echo "tando-agent: job $n runs more often than the profile allows (left out)" >&2; continue; fi
+    fi
     sp=${_jobs[$k.spread]:-${_jobs[job_spread]:-}}
     [[ $sp =~ ^[0-9]{1,4}$ ]] || sp=$(job_spread_for "$cal")
     ms=${_jobs[$k.missed]:-${_jobs[job_missed]:-run}}; per=true; [[ $ms == skip ]] && per=false
@@ -8610,7 +8645,9 @@ worker_unit() { echo "tando-${A}_worker-$1"; }   # name -> unit name without .se
 worker_names() {
   local -n _wn=${1:-C}
   local k
-  for k in "${!_wn[@]}"; do [[ $k != worker.* || $k == worker.*.* ]] || echo "${k#worker.}"; done | LC_ALL=C sort
+  local max=99
+  max=$(prof_get workers) || max=99   # (the profile's count: a rollback brings back no more)
+  for k in "${!_wn[@]}"; do [[ $k != worker.* || $k == worker.*.* ]] || echo "${k#worker.}"; done | LC_ALL=C sort | head -n "$max"
 }
 # worker_rows: one row per worker of the live release (app.conf), after its app row (srv/status
 # prints the same): worker <app> <name> <state> <restarts> <memory> <max>. state: systemd's,
@@ -8868,7 +8905,8 @@ case $verb in
   job-run) cmd_job_run "$@";;
   idle-stopped) cmd_idle_stopped "$@";;
   wake-admit) cmd_wake_admit "$@";;
-  fw-sync) need_root; load "$R/host.conf" H; fw_sync;;   # (a container app's ExecStartPre: fw_ctr_load)
+  fw-sync) need_root; load "$R/host.conf" H; fw_sync;;   # (tando-firewall.service's ExecStartPost)
+  fw-ctr) cmd_fw_ctr "$@";;
   wake-check) cmd_wake_check;;
   job-begin) cmd_job_begin "$@";; job-end) cmd_job_end "$@";; job-due) cmd_job_due "$@";; job-gone) cmd_job_gone "$@";; job-pause) cmd_job_pause "$@";; job-log) cmd_job_log "$@";;
   host)   # host care (docs/HOSTCARE.md): the server itself, answered by tando-host (Go, srv/hostcare)

@@ -256,7 +256,7 @@ ws() { # priority -> the slice file's MemoryMax and MemoryLow lines
   # shellcheck disable=SC2016
   # (bash 3.2 has no associative arrays: C[key] is C_key, and no workers)
   "$BASH" -c 'eval "$1"; C_memory=128M C_priority=$2; A=a1; write_slice; echo "rc=$?"' _ \
-    "$(agent_fn write_slice size_mb write_if_changed app_slice prof_get | sed -e "s#/etc/#$T/etc/#g" \
+    "$(agent_fn write_slice size_mb write_if_changed app_slice prof_get mem_cap | sed -e "s#/etc/#$T/etc/#g" \
       -e 's/\${C\[\([a-z]*\)\]:-/${C_\1:-/g' -e 's/" \${!C\[\*\]}"/" "/')" "$1"
   grep -h '^Memory' "$T/etc/systemd/system/tando-a1.slice" 2> /dev/null | tr '\n' ' '
 }
@@ -525,13 +525,19 @@ pc() { # spec settings... -> profile_check's lines, sorted, joined by |
 }
 P='memory=256M,cpu=25%,tasks=256,workers=1,job_timeout=600,mail_out=off'
 check "U18g unset limits come from the profile" eq "$(pc "$P" memory=128M)" "set cpu=25%|set job_timeout=600|set mail_out=off|set tasks=256|"
+check "U18g2 no memory set: the profile's" eq "$(pc "$P" cpu=25%)" "set job_timeout=600|set mail_out=off|set memory=256M|set tasks=256|"
 check "U18h settings within it pass as they are" eq "$(pc "$P" memory=256M cpu=0.2 tasks=100 job_timeout=60 mail_out=off)" ""
 check "U18i over a ceiling is refused, each named" eq "$(pc "$P" memory=1G cpu=0.5 tasks=512 job_timeout=601 mail_out=on)" \
   "bad cpu = 0.5 is over 25%|bad job_timeout = 601 is over 600|bad mail_out = on: the profile has no outbound mail|bad memory = 1G is over 256M|bad tasks = 512 is over 256|"
 check "U18j workers over the count, a worker's memory, a job's own timeout" eq \
   "$(pc "$P" cpu=25% tasks=256 job_timeout=60 mail_out=off 'worker.a=node a.js' 'worker.b=node b.js' worker.a.memory=512M 'job.x=daily|true' job.x.timeout=900)" \
-  "bad 2 workers, the profile allows 1|bad job.x.timeout = 900 is over 600|bad worker.a.memory = 512M is over 256M|"
+  "bad 2 workers, the profile allows 1|bad job.x.timeout = 900 is over 600|bad worker.a.memory = 512M is over 256M|set memory=256M|"
 check "U18k a profile without a key leaves it alone" eq "$(pc 'workers=0' memory=4G cpu=400%)" ""
+# a rollback cannot raise memory past the profile: units take mem_cap
+mcap() { "$BASH" -c 'eval "$1"; R=/nonexistent; C_memory=$2 C_profile=p H_spec=$3; prof_get() { local s=",$H_spec,"; [[ $s == *",$1="* ]] || return 1; s=${s#*",$1="}; echo "${s%%,*}"; }; mem_cap' _ \
+  "$(agent_fn mem_cap size_mb | sed 's/\${C\[memory\]:-/${C_memory:-/')" "$@"; }
+check "U18r mem_cap: over the profile, the profile's" eq "$(mcap 1G memory=256M)" 256M
+check "U18s mem_cap: under it, the app's; no profile memory, the app's" eq "$(mcap 128M memory=256M)/$(mcap 1G cpu=10%)" "128M/1G"
 # awake_auto: idle apps that fit, at their caps, beside the always-on apps' caps (RAM x mem_overcommit)
 aa() { # MemTotal-kB app.conf-contents... -> awake_auto
   local m=$1 i=0 a; shift
