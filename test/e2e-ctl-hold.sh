@@ -40,7 +40,7 @@ N=0
 # req <cert> <verb> [args]: one mutating request with a fresh request id
 req() {
   N=$((N + 1))
-  ctl "$1" "{\"v\":1,\"verb\":\"$2\",\"app\":\"shop\",\"request_id\":\"hold-test-$N-$$\"${3:+,\"args\":$3}}"
+  ctl "$1" "{\"v\":1,\"verb\":\"$2\",\"app\":\"${APP:-shop}\",\"request_id\":\"hold-test-$N-$$\"${3:+,\"args\":$3}}"
 }
 http() { curl -s -o "$E/body" -w '%{http_code}' --max-time 20 "$(t_url shop)"; }
 body() { cat "$E/body" 2> /dev/null; }
@@ -108,6 +108,20 @@ check "H18 released, an app stopped before the hold stays stopped (the stopped p
   ok && [ "$(jv "d[\"result\"][\"stopped\"]")" = 1 ] && [ "$(http)" = 503 ] && [ "$(body)" = "shop is stopped" ] && [ "$(unit)" != active ]'
 req w app.start
 check "H19 control: start works again once released" eval 'ok && [ "$(http)" = 200 ]'
+
+# ---- an app with idle_stop: its wake socket goes too (no request starts it) -----------------------
+cp -R "$ROOT/examples/hello" "$W/nap"; printf 'app = nap\nidle_stop = 5m\n' >> "$W/nap/tando.conf"
+(cd "$W/nap" && "$R" up --yes > "$E/up-nap.log" 2>&1)
+napc() { curl -s -o "$E/body" -w '%{http_code}' --max-time 20 "$(t_url nap)"; }
+sock() { "$SSH" "systemctl is-active tando-nap_wake.socket"; }
+check "H21 control: the idle app answers through its wake socket" eval '[ "$(napc)" = 200 ] && [ "$(sock)" = active ]'
+APP=nap req w app.hold '{"reason":"pause"}'
+"$SSH" 'sudo systemctl daemon-reload && sudo /opt/tando/bin/tando-agent recover-all' > /dev/null 2>&1
+check "H22 a held idle app: its wake socket is off (also after a recovery); a request gets the page, not the app" eval '
+  [ "$(sock)" != active ] && [ "$(napc)" = 503 ] && body | grep -q "nap is paused" &&
+  [ "$("$SSH" "systemctl is-active tando-nap.service")" != active ]'
+APP=nap req w app.release
+check "H23 released, the idle app answers again (socket back)" eval 'ok && [ "$(napc)" = 200 ] && [ "$(sock)" = active ]'
 
 req w app.destroy '{"confirm":"shop","purge":true}'
 check "H20 destroy removes the app's evidence" eval 'ok && ! "$SSH" "sudo test -e /var/lib/tando/ctl/evidence/shop"'
