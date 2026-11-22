@@ -123,6 +123,25 @@ check "H22 a held idle app: its wake socket is off (also after a recovery); a re
 APP=nap req w app.release
 check "H23 released, the idle app answers again (socket back)" eval 'ok && [ "$(napc)" = 200 ] && [ "$(sock)" = active ]'
 
+# ---- previews: held with their parent (the same code on another link) ----------------------------
+(cd "$W/shop" && "$R" preview up --branch pv1 > "$E/pv.log" 2>&1)
+pvc() { curl -s -o "$E/body" -w '%{http_code}' --max-time 20 "$(t_url shop-pv1)"; }
+check "H24 control: shop's preview shop-pv1 serves (200)" eval '[ "$(pvc)" = 200 ]'
+req w app.hold '{"reason":"suspend"}'
+check "H25 suspending the app suspends its preview too (503 suspended, unit stopped)" eval '
+  ok && [ "$(pvc)" = 503 ] && body | grep -q "shop-pv1 is suspended" &&
+  [ "$("$SSH" "systemctl is-active tando-shop-pv1.service")" != active ]'
+# what the gate runs for the app's deploy key (tando preview up in CI): the agent's preview-up
+"$SSH" 'sudo /opt/tando/bin/tando-agent preview-up shop shop-pv2' > "$E/pv2.log" 2>&1; rc=$?
+check "H26 no new preview while the app is held (the deploy key's preview-up is refused)" eval '
+  [ $rc != 0 ] && grep -q "is held" "$E/pv2.log" && ! "$SSH" "test -e /opt/tando/apps/shop-pv2"'
+(cd "$W/shop" && "$R" preview up --branch pv1 > "$E/pv3.log" 2>&1); rc=$?
+check "H27 nor a deploy to an existing preview" eval '[ $rc != 0 ] && [ "$(pvc)" = 503 ]'
+"$SSH" 'sudo /opt/tando/bin/tando-agent release shop-pv1' > "$E/pv4.log" 2>&1; rc=$?
+check "H28 the preview is not released on its own while its app is held" eval '[ $rc != 0 ] && [ "$(pvc)" = 503 ]'
+req w app.release
+check "H29 releasing the app releases its preview (200 again)" eval 'ok && [ "$(http)" = 200 ] && t_until 30 sh -c "[ \"\$(curl -s -o /dev/null -w %{http_code} --max-time 10 $(t_url shop-pv1))\" = 200 ]"'
+
 req w app.destroy '{"confirm":"shop","purge":true}'
 check "H20 destroy removes the app's evidence" eval 'ok && ! "$SSH" "sudo test -e /var/lib/tando/ctl/evidence/shop"'
 "$R" host setup test public_port="$T_HTTP_PORT" ctl_ca=off > /dev/null 2>&1

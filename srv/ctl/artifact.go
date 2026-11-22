@@ -166,9 +166,9 @@ const ArtifactMaxMB = 512
 // and unpacked (and 5% of it, whichever is more).
 const ArtReserveMB = 1024
 
-// fetchPolicy: host.conf's limits, and for the write principal the operator's allowlist (an
-// app's principal never reaches an address the allowlist opens: it is for the control plane's
-// own artifact store) and extra CA.
+// fetchPolicy: host.conf's limits, the operator's allowlist for this principal (fetch-allow for
+// tando-ctl-write, the control plane's own artifact store; fetch-allow-apps for apps' principals,
+// so a tenant never reaches what was opened for the control plane) and extra CA.
 func (c *Ctl) fetchPolicy(id Ident) (FetchPolicy, Limits, *Error) {
 	h := c.host()
 	mb := int64(8192)
@@ -180,13 +180,16 @@ func (c *Ctl) fetchPolicy(id Ident) (FetchPolicy, Limits, *Error) {
 		amb = n
 	}
 	p := FetchPolicy{Timeout: 15 * time.Minute, MaxSize: min(amb, mb) << 20}
+	// (fetch-allow-apps: what the operator opens to apps' own principals too; empty by default)
+	allowFile := "fetch-allow-apps"
 	if id.Mode == ModeWrite {
-		allow, err := LoadAllow(filepath.Join(c.ctlConf(), "fetch-allow"))
-		if err != nil {
-			return p, Limits{}, &Error{"internal", clean(err.Error())}
-		}
-		p.Allow = allow
+		allowFile = "fetch-allow"
 	}
+	allow, err := LoadAllow(filepath.Join(c.ctlConf(), allowFile))
+	if err != nil {
+		return p, Limits{}, &Error{"internal", clean(err.Error())}
+	}
+	p.Allow = allow
 	pem, err := readRootFile(filepath.Join(c.ctlConf(), "fetch-ca.pem"), 1<<20)
 	if err != nil {
 		return p, Limits{}, &Error{"internal", clean(err.Error())}

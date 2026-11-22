@@ -137,6 +137,14 @@ dep w dep-0008 '{"url":"http://127.0.0.1:9443/v2.tar.gz","sha256":"00","size":1}
 check "D10 bad arguments are refused before anything is fetched (http URL)" eval '[ "$(code)" = bad_request ]'
 
 # ---- the app's own principal; the spec kept; replay; a failing release ----------------------------
+# the write principal's allowlist is not the apps': an app's principal does not reach the loopback
+dep a dep-0020 "$(art v2)"
+check "D18 an app's principal does not reach an address opened for the write principal only; the error tells nothing of the server" eval '
+  [ "$(code)" = failed ] && msg | grep -q "address is not one" && ! msg | grep -q "127.0.0.1" && [ "$(body)" = version-one ]'
+"$SSH" 'printf "127.0.0.1/32\n" | sudo tee /opt/tando/ctl/fetch-allow-apps > /dev/null'
+dep a dep-0022 "$(art v2 1111111111111111111111111111111111111111111111111111111111111111)"
+check "D19 with fetch-allow-apps: a wrong sha256 is refused without the digest of what was fetched" eval '
+  [ "$(code)" = failed ] && msg | grep -q "sha256 mismatch" && ! msg | grep -q "$(shaof "$A/v2.tar.gz")"'
 "$SSH" 'sudo sed -i "/^memory=/d" /opt/tando/apps/web/app.conf && echo memory=192M | sudo tee -a /opt/tando/apps/web/app.conf > /dev/null'
 dep a dep-0009 "$(art v2)"
 check "D11 the app's principal deploys its own app; the app's memory (spec) is kept" eval '
@@ -204,5 +212,16 @@ ctl w '{"v":1,"verb":"app.start","app":"web","request_id":"start-0001"}'
 check "N5 drain off; app.start brings an app back" eval 'ok && [ "$(body)" = version-two ]'
 (cd "$W" && cp -R "$ROOT/examples/hello" web && printf 'app = web\n' >> web/tando.conf && cd web && "$R" deploy --yes > "$E/laptop.log" 2>&1)
 check "D17 a laptop deploy of the same app works after artifact deploys" eval 'case "$(body)" in ""|version-*) false;; esac'
+inc1=$("$SSH" 'stat -c %U /opt/tando/apps/web/incoming')
+dep w dep-0030 "$(art v3)"
+check "D20 after a laptop deploy, an artifact deploy leaves incoming/ its owner's ($inc1), with no root file in it" eval '
+  ok && [ "$inc1" != root ] && [ "$("$SSH" "stat -c %U /opt/tando/apps/web/incoming")" = "$inc1" ] &&
+  [ -z "$("$SSH" "sudo find /opt/tando/apps/web/incoming -user root -print -quit")" ]'
+"$R" host setup test public_port="$T_HTTP_PORT" ctl_artifact_max_mb=1 > "$E/setup-cap.log" 2>&1
+dep w dep-0031 '{"url":"https://127.0.0.1:9443/v3.tar.gz","sha256":"'"$(shaof "$A/v3.tar.gz")"'","size":2000000}'
+check "D21 ctl_artifact_max_mb: an artifact over it is refused before anything is fetched" eval '[ "$(code)" = failed ] && msg | grep -q ctl_artifact_max_mb'
+ctl w '{"v":1,"verb":"app.destroy","app":"web2","request_id":"destroy-w2-01","args":{"confirm":"web2","purge":true}}'
+req app.import web2 import-0003 "$imp"
+check "D22 the spec goes with the app: a new web2 imports from generation 1 again" eval 'ok'
 "$SSH" 'sudo systemctl stop tv-art' > /dev/null 2>&1
 t_done
