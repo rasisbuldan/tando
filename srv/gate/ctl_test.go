@@ -358,32 +358,55 @@ func TestParseCert(t *testing.T) {
 	}
 }
 
-// F5: an empty list replaces one with entries only when asked by name; a list for another CA
-// is refused
+// F5/R1: a list with fewer entries than the current one (an empty one too) replaces it only when
+// forced; one with as many or more goes in; a list for another CA is refused
 func TestCtlKRL(t *testing.T) {
 	g := ctlGate(t)
 	krl := filepath.Join(g.ctlDir(), "revoked.krl")
-	write(t, krl, "KRL-with-entries")
-	empty := filepath.Join(t.TempDir(), "empty")
-	write(t, empty, "")
-	f, _ := os.Open(empty)
-	g.Stdin = f
-	var b bytes.Buffer
-	if err := g.CtlAdmin(out.New(&b), "ctl-krl"); err == nil || !strings.Contains(err.Error(), "ctl_krl=empty") {
-		t.Errorf("emptied without asking: %v", err)
+	write(t, krl, "KRL-current")
+	// ssh-keygen -Q -l: the current list has 3 entries, the candidates as their file says
+	g.Env.Run = &fakeRun{out: func(a []string) ([]byte, error) {
+		if len(a) > 1 && a[1] == "-Q" {
+			b, _ := os.ReadFile(a[len(a)-1])
+			switch string(b) {
+			case "KRL-current":
+				return []byte("# KRL version 0\nserial: 1\nserial: 2\nserial: 3\n"), nil
+			case "KRL-two":
+				return []byte("# KRL version 0\nserial: 1\nserial: 2\n"), nil
+			case "KRL-four":
+				return []byte("# KRL version 0\nserial: 1\nserial: 2\nserial: 3\nserial: 9\n"), nil
+			}
+		}
+		return nil, nil
+	}}
+	try := func(content string, force bool) error {
+		in := filepath.Join(t.TempDir(), "in")
+		write(t, in, content)
+		f, _ := os.Open(in)
+		defer f.Close()
+		g.Stdin, g.krlForce = f, force
+		var b bytes.Buffer
+		return g.CtlAdmin(out.New(&b), "ctl-krl")
 	}
-	if data, _ := os.ReadFile(krl); string(data) != "KRL-with-entries" {
-		t.Error("the list changed")
+	cur := func() string { d, _ := os.ReadFile(krl); return string(d) }
+	for _, c := range []string{"", "KRL-two"} {
+		if err := try(c, false); err == nil || !strings.Contains(err.Error(), "ctl_krl_force=yes") || cur() != "KRL-current" {
+			t.Errorf("%q replaced the list without asking: %v %q", c, err, cur())
+		}
 	}
-	f.Seek(0, 0)
-	g.krlEmpty = true
-	if err := g.CtlAdmin(out.New(&b), "ctl-krl"); err != nil {
-		t.Errorf("ctl_krl=empty: %v", err)
+	if err := try("KRL-four", false); err != nil || cur() != "KRL-four" {
+		t.Errorf("a longer list: %v %q", err, cur())
 	}
-	if data, _ := os.ReadFile(krl); len(data) != 0 {
-		t.Error("not emptied")
+	write(t, krl, "KRL-current")
+	if err := try("KRL-two", true); err != nil || cur() != "KRL-two" {
+		t.Errorf("forced: %v %q", err, cur())
 	}
-	f.Close()
+	if err := try("", true); err != nil || cur() != "" {
+		t.Errorf("forced empty: %v %q", err, cur())
+	}
+	if err := try("", false); err != nil {
+		t.Errorf("empty over empty: %v", err)
+	}
 
 	listing := "# KRL version 0\n# CA key ssh-ed25519 SHA256:other\nserial: 99\nserial: 100\n"
 	if _, why := krlEntries([]byte(listing), []string{"256", "SHA256:ours", "ca"}); why == "" {

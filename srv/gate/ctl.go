@@ -391,13 +391,7 @@ func (g *Gate) ctlKRL(w *out.Writer, data []byte) error {
 	defer os.Remove(tmp)
 	cur := filepath.Join(dir, "revoked.krl")
 	entries := 0
-	if len(data) == 0 {
-		// one wrong path must not take back every revocation: an empty list replaces a list with
-		// entries only when asked by name (ctl_krl=empty)
-		if fi, err := os.Stat(cur); err == nil && fi.Size() > 0 && !g.krlEmpty {
-			return die("this would empty the revocation list (it has entries): to un-revoke everything, ctl_krl=empty")
-		}
-	} else {
+	if len(data) > 0 {
 		// an unreadable list would make sshd refuse every certificate: only a KRL ssh-keygen reads
 		o, err := g.Env.Run.Output(context.Background(), run.Cmd{Argv: []string{"ssh-keygen", "-Q", "-l", "-f", tmp},
 			Timeout: 30 * time.Second})
@@ -412,6 +406,20 @@ func (g *Gate) ctlKRL(w *out.Writer, data []byte) error {
 		entries, why = krlEntries(o, ff)
 		if why != "" {
 			return die("%s", why)
+		}
+	}
+	// one wrong file must not take back revocations: a list with fewer entries than the current
+	// one (an empty one included) replaces it only when asked (ctl_krl_force=yes, or ctl_krl=none
+	// for an empty list)
+	if !g.krlForce {
+		if fi, err := os.Stat(cur); err == nil && fi.Size() > 0 {
+			if o, err := g.Env.Run.Output(context.Background(), run.Cmd{Argv: []string{"ssh-keygen", "-Q", "-l", "-f", cur},
+				Timeout: 30 * time.Second}); err == nil {
+				if have, _ := krlEntries(o, nil); entries < have {
+					return die("this list has %d entries, the current one has %d: that would take revocations back; "+
+						"to replace it anyway, ctl_krl_force=yes (ctl_krl=none empties it)", entries, have)
+				}
+			}
 		}
 	}
 	if err := os.Rename(tmp, filepath.Join(dir, "revoked.krl")); err != nil {

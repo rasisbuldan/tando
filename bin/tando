@@ -187,8 +187,10 @@ cmd_host() {
           port_min=*|port_max=*|preflight_min=*|preflight_max=*|uid_min=*|uid_max=*|mem_overcommit=*|idle_awake=*|job_slots=*|backup_window=*|backup_jobs=*|backup_drill=monthly|backup_drill=off) ;;
           care=on|care=off) ;;   # host care's security updates (tando-host install; not the agent's)
           ctl_ca=*) ctl_ca_arg "${kv#ctl_ca=}" > /dev/null;;   # control plane mode (docs/CONTROL-PLANE.md)
-          ctl_krl=empty) ;;   # un-revoke everything, by name
-          ctl_krl=?*) [ -f "${kv#ctl_krl=}" ] || usage_err "ctl_krl: no such file: ${kv#ctl_krl=}" host;;
+          ctl_krl=none) ;;   # un-revoke everything, by name
+          ctl_krl=empty) ;;   # the old name of none; a file called "empty" here is that file
+          ctl_krl=?*) [ -f "${kv#ctl_krl=}" ] || usage_err "ctl_krl: no such file: ${kv#ctl_krl=} (ctl_krl=none: an empty list)" host;;
+          ctl_krl_force=yes|ctl_krl_force=no) ;;   # let a list with fewer entries than the current one replace it
           --pg-stat-statements) pgss=1;;   # PostgreSQL's top statements (a restart: asked below)
           --pg-restart) pgrs=1;;           # PostgreSQL's new memory settings (a restart: asked below)
           role=data)   # a data node: PostgreSQL for app nodes (docs/DATA-NODE.md); its step is "data"
@@ -206,11 +208,12 @@ cmd_host() {
       # so is a new max_connections or shared_buffers (sized from the server's RAM)
       [ -z "$pgrs" ] || confirm "host setup --pg-restart restarts PostgreSQL on $HOST if its memory settings wait for it: every app's database is unavailable for a few seconds." "$HOST"
       ui_box_open "host setup $HOST" "$TARGET"
-      local t0 total n sargs=() care="" krl="" f=""
+      local t0 total n sargs=() care="" krl="" f="" krlforce=""
       for kv in "$@"; do
         case $kv in care=*) care=$kv;; --pg-stat-statements) sargs+=(pg_stat_statements=yes);;
           --pg-restart) sargs+=(pg_restart=yes);; ctl_ca=*) sargs+=("ctl_ca=$(ctl_ca_arg "${kv#ctl_ca=}")");;
-          ctl_krl=*) krl=${kv#ctl_krl=};; *) sargs+=("$kv");; esac
+          ctl_krl=*) krl=${kv#ctl_krl=};; ctl_krl_force=*) [ "${kv#ctl_krl_force=}" = yes ] && krlforce=" force";;
+          *) sargs+=("$kv");; esac
       done
       total=$((9 + $(printf '%s' "$feats" | wc -w)))
       [ -z "$pgss" ] || total=$((total + 1))
@@ -237,8 +240,9 @@ cmd_host() {
         exit 1
       fi
       if [ -n "$krl" ]; then   # the control plane's revocation list, as it is (binary)
-        kv=ctl-krl f=$krl
-        [ "$krl" = empty ] && kv="ctl-krl empty" f=/dev/null
+        kv="ctl-krl$krlforce" f=$krl
+        # none (and, when no file has that name, its old name empty) is an empty list, asked for by name
+        if [ "$krl" = none ] || { [ "$krl" = empty ] && [ ! -f empty ]; }; then kv="ctl-krl force" f=/dev/null; fi
         ssh "${SSHO[@]}" "$TARGET" "sudo -n /opt/tando/bin/tando-gate admin $kv" < "$f" > /dev/null 2> "$TMPD/err" ||
           { while IFS= read -r kv; do box_say "$UI_RED" "$kv"; done < "$TMPD/err"; ui_box_close "the revocation list was not installed"; exit 1; }
       fi
