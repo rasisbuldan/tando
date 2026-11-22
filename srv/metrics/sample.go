@@ -62,7 +62,7 @@ func (m Metrics) Sample(ctx context.Context) error {
 	if err := m.sampleHostX(now); err != nil {
 		return err
 	}
-	if err := atomicfile.Write(statePath, next.format(keysIn(next, keys)), atomicfile.Mode(fileMode)); err != nil {
+	if err := atomicfile.WriteVolatile(statePath, next.format(keysIn(next, keys)), atomicfile.Mode(fileMode)); err != nil {
 		return err
 	}
 	if appErr != nil {

@@ -81,7 +81,7 @@ func (m Metrics) sampleHostX(now int64) error {
 			return err
 		}
 	}
-	return atomicfile.Write(filepath.Join(m.Dir, xState), cur.format(), atomicfile.Mode(fileMode))
+	return atomicfile.WriteVolatile(filepath.Join(m.Dir, xState), cur.format(), atomicfile.Mode(fileMode))
 }
 
 // appendX appends a line to an x file, rotating it as appendLine does; its start time and line

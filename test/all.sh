@@ -208,6 +208,8 @@ in_tier() {
     e2e-matrix-quick) [ "$tier" = full ] || [ "$tier" = quick ] || [ "$tier" = smoke ];;
     e2e-matrix-weekly) [ "$tier" = nightly ] || [ "$tier" = weekly ];;
     e2e-matrix) return 1;;
+    # the noisy-neighbour suite (one server, three apps, eight failures): about ten minutes, not in quick or smoke
+    e2e-neighbours) [ "$tier" != quick ] && [ "$tier" != smoke ];;
     *) return 0;;
   esac
 }

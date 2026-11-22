@@ -23,8 +23,10 @@ import (
 // pretick runs the sample and the recovery; neither failure stops the checks.
 func (w Watch) pretick(ctx context.Context) {
 	if w.Sample != nil {
-		w.Sample(ctx)
+		w.Cost.Time("metrics sample", func() { w.Sample(ctx) })
 	}
+	end := w.Cost.Start("recover")
+	defer end()
 	if w.recoverNeeded() {
 		w.agentOutside(ctx, "recover-all", "", "recover interrupted activations", 120*time.Second)
 	}
