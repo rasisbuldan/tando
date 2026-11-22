@@ -392,10 +392,11 @@ check "U13c a new app's configure gives back the staged lock with the ports lock
 # socket starts it) or static app. (systemctl: a stub; /etc is moved into $T; ${C[k]} and ${S[k]}
 # become ${C_k} and ${S_k}: this runs under bash 3.2, which has no associative arrays)
 na() { sed -e 's/\${\([CS]\)\[\([a-z_]*\)\]/${\1_\2/g' -e "s#/etc/#$T/etc/#g"; }
-ub() { # current stopped recipe idle_stop wants(0|1) -> the systemctl calls
+ub() { # current stopped recipe idle_stop wants(0|1|2: the wake socket) -> the systemctl calls
   rm -rf "${T:?}/etc"; mkdir -p "$T/etc/systemd/system/multi-user.target.wants"; : > "$T/calls"
   : > "$T/etc/systemd/system/tando-a1.service"
   [ "$5" = 1 ] && : > "$T/etc/systemd/system/multi-user.target.wants/tando-a1.service"
+  [ "$5" = 2 ] && mkdir -p "$T/etc/systemd/system/sockets.target.wants" && : > "$T/etc/systemd/system/sockets.target.wants/tando-a1_wake.socket"
   # shellcheck disable=SC2016
   R=$T "$BASH" -c 'eval "$1"; systemctl() { echo "${SYSTEMCTL_INSTALL_CLIENT_SIDE:+client }$*" >> "$R/calls"; }; A=a1
     S_current=$2 S_stopped=$3 C_recipe=$4 C_idle_stop=$5; unit_boot' _ \
@@ -409,7 +410,10 @@ check "U14b a release live, not enabled: enabled" eq "$(ub r1 "" node "" 0)" "cl
 check "U14c a release live, enabled: nothing" eq "$(ub r1 "" node "" 1)" ""
 check "U14d no release, not enabled: nothing" eq "$(ub "" "" node "" 0)" ""
 check "U14e a stopped app is not enabled" eq "$(ub r1 1 node "" 0)" ""
-check "U14f an idle app (its socket starts it) is not enabled" eq "$(ub r1 "" node 6h 0)" ""
+# (an idle app: enabling its unit enables its wake socket (Also=), whose link is looked at; a new
+# idle app's socket was left not enabled, and did not come back at boot: e2e-idle I2)
+check "U14f an idle app with a release: enabled (its wake socket, through Also=)" eq "$(ub r1 "" node 6h 0)" "client enable -q --no-reload tando-a1;"
+check "U14j an idle app whose wake socket is enabled: nothing (not the multi-user link)" eq "$(ub r1 "" node 6h 2)" ""
 check "U14g a static app has no unit" eq "$(ub "" "" static "" 1)" ""
 check "U14h configure enables the unit only with a live release, and never for a new app" eval \
   'sed -n "/^cmd_configure() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "^  cfg_reload \"\$new\"" &&

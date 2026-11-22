@@ -1708,10 +1708,12 @@ op_trailer() {
 # not stopped, and disabled while none is: a first deploy that failed, an app whose every release
 # went, left a unit that failed at every boot. (configure enables none before the first release.)
 # (Its link in multi-user.target.wants is looked at, not systemctl: no fork on every operation.
-# An idle app is started by its socket, an adopted one keeps what adopt set.)
+# An idle app is started by its wake socket: enabling its unit enables the socket (Also=), whose
+# link in sockets.target.wants is looked at. An adopted one keeps what adopt set.)
 unit_boot() {
-  has_unit && ! idle_app && [[ -z ${C[adopted_from]:-} && -f /etc/systemd/system/tando-$A.service ]] || return 0
+  has_unit && [[ -z ${C[adopted_from]:-} && -f /etc/systemd/system/tando-$A.service ]] || return 0
   local w=/etc/systemd/system/multi-user.target.wants/tando-$A.service
+  idle_app && w=/etc/systemd/system/sockets.target.wants/tando-${A}_wake.socket
   if [[ -n ${S[current]:-} ]]; then
     [[ -n ${S[stopped]:-} || -e $w ]] || unit_enable enable
   elif [[ -e $w ]]; then
