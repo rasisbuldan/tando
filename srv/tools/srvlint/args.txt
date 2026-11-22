@@ -105,7 +105,7 @@ status/verb_info.go tool	caddy|getconf|node|python3	caddy|getconf|node|python3 G
 status/verb_info.go tool	caddy|getconf|node|python3	caddy|getconf|node|python3 version
 watch/check_caddy.go checkCaddyConfig	caddy	caddy validate --config <valid:joined path .../Caddyfile> --adapter caddyfile
 watch/check_down.go countRestarts	journalctl	journalctl -q --no-pager -o cat -u tando-<..> --since=@<..> -g "process exited, code="
-watch/check_health.go liveness	systemd-run	systemd-run --quiet --collect --no-block --unit=tando-<..> -p "Description=tando-watch: restart "<..> tando-agent restart <valid:a.name>
+watch/check_health.go restartHung	systemd-run	systemd-run --quiet --collect --no-block --unit=tando-<..> -p "Description=tando-watch: restart "<..> tando-agent restart <valid:a.name>
 watch/check_health.go unitState	systemctl	systemctl show -P ActiveState <param unit: callers pass constants or validated values>
 watch/check_host.go checkFirewall	nft	nft -f <valid:joined path .../firewall.nft>
 watch/check_host.go checkFirewall	nft	nft list table inet tando
