@@ -70,7 +70,12 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   `app.export` returns the app's definition (env values only to the write principal, never stored
   on the node); `node.drain` takes no new app (the laptop's first deploy is refused too) and can
   stop the apps in order. Fixed: control plane verbs ran tando-agent without `/usr/local/bin` on
-  PATH (a Node installed there was not found). Tests: `test/e2e-ctl-deploy.sh`.
+  PATH (a Node installed there was not found). Tests: `test/e2e-ctl-deploy.sh`. Hardened after review: the
+  allowlist is the write principal's (`fetch-allow-apps` for apps' principals), errors to app
+  principals carry no status, length, digest or host, `ctl_artifact_max_mb=` (default 512) with a
+  free-space reserve, configure's check before the fetch, link chains refused, the spec removed with
+  the app, presigned URL queries only in the write principal's export, and previews held with their
+  app.
 - Control plane: `app.hold` (`reason` pause or suspend, optional `message`) and `app.release`
   take an app off line and back (docs/CONTROL-PLANE.md, "Hold"). Held, it is stopped and disabled
   (web unit, workers, wake socket, job timers; the daily backup skips it, its data stays), Caddy

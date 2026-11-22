@@ -211,24 +211,40 @@ What the node does, in order, and what it refuses:
 1. **Fetch.** `https` only, also after a redirect (at most 3); no proxy. The address is checked
    when the connection is made, after the name is resolved: loopback, private (RFC 1918, ULA),
    link-local (the cloud metadata service), CGNAT, multicast, documentation and other reserved
-   ranges are refused, so a URL cannot make the node reach what only it can reach. An operator who
-   serves artifacts from a private network lists those ranges in `/opt/tando/ctl/fetch-allow` (one
-   address or CIDR per line, `#` comments; root's file, writable by root only, or it is not used).
+   ranges are refused (IPv4-compatible `::/96`, mapped `::ffff:0:0/96`, 6to4 and Teredo too), so a
+   URL cannot make the node reach what only it can reach. An operator who serves artifacts from a
+   private network lists those ranges in `/opt/tando/ctl/fetch-allow` (one address or CIDR per line,
+   `#` comments; an IPv4 range written as `::ffff:a.b.c.d/N` is taken as its IPv4 range; root's file
+   in a root-only directory, writable by root only, or it is not used). That list is for
+   `tando-ctl-write` only: an app's principal gets `/opt/tando/ctl/fetch-allow-apps` (empty unless the
+   operator writes it), so a tenant never reaches the control plane's private artifact store or
+   anything else opened for it.
    The certificate must chain to the system's CAs, or to the ones in `/opt/tando/ctl/fetch-ca.pem`
-   (same rule). The body must be exactly `size` bytes (at most the server's `app_max_mb`; a longer
-   body stops at `size + 1`), within 15 minutes.
+   (same rule). The body must be exactly `size` bytes, at most `ctl_artifact_max_mb` (`tando host
+   setup <host> ctl_artifact_max_mb=N`, default 512, never over `app_max_mb`; a larger `size` is
+   refused before anything is fetched, a longer body stops at `size + 1`), within 15 minutes. The
+   store's file system must have room for twice the artifact plus a reserve (1 GB or 5%, whichever
+   is more), checked before the fetch and while unpacking. Before any of it, an app that exists is
+   put through `configure`'s own check with its spec: a held app, or one over memory admission, is
+   refused without a fetch. Errors to an app's principal say what failed in general words (no HTTP
+   status, length, digest, host or TLS message); the write principal also gets the detail. No error
+   carries the digest of what was fetched.
 2. **Verify.** The download goes to a file that is unlinked at once, in `/var/lib/tando/ctl/art`
    (root 700). Its sha256 is computed on that file descriptor, and the same descriptor is unpacked:
    nothing can swap the bytes between the check and the use.
 3. **Unpack.** Into a fresh root-only directory. Refused: absolute paths, `..`, names with control
    characters, an entry outside `release/` (other than the manifest), an entry below a symbolic
-   link or a file of the archive, a name twice, a symbolic link whose target is absolute or leaves
-   `release/`, hard links, devices, FIFOs; more than 200,000 entries or more than `app_max_mb`
-   unpacked (a decompression bomb stops there). Modes become 0644 or 0755 (no setuid, setgid or
+   link or a file of the archive, a name twice (a directory's own entry after its files is fine), a
+   symbolic link whose target is absolute, leaves `release/` or passes through another link of the
+   archive, hard links, devices, FIFOs; more than 200,000 headers (every header counts) or more than
+   four times `ctl_artifact_max_mb` unpacked (never over `app_max_mb`: a decompression bomb stops
+   there). Modes become 0644 or 0755 (no setuid, setgid or
    sticky bit), every file root's.
 4. **Deploy.** The laptop deploy's path from its upload on: `configure` with the app's spec
    settings (the last `apply`, or what the app has now) and the manifest's, the upload lease
-   (`begin`), the unpacked tree into the app's `incoming/` (`tando-agent artifact-put`), `activate`.
+   (`begin`), the unpacked tree into the app's `incoming/` (`tando-agent artifact-put`: copied into a
+   new directory of root's, handed to `incoming/`'s owner and put in its place, so root never writes
+   into a directory another user owns), `activate`.
    The activation is tando's: copy (with its own checks again: links, special files, `.env`),
    pre-flight on a spare port, backup, release command, switch, health check, soak, and the way
    back to the live release when any of it fails. Nothing is built. Memory admission applies.
@@ -267,15 +283,18 @@ it over.
   and the steps done. The deploy step undoes itself (the live release keeps serving); env steps
   done before it stay (forward-only: send the spec again, or a newer one).
 - The node keeps the last spec in `/var/lib/tando/ctl/spec/<app>.json` (root 600): generation,
-  settings, domains, the artifact reference. No env value.
+  settings, domains, the artifact reference. No env value. It goes when the app is destroyed (by
+  `app.destroy` or the laptop's `tando destroy`): a new app of that name starts at any generation.
 
 ## Export and import
 
 `app.export` (a read verb) returns what recreates the app on another node: `settings` (the spec),
 `code_settings`, `domains`, `env_names`, `artifact` (of the last apply or `app.deploy` through
 apply), `release` (the live release's id), `generation`, and `data`: `database`, `backup`, and
-`data_node` when its database is on a data node (docs/DATA-NODE.md). With `"values": true` and the
-write principal, `env` has the values too. Nothing of it is written on the node: read verbs are
+`data_node` when its database is on a data node (docs/DATA-NODE.md). The artifact's URL keeps its
+query (a presigned URL's signature) for the write principal only; other principals get it without
+query and fragment. With `"values": true` and the write principal, `env` has the values too, and
+the journal line of that request says `values=1`. Nothing of it is written on the node: read verbs are
 not kept by the request store, so an export leaves no secret behind that the node did not have.
 The data itself moves with a backup and `tando backup restore`, or stays on its data node.
 
@@ -290,7 +309,8 @@ refused, and so is the first deploy of a new app from a laptop. The apps on it a
 restarted and read as before. With `stop_apps`, the apps are stopped one at a time (as
 `app.stop`: the stopped page, units disabled, a reboot keeps them stopped), those in `stop_order`
 first, then the rest by name; the first one that fails ends it (the result says which were
-stopped). `{"off": true}` ends draining; stopped apps stay stopped until `app.start`.
+stopped). `{"off": true}` ends draining; stopped apps stay stopped until `app.start`. Drain is not
+a hold: an app's principal may start its app again; hold it (`app.hold`) to keep it off.
 
 ## Hold
 
@@ -342,6 +362,12 @@ app is destroyed; copy it off the node when you need it longer.
 The agent verbs are `tando-agent hold <app> pause|suspend [message]` and `tando-agent release
 <app>` (root), each under the app's lock and written to the audit log like `stop`.
 
+
+Previews (docs/PREVIEWS.md) are held with their app: the same reason and page
+(`<app>-<branch> is suspended`), their units stopped. While the app is held no preview is made or
+deployed (`tando preview up`, also with the app's deploy key in CI, is refused), and a preview is
+not released on its own; `app.release` of the app releases the previews its hold held (one held on
+its own stays held).
 
 ## Idempotency and order
 
