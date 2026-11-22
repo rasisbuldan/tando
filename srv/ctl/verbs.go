@@ -56,6 +56,8 @@ func init() {
 		"app.export":    {app: appRequired, timeout: time.Minute, run: (*Ctl).export},
 		"node.drain":    {write: true, writeOnly: true, nodeOnly: true, app: appNone, timeout: 60 * time.Minute, run: (*Ctl).drain},
 		"app.deploy":    {write: true, app: appRequired, timeout: 75 * time.Minute, run: (*Ctl).appDeploy},
+		"app.hold":      {write: true, app: appRequired, timeout: 10 * time.Minute, run: (*Ctl).hold},
+		"app.release":   {write: true, app: appRequired, timeout: 10 * time.Minute, run: (*Ctl).release},
 	}
 }
 

@@ -87,7 +87,7 @@ srv/offsite/*            go e2e-offsite e2e-data e2e-upgrade
 srv/status/*             go ui-test e2e-idle e2e-status e2e-live e2e-top e2e-cli e2e-workers e2e-upgrade
 srv/metrics/*            go e2e-status e2e-top e2e-sec2 @alerts e2e-upgrade e2e-ctl
 srv/gate/*               go e2e-ci e2e-sec2 e2e-upgrade e2e-ctl
-srv/ctl/*                go e2e-ctl e2e-ctl-deploy
+srv/ctl/*                go e2e-ctl e2e-ctl-deploy e2e-ctl-hold
 srv/hostcare/*           go e2e-host @alerts e2e-upgrade
 srv/studio/*             go e2e-studio e2e-datanode
 srv/live/*               go e2e-live
@@ -156,6 +156,7 @@ test/e2e-upgrade.sh      e2e-upgrade lint
 test/e2e-datanode.sh     e2e-datanode lint
 test/e2e-ctl.sh          e2e-ctl lint
 test/e2e-ctl-deploy.sh   e2e-ctl-deploy lint
+test/e2e-ctl-hold.sh     e2e-ctl-hold lint
 test/faults/*            @faults e2e-matrix-quick e2e-matrix-weekly lint
 test/sec2/*              e2e-sec2 lint
 test/sec3/*              e2e-sec2 lint

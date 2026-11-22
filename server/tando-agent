@@ -745,7 +745,7 @@ lock_holder() { # the verb that holds the lock, in words
     backup-run) echo "a backup";;
     backup-restore) echo "a restore";;
     env-set|env-unset) echo "an env change";;
-    start|stop|restart) echo "a $v";;
+    start|stop|restart|hold|release) echo "a $v";;
     domain-add|domain-rm) echo "a domain change";;
     destroy) echo "destroy";;
     recover|recover-all|deploy-status|app-down) echo "a recovery check";;
@@ -1251,7 +1251,11 @@ write_caddy() {
       echo "	header @tandonew Content-Type \"text/html; charset=utf-8\""
       echo "	respond @tandonew \"<!doctype html><meta charset=utf-8><title>$A is being deployed</title><h1>$A is being deployed</h1><p>The first version is on its way. Try again in a few seconds.</p>\" 503"
     fi
-    if [[ -n ${S[stopped]:-} ]]; then
+    if [[ -n ${S[hold]:-} ]]; then
+      # held (cmd_hold): the reason's page; the message was checked against HOLD_NOTE_RE
+      echo "	header Retry-After 3600"
+      echo "	respond \"$(hold_page)\" 503"
+    elif [[ -n ${S[stopped]:-} ]]; then
       echo "	header Retry-After 60"
       echo "	respond \"$A is stopped\" 503"
     elif [[ -n ${S[down]:-} ]]; then
@@ -1951,7 +1955,7 @@ prune() {
     valid_id "$i" || continue
     n=$((n + 1)) keep=0
     ((n <= KEEP)) && keep=1
-    [[ $i == "${S[current]:-}" || $i == "${S[last_good]:-}" || $i == "${S[target]:-}" ]] && keep=1
+    [[ $i == "${S[current]:-}" || $i == "${S[last_good]:-}" || $i == "${S[target]:-}" || $i == "${S[hold_release]:-}" ]] && keep=1
     [[ -z ${S[status_$i]:-} ]] && keep=1          # reserved by a queued activation
     if ((!keep)); then
       rm -rf "${D:?}/releases/$i" "${D:?}/jobs/$i" "${D:?}/start/$i" "${D:?}/sums/$i" "${D:?}/sums/$i.tmp" "${D:?}/sums/$i.work"; unset "S[status_$i]" "S[seq_$i]"
@@ -3824,6 +3828,7 @@ cmd_configure() {
     [[ $'\n'$input$'\n' == *$'\n'check=1$'\n'* ]] || lock
     load "$D/app.conf" C
     load "$D/state" S
+    held_refuse
     # the live release's jobs are those it was deployed with: keep them before app.conf changes
     [[ -n ${S[current]:-} && ! -f $D/jobs/${S[current]} ]] && valid_id "${S[current]}" && jobs_snap "${S[current]}"
     # and so are its settings (start, health, memory, path...): a deploy that does not go live must
@@ -4224,6 +4229,7 @@ cmd_activate() {
   fi
   flock -u 7
   recover
+  load "$D/state" S; held_refuse
   [[ $b =~ ^[0-9]+(\.[0-9])?$ && $u =~ ^[0-9]+(\.[0-9])?$ ]] || die "bad timings"
   lease_lock
   load "$D/upload" L
@@ -4426,6 +4432,13 @@ cmd_run_activation() {
   fp run.locked
   AUDIT_NOTE="release $id"
   load "$D/state" S
+  if [[ -n ${S[hold]:-} ]]; then   # held while it was queued: given up (rec_reap reports the reason)
+    local hw="$A is held (${S[hold]}): release it first"
+    lease_lock; load "$D/upload" L
+    [[ ${L[id]:-} == "$id" ]] && { L[why]=$hw; save "$D/upload" L; }
+    flock -u 7
+    die "$hw"
+  fi
   # its number in deploy order (rollback and prune go by it, not by the clock); a damaged value
   # starts again after the highest number a release still has
   if ! [[ ${S[seq]:-0} =~ ^[0-9]{1,9}$ ]]; then
@@ -5001,7 +5014,7 @@ recover_locked() {
     env)  # (no env.prev: it ended before the new env was written; nothing changed)
       if [[ -f $D/env.next || -f $D/env.prev ]]; then env_finish > /dev/null
       else rm -f "$D/.env.check"; st phase idle env_revert ""; fi;;
-    stop) S[stopped]=1; stop_app || unset "S[stopped]"; st phase idle;;
+    stop) S[stopped]=1; stop_app || [[ -n ${S[hold]:-} ]] || unset "S[stopped]"; st phase idle;;
     start|restart) restart_app && workers_follow all; st phase idle;;
     restore) rs_end "cut off";;     # (the app runs its release again, or stays stopped; a half step is recorded)
     destroy) destroy_finish; return 0;;   # (the user asked for it: finished, never undone)
@@ -5086,7 +5099,8 @@ rec_service() {
   [[ -n ${C[adopted_from]:-} ]] && ! systemctl -q is-enabled "tando-$A" 2> /dev/null && return 0
   local as; as=$(systemctl show -P ActiveState "tando-$A" 2> /dev/null)
   if [[ -n ${S[stopped]:-} ]]; then
-    if [[ $as =~ ^(active|activating|reloading)$ ]] || systemctl -q is-enabled "tando-$A" 2> /dev/null; then stop_app
+    if [[ $as =~ ^(active|activating|reloading)$ ]] || systemctl -q is-enabled "tando-$A" 2> /dev/null ||
+       { idle_app && systemctl -q is-enabled "tando-${A}_wake.socket" 2> /dev/null; }; then stop_app
     else write_caddy; fi
   elif [[ -n ${S[down]:-} ]]; then
     if [[ $as == active ]] && own_listener "${C[port]}" "tando-$A.service"; then
@@ -5141,6 +5155,7 @@ cmd_recover_all() {
 cmd_rollback() {
   need_root; app "$1"; recover; lock 120
   load "$D/state" S
+  held_refuse
   local cur=${S[current]:-} to=${2:-} i t
   if [[ -n $to ]]; then
     valid_id "$to" && [[ -d $D/releases/$to ]] || die "no such release: $to"
@@ -5425,6 +5440,8 @@ cmd_backup_run() { # app kind: the timer (daily), `tando backup now` (manual)
   has_backup_data || die "$A has no data or database to back up"
   lock 3600
   load "$D/state" S
+  # (a held app's data stays as it is: no daily backup; one by hand is allowed)
+  [[ $kind == daily && -n ${S[hold]:-} ]] && { echo "skipped=held"; return 0; }
   # (the daily run's outcome, for the backup ping of tando-watch: docs/MONITORING.md, "From
   # outside". backup_take runs in this shell, not $(...): a subshell does not keep the handler
   # that lets this verb outlive a dropped ssh session, and its first write would end the backup)
@@ -5498,6 +5515,7 @@ cmd_backup_restore() {
   dir=$BK/$A/$id
   recover; lock 300
   load "$D/state" S
+  held_refuse
   # on failure: start the app again and say where the data before the restore is
   rfail() { rs_end "$1"; die "$1 (the previous data is in backup $safety)"; }
   st phase restore restore_id "$id" restore_step stop restore_safety "" restore_cut "" \
@@ -5669,6 +5687,7 @@ cmd_backup_all() {
     a=${f%/app.conf}; a=${a##*/}
     last=$(sed -n 's/^backup_daily_ok=//p' "$R/apps/$a/state" 2> /dev/null)
     [[ $last =~ ^[0-9]+$ ]] && ((t0 - last < 72000)) && continue
+    grepq '^hold=' "$R/apps/$a/state" 2> /dev/null && continue   # (held: cmd_hold)
     apps+=("$a")
   done
   for a in $(backup_order ${apps[@]+"${apps[@]}"}); do
@@ -7481,6 +7500,7 @@ destroy_finish() {
   rm -f "/var/lib/tando/metrics/$A.tsv" "/var/lib/tando/metrics/$A.tsv.1" "/var/lib/tando/metrics/$A.disk" "/var/lib/tando/metrics/$A.disk.1" \
     "/var/lib/tando/metrics/$A.db" "/var/lib/tando/metrics/$A.db.1" "/var/lib/tando/metrics/$A.dbtop"
   [[ -x $R/bin/tando-watch ]] && "$R/bin/tando-watch" forget "$A" > /dev/null   # its alert state
+  rm -rf "${EVID:?}/$A"   # (a suspended app's evidence: cmd_hold)
   # leftovers of the uid outside the app's directory, then the user; its uid is never handed out
   # again. The app's directory goes last: a destroy interrupted before it finds the app again and
   # finishes (an earlier order left a user tando-<app> that blocked a new app of that name)
@@ -8024,6 +8044,7 @@ cmd_svc() { # start|stop|restart app
   need_root; app "$2"; recover
   [[ -n ${S[current]:-} ]] || die "nothing deployed yet"
   lock 120; load "$D/state" S
+  [[ $1 == stop ]] || held_refuse
   # each is a phase of its own: a crash in the middle leaves it recorded, and recover finishes it
   # (stop: stopped; start, restart: running)
   if [[ $1 == stop ]]; then
@@ -8431,7 +8452,8 @@ sync_jobs() {
   local todo=() off=()
   for k in ${new[@]+"${new[@]}"}; do
     x=${k#"tando-${A}_job-"}
-    if [[ $paused == *" ${x%.timer} "* ]]; then   # paused: the timer is off and stays off (tando jobs resume)
+    # paused: the timer is off and stays off (tando jobs resume); a held app's are all off (cmd_hold)
+    if [[ -n ${S[hold]:-} || $paused == *" ${x%.timer} "* ]]; then
       systemctl -q is-enabled "$k" 2> /dev/null || systemctl -q is-active "$k" && off+=("$k")
       continue
     fi
@@ -8582,6 +8604,7 @@ cmd_job_due() {
   need_root; app "$1"
   local n=${2:-} cal e nx now
   [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ ]] || return 0
+  [[ -z ${S[hold]:-} ]] || exit 1   # (held: no job runs, by its timer or by hand)
   [[ -f $D/jobhist/$n.now ]] && { rm -f "$D/jobhist/$n.now"; return 0; }
   read -r e 2> /dev/null < "$D/jobhist/$n.end" || return 0
   [[ $e =~ ^[0-9]{10,12}$ ]] || return 0
@@ -8607,6 +8630,7 @@ cmd_job_run() {
   local n=${2:-} u inv t0 l SAN
   [[ $n =~ ^[a-z][a-z0-9-]{0,20}$ && -n ${C[job.$n]:-} ]] || die "$A has no job ${n//[^A-Za-z0-9_-]/?} (tando jobs lists them)"
   u=$(job_unit "$n").service
+  held_refuse
   [[ -f /etc/systemd/system/$u ]] ||
     die "job $n is not scheduled yet: jobs take effect with the first verified release that has them (tando up; tando status)"
   AUDIT_NOTE="job $n"
@@ -8966,6 +8990,117 @@ cmd_exec_worker() {
   exec "${argv[@]}"
 }
 
+# ---- hold: an app taken off line by the control plane (app.hold, app.release) -----------------
+# hold <app> pause|suspend [message]: the app is stopped as by `tando stop` (its web unit, workers
+# and wake socket off and disabled: a reboot keeps it so) and Caddy answers 503 "<app> is paused"
+# (or suspended, with the message after it). Its job timers are off (sync_jobs), its daily backup
+# is skipped (its data stays as it is), and deploy, start, restart, rollback, a restore and a job
+# run are refused until `release`. The state keeps hold (the reason), hold_since, hold_note,
+# hold_pre_stopped (it was stopped before: release keeps it stopped) and hold_release (the release
+# that was current: never pruned while held). suspend (an abuse takedown) also freezes evidence
+# first: the app's journal, its request logs, the current release's id and file sums, in
+# $EVID/<app>/<time>/ (root 700, with SHA256SUMS); kept until the app is destroyed.
+EVID=/var/lib/tando/ctl/evidence
+# what a message may hold: it goes into the Caddyfile between double quotes, where a brace would
+# be a placeholder ({env.*}, {file.*}) and a quote or backslash would end or escape the string
+HOLD_NOTE_RE="^[A-Za-z0-9][A-Za-z0-9 .,:;!?'()/@+_-]{0,199}\$"
+held_refuse() { # what is refused while the app is held
+  [[ -z ${S[hold]:-} ]] || die "$A is held (${S[hold]}): release it first"
+}
+# hold_page: the text Caddy answers with while the app is held (write_caddy)
+hold_page() {
+  local t="$A is paused"
+  [[ ${S[hold]} == suspend ]] && t="$A is suspended"
+  [[ -n ${S[hold_note]:-} && ${S[hold_note]} =~ $HOLD_NOTE_RE ]] && t+=". ${S[hold_note]}"
+  echo "$t"
+}
+# hold_evidence: the suspended app's journal, request logs and release, frozen (HE_DIR)
+hold_evidence() {
+  local t d f j id=${S[current]:-}
+  t=$(date -u +%Y%m%d-%H%M%S)
+  install -d -m 700 -o root -g root /var/lib/tando/ctl "$EVID" "$EVID/$A" || return 1
+  d=$EVID/$A/$t; [[ -e $d ]] && d+=-$$
+  install -d -m 700 -o root -g root "$d" || return 1
+  HE_DIR=$d
+  ( umask 077
+    j=$(jns)
+    # (the app's own namespace when it has one: every unit of the app logs there)
+    if [[ -n $j ]]; then journalctl --namespace="tando-$A" -o export --no-pager > "$d/journal.export"
+    else journalctl -u "tando-$A.service" -u "tando-${A}_*" -o export --no-pager > "$d/journal.export"; fi
+    for f in "/var/log/tando/$A"/access.log*; do [[ -f $f && ! -L $f ]] && cp -p -- "$f" "$d/"; done
+    valid_id "$id" && [[ -f $D/sums/$id && ! -L $D/sums/$id ]] && cp -p -- "$D/sums/$id" "$d/release.sums"
+    printf 'app=%s\nreason=suspend\nrelease=%s\ntime=%s\nby=%s\nnote=%s\n' "$A" "${id:--}" "$(now)" "${SUDO_USER:-root}" "${S[hold_note]:-}" > "$d/info"
+    cd "$d" && sha256sum -- * > SHA256SUMS ) || return 1
+  chmod -R go= "$d"
+}
+cmd_hold() { # app pause|suspend [message]
+  need_root; app "$1"; recover
+  local why=${2:-} note=${3:-}
+  [[ $why == pause || $why == suspend ]] || die "hold: pause or suspend"
+  [[ -z $note || $note =~ $HOLD_NOTE_RE ]] ||
+    die "hold: the message is at most 200 letters, digits, spaces and . , : ; ! ? ' ( ) / @ + _ -"
+  lock 300; load "$D/state" S
+  AUDIT_NOTE="$why"
+  if [[ -n ${S[hold]:-} ]]; then
+    # a suspend is lifted only by release (a pause must not soften it); a pause becomes a suspend
+    [[ ${S[hold]} == suspend && $why == pause ]] && die "$A is held (suspend): release it first"
+    if [[ ${S[hold]} == "$why" ]]; then
+      st hold_note "$note" || die "could not save the state (disk full?)"
+      write_caddy || die "${WC_WHY:-Caddy refused the site}"
+      echo already=1; echo hold="$why"; return 0
+    fi
+  fi
+  local pre=${S[stopped]:-}
+  [[ -n ${S[hold]:-} ]] && pre=${S[hold_pre_stopped]:-}
+  S[hold_note]=$note
+  if [[ $why == suspend ]]; then
+    if hold_evidence; then echo "evidence=$HE_DIR"
+    else echo "tando-agent: the evidence of $A could not be written in full (disk full?); it is held all the same" >&2; echo evidence=0; fi
+  fi
+  S[hold]=$why S[hold_since]=$(now) S[hold_pre_stopped]=$pre S[hold_release]=${S[current]:-} S[stopped]=1
+  unset "S[down]"
+  # (phase stop: a hold cut off here is finished by recover as a stop; the state says held already)
+  st phase stop || die "could not save the state (disk full?); $A is not held"
+  # (nothing deployed yet: no unit runs; the page alone, and no deploy until release)
+  if [[ -z ${S[current]:-} ]]; then
+    write_caddy || die "${WC_WHY:-Caddy refused the site}; $A is held, its page is not served yet (recovery retries)"
+  elif ! { fp hold.stop && stop_app; }; then
+    # (logged, not undone: a takedown that half worked is finished by the next recover)
+    die "${WC_WHY:-systemctl stop failed}; $A is held, but not all of it stopped yet (recovery retries)"
+  fi
+  jobs_follow || echo "tando-agent: the job timers of $A could not be stopped yet: recovery retries" >&2
+  st phase idle
+  echo hold="$why"; echo held=1; echo healthy=1
+}
+cmd_release() { # app
+  need_root; app "$1"; recover
+  lock 300; load "$D/state" S
+  [[ -n ${S[hold]:-} ]] || { echo already=1; echo held=0; echo healthy=1; return 0; }
+  local was=${S[hold]} pre=${S[hold_pre_stopped]:-}
+  AUDIT_NOTE="was $was"
+  unset "S[hold]" "S[hold_since]" "S[hold_note]" "S[hold_pre_stopped]" "S[hold_release]"
+  if [[ -n $pre || -z ${S[current]:-} ]]; then
+    # stopped before the hold (tando stop): it stays stopped, with the stopped page; nothing
+    # deployed yet: the page a first deploy replaces
+    [[ -n $pre ]] || unset "S[stopped]"
+    save "$D/state" S || die "could not save the state (disk full?)"
+    write_caddy || echo "tando-agent: ${WC_WHY:-Caddy refused the site}" >&2
+    jobs_follow || echo "tando-agent: the job timers of $A could not be updated yet: recovery retries" >&2
+    echo released="$was"; [[ -n $pre ]] && echo stopped=1; echo healthy=1; return 0
+  fi
+  # (phase start: cut off, recover starts it)
+  st phase start || die "could not save the state (disk full?); $A is still held"
+  if ! restart_app; then
+    st phase idle
+    die "${WC_WHY:-systemctl start failed}: $A is released but did not start (it is stopped: tando start)"
+  fi
+  workers_follow all || echo "tando-agent: $WF_WHY" >&2
+  jobs_follow || echo "tando-agent: the job timers of $A could not be updated yet: recovery retries" >&2
+  st phase idle
+  echo released="$was"
+  if via_caddy "$(app_unit)"; then echo healthy=1; else echo healthy=0; fi
+}
+
 # ---- dispatch ------------------------------------------------------------------------------
 
 verb=${1:-}
@@ -8978,7 +9113,7 @@ case $verb in
   activate|run-activation) audit deploy "${1:-}";;
   artifact-put) audit "$verb" "${1:-}";;
   configure|rollback|env-set|env-unset|env-ls|start|stop|restart|unlock|destroy|backup-run|\
-  backup-restore|backup-cat|db-url|db-psql|shell|job-run|job-pause) audit "$verb" "${1:-}";;
+  backup-restore|backup-cat|db-url|db-psql|shell|job-run|job-pause|hold|release) audit "$verb" "${1:-}";;
   db-studio|db-studio-code|db-studio-stop) audit "$verb" "${1:-}";;
   backup-drill) audit "$verb" "${1:-}";;
   data-link|data-unlink|db-link) audit "$verb" -;;
@@ -8991,7 +9126,7 @@ esac
 # for a restore and never started again, a new env never checked). Their output then goes
 # nowhere. (A handler, not an ignored signal: the commands they run keep the default.)
 case $verb in
-  configure|rollback|env-set|env-unset|start|stop|restart|destroy|backup-run|backup-restore|domain-add|domain-rm|preview-up|preview-rm|backup-drill)
+  configure|rollback|env-set|env-unset|start|stop|restart|destroy|backup-run|backup-restore|domain-add|domain-rm|preview-up|preview-rm|backup-drill|hold|release)
     trap 'exec > /dev/null 2>&1' PIPE HUP;;
 esac
 case $verb in
@@ -9023,6 +9158,8 @@ case $verb in
   env-names) cmd_env_names "$@";;
   env-log) cmd_env_log "$@";;
   start|stop|restart) cmd_svc "$verb" "$@";;
+  hold) cmd_hold "$@";;
+  release) cmd_release "$@";;
   logs|log-stats|log-doctor|req-summary|req-tail|req-errors|audit-read|errors)
     if [[ $verb == logs ]] && valid_app "${1:-}" &&
        [[ $(sed -n 's/^recipe=//p' "$R/apps/$1/app.conf" 2> /dev/null) == static ]]; then

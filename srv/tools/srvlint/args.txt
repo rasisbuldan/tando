@@ -8,6 +8,8 @@ ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent destroy
 ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent end <valid:app>
 ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent env-set <valid:r.App>
 ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent env-unset <valid:r.App>
+ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent hold <valid:r.App> <valid:a.Reason> <valid:a.Message>
+ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent release <valid:r.App>
 ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent restart|start|stop <valid:r.App>
 ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent rollback <valid:r.App> <valid:a.To>
 ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent stop <valid:n>
@@ -154,4 +156,4 @@ watch/verbs_install.go systemctl	systemctl	systemctl enable -q tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl reset-failed tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl start tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl try-restart tandod.service
-# positions: 669 constant, 56 prefixed, 3 int, 75 validated, 6 value of an option, 13 after --, 0 other
+# positions: 673 constant, 56 prefixed, 3 int, 79 validated, 6 value of an option, 13 after --, 0 other
