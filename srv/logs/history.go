@@ -52,9 +52,11 @@ func col(r []string, i int) string {
 
 func colNum(r []string, i int) float64 { return lines.Num([]byte(col(r, i))) }
 
+// liveSwitch: the row is a release going live: a deploy or rollback that ended ok, or a deploy
+// whose soak a newer deploy cut short (superseded: it was live until the next switch).
 func liveSwitch(r []string) bool {
-	k := col(r, 2)
-	return col(r, 3) == "ok" && (k == "deploy" || k == "rollback")
+	k, res := col(r, 2), col(r, 3)
+	return (res == "ok" && (k == "deploy" || k == "rollback")) || (res == "superseded" && k == "deploy")
 }
 
 // releaseRanges: the periods during which release id was current, [from, to) in microseconds
@@ -70,7 +72,9 @@ func (a *app) releaseRanges(id string, now int64) [][2]float64 {
 		switch {
 		case liveSwitch(r):
 			s = append(s, sw{colNum(r, 0) - colNum(r, 10), col(r, 1)})
-			good = col(r, 1)
+			if col(r, 3) == "ok" { // (a superseded release is never what a rollback goes back to)
+				good = col(r, 1)
+			}
 		case col(r, 3) == "rolledback":
 			s = append(s, sw{colNum(r, 0) - colNum(r, 10), col(r, 1)}, sw{colNum(r, 0), good})
 		}

@@ -63,14 +63,21 @@ configure() {
     [ -n "$C_domain" ] && printf 'domain=%s\n' "$C_domain"
     [ -n "$C_www" ] && printf 'www=%s\n' "$C_www"
   } > "$TMPD/settings"
-  if [ "${1:-}" != check ] && [ -n "${BUSY_ID:-}" ]; then configure_wait
+  if [ "${1:-}" != check ] && [ -n "${BUSY_ID:-}" ]; then
+    # a release in its soak: this deploy supersedes it (the server ends the soak once this
+    # configure waits for it); it stays live until this one switches, not counted as verified
+    if [ "$BUSY_PHASE" = soak ] && [ "${BUSY_SUPERSEDE:-}" = 1 ] && valid_id "$BUSY_ID"; then
+      box_say "$UI_DIM" "        release $BUSY_ID is soaking: this deploy supersedes it"
+    fi
+    configure_wait
   else agent sudo configure "$APP" < "$TMPD/settings" > "$TMPD/cfg"; fi
   kv_read "$TMPD/cfg" link port created changed exists current needs node domains \
-    busy busy_phase busy_left busy_soak conf
+    busy busy_phase busy_left busy_soak conf supersede
   # configure check: something holds the app now (a release soaking, a rollback, a backup); the
   # real configure waits for it, and configure_wait says so if it still does then
   if [ "${1:-}" = check ]; then
     BUSY_ID=$K_busy BUSY_PHASE=$K_busy_phase BUSY_LEFT=$K_busy_left BUSY_SOAK=$K_busy_soak BUSY_T=$(now)
+    BUSY_SUPERSEDE=$K_supersede
   fi
 }
 
@@ -697,6 +704,11 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
       ui_box_close "live in $(ui_dur "$(since "$t0")")  $K_link"
       after_live
       return 0;;
+    superseded)   # (--wait: a newer deploy of the app ended its soak; it is live, not verified)
+      ui_box_close "live in $(ui_dur "$(since "$t0")")  $K_link"
+      note "a newer deploy ended its soak early: live, but not counted as verified (tando releases)"
+      after_live
+      return 0;;
   esac
   fail_report
   box_say "$UI_DIM" "all of it: tando logs --release $id ${UI_G_MID} the server: tando doctor"
@@ -759,7 +771,7 @@ act_follow() {
       fi
       ui_box_line "        live; watching it ${K_soak:-30} s before calling it verified"
     fi
-    case $K_result in ok|failed|rolledback|bad|verified|unknown) break;; esac
+    case $K_result in ok|failed|rolledback|bad|verified|superseded|unknown) break;; esac
     # (past it, one more answer is asked for first: a laptop that slept through the activation
     # reports its result, not that it has not finished)
     if [ "$(now)" -gt "$deadline" ]; then

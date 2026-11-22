@@ -628,11 +628,22 @@ echo 31 > VERSION; TANDO_WAIT="" "$R" deploy --wait > "$E/dwait.out" 2>&1; rc=$?
 check "16c deploy --wait (TANDO_WAIT unset) waits out the soak: 7/7 verify has a time (rc=$rc)" \
   eval '[ $rc = 0 ] && grep -qE "7/7 +verify +[0-9]" "$E/dwait.out"'
 echo 32 > VERSION; TANDO_WAIT="" "$R" deploy > "$E/dnowait.out" 2>&1; rc=$?; cat "$E/dnowait.out" >&2
+# (the unchanged deploy after v32's soak: during it, a deploy supersedes the soak, and the release
+# is then not verified, so the same tree is activated again; 16f)
+until_ 30 srv "! sudo grep -qx result=running /opt/tando/apps/hello/activation"
 "$R" deploy > "$E/dsame.out" 2>&1; rc2=$?
 check "16e deploy of the unchanged tree: already live, nothing activated (rc=$rc2)" \
   eval '[ $rc2 = 0 ] && grep -q "already live" "$E/dsame.out" && ! grep -qE "^[^a-z]* release [0-9]{8}-[0-9]{6} *[^a-z]*$" "$E/dsame.out"'
 check "16d deploy without --wait returns once live; the server watches the soak (rc=$rc)" \
   eval '[ $rc = 0 ] && grep -q "the server watches it" "$E/dnowait.out"'
+# an unchanged tree deployed while the live release still soaks: that soak is superseded (live, not
+# verified), so "already live" does not apply: the same files go live again and are verified
+echo 33 > VERSION; TANDO_SOAK=20 TANDO_WAIT="" "$R" deploy > "$E/dsup1.out" 2>&1
+TANDO_SOAK=20 TANDO_WAIT="" "$R" deploy > "$E/dsup2.out" 2>&1; rc=$?
+sid=$(sed -n 's/.*release \([0-9-]*\) *│.*/\1/p' "$E/dsup1.out" | head -1)
+check "16f an unchanged deploy during the soak supersedes it and goes live verified (rc=$rc; $sid $(rel_status "$sid"))" \
+  eval '[ $rc = 0 ] && grep -q "supersedes it" "$E/dsup2.out" && grep -q "live in" "$E/dsup2.out" && [ "$(rel_status "$sid")" = superseded ] && eqv 33'
+until_ 40 srv "! sudo grep -qx result=running /opt/tando/apps/hello/activation"   # (its own 20 s soak ends)
 
 # 22. the release command (release = in tando.conf; docs/COMMANDS.md "The release command"): once
 # per deploy on the server, as the app's user, after pre-flight and the pre-deploy backup, before

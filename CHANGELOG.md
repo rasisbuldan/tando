@@ -54,6 +54,15 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   - Caddy 2.7 and later: a reload (a new app, another app's site change) no longer ends every
     websocket and event stream at once: they end 5 minutes later (`stream_close_delay`; `tando host setup <host> stream_close_delay=30m` to change it). Caddy
     2.6 (Ubuntu's package) has no such setting: there a reload still ends them.
+- Deploys: a deploy no longer waits out the soak of the release before it (back-to-back deploys
+  took the rest of that soak, up to 30 s, on top of their own time). It supersedes it: the soak
+  ends at once, that release stays live until the new one switches and is recorded as
+  `superseded` (in `tando releases` and `tando history`): live, not verified. A new release that
+  fails after its switch goes back to the last verified release, never to a superseded one.
+- Faster health checks: the pre-flight and the check through Caddy poll every 0.1 s for their
+  first two seconds (they waited up to 0.5 s between polls), asking systemd for the unit's state
+  in one call every fourth poll. State writes during a deploy fork less (the metadata group is
+  looked up once per process, a temp file is made with its group and mode in one step).
 - Scale: a server holds 100 apps and more (tuned for 4 vCPU / 8 GB). Upgrade with
   `tando host setup <host>`; apps keep their ports, users and settings. docs/ARCHITECTURE.md,
   "Many apps on one server".
