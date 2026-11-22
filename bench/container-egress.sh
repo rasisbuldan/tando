@@ -29,7 +29,7 @@ fb_init "$HOST"
 A=fb-egress
 W=$(mktemp -d) || exit 2
 trap 'rm -rf "$W"' EXIT
-fb_apps | awk '{ print $1 }' | grep -qx "$A" && { echo "$A already exists on $HOST: destroy it first (tando destroy -a $A -H $HOST --purge --yes)" >&2; exit 2; }
+fb_apps | awk '{ print $1 }' | grep -x "$A" > /dev/null && { echo "$A already exists on $HOST: destroy it first (tando destroy -a $A -H $HOST --purge --yes)" >&2; exit 2; }
 rsh 'command -v podman > /dev/null' || { echo "podman is not on $HOST: tando host setup $HOST podman=yes" >&2; exit 2; }
 
 cp -R "$FB_ROOT/examples/container/." "$W/"
