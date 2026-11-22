@@ -2845,6 +2845,7 @@ fw_sync() {
     echo "  counter app_dns {}"
     echo "  counter app_mail {}"
     echo "  counter app_rate {}"
+    echo "  counter app_meta {}"
     for u in "${!own[@]}"; do echo "  counter out_$u {}"; echo "  counter in_$u {}"; done
     echo "  chain containers {}"
     echo "  chain output {"
@@ -2911,8 +2912,11 @@ fw_app_rules() {
   fi
   # the cloud provider's metadata service (instance keys and tokens on many clouds): an app
   # tricked into fetching a URL (SSRF) must not reach it
-  echo "    $mt ip daddr 169.254.169.254 reject"
-  echo "    $mt ip6 daddr fd00:ec2::254 reject"
+  # (counted: app_meta; TCP gets a reset, which slirp4netns passes on to a container at once)
+  echo "    $mt ip daddr 169.254.169.254 meta l4proto tcp counter name app_meta reject with tcp reset"
+  echo "    $mt ip daddr 169.254.169.254 counter name app_meta reject"
+  echo "    $mt ip6 daddr fd00:ec2::254 meta l4proto tcp counter name app_meta reject with tcp reset"
+  echo "    $mt ip6 daddr fd00:ec2::254 counter name app_meta reject"
   # SocketBindDeny filters bind(), but listen() on an unbound socket autobinds 0.0.0.0:<any>:
   # the app's packets in a connection opened from outside (not over lo) are dropped
   echo "    oifname != \"lo\" $mt ct direction reply drop"

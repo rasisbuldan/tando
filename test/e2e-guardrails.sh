@@ -148,8 +148,9 @@ if command -v docker > /dev/null 2>&1 || command -v podman > /dev/null 2>&1; the
   srv "sudo podman exec tando-gc-$port sh -c 'nc -w 4 192.0.2.1 25 < /dev/null'" > /dev/null
   m1=$(cnt app_mail)
   check "G29 a connection from inside the container is refused by the app's mail rule ($m0 -> $m1)" eval '[ "$m1" -gt "$m0" ]'
+  x0=$(cnt app_meta)
   t0=$SECONDS; srv "sudo podman exec tando-gc-$port sh -c 'nc -w 5 169.254.169.254 80 < /dev/null'" > /dev/null; dt=$((SECONDS - t0))
-  check "G30 the metadata address is refused at once from inside the container (${dt}s)" eval '[ $dt -lt 3 ]'
+  check "G30 the metadata address is refused from inside the container ($x0 -> $(cnt app_meta), ${dt}s)" eval '[ "$(cnt app_meta)" -gt "$x0" ] && [ $dt -lt 5 ]'
   srv "sudo systemctl restart tando-gc.service" > /dev/null
   m0=$(cnt app_mail)
   t_until 30 eval 'srv "sudo podman exec tando-gc-$port true"' > /dev/null

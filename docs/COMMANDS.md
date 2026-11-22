@@ -926,7 +926,8 @@ profile on the server applies to each app at its next deploy.
 - Container apps (`recipe = container`): their packets leave from slirp4netns and conmon, which
   run as root inside the app's unit, so the rules by user do not see them. The same rules match
   the app's slice (`socket cgroupv2`) in the chain `containers`, loaded after the main rules and
-  again at each start of the app (a slice made again has a new id; at boot no slice exists).
+  again at each start of the app (a slice made again has a new id; at boot no slice exists). The
+  metadata address refusal is counted in `app_meta` (also for directory apps).
 - The `cpu_sustained` alert: the app's slice above `cpu_pct` % (default 90) of its CPU limit (of
   one core without one) for `cpu_for` minutes (default 30) in a row; not counted while a deploy,
   build, release command, shell or backup of the app runs. Never stops the app. `tando alerts set

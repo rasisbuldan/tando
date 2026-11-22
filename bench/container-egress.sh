@@ -84,7 +84,10 @@ echo "container_delta \$(echo "\$s1 \$s2" | awk '{ print \$5-\$1, \$6-\$2, \$7-\
 t0=\$(date +%s.%N)
 setpriv --reuid=\$U --regid=\$G --clear-groups timeout 6 bash -c 'exec 3<>/dev/tcp/169.254.169.254/80' 2> /dev/null; r1=\$?
 t1=\$(date +%s.%N)
+mb0=\$(nft list counter inet tando app_meta 2> /dev/null | sed -n 's/.*packets \([0-9]*\).*/\1/p')
 podman exec \$CT sh -c 'nc -w 5 169.254.169.254 80 < /dev/null' > /dev/null 2>&1; r2=\$?
+mb1=\$(nft list counter inet tando app_meta 2> /dev/null | sed -n 's/.*packets \([0-9]*\).*/\1/p')
+echo "tando_meta_refused \$(( \${mb1:-0} - \${mb0:-0} ))"
 t2=\$(date +%s.%N)
 echo "metadata_host_uid \$r1 \$(echo "\$t0 \$t1" | awk '{ printf "%.2f", \$2-\$1 }')"
 echo "metadata_container \$r2 \$(echo "\$t1 \$t2" | awk '{ printf "%.2f", \$2-\$1 }')"
@@ -111,8 +114,9 @@ elif [ "$uidc" -ge 1 ]; then
 fi
 sr=$(get tando_slice_rules); case $sr in ''|*[!0-9]*) sr=0;; esac
 mc=$(get metadata_container); mcode=${mc%% *} msec=${mc#* }
-if [ "$sr" -ge 1 ] && [ "$cgc" -ge 1 ] && [ "${mcode:-0}" != 0 ] && awk -v s="$msec" 'BEGIN { exit !(s < 1.5) }'; then
-  echo "RESULT: the container's packets leave as root ($rootc), but tando's rules match the app's slice ($sr rules in chain containers; the slice saw $cgc of $anyc packets) and the metadata address was refused at once from inside the container (${msec}s): constrained."
+mr=$(get tando_meta_refused); case $mr in ''|*[!0-9]*) mr=0;; esac
+if [ "$sr" -ge 1 ] && [ "$cgc" -ge 1 ] && [ "${mcode:-0}" != 0 ] && [ "$mr" -ge 1 ]; then
+  echo "RESULT: the container's packets leave as root ($rootc), but tando's rules match the app's slice ($sr rules in chain containers; the slice saw $cgc of $anyc packets) and tando refused the container's connection to the metadata address (counter app_meta +$mr, ${msec}s): constrained."
   exit 0
 else
   echo "RESULT: BYPASS. The container's packets left the host as socket owner root ($rootc) or another, never as the app's uid ($uidc of $anyc): the per-uid rules in table inet tando (connection cap, DNS rate, metadata block, loopback ports, and any mail block keyed on the uid) do not see them. A match on the app slice (socket cgroupv2 level 2) saw $cgc of those $anyc packets: that is the fix key."
