@@ -168,6 +168,11 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 Run `tando host setup <host>` on each server after updating tando; it applies the items below.
 Steps and checks: docs/release-notes/0.3.0.md.
 
+- An app's `/tmp` and `/var/tmp` are a 64 MB tmpfs in its memory (was: a private directory on
+  the disk), from its next deploy or host setup. An app that writes large temporary files (uploads
+  to the system temp directory) sets `tmp_size = 512M`, or `memory =` higher with it. New caps per
+  app's user: 2048 connections at once (`conn_out`), 200 DNS packets a second (`dns_rate`), 20 x
+  `db_pool` connections to the database; `tando doctor` ("app limits") counts what they refused.
 - PostgreSQL moves to pgbouncer on the app's next deploy. An app's `DATABASE_URL` then points at
   pgbouncer (transaction pooling); `LISTEN`/`NOTIFY`, session advisory locks, session `SET` and
   prepared statements on old drivers do not survive that: set `db_direct = true` for such an app
