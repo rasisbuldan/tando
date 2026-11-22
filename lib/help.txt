@@ -249,7 +249,7 @@ its own app over HTTP can meet it restarting (a deploy, tando restart): retry in
 started a second time. A run is stopped after its timeout (job_timeout = <seconds>, default
 3600; job.<name>.timeout for one job) and reported as timed out. A run the server missed while
 it was off is made up once at boot (job_missed = skip to drop it); starts are spread over
-15 s (job_spread). The last 50 runs of each job (time, result, duration) are kept.
+a sixth of the period, at most 10 minutes (job_spread). The last 50 runs of each job (time, result, duration) are kept.
 
 @@ db
 flags: -a= -H= --show --no-open --json --idle= --stop
