@@ -115,7 +115,7 @@ ci_date() { # epoch -> "2026-11-14 17:01" in GMT
 
 ci_setup() { # [rotate|previews]
   local mode=${1:-} h port kh line n=0 envname=tando-deploy
-  ci_admin "${mode:-setup}"
+  case $mode in rotate) ci_admin rotate;; *) ci_admin setup;; esac
   command -v ssh-keygen > /dev/null || die "ssh-keygen not found"
   ci_install_gate
   ssh-keygen -q -t ed25519 -N '' -C "tando-ci-$APP" -f "$TMPD/ci_key" < /dev/null > /dev/null ||
