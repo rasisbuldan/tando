@@ -53,6 +53,8 @@ var validated = map[string]string{
 	"gate tando-agent string(m[1])": "the token the agent printed, matched by a token regexp (rootmode.go)",
 	"gate tando-agent p.Build":      "validSecs: digits",
 	"gate tando-agent p.Upload":     "validSecs: digits",
+	"gate tando-agent pv":           "ValidPreview(app, name): <app>-<slug>, a valid.App name (preview.go), checked in rootPreview",
+	"gate tando-agent p.TTL":        "previewTTLRe: 1-4 digits and one of s m h d, never starts with - (params.go, preview.go)",
 	"gate ipcrm f[1]":               "uintOf(f[1]) must succeed before the call (procs.go)",
 
 	// the other programs: app is valid.App at the entry of every verb

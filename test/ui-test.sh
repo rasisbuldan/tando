@@ -370,8 +370,11 @@ conf_arms() { # file start-regex end-regex: the labels of the 6-space case arms 
         sed 's/^worker\.\*\.\([a-z_]*\)$/worker.<name>.\1/' | sort -u
 }
 conf_client=$(conf_arms "$here/lib/common.sh" '^conf_load() {' '^  done < "\$f"')
-# check, origin and force are words of the client's request to configure, not tando.conf keys
-conf_server=$(conf_arms "$here/server/tando-agent" '^cmd_configure() {' '^  done <<< "\$input"' | grep -vx -e check -e origin -e force -e 'job.<name>.cron')
+# check, origin and force are words of the client's request to configure, not tando.conf keys;
+# preview_of and preview_expires are marks the server writes into a preview's app.conf (preview-up),
+# not settings: tando.conf must not set them (the client parser rejects them on purpose, or a
+# project could mark itself a preview), so they are neither documented as keys nor required there
+conf_server=$(conf_arms "$here/server/tando-agent" '^cmd_configure() {' '^  done <<< "\$input"' | grep -vx -e check -e origin -e force -e 'job.<name>.cron' -e preview_of -e preview_expires)
 conf_doc=$(grep -o '^| `[^`]*`' "$here/docs/CONFIG.md" | sed 's/^| `//; s/`$//' | sort -u)
 conf_code=$(printf '%s\n%s\n' "$conf_client" "$conf_server" | sort -u)
 if [[ $(printf '%s\n' "$conf_code" | wc -l) -lt 40 ]]; then bad "tando.conf keys: read only $(printf '%s\n' "$conf_code" | wc -l) from the code"; else ok; fi
