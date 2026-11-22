@@ -23,7 +23,10 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   (`pg_dump` with the app's role), restore, the restore drill (into `tdrill_<app>` on the data
   node), the studio (TLS in its PostgreSQL client), `tando db` and destroy (drops the project on
   the data node) work against it; tandod watches PostgreSQL on the data node and not on the app
-  node. Servers without a link change nothing.
+  node. Servers without a link change nothing. The operator's tando acts only on its own link
+  record (an app node reporting another link is refused), limits come from tando.conf within the
+  data node's bounds (`data_pool_max`, `data_temp_max`, `data_timeout_max`,
+  `data_conn_per_node`), the certificate renews itself (`tando-data-renew.timer`).
 - bench: `bench/fleet.sh` (100-app fleet and reboot test on a real server), `bench/rebuild-drill.sh` (rebuild and offsite restore drill) and `bench/container-egress.sh` (container apps bypass the per-uid network rules: measured, fix proposed); docs/THREAT-MODEL.md.
 - Preview apps: `tando preview up [--branch B] [--ttl 7d]` deploys this project as
   `<app>-<branch>` (24 characters at most; a checksum keeps two branches apart) on its own link:
