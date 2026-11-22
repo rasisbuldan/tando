@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -434,5 +435,29 @@ func TestDigestKeyed(t *testing.T) {
 	if Digest([]byte("k1"), "write", r) == Digest([]byte("k2"), "write", r) ||
 		Digest([]byte("k1"), "write", r) == Digest([]byte("k1"), "app-shop", r) {
 		t.Error("digest ignores the key or the principal")
+	}
+}
+
+// F3: what a request names reaches the journal as one quoted field, never as forged fields or lines
+func TestServeLogNoInjection(t *testing.T) {
+	c := New(env.Env{Root: t.TempDir(), Lib: t.TempDir(), Now: time.Now})
+	var logs []string
+	c.Log = func(m string) { logs = append(logs, m) }
+	for _, in := range []string{
+		`{"v":2,"verb":"inventory result=ok\nctl write verb=app.destroy result=ok","app":"x y"}`,
+		`{"v":1,"verb":"inventory","app":"a result=ok"}`,
+		`{"v":1,"verb":"app.restart","app":"shop","request_id":"x result=ok\n"}`,
+	} {
+		c.Serve(context.Background(), Ident{Mode: ModeRead, Serial: "1", KeyID: "k"}, []byte(in), new(bytes.Buffer))
+	}
+	quoted := regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+	if len(logs) != 3 {
+		t.Fatalf("%d lines", len(logs))
+	}
+	for _, l := range logs {
+		bare := quoted.ReplaceAllString(l, "Q")
+		if strings.ContainsAny(l, "\n\r") || strings.Count(bare, " result=") != 1 || strings.Count(bare, " verb=") != 1 {
+			t.Errorf("log line %q", l)
+		}
 	}
 }

@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"io"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"time"
 
 	"tando/srv/internal/env"
@@ -124,8 +126,10 @@ func (c *Ctl) Serve(ctx context.Context, id Ident, in []byte, w io.Writer) int {
 		if resp.Replayed {
 			res += " (replayed)"
 		}
-		c.Log("ctl " + string(id.Mode) + appSuffix(id) + " serial=" + id.Serial + " key=" + id.KeyID + " verb=" + or(r.Verb, "?") +
-			" app=" + or(r.App, "-") + " request_id=" + or(r.RequestID, "-") + " result=" + res +
+		// fields from the request may be anything on an error path: a value that is not a plain
+		// word is quoted (Go syntax: no space, newline or control character reaches the journal raw)
+		c.Log("ctl " + string(id.Mode) + appSuffix(id) + " serial=" + field(id.Serial) + " key=" + field(id.KeyID) +
+			" verb=" + field(or(r.Verb, "?")) + " app=" + field(or(r.App, "-")) + " request_id=" + field(or(r.RequestID, "-")) + " result=" + res +
 			" secs=" + time.Duration(c.Env.Now().Sub(start)).Truncate(time.Millisecond).String())
 	}
 	b, err := json.Marshal(resp)
@@ -137,6 +141,19 @@ func (c *Ctl) Serve(ctx context.Context, id Ident, in []byte, w io.Writer) int {
 		return 0
 	}
 	return 1
+}
+
+var plainRe = regexp.MustCompile(`^[A-Za-z0-9._:@+-]{1,64}$`)
+
+// field is a log field: as it is when it is a plain word, else quoted.
+func field(s string) string {
+	if plainRe.MatchString(s) {
+		return s
+	}
+	if len(s) > 100 {
+		s = s[:100]
+	}
+	return strconv.QuoteToASCII(s)
 }
 
 // Namespace is the principal's part of the request store: write, read or app-<app>.
