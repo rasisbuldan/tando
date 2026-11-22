@@ -251,9 +251,15 @@ app_perms() { # the metadata group, its members, the modes of the app's files
   local g=tando-m-$A f du
   if meta_group_ok; then
     # its gid from new_uid: never one of a destroyed app (retired), so no leftover file is this group's
+    # (under the lock a new app's user is made under: two apps created at once picked the same id,
+    # or one's groupadd failed writing /etc/gshadow while the other's usermod held it)
+    lockfile "$R/.ports.lock"
+    exec 12> "$R/.ports.lock"
+    flock -w 120 12 || die "another app is being created on this server and takes too long ($R/.ports.lock); try again"
     getent group "$g" > /dev/null || groupadd --system -g "$(new_uid)" "$g" || die "groupadd $g failed"
     id "${AU:-tando-$A}" &> /dev/null && usermod -aG "$g" "${AU:-tando-$A}"   # adopted apps keep their user
     du=$(deploy_user) && usermod -aG "$g" "$du"
+    exec 12>&-
   else
     # (the metadata stays root's alone: tando status works for the admin, not for the app's user)
     echo "tando-agent: warning: $g is the user group of the app m-$A, so $A's settings and state are kept root's only (rename one of the two apps to fix it)" >&2
