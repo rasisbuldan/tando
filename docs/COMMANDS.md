@@ -603,7 +603,7 @@ nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Setting
 80/443: `rate_limit=on|off|auto` (auto: on when tando owns Caddy), `conn_limit=N` (connections at
 once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections per second, burst
 3x; default 100), and per app's user `conn_out=N` (connections at once, default 2048), `dns_rate=N`
-(DNS packets a second, default 200) ("Limits and load"). Scale (docs/ARCHITECTURE.md, "Many apps on one server"): `port_min=`,
+(DNS packets a second, default 200), `stream_close_delay=5m` (how long a Caddy reload leaves websockets and event streams open, Caddy 2.7+) ("Limits and load"). Scale (docs/ARCHITECTURE.md, "Many apps on one server"): `port_min=`,
 `port_max=` (app ports, default 4100-4999), `preflight_min=`, `preflight_max=` (pre-flight ports,
 default 14100-14999; the ranges must not overlap or hold 2019 or 5432), `uid_min=`, `uid_max=`
 (new app users' ids, default 30000-39999), `mem_overcommit=` (default 1.5; 0 turns the check off),
@@ -1002,8 +1002,8 @@ a new app reload Caddy's whole config; Caddy 2.6 finishes requests in flight but
 keep-alive connections of every site it serves (clients reconnect; one that sends on a connection
 being closed sees a reset). A deploy itself does not reload Caddy when the site did not change.
 A reload also ends the websockets and event streams of every app: at once on Caddy 2.6 (Ubuntu's
-package; it has no setting against it), 30 minutes later on Caddy 2.7 and later
-(`stream_close_delay 30m` in each site), so a client that reconnects keeps working either way.
+package; it has no setting against it), 5 minutes later on Caddy 2.7 and later
+(`stream_close_delay 5m` in each site; `tando host setup <host> stream_close_delay=30m` changes it: every reload keeps the old config's streams that long, so frequent deploys pile them up), so a client that reconnects keeps working either way.
 **Restarts under load:** an app that on SIGTERM only calls `server.close()` waits for every
 keep-alive connection, and Caddy keeps its connections busy under load: the old process lives until
 stop_timeout. Close idle connections too and answer with `Connection: close` from then on (see

@@ -668,7 +668,8 @@ func ago(now, t int64) string {
 // ---- disaster recovery: recreate apps of another server --------------------------------------
 
 // confKeys: the app.conf settings `tando-agent configure` takes (the others are the server's own:
-// port, created, origin, user, data_dir ...)
+// port, created, origin, user, data_dir ...). TestConfKeysMatchAgent keeps it equal to the agent's
+// CONF_KEYS_A (plus spa).
 var confKeys = map[string]bool{
 	"recipe": true, "image": true, "container_port": true, "build_memory": true, "start": true,
 	"start_shell": true, "release": true, "release_shell": true, "release_timeout": true, "health": true, "path": true, "data": true, "writable": true, "backup": true,
@@ -678,6 +679,9 @@ var confKeys = map[string]bool{
 	"health_expect": true, "health_fails": true, "health_recover": true,
 	"db_statement_timeout": true, "db_idle_tx_timeout": true, "db_temp_limit": true,
 	"db_pool": true, "db_direct": true,
+	"job_timeout": true, "job_spread": true, "job_missed": true, "assets": true, "compress": true,
+	"priority": true, "idle_stop": true, "tmp_size": true, "io": true, "disk": true,
+	"response_timeout": true, "body_max": true, "cold_timeout": true, "spa": true,
 }
 
 func (o Offsite) drOpen(host string) (*session, error) {
