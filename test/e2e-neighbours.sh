@@ -291,7 +291,9 @@ b_start crash
 down() { [ "$(srv "systemctl show -P ActiveState tando-$A")" = failed ]; }
 t_until 60 down > /dev/null 2>&1
 dres=$?
-fivexx=$(code $A 5 /)
+# (the page is written by app-down a moment after systemd gives up: poll for it)
+page() { fivexx=$(code $A 5 /); [ "$fivexx" = 503 ]; }
+t_until 15 page > /dev/null 2>&1
 c_wake; sleep 1
 # "down" needs two samples of a unit that keeps failing (the alerts suite waits for the same)
 alert=0 i=0
@@ -308,7 +310,7 @@ srv "systemctl show -P ActiveState -P SubState -P Result -P NRestarts tando-$A |
 common N6 crash 400 "start limit, 503 page, down alert"
 BTOL=0
 check "N6a the crash loop ends at the start limit: the unit went to failed, not restarting forever" eval '[ "$dres" = 0 ]'
-check "N6b visitors of A get the 503 page at once while it is down (got $fivexx)" eval '[ "$fivexx" = 503 ]'
+check "N6b visitors of A get the 503 page within seconds of the unit giving up (got $fivexx)" eval '[ "$fivexx" = 503 ]'
 check "N6c the monitor fires the down alert for A (and for no other app)" eval '
   [ "$alert" = 1 ] && ! srv "sudo grep -Eq \"^($B|$C)\\.down\\.st=(pending|firing)\" /var/lib/tando/watch/state"'
 srv "sudo rm -f /opt/tando/apps/$A/shared/data/crashloop; sudo /opt/tando/bin/tando-agent recover-all" > /dev/null 2>&1
