@@ -60,7 +60,7 @@ srv/internal/usage. Tests: `test/e2e-ctl.sh`, the Go tests of those packages.
 |---|---|
 | `tando-ctl-read` | every read verb, every app |
 | `tando-ctl-write` | every verb, every app |
-| `tando-app-<app>` | that app's read verbs and its `restart`, `stop`, `start`, `rollback`, `env.set`, `env.unset`; `alerts` and `usage` narrowed to it; never `inventory` or `destroy` |
+| `tando-app-<app>` | that app's read verbs and its `restart`, `stop`, `start`, `rollback`, `env.set`, `env.unset`, `hold` with reason pause and `release` of a pause; `alerts` and `usage` narrowed to it; never `inventory`, `destroy`, or a suspend (set or lifted) |
 
 The principal is matched by sshd: `AuthorizedPrincipalsCommand` runs `tando-gate ctl-principals`
 (as the unprivileged user `tando-keys`), which prints one line per principal with its forced
@@ -148,7 +148,7 @@ Read (no request id needed):
 | Verb | args | Result |
 |---|---|---|
 | `inventory` | | `node`: cpus, mem_total_mb, mem_available_mb, swap_total_mb, load1, disk_total_mb, disk_free_mb, mem_overcommit, idle_awake_pct, alloc_mb (every cap), admitted_mb (as admission counts them), admit_limit_mb and admit_headroom_mb (RAM x mem_overcommit, without them when the check is off), apps, version; `apps`: each as `app.status` |
-| `app.status` | | app, recipe, state (the web unit), stopped, down, idle_stop, current, last_good, phase, alloc_mb, alloc_workers_mb, admitted_mb, cpu, mem_mb and cpu_ms_minute (the last per-minute sample; null before the first), sampled_at, awake_s_24h |
+| `app.status` | | app, recipe, state (the web unit), stopped, down, hold and hold_since (only while held: below), idle_stop, current, last_good, phase, alloc_mb, alloc_workers_mb, admitted_mb, cpu, mem_mb and cpu_ms_minute (the last per-minute sample; null before the first), sampled_at, awake_s_24h |
 | `app.releases` | | `releases`: id, status, current, last_good, newest first |
 | `app.history` | `n` (1-1000, default 20) | `history`: time, id, kind, result, seconds, note |
 | `alerts` | (`app` optional) | `alerts` that are firing or pending: scope (an app or `host`), check, state, since, detail |
@@ -163,10 +163,63 @@ Mutating (`request_id` required), each the agent verb the laptop CLI runs:
 | `app.env.set` | `vars`: {"NAME": "value"} (no control characters) | `tando env set`; the app restarts and is checked, a change that breaks it is undone |
 | `app.env.unset` | `names`: ["NAME"] | `tando env unset` |
 | `app.destroy` | `confirm` (must be the app's name), `purge` (bool) | `tando destroy [--purge]`; write principal only |
+| `app.hold` | `reason`: `pause` or `suspend`; `message` (optional) | takes the app off line: see Hold |
+| `app.release` | | brings a held app back |
 
 The result of a mutating verb is the agent's `key=value` lines as an object (`healthy`,
-`changed`, `restarted`, ...). Deploying an artifact, holding an app, applying a whole app spec and
-draining a server are not in this version.
+`changed`, `restarted`, ...). Deploying an artifact, applying a whole app spec and draining a
+server are not in this version.
+
+## Hold
+
+`app.hold` takes an app off line without removing anything; `app.release` brings it back. The
+reason is recorded and shown (`app.status`, `inventory`: `hold`, `hold_since`):
+
+| Reason | For | Set by | Lifted by |
+|---|---|---|---|
+| `pause` | the operator's own reasons (unpaid, on request, maintenance) | `tando-ctl-write` or the app's principal | either |
+| `suspend` | an abuse takedown | `tando-ctl-write` only | `tando-ctl-write` only |
+
+An app's principal can neither suspend its app, nor release a suspend, nor turn a suspend into a
+pause: which reason holds the app is read from the node's state when the request runs, not from
+the request. Pausing a paused app again only changes the message; suspending a paused app makes it
+suspended (and freezes evidence).
+
+While an app is held:
+
+- It is stopped as by `tando stop`: Caddy first answers 503 with `<app> is paused` or `<app> is
+  suspended` (with `. <message>` after it when one was given; `Retry-After: 3600`), then the web
+  unit and the workers stop and are disabled, and an app with `idle_stop` has its wake socket
+  stopped and disabled (no request wakes it). Its job timers are off, and no job runs, by its
+  timer or by hand.
+- A reboot keeps it so: the state file says held, the units are disabled, and tando's recovery at
+  boot keeps a held app stopped. A stopped app raises no down alert.
+- Refused with `held (<reason>): release it first`: deploy (the laptop's `tando up` and deploy
+  keys alike, at configure and again at activation: a deploy queued before the hold gives up),
+  start, restart, rollback, backup restore. The current release stays in place and is never
+  pruned. `env.set` and `env.unset` are saved and take effect at release; `stop` answers
+  `already`; `destroy` works (and removes the evidence below).
+- The daily backup skips it (its data stays as it was); a backup by hand still works.
+- The message is at most 200 of letters, digits, space and `. , : ; ! ? ' ( ) / @ + _ -`: it is
+  written into the Caddy site between quotes, so braces (Caddy placeholders), quotes and
+  backslashes are refused.
+
+`app.release` restores what was before the hold: an app that ran is started, checked
+(`healthy`) and its job timers come back; an app that was stopped (`tando stop`, `app.stop`)
+before the hold stays stopped, with the stopped page. If the start fails, the hold is gone and the
+app is stopped: read the message, then `app.start`.
+
+**Evidence.** A suspend first copies, under `/var/lib/tando/ctl/evidence/<app>/<UTC time>/`
+(root, 700): the app's journal (its journal namespace, `journal.export`, `journalctl -o export`
+format), its request logs (`access.log*`, when request logging is on), `release.sums` (the file
+sums of the current release), `info` (app, release id, time, who, message) and `SHA256SUMS` of
+them all. The result's `evidence` names the directory (`evidence=0` and a warning when it could
+not be written in full: the takedown goes on anyway). Evidence is kept after a release, until the
+app is destroyed; copy it off the node when you need it longer.
+
+The agent verbs are `tando-agent hold <app> pause|suspend [message]` and `tando-agent release
+<app>` (root), each under the app's lock and written to the audit log like `stop`.
+
 
 ## Idempotency and order
 

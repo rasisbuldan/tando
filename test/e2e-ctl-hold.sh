@@ -83,11 +83,13 @@ check "H10 an app's principal releases a pause: 200 again, job timer back" eval 
 # ---- suspend -----------------------------------------------------------------------------------
 req w app.hold '{"reason":"suspend"}'
 check "H11 the write principal suspends it: 503 \"shop is suspended\"" eval 'ok && [ "$(http)" = 503 ] && [ "$(body)" = "shop is suspended" ]'
+# shellcheck disable=SC2034  # (read by the eval strings of the checks below)
 ev=$(jv 'd["result"].get("evidence", "")')
 check "H12 suspend froze evidence: root 700, journal, release id and sums, SHA256SUMS that verify" eval '
   case "$ev" in /var/lib/tando/ctl/evidence/shop/*) ;; *) false;; esac &&
-  "$SSH" "sudo test \"\$(stat -c %U:%a $ev)\" = root:700 && sudo test -s $ev/journal.export && sudo test -s $ev/release.sums &&
-    sudo grep -q ^release=2 $ev/info && cd $ev && sudo sha256sum -c --quiet SHA256SUMS"'
+  "$SSH" "test \"\$(sudo stat -c %U:%a $ev)\" = root:700 && sudo test -s $ev/journal.export && sudo test -s $ev/release.sums &&
+    sudo grep -q ^release=2 $ev/info && sudo sh -c \"cd $ev && sha256sum -c --quiet SHA256SUMS\"" ||
+  { "$SSH" "sudo ls -la $ev; sudo cat $ev/info" >&2; false; }'
 req a app.release
 check "H13 an app's principal cannot release a suspend (forbidden; still 503)" eval '[ "$(code)" = forbidden ] && [ "$(http)" = 503 ]'
 req a app.hold '{"reason":"pause"}'

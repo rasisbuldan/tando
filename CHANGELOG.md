@@ -43,6 +43,15 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   node's CA with the mode's principal, or nothing; `tando doctor` and every host setup check that
   sshd still admits `tando-ctl` by certificate only. Request ids, quotas and eviction are per
   principal. The laptop CLI is unchanged.
+- Control plane: `app.hold` (`reason` pause or suspend, optional `message`) and `app.release`
+  take an app off line and back (docs/CONTROL-PLANE.md, "Hold"). Held, it is stopped and disabled
+  (web unit, workers, wake socket, job timers; the daily backup skips it, its data stays), Caddy
+  answers 503 "<app> is paused" or "is suspended", and deploy, start, restart, rollback, restore
+  and job runs are refused ("held (<reason>): release it first"), across a reboot too. An app's
+  principal may pause its app and release a pause; only `tando-ctl-write` suspends or lifts a
+  suspend. A suspend first freezes evidence on the node (the app's journal, request logs, current
+  release and its file sums, with SHA256SUMS) until the app is destroyed. `app.status` and
+  `inventory` show `hold` and `hold_since`.
 - New: `node_lite = true` in tando.conf (node and next recipes, opt-in, never written by
   `tando init`): V8's `--lite-mode`: a few MB less warm (25.1 to 23.1 MB PSS measured on a
   hello-world Express app; the audit's 24 to 13 MB RSS was not reproduced), slower under load (docs/COMMANDS.md, "node_lite").
