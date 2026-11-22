@@ -27,6 +27,9 @@ of its rivals, on one Next.js standalone app. Results: `RESULTS.md`. Raw output:
 | `run-rivals.sh`, `summarize-v2.py` | v2: 3 rounds of every rival into `raw/v2/`, and its summary |
 | `run-e-dokku.sh` | Dokku (bare 24.04, official bootstrap); 3 rounds via `run-e-rounds.sh` into `raw/v2/e/` |
 | `server-bare/`, `server/build-images.sh` | bare image (copy of the test server, BARE=1); server images built with a dedicated builder |
+| `fleet.sh`, `fleet-common.sh` | fleet bench on a REAL registered server (`bench/fleet.sh <host> -n 100`): N tiny apps (static, Go, Node, Node with idle_stop, one PostgreSQL), memory per app and host, tandod CPU, PID 1 RSS, create and deploy p50/p95, daemon-reload and Caddy reload at N, wake latency, `tando ls` time, then a reboot test (every app must answer again). Safe defaults: refuses a host with other apps, apps are `fb-<n>`, `--cleanup` removes only `fb-*`. Report in `bench/.fleet/` |
+| `rebuild-drill.sh` | node rebuild and offsite restore drill: export definitions and env names, offsite backups, destroy the `fb-rd*` apps, restore from the bucket alone, verify rows and files; documents the manual fresh-VM steps (`--target` for a rebuilt node, `--fake-s3` for a Docker test server) |
+| `container-egress.sh` | do container apps' packets pass the per-uid nftables rules? counts SYNs by socket owner and by cgroup; exit 1 when they bypass |
 | `density.sh` | density at scale (not in the test tiers): N apps with `idle_stop` on one test server; daemon-reload time, PID 1 RSS and units every 50 apps, idle journald instances, a new app's time and reloads (`OLD=<checkout>` for a before), and PID 1 across rounds of wake sockets driven into their trigger limit |
 | `cleanup.sh` | removes every `tando-bench-*` container/volume/network/image, Kamal's builder and registry |
 
