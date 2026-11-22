@@ -17,7 +17,7 @@ The server already runs other things? Read [SETUP-EXISTING-VM.md](SETUP-EXISTING
 
 Open TCP **22** (or your ssh port), **80** and **443** in the provider's firewall. Ports 80 and 443 must
 be reachable from the internet or certificates fail. Apps listen only on `127.0.0.1`, in ports
-4100-4199 (4200-4299 for the pre-flight copy of a release), so nothing else is opened.
+4100-4999 (14100-14999 for the pre-flight copy of a release), so nothing else is opened.
 If `ufw` is active, `host setup` opens 80 and 443 in it (`ufw=no` skips this). It never turns `ufw` on.
 
 Pick how apps get a name:

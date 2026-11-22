@@ -98,6 +98,7 @@ the page shows "Session ended"). Errors are `{"error":{"code","message"}}`, the 
 | GET | `/api/envlog?host=&app=` | `env log -a <app> --json -H <host>` | as jobs | cookie |
 | GET | `/api/alerts?host=` | `alerts --json -H <host>` | as jobs | cookie |
 | GET | `/api/history?host=` | `history --json -H <host>` (every app of the server) | as jobs | cookie |
+| POST | `/api/studio/open` `{host,app}` | `db studio <app> -H <host> --json` once per host, then `mint <app>` on its stdin | none (a click may mint two codes) | cookie (no confirm token) |
 | POST | `/api/action` `{action,host,app,confirm,params?}` | the action's argv (below) | idempotency record 24 h | cookie + confirm token + `Idempotency-Key` |
 | GET | `/api/action?key=` | none | the record | cookie |
 | GET | `/api/action/stream?key=` | none (the write's output file) | none | cookie |
