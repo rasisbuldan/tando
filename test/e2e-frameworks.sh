@@ -63,4 +63,44 @@ for pm in pnpm npm; do
           grep -q "^  workspace: package apps/$pm-api of ../.., " "$E/ws-$pm.out"'
 done
 
+# F7. A Workers API app (recipe = workerd): detected from wrangler.toml, the pinned workerd
+# binary installed on the server by tando up, one workerd process of its own; the module's sibling
+# import works, tando env values arrive as bindings. Idle memory of the whole unit is logged next
+# to a plain Node app's
+cmdline() { # app: the command line and the user of the main process of its unit
+  t_srv "p=\$(systemctl show -p MainPID --value tando-$1); tr '\\0' ' ' < /proc/\$p/cmdline; echo; ps -o user= -p \$p"
+}
+mem() { # app: PSS and RSS of every process of the app's unit (smaps_rollup)
+  t_srv "sudo sh -c 'for p in \$(cat /sys/fs/cgroup\$(systemctl show -p ControlGroup --value tando-$1)/cgroup.procs); do grep -hE \"^(Pss|Rss):\" /proc/\$p/smaps_rollup; done'" |
+    awk '$1 == "Pss:" { p += $2 } $1 == "Rss:" { r += $2 } END { printf "PSS %d KB, RSS %d KB", p, r }'
+}
+warm() { local i; for i in 1 2 3 4 5 6 7 8 9 10; do curl -s -o /dev/null -m 5 "$(t_url "$1" /)"; done; }
+up workerd-hello
+check "F7a workerd: up (rc=$RC), detected from wrangler.toml, answers (a module with an import) and /health" \
+  eval 'grep -q "^recipe = workerd" "$W/workerd-hello/tando.conf" && grep -q "^detected: Cloudflare Workers$" "$E/workerd-hello.out" &&
+        t_eq "$(get workerd-hello)" "workerd fixture" && t_eq "$(get workerd-hello /health)" ok'
+check "F7b workerd: the unit's process is workerd, run by the app's own user, one process of its own" \
+  eval 'cmdline workerd-hello | tr "\n" " " | grep -q "^/opt/tando/workerd/workerd serve .* tando-workerd-hello *$"'
+check "F7c workerd: an env value is a binding (tando env set, then the app answers with it)" \
+  eval '(cd "$W/workerd-hello" && "$R" env set GREETING=hallo > /dev/null 2>&1) && t_until 30 sh -c "[ \"\$(curl -s -m 5 $(t_url workerd-hello /env))\" = hallo ]"'
+check "F7d workerd: the binary is pinned by checksum (a download that does not match is refused)" \
+  eval 'grep -q "^WORKERD_SHA_64=[0-9a-f]\{64\}$" "$ROOT/server/tando-agent" && grep -q "the checksum of .* is not the one tando expects" "$ROOT/server/tando-agent"'
+warm workerd-hello
+log "idle memory, workerd app: $(mem workerd-hello)"
+
+# F8. node_lite = true: the app's node runs with V8's --lite-mode (a node shim first in PATH: the
+# flag is not allowed in NODE_OPTIONS); the answer is the same. A plain Node app beside it does not
+up express-npm
+rsync -a "$ROOT/test/fixtures/apps/express-npm/" "$W/lite-express/"
+(cd "$W/lite-express" && "$R" init < /dev/null > /dev/null 2>&1 && printf 'node_lite = true\n' >> tando.conf)
+(cd "$W/lite-express" && "$R" up < /dev/null) > "$E/lite-express.out" 2>&1; RC=$?
+cat "$E/lite-express.out" >&2
+check "F8a node_lite: up (rc=$RC) and it answers" t_eq "$(get lite-express)" "express npm fixture"
+check "F8b node_lite: the node process runs with --lite-mode" \
+  eval 'cmdline lite-express | grep -q -- "^node --lite-mode server.js"'
+check "F8c without node_lite: no --lite-mode" \
+  eval '! cmdline express-npm | grep -q -- "--lite-mode" && cmdline express-npm | grep -q "^node server.js"'
+warm express-npm; warm lite-express
+log "idle memory: node $(mem express-npm); node_lite $(mem lite-express)"
+
 t_done

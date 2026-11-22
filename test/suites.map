@@ -150,6 +150,7 @@ test/e2e-matrix*         e2e-matrix-quick e2e-matrix-weekly lint
 test/e2e-workers.sh      e2e-workers lint
 test/e2e-neighbours.sh   e2e-neighbours lint
 test/e2e-proxy.sh        e2e-proxy lint
+test/e2e-origin.sh       e2e-origin lint
 test/e2e-upgrade.sh      e2e-upgrade lint
 test/e2e-datanode.sh     e2e-datanode lint
 test/faults/*            @faults e2e-matrix-quick e2e-matrix-weekly lint
