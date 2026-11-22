@@ -96,41 +96,12 @@ func (g *Gate) sshdExe(pid int) bool {
 // BindSession finds the key's login process above this one (session_bind).
 func (g *Gate) BindSession(uid int) (Session, error) {
 	refused := die(msgSession)
-	p := os.Getpid()
-	for {
-		p = g.ppid(p)
-		if p <= 1 {
-			return Session{}, refused
-		}
-		u := g.uids(p)
-		// this program as root and sudo (real uid the caller's, the rest root) are passed
-		if !allAre(u, 0, 0, 0, 0) && !allAre(u, uid, 0, 0, 0) {
-			break
-		}
-	}
-	k := p
-	if !allAre(g.uids(k), uid, uid, uid, uid) {
-		return Session{}, refused
-	}
-	if e, err := os.Readlink(g.procFile(k, "exe")); err != nil || e != g.P.Gate {
-		return Session{}, refused
-	}
-	cmdline, err := os.ReadFile(g.procFile(k, "cmdline"))
+	k, a, err := g.loginProcess(uid)
 	if err != nil {
-		return Session{}, refused
-	}
-	a := strings.Split(strings.TrimSuffix(string(cmdline), "\x00"), "\x00")
-	if len(a) != 3 || (a[0] != "tando-gate" && a[0] != g.P.Gate) {
-		return Session{}, refused
+		return Session{}, err
 	}
 	id, err := ForcedKeyID(a[1:], g.P.Gate)
 	if err != nil {
-		return Session{}, refused
-	}
-	p1 := g.ppid(k)
-	p2 := g.ppid(p1)
-	if p1 <= 1 || p2 <= 0 || !allAre(g.uids(p1), uid, uid, uid, uid) || !g.sshdExe(p1) ||
-		!allAre(g.uids(p2), 0, 0, 0, 0) || !g.sshdExe(p2) {
 		return Session{}, refused
 	}
 	s := Session{KeyID: id}
@@ -144,4 +115,46 @@ func (g *Gate) BindSession(uid int) (Session, error) {
 		}
 	}
 	return s, nil
+}
+
+// loginProcess finds the login process above this one: the gate as login shell, running entirely
+// as uid, started by uid's sshd session process under sshd's privileged one. It returns its pid
+// and its command line (three words: the gate, "-c", the forced command); the forced command is
+// the caller's to check (a deploy key's, or the control plane's).
+func (g *Gate) loginProcess(uid int) (int, []string, error) {
+	refused := die(msgSession)
+	p := os.Getpid()
+	for {
+		p = g.ppid(p)
+		if p <= 1 {
+			return 0, nil, refused
+		}
+		u := g.uids(p)
+		// this program as root and sudo (real uid the caller's, the rest root) are passed
+		if !allAre(u, 0, 0, 0, 0) && !allAre(u, uid, 0, 0, 0) {
+			break
+		}
+	}
+	k := p
+	if !allAre(g.uids(k), uid, uid, uid, uid) {
+		return 0, nil, refused
+	}
+	if e, err := os.Readlink(g.procFile(k, "exe")); err != nil || e != g.P.Gate {
+		return 0, nil, refused
+	}
+	cmdline, err := os.ReadFile(g.procFile(k, "cmdline"))
+	if err != nil {
+		return 0, nil, refused
+	}
+	a := strings.Split(strings.TrimSuffix(string(cmdline), "\x00"), "\x00")
+	if len(a) != 3 || (a[0] != "tando-gate" && a[0] != g.P.Gate) {
+		return 0, nil, refused
+	}
+	p1 := g.ppid(k)
+	p2 := g.ppid(p1)
+	if p1 <= 1 || p2 <= 0 || !allAre(g.uids(p1), uid, uid, uid, uid) || !g.sshdExe(p1) ||
+		!allAre(g.uids(p2), 0, 0, 0, 0) || !g.sshdExe(p2) {
+		return 0, nil, refused
+	}
+	return k, a, nil
 }

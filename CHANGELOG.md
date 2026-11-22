@@ -27,6 +27,22 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   record (an app node reporting another link is refused), limits come from tando.conf within the
   data node's bounds (`data_pool_max`, `data_temp_max`, `data_timeout_max`,
   `data_conn_per_node`), the certificate renews itself (`tando-data-renew.timer`).
+- Control plane mode (docs/CONTROL-PLANE.md), off unless turned on: `tando host setup <host>
+  ctl_ca=<ca.pub>` lets a program drive the server over ssh as the user `tando-ctl`, with OpenSSH
+  user certificates of that CA only (validity, source address and the revocation list
+  `ctl_krl=<file>` checked by sshd; no static key). The principal decides: `tando-ctl-read`,
+  `tando-ctl-write`, or `tando-app-<app>` for one app. One JSON request on stdin, one JSON response
+  on stdout, versioned (`"v": 1`). Read verbs: `inventory` (capacity, admission headroom, every
+  app's caps, measured use, state and awake seconds), `app.status`, `app.releases`, `app.history`,
+  `alerts`, `usage`. Mutating verbs, the laptop's own agent paths: `app.restart`, `stop`, `start`,
+  `rollback`, `env.set`, `env.unset`, `destroy`; each carries a `request_id`: a retry gets the
+  first response (waiting for it while it runs), nothing runs twice, one app's requests run in
+  order. Metering: a per-minute ledger of each app's allocated memory and awake seconds (measured
+  memory and CPU beside them, informational), read with a cursor, kept 14 days, across restarts.
+  Root mode checks sshd's own record of the login (`ExposeAuthInfo`): one certificate of the
+  node's CA with the mode's principal, or nothing; `tando doctor` and every host setup check that
+  sshd still admits `tando-ctl` by certificate only. Request ids, quotas and eviction are per
+  principal. The laptop CLI is unchanged.
 - New: `node_lite = true` in tando.conf (node and next recipes, opt-in, never written by
   `tando init`): V8's `--lite-mode`: a few MB less warm (25.1 to 23.1 MB PSS measured on a
   hello-world Express app; the audit's 24 to 13 MB RSS was not reproduced), slower under load (docs/COMMANDS.md, "node_lite").

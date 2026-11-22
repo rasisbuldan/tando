@@ -65,6 +65,12 @@ var validated = map[string]string{
 	"watch tando-agent a.name":  "an app of apps.Names: valid.App",
 	"logs journalctl p.args...": "built only by appending --namespace=, -u <unit>, --since=@, --until=@ and numbers (query.go)",
 
+	// control plane mode (srv/ctl): the app is valid.App in Parse before any verb runs, and an app
+	// of apps.Names (exists); the rest are the verbs table's constants or checked arguments
+	"ctl /opt/tando/bin/tando-agent r.App": "valid.App in Parse (schema.go) and exists(): starts with a letter",
+	"ctl /opt/tando/bin/tando-agent v":     "svc's verb: restart, start or stop, constants of the verbs table",
+	"ctl /opt/tando/bin/tando-agent a.To":  "valid.ID (rollback): a release id, starts with a digit",
+
 	// host care: the apps whose backup is taken before a reboot
 	"hostcare /opt/tando/bin/tando-agent app": "staleBackups: names of backups(), each valid.App (starts with a letter)",
 }

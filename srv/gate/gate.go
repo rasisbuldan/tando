@@ -86,6 +86,7 @@ type Paths struct {
 	Tmp      []string // world-writable directories cleaned of an evicted user's files
 	RunUser  string   // /run/user
 	Musl     string   // glob of musl's loader (info: libc=musl)
+	AuthTmp  string   // /tmp: where sshd writes a session's SSH_USER_AUTH file (ExposeAuthInfo)
 }
 
 // OSPaths are the real paths under root (/opt/tando).
@@ -106,6 +107,7 @@ func OSPaths(root string) Paths {
 		Tmp:      []string{"/tmp", "/var/tmp", "/dev/shm"},
 		RunUser:  "/run/user",
 		Musl:     "/lib/ld-musl-*",
+		AuthTmp:  "/tmp",
 	}
 }
 
@@ -122,6 +124,8 @@ type Gate struct {
 	// as itself). Kill ends a process (nil: SIGKILL; a test with a fake /proc replaces it).
 	Owner, Group int
 	Kill         func(pid int)
+
+	krlEmpty bool // admin ctl-krl empty: the list may become empty
 
 	// set once the caller is known: refusals of a deploy key go to the journal
 	app, keyID string

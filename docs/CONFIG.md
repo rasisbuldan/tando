@@ -183,3 +183,7 @@ Per app; the host's defaults are set with `tando host setup` (docs/LOGGING.md).
 
 The client also sends `origin`, `force` and `check` to the server with every deploy. They are
 protocol words, not keys of `tando.conf`, and the file rejects them.
+
+Control plane mode (docs/CONTROL-PLANE.md) is a server setting (`tando host setup <host>
+ctl_ca=...`), not a key of this file. Its metering counts an app's `memory` (and its workers')
+as what the app is allocated.
