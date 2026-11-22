@@ -54,7 +54,7 @@ tando host link app1 db1
 | pgbouncer | `auth_type = hba` with the same per-project lines (TLS for every address but the loopback) | — |
 | Role limits | `CONNECTION LIMIT db_pool + 5`, `statement_timeout`, `idle_in_transaction_session_timeout`, `temp_file_limit`, from the app's tando.conf on the operator's machine (never from the app node), within the data node's bounds | — |
 | Bounds | `host setup <dn> data_pool_max=20 data_temp_max=8G data_timeout_max=1h`: a project's pool, temp limit and timeouts may not exceed them, the timeouts and temp limit cannot be `off`, and all pools plus their tool slots must fit in `max_connections` | — |
-| Per node | `data_conn_per_node=500`: connections one app node may hold to 5432 and 6432 at once (nft, per source address), so one node cannot take every unauthenticated slot | — |
+| Per node | `data_conn_per_node=500`: connections one app node may hold to 5432 and 6432 at once (nft, per source address). On 5432 a linked node holds at most its projects' share: their pools plus tool slots, plus 5 (at least 10), so one node cannot fill PostgreSQL's `max_connections` | — |
 | TLS | PostgreSQL and pgbouncer present the node's certificate | `sslmode=verify-full&sslrootcert=/opt/tando/db-ca.pem` in both URLs: the CA and the address must match |
 
 Until its certificate exists, the data node's PostgreSQL and pgbouncer listen on the loopback
@@ -113,6 +113,10 @@ again).
   database, drill database and role on the data node and removes its pg_hba lines. When the data
   node cannot be reached, the command says how to drop it later.
 - Preview apps get no database, as on a single server.
+- Each project's role owns its databases' schema public (also on PostgreSQL 14 and older, where
+  the superuser owned it), so migrations create tables there as on a single server.
+- Every provisioning and destroy checks the data node's CA against the fingerprint in the link
+  record; another CA (a server put in its place) is refused until the link is made again.
 - What other projects can see: their databases are closed to every other role (no CONNECT, no
   USAGE on their schema public), but PostgreSQL's catalog is shared: any project's role can read
   the names of the other databases and roles (pg_database, pg_roles) and the role names of
