@@ -364,6 +364,18 @@ awake_cap() {
   local m=${H[awake_max]:-auto}
   case $m in off) echo 0;; auto) awake_auto;; *) [[ $m =~ ^[1-9][0-9]*$ ]] && echo "$m" || awake_auto;; esac
 }
+# awake_files: the apps counted awake (<app>.awake), each checked: a marker whose app is gone or
+# whose unit is neither running nor starting (a crash, a destroy) is removed, not counted
+awake_files() {
+  local f a st
+  for f in "$WAKE_DIR"/*.awake; do
+    [[ -f $f ]] || continue
+    a=${f##*/}; a=${a%.awake}
+    st=$(systemctl show -P ActiveState "tando-$a.service" 2> /dev/null)
+    if [[ -f $R/apps/$a/app.conf && ( $st == active || $st == activating || $st == reloading ) ]]; then echo "$f"
+    else rm -f "$f"; fi
+  done
+}
 # awake_victim [except]: the idle app to stop for a new wake (see above), or fails
 awake_victim() {
   local t a p now; now=$(now)
@@ -378,7 +390,7 @@ awake_victim() {
       { for (i = 1; i <= NF; i++) if ($i ~ /^last(snd|rcv):[0-9]+$/) { split($i, x, ":"); if (x[2] + 0 < g) busy = 1 } }
       END { exit !busy }' && continue
     echo "$a"; return 0
-  done < <(for f in "$WAKE_DIR"/*.awake; do [[ -f $f ]] && { a=${f##*/}; echo "$(stat -c %Y "$f") ${a%.awake}"; }; done | sort -n)
+  done < <(for f in $(awake_files); do a=${f##*/}; echo "$(stat -c %Y "$f") ${a%.awake}"; done | sort -n)
   return 1
 }
 # awake_trim [except]: (WAKE_DIR/.lock held) stop idle apps until at most awake_max are awake; set
@@ -387,7 +399,7 @@ awake_trim() {
   local max n=0 f v
   max=$(awake_cap)
   if ! [[ $max =~ ^[1-9][0-9]*$ ]]; then rm -f "$WAKE_DIR/.full"; return 0; fi
-  for f in "$WAKE_DIR"/*.awake; do [[ -f $f ]] && n=$((n + 1)); done
+  for f in $(awake_files); do n=$((n + 1)); done
   while ((n > max)) && v=$(awake_victim "${1:-}"); do
     rm -f "$WAKE_DIR/$v.awake"; n=$((n - 1))
     systemctl stop --no-block "tando-${v}_wake.service" "tando-$v.service" 2> /dev/null
@@ -424,9 +436,11 @@ cmd_wake_admit() {
   # tando's own start (a deploy, a restart: <app>.admin) is never refused
   local max n=0 f v
   max=$(awake_cap)
-  if [[ -f $WAKE_DIR/$A.admin ]]; then rm -f "$WAKE_DIR/$A.admin"
+  # (a marker a minute old or more is a start that never came: not honoured)
+  if [[ -f $WAKE_DIR/$A.admin ]] && (($(stat -c %Y "$WAKE_DIR/$A.admin") > now - 60)); then rm -f "$WAKE_DIR/$A.admin"
   elif [[ $max =~ ^[1-9][0-9]*$ ]]; then
-    for f in "$WAKE_DIR"/*.awake; do [[ -f $f && $f != "$WAKE_DIR/$A.awake" ]] && n=$((n + 1)); done
+    rm -f "$WAKE_DIR/$A.admin"
+    for f in $(awake_files); do [[ $f != "$WAKE_DIR/$A.awake" ]] && n=$((n + 1)); done
     if ((n >= max)) && v=$(awake_victim "$A"); then
       rm -f "$WAKE_DIR/$v.awake"; n=$((n - 1))
       systemctl stop --no-block "tando-${v}_wake.service" "tando-$v.service" 2> /dev/null
@@ -3650,6 +3664,10 @@ EOF
   ((OC_CHANGED)) && { caddy_reload || die "Caddy did not load the new origin certificate: ${CADDY_ERR:-}"; }
   origin_sched_install || die "could not set up the origin ranges timer (tando-origin.timer)"
   fw_sync || die "the per-app loopback rules could not be loaded (above); run tando host setup again"
+  # active (it loaded nothing the first time: no firewall.nft yet), so that a restart of nftables,
+  # which flushes every rule, restarts it too (PartOf) and the rules come back
+  systemctl is-active -q tando-firewall.service || systemctl start tando-firewall.service ||
+    die "tando-firewall.service did not start: sudo journalctl -u tando-firewall -n 20 shows why"
   step apps ok "$n app$( ((n == 1)) || echo s); $CORE_DETAIL"
   echo ok=1
 }
@@ -7398,6 +7416,7 @@ destroy_finish() {
   [[ $purge == purge ]] && rm -rf "${BK:?}/$A"
   # (the user is gone: fw_sync leaves the app out although its app.conf is still there)
   fp ds.fw
+  rm -f "$WAKE_DIR/$A.awake" "$WAKE_DIR/$A.wakes" "$WAKE_DIR/$A.cool" "$WAKE_DIR/$A.admin"   # (the awake governor's)
   fw_sync || echo "warning=could not reload the loopback rules (tando doctor)" >&2
   # the app's directory last, in one rename (a cut rm -rf could take app.conf and leave the rest,
   # which no recover finds): what a cut leaves of the renamed one, recover-all removes
