@@ -2319,6 +2319,12 @@ cmd_begin() { # app who [upload KB] -> token
   local du u; du=$(deploy_user); u=$(stat -c %U "$D/incoming")
   if [[ -n $du && $u == "$du" ]]; then echo "upload_as=$u"; fi
   save "$D/upload" L || die "could not record the upload lease (disk full?): tando doctor"
+  # an app the control plane made has a root-owned incoming/: the first admin upload takes it
+  # (the admin runs this through sudo: no right is gained)
+  if [[ $who != ci-* && $u == root && -n ${SUDO_USER:-} && $SUDO_USER != root && $SUDO_USER != tando-ctl && -z $du ]] &&
+     id -u "$SUDO_USER" &> /dev/null; then
+    chown -RhP "$SUDO_USER" "$D/incoming" || die "could not hand incoming/ to $SUDO_USER"
+  fi
   # an admin upload: no rsync of the app's deploy key (tando-gate) may still be writing incoming/
   [[ $who == ci-* || -z $du ]] || pkill -KILL -u "$du" 2> /dev/null || true
 }
@@ -4065,6 +4071,8 @@ cmd_configure() {
       exec 14>&-
     fi
     install -d -m 755 -o root -g root "$D" "$D/releases"
+    # (the control plane's user never owns files: its uploads are root's, artifact-put)
+    [[ $owner == tando-ctl ]] && owner=root
     install -d -m 755 -o "$owner" "$D/incoming"
     install -d -m 750 -o "tando-$A" -g "tando-$A" "$D/shared"
     install -m 640 -o root -g "tando-$A" /dev/null "$D/env"

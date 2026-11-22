@@ -77,12 +77,12 @@ func (c *Ctl) exists(app string) *Error {
 
 var kvKeyRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 
-// agent runs a tando-agent verb as root and returns its key=value lines; a failure is "failed"
+// agent runs a tando-agent verb as root (PATH: sudo's secure_path, where the laptop's calls find node) and returns its key=value lines; a failure is "failed"
 // with the agent's own reason (its "tando-agent: ..." lines).
 func (c *Ctl) agent(ctx context.Context, stdin string, args ...string) (map[string]string, *Error) {
 	var stderr bytes.Buffer
 	cmd := run.Cmd{Argv: append([]string{agentPath}, args...), Stderr: &stderr,
-		Env: []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C", "SUDO_USER=" + c.Caller}}
+		Env: []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C", "SUDO_USER=" + c.Caller}}
 	if dl, ok := ctx.Deadline(); ok {
 		cmd.Timeout = time.Until(dl)
 	}

@@ -271,7 +271,7 @@ func (c *Ctl) deployArtifact(ctx context.Context, r Request, a DeployArgs, spec 
 // deployTree is the laptop deploy's path from its upload on: configure, begin, the tree into
 // incoming/, activate, and the activation followed to its result.
 func (c *Ctl) deployTree(ctx context.Context, app, tree, settings string) (map[string]string, *Error) {
-	cfg, e := c.agent(ctx, settings+"origin=tando-ctl\nforce=1\n", "configure", app)
+	cfg, e := c.agent(ctx, settings, "configure", app)
 	if e != nil {
 		return nil, e
 	}
