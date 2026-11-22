@@ -1,3 +1,4 @@
+ctl	tando-agent
 daemon	systemctl
 gate	atq
 gate	atrm

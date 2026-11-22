@@ -25,6 +25,7 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   order. Metering: a per-minute ledger of each app's allocated memory and awake seconds (measured
   memory and CPU beside them, informational), read with a cursor, kept 14 days, across restarts.
   The laptop CLI is unchanged.
+- bench: `bench/fleet.sh` (100-app fleet and reboot test on a real server), `bench/rebuild-drill.sh` (rebuild and offsite restore drill) and `bench/container-egress.sh` (container apps bypass the per-uid network rules: measured, fix proposed); docs/THREAT-MODEL.md.
 - Preview apps: `tando preview up [--branch B] [--ttl 7d]` deploys this project as
   `<app>-<branch>` (24 characters at most; a checksum keeps two branches apart) on its own link:
   the parent's settings, no database, jobs or backups, no release command (unless
