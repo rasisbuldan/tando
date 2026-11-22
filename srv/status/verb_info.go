@@ -91,6 +91,9 @@ func (c *Collector) Info(ctx context.Context, w io.Writer) error {
 	}
 	s.kv("addrs", ab.String())
 	s.kv("domain_tls", domainTLS(H))
+	// a data node, or an app node whose databases are on one (docs/DATA-NODE.md)
+	s.kv("role", H.or("role", "app"))
+	s.kv("db_host", H.get("db_host"))
 	return s.to(w)
 }
 

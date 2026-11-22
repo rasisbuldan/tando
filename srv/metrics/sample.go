@@ -19,6 +19,7 @@ import (
 	"tando/srv/internal/cgroup"
 	"tando/srv/internal/run"
 	"tando/srv/internal/systemd"
+	"tando/srv/internal/usage"
 )
 
 // Sample appends one line per app and one for the host, then rewrites .state.
@@ -46,7 +47,8 @@ func (m Metrics) Sample(ctx context.Context) error {
 	keys := append(slices.Clone(names), hostKey) // .state's order: the apps, then the host
 
 	net := m.netBytes(ctx) // (before systemctl: one nft call for every app)
-	appErr := m.sampleApps(ctx, now, names, prev, next, net)
+	led := ledger{dir: m.usageDir(), last: usage.LoadLast(m.usageDir()), boot: m.bootID(), mono: m.uptimeUsec()}
+	appErr := m.sampleApps(ctx, now, names, prev, next, &led, net)
 	if appErr != nil {
 		// systemd did not answer (or a file could not be written): no line this minute for the
 		// apps not done yet, but their files' line counts and start times must survive, or the
@@ -72,10 +74,10 @@ func (m Metrics) Sample(ctx context.Context) error {
 	if appErr != nil {
 		return fmt.Errorf("apps not sampled: %w", appErr)
 	}
-	return nil
+	return led.write(m.Env.Now())
 }
 
-func (m Metrics) sampleApps(ctx context.Context, now int64, names []string, prev, next state, net map[uint32][2]int64) error {
+func (m Metrics) sampleApps(ctx context.Context, now int64, names []string, prev, next state, led *ledger, net map[uint32][2]int64) error {
 	if len(names) == 0 {
 		return nil
 	}
@@ -83,7 +85,8 @@ func (m Metrics) sampleApps(ctx context.Context, now int64, names []string, prev
 	for i, a := range names {
 		units[i] = "tando-" + a + ".service"
 	}
-	props, err := systemd.Show(ctx, m.Env.Run, units, "ActiveState", "NRestarts")
+	props, err := systemd.Show(ctx, m.Env.Run, units, "ActiveState", "NRestarts",
+		"ActiveEnterTimestampMonotonic", "InactiveEnterTimestampMonotonic")
 	if err != nil {
 		return err
 	}
@@ -117,6 +120,7 @@ func (m Metrics) sampleApps(ctx context.Context, now int64, names []string, prev
 		if err != nil {
 			return err
 		}
+		led.add(m.Env.Root, a, now, props[i], mem, d)
 		e.usec, e.x = usec, p.x
 		e.periods, e.throttled, e.ooms = sl.periods, sl.throttled, sl.ooms
 		e.out, e.in = out, in

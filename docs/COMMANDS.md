@@ -611,7 +611,8 @@ nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Setting
 `tls=`, `public_port=`, `node=`, `python=yes`, `podman=yes`, `postgres=yes`, `postgres_version=N`
 (only after moving the databases by hand: "Upgrading PostgreSQL"), `swap=yes|no`,
 `ufw=no`, `domain_tls=internal`; also `app_max_mb=`, `ci_max_mb=`, `ci_max_files=`,
-`ci_max_file_mb=`, `unit_drop=`, `journal_max=` (not in help.txt), and the per-client limits on ports
+`ci_max_file_mb=`, `unit_drop=`, `journal_max=` (not in help.txt), control plane mode:
+`ctl_ca=<ca.pub>|off` and `ctl_krl=<file>` (docs/CONTROL-PLANE.md; not in help.txt), and the per-client limits on ports
 80/443: `rate_limit=on|off|auto` (auto: on when tando owns Caddy), `conn_limit=N` (connections at
 once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections per second, burst
 3x; default 100), and per app's user `conn_out=N` (connections at once, default 2048), `dns_rate=N`
@@ -1155,6 +1156,15 @@ take every app's database down. The Ubuntu packages set this; tando pins it in
 (row `postgresql memory`). `vm.overcommit_memory` is not changed: strict overcommit, which the
 PostgreSQL manual suggests for a dedicated database server, makes Node and Python apps on the same
 small server fail to start.
+
+### Databases on a data node
+
+`tando host setup <h> role=data` makes a server a data node, and `tando host link <app-node>
+<data-node> [app_addr=IP] [data_addr=IP]` puts the app node's databases there: an app with
+`database = postgres` then gets its role and database on the data node, reached over TLS
+(verify-full). Backups, restore, the drill, the studio and destroy work against it; the limits
+above apply there too. The layout, what is enforced where and what is not covered:
+docs/DATA-NODE.md.
 
 ### Upgrading PostgreSQL
 

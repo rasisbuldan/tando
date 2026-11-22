@@ -88,6 +88,12 @@ the same agent skips the rest), `domain-add <app> <domain> <www>`, `domain-rm`, 
 (token on stdin; the older form with the token as second argument still works), `rollback [id]`,
 `recover`, `env-set/-unset/-ls` (stdin), `start/stop/restart`, `unlock`, `destroy [purge|plan]`,
 `backup-run <kind>`, `backup-ls`, `backup-cat`, `backup-restore`, `db-url`, `db-psql`,
+data nodes (docs/DATA-NODE.md): on the data node `data-link <node> <addr> [data_addr]` (prints
+`addr=`, `ca=` base64), `data-unlink <node>`, `data-db ensure <app> <node> [pool= st= it= tf=]
+[new=1]` (prints `role=`, and `password=` once for a new role or `new=1`), `data-db drop <app>
+<node>`, `data-db ls`; on an app node `db-link <data-node> <addr> <own-name>` (the CA on stdin)
+and `db-remote-set <app>` (`password=` on stdin); `configure` prints `db_remote=`, `db_node=`,
+`db_url=0|1` and the limits (`db_pool`, `db_st`, `db_it`, `db_tf`) for an app whose database is there,
 `db-studio <app> ro <sid> <idle-min> <port> <host>` (the older per-session studio, for as long as its
 ssh session, still used against a server without the studio service: relays only its `ready` and
 `stopped` lines), `db-studio-ls [app]` (`database=`, `installed=`, then
@@ -332,6 +338,11 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
   port it uses: on the first real server a tando app's shell (`tando ssh <app>`) reached a hand-run
   app on 127.0.0.1:3100. Such a service needs its own authentication or a unix socket; tando does
   not firewall it.
+- Data nodes (docs/DATA-NODE.md): the data node's superuser never leaves it; the operator's tando
+  provisions there and hands an app node only a role's password. 5432 and 6432 accept linked app
+  nodes only (nft), pg_hba admits a role only from its own app node and only over TLS, and app
+  nodes connect with `sslmode=verify-full` against the CA pinned at `host link`. On the app node
+  the per-uid loopback rules for 5432/6432 apply to the data node's address too.
 - Root never writes through app-writable paths: shared/ directories are created by the app's user
   and only verified by root (a symlink is refused); restores fill a fresh directory as the app user
   and swap it in by rename; image uploads with symlinks are refused; control characters in names

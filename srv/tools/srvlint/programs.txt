@@ -1,3 +1,4 @@
+ctl	tando-agent
 daemon	systemctl
 gate	atq
 gate	atrm
@@ -9,6 +10,7 @@ gate	ipcs
 gate	logger
 gate	loginctl
 gate	rsync
+gate	ssh-keygen
 gate	sshd
 gate	sudo tando-gate
 gate	systemctl

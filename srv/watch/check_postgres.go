@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"tando/srv/internal/bashread"
 	"tando/srv/internal/decimal"
 	"tando/srv/internal/run"
+	"tando/srv/internal/valid"
 )
 
 // PostgreSQL, for the apps that have a database (database = postgres: one shared server, a role
@@ -83,8 +85,14 @@ func parsePg(out []byte) *pgFacts {
 func checkPostgres(t *tick) {
 	const k = "_host.postgres"
 	var users []string
+	// an app node linked to a data node: its apps' databases are there, and the data node's own
+	// tandod watches them (docs/DATA-NODE.md); a data node watches its projects' (data/db/<app>)
+	remote := t.host["db_host"] != ""
+	if t.host["role"] == "data" {
+		users = dataProjects(t.w.Env.Root)
+	}
 	for _, a := range t.names {
-		if c, _ := t.w.Cache.load(filepath.Join(t.w.appDir(a), "app.conf")); c["database"] == "postgres" {
+		if c, _ := t.w.Cache.load(filepath.Join(t.w.appDir(a), "app.conf")); c["database"] == "postgres" && !remote {
 			users = append(users, a)
 		} else {
 			t.vs.del("pgsz."+a, "pgc."+a, "pgl."+a) // (it had a database once: nothing stale for tando status)
@@ -162,6 +170,18 @@ func checkPostgres(t *tick) {
 		return
 	}
 	t.sample(k, "_host", "postgres", ok, "", 1)
+}
+
+// dataProjects: the projects a data node holds, by app name (the agent's data-db records)
+func dataProjects(root string) []string {
+	es, _ := os.ReadDir(filepath.Join(root, "data", "db"))
+	var r []string
+	for _, e := range es {
+		if n := e.Name(); e.Type().IsRegular() && valid.App(n) {
+			r = append(r, n)
+		}
+	}
+	return r
 }
 
 // pgWhy is psql's reason on one line, without its prefixes.

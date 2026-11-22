@@ -36,6 +36,10 @@ type fakeHost struct {
 	probe   map[string]probeRes          // health probe result by URL (default: 200 ok)
 	direct  int                          // liveness's direct probe status
 	slow    time.Duration                // how long the direct probe takes
+	meet    int                          // direct probes that must be running at once (0: no meeting)
+	here    int                          // direct probes that arrived at the meeting
+	met     chan struct{}                // closed when meet of them are there
+	lonely  bool                         // one waited for the others in vain (they ran one after the other)
 	sends   []sent
 	code    int // the receivers' answer
 	pings   int
@@ -212,6 +216,27 @@ func (f *fakeHost) Probe(ctx context.Context, reqs []probeReq, timeout time.Dura
 }
 
 func (f *fakeHost) Direct(ctx context.Context, url string) int {
+	if f.meet > 0 {
+		// a barrier, not a clock: the probes that must overlap wait for each other here, so one
+		// after the other can never get past (it times out and is recorded)
+		f.mu.Lock()
+		if f.met == nil {
+			f.met = make(chan struct{})
+		}
+		f.here++
+		if f.here == f.meet {
+			close(f.met)
+		}
+		ch := f.met
+		f.mu.Unlock()
+		select {
+		case <-ch:
+		case <-time.After(3 * time.Second):
+			f.mu.Lock()
+			f.lonely = true
+			f.mu.Unlock()
+		}
+	}
 	time.Sleep(f.slow)
 	return f.direct
 }

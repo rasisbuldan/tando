@@ -72,6 +72,7 @@ lib/cmd-snapshot.sh      lint ui-test e2e-cli e2e-status e2e-top
 lib/hostcare.sh          lint ui-test e2e-cli e2e-host
 lib/offsite.sh           lint ui-test e2e-cli e2e-offsite e2e-data
 lib/studio.sh            lint ui-test e2e-cli e2e-studio
+lib/datanode.sh          lint ui-test e2e-cli e2e-datanode
 lib/cmd-menubar.sh       lint ui-test e2e-cli install-test
 lib/cmd-addon.sh         lint ui-test e2e-cli install-test addon-test
 lib/cmd-dashboard.sh     lint ui-test e2e-cli install-test addon-test
@@ -80,14 +81,15 @@ macos/*                  ui-test install-test
 # ---- server side
 server/tando-adopt       lint ui-test e2e-ci e2e-status e2e-adopt
 server/legacy/*          lint install-test e2e-status @alerts
-srv/watch/*              go @alerts e2e-idle e2e-status e2e-host e2e-faults-q4 e2e-upgrade
+srv/watch/*              go @alerts e2e-idle e2e-status e2e-host e2e-faults-q4 e2e-upgrade e2e-datanode
 srv/logs/*               go e2e-logs e2e e2e-ci @alerts e2e-workers e2e-upgrade
 srv/offsite/*            go e2e-offsite e2e-data e2e-upgrade
 srv/status/*             go ui-test e2e-idle e2e-status e2e-live e2e-top e2e-cli e2e-workers e2e-upgrade
-srv/metrics/*            go e2e-status e2e-top e2e-sec2 @alerts e2e-upgrade
-srv/gate/*               go e2e-ci e2e-sec2 e2e-upgrade
+srv/metrics/*            go e2e-status e2e-top e2e-sec2 @alerts e2e-upgrade e2e-ctl
+srv/gate/*               go e2e-ci e2e-sec2 e2e-upgrade e2e-ctl
+srv/ctl/*                go e2e-ctl
 srv/hostcare/*           go e2e-host @alerts e2e-upgrade
-srv/studio/*             go e2e-studio
+srv/studio/*             go e2e-studio e2e-datanode
 srv/live/*               go e2e-live
 srv/tools/*              go
 srv/README.md            lint
@@ -152,6 +154,8 @@ test/e2e-guardrails.sh   e2e-guardrails lint
 test/e2e-proxy.sh        e2e-proxy lint
 test/e2e-origin.sh       e2e-origin lint
 test/e2e-upgrade.sh      e2e-upgrade lint
+test/e2e-datanode.sh     e2e-datanode lint
+test/e2e-ctl.sh          e2e-ctl lint
 test/faults/*            @faults e2e-matrix-quick e2e-matrix-weekly lint
 test/sec2/*              e2e-sec2 lint
 test/sec3/*              e2e-sec2 lint

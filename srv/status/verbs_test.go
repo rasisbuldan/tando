@@ -296,7 +296,7 @@ func TestInfo(t *testing.T) {
 	os.Chmod(h.path("tools/caddy"), 0o755)
 	want := rows("version=0.1.0", "proto=2", "arch="+machine(), "libc=glibc", "glibc=2.39", "apps_domain=example.org", "tls=internal", "sum=3015617425",
 		"podman=no", "python=no", "node=24.1.0", "caddy=2.6.2", "postgres=16", "public_port=", "ip=10.0.0.2",
-		"addrs=10.0.0.2 2001:db8::2 ", "domain_tls=internal")
+		"addrs=10.0.0.2 2001:db8::2 ", "domain_tls=internal", "role=app", "db_host=")
 	eq(t, info(), want)
 	if n := h.called(h.path("tools/node")); n != 1 {
 		t.Errorf("node ran %d times", n)

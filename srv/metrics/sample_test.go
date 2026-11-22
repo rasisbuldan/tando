@@ -89,7 +89,7 @@ func TestSample(t *testing.T) {
 	if err := h.m.Sample(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(h.lastArgv, " "); got != "systemctl show -p ActiveState,NRestarts tando-api-2.service tando-web.service" {
+	if got := strings.Join(h.lastArgv, " "); got != "systemctl show -p ActiveState,NRestarts,ActiveEnterTimestampMonotonic,InactiveEnterTimestampMonotonic tando-api-2.service tando-web.service" {
 		t.Errorf("systemctl argv: %s", got)
 	}
 	// first sample: no cpu difference yet

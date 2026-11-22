@@ -33,6 +33,8 @@ daemon/                 composition: tandod's schedule, socket and wiring of wat
               which verbs, the timeouts); no domain imports: tando-watch and tando-status link it
 cmd/tando-gate/         main: scrubs the environment, dispatches the four entry points and version
 gate/                   domain: the CI deploy keys' confinement, docs/CI.md (structure below)
+ctl/                    domain: control plane mode's JSON verbs and request store, docs/CONTROL-PLANE.md
+                        (tando-gate's ctl-root runs it as root, with the identity sshd established)
 cmd/tando-logs/         main: dispatches the verbs of tando-logs and version
 logs/                   domain: journals, request log, error scan, audit, log settings (structure below)
   journal/ reqlog/ errscan/ lines/   its parsers: no files, no commands, table, golden and fuzz tests

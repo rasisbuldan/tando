@@ -79,7 +79,7 @@ _tando() {
     db) subs="psql url studio info" flags="$flags -a -H --show --no-open --json --idle --stop" args="apps";;
     backup) subs="ls now drill restore pull offsite" flags="$flags --json -a -H --yes --show --saved --import --rotate" args="apps";;
     restore) subs="" flags="$flags -a --yes -H --from-host --all" args="";;
-    host) subs="add setup ls rm rename status care update reboot" flags="$flags --port --key --yes --force --insecure-test --no-check --deploy --json --watch --all --now --updates --reboot --window --tz --lead --even-with-other-sites --drop-alias --pg-stat-statements --pg-restart" args=""
+    host) subs="add setup link ls rm rename status care update reboot" flags="$flags --port --key --yes --force --insecure-test --no-check --deploy --json --watch --all --now --updates --reboot --window --tz --lead --even-with-other-sites --drop-alias --pg-stat-statements --pg-restart --move" args=""
       [ "$COMP_CWORD" -eq $((i + 2)) ] && case $sub in setup|rm|rename) args=hosts;; esac;;
     domain) subs="add rm ls" flags="$flags --www --wait --force -a -H" args="apps";;
     doctor) subs="" flags="$flags --verbose --json -H" args="hosts";;

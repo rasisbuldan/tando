@@ -415,3 +415,32 @@ func TestParseEnvCred(t *testing.T) {
 		t.Fatal("--fd and --sock")
 	}
 }
+
+// a database on a data node: the studio connects where DATABASE_URL_DIRECT says, with
+// verify-full against its sslrootcert, and refuses such a URL without them
+func TestParseEnvCredRemote(t *testing.T) {
+	u := "postgres://tando_shop:pw@192.0.2.10:6432/tando_shop?sslmode=verify-full&sslrootcert=/opt/tando/db-ca.pem"
+	d := "postgres://tando_shop:pw@192.0.2.10:5432/tando_shop?sslmode=verify-full&sslrootcert=/opt/tando/db-ca.pem"
+	c := Config{PGAddr: "127.0.0.1:5432"}
+	if err := ParseEnvCred([]byte("DATABASE_URL=\""+u+"\"\nDATABASE_URL_DIRECT=\""+d+"\"\n"), "shop", &c); err != nil ||
+		c.PGAddr != "192.0.2.10:5432" || c.PGServerName != "192.0.2.10" || c.PGRootCert != "/opt/tando/db-ca.pem" || c.Password != "pw" {
+		t.Fatalf("%v %+v", err, c)
+	}
+	c = Config{PGAddr: "127.0.0.1:5432"}
+	local := "postgres://tando_shop:pw@127.0.0.1:5432/tando_shop"
+	if err := ParseEnvCred([]byte("DATABASE_URL=\""+local+"\"\nDATABASE_URL_DIRECT=\""+local+"\"\n"), "shop", &c); err != nil ||
+		c.PGAddr != "127.0.0.1:5432" || c.PGRootCert != "" {
+		t.Fatalf("local: %v %+v", err, c)
+	}
+	for _, bad := range []string{
+		"postgres://tando_shop:pw@192.0.2.10:5432/tando_shop",
+		"postgres://tando_shop:pw@192.0.2.10:5432/tando_shop?sslmode=require&sslrootcert=/opt/tando/db-ca.pem",
+		"postgres://tando_shop:pw@192.0.2.10:5432/tando_shop?sslmode=verify-full",
+		"postgres://tando_other:pw@192.0.2.10:5432/tando_other?sslmode=verify-full&sslrootcert=/x.pem",
+	} {
+		c = Config{}
+		if err := ParseEnvCred([]byte("DATABASE_URL=\""+u+"\"\nDATABASE_URL_DIRECT=\""+bad+"\"\n"), "shop", &c); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}
