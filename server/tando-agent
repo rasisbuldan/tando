@@ -2818,6 +2818,10 @@ EOF
         die "could not set up control plane mode (above)"
       got+="; control plane mode on"
     fi
+  elif [[ -f $R/ctl/ca.pub && -x $R/bin/tando-gate ]]; then
+    # the mode is on: sshd must still apply its settings (another drop-in may have come since)
+    "$R/bin/tando-gate" admin ctl-check > /dev/null || die "control plane mode: sshd's settings for tando-ctl changed (above); fix them, or tando host setup <host> ctl_ca=off"
+    got+="; control plane mode checked"
   fi
   local mem; mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
   if [[ $swap != no ]] && ! swapon --show=NAME --noheadings 2> /dev/null | grepq . &&
@@ -3083,6 +3087,11 @@ cmd_doctor() {
     if getent passwd tando-keys > /dev/null && [[ -f /etc/ssh/sshd_config.d/50-tando-ci.conf ]]; then
       row check ok "ci keys" "sshd reads them as tando-keys; $(ls -d "$R"/ci/*/ 2> /dev/null | wc -l) apps with keys"
     else row check fail "ci keys" "tando-keys or the sshd drop-in is missing: run tando host setup"; fi
+  fi
+  if [[ $EUID == 0 && -f $R/ctl/ca.pub && -x $R/bin/tando-gate ]]; then   # control plane mode (docs/CONTROL-PLANE.md)
+    local ce
+    if ce=$("$R/bin/tando-gate" admin ctl-check 2>&1 > /dev/null); then row check ok "control plane" "sshd admits tando-ctl by certificate only"
+    else row check fail "control plane" "${ce#tando-gate: }"; fi
   fi
   if systemctl -q is-enabled tando-recover.service 2>/dev/null; then row check ok "recover unit" enabled
   else row check fail "recover unit" "not enabled"; fi

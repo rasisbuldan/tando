@@ -2,8 +2,10 @@ package gate
 
 import (
 	"bytes"
+	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -91,19 +93,45 @@ func TestParseCAKey(t *testing.T) {
 	}
 }
 
-// ctlTree: the session of a ctl login (uid 995 is tando-ctl), with this test process as root mode
-func ctlTree(t *testing.T, g *Gate, loginCmd string, loginUIDs string) {
+// (a ctl login, the test process as its root mode)
+// the test runs as the ctl user (the SSH_USER_AUTH file must be the login's own)
+var (
+	cuid  = os.Getuid()
+	cu    = strconv.Itoa(cuid)
+	cuids = cu + " " + cu + " " + cu + " " + cu
+)
+
+// ctlTree: the session of a ctl login whose sshd authenticated it with the fixture certificate
+// cert (testdata/ctl/<cert>-cert.pub; "" : no SSH_USER_AUTH), this test process as root mode
+func ctlTree(t *testing.T, g *Gate, loginCmd string, loginUIDs string, cert ...string) {
+	c := "app"
+	if len(cert) > 0 {
+		c = cert[0]
+	}
+	env := "X=1"
+	if c != "" {
+		g.P.AuthTmp = t.TempDir()
+		auth := filepath.Join(g.P.AuthTmp, "sshauth.abc123")
+		pub, err := os.ReadFile(filepath.Join("testdata", "ctl", c+"-cert.pub"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := strings.Fields(string(pub))
+		write(t, auth, "publickey "+f[0]+" "+f[1]+"\n")
+		env = "SSH_USER_AUTH=" + auth
+	}
 	sessionTree(t, g, func(p map[string]any) {
-		p["loginCmd"], p["loginUIDs"], p["sessUIDs"], p["sudoUIDs"] = loginCmd, loginUIDs, "995 995 995 995", "995 0 0 0"
-		p["env"] = "X=1"
+		p["loginCmd"], p["loginUIDs"], p["sessUIDs"], p["sudoUIDs"] = loginCmd, loginUIDs, cuids, cu+" 0 0 0"
+		p["env"] = env
 	})
 }
 
 func ctlGate(t *testing.T) *Gate {
 	g, _ := testGate(t)
-	write(t, g.P.Passwd, "root:x:0:0::/root:/bin/bash\ntando-ctl:x:995:995::"+filepath.Join(g.P.Root, "ctl")+":"+g.P.Gate+
+	write(t, g.P.Passwd, "root:x:0:0::/root:/bin/bash\ntando-ctl:x:"+cu+":"+cu+"::"+filepath.Join(g.P.Root, "ctl")+":"+g.P.Gate+
 		"\ntando-d-alpha:x:990:990::"+filepath.Join(g.P.CI, "alpha")+":"+g.P.Gate+"\n")
-	write(t, filepath.Join(g.P.Root, "ctl", "ca.pub"), testCA+"\n")
+	ca, _ := os.ReadFile(filepath.Join("testdata", "ctl", "ca.pub"))
+	write(t, filepath.Join(g.P.Root, "ctl", "ca.pub"), string(ca))
 	write(t, filepath.Join(g.appDir("alpha"), "app.conf"), "port=4100\n")
 	in := filepath.Join(t.TempDir(), "in")
 	write(t, in, `{"v":1,"verb":"inventory"}`)
@@ -113,31 +141,31 @@ func ctlGate(t *testing.T) *Gate {
 	}
 	t.Cleanup(func() { f.Close() })
 	g.Stdin = f
-	g.Caller = Caller{UID: 995, EUID: 0, SudoUID: "995", SudoUser: "tando-ctl"}
+	g.Caller = Caller{UID: cuid, EUID: 0, SudoUID: cu, SudoUser: "tando-ctl"}
 	return g
 }
 
 func TestCtlRoot(t *testing.T) {
 	g := ctlGate(t)
-	ctlTree(t, g, g.P.Gate+" ctl app:alpha 9 cp-1", "995 995 995 995")
+	ctlTree(t, g, g.P.Gate+" ctl app:alpha 9 cp-1", cuids)
 	id, in, err := g.CtlRoot(nil)
 	if err != nil || id != (CtlIdent{Mode: "app", App: "alpha", Serial: "9", KeyID: "cp-1"}) || string(in) != `{"v":1,"verb":"inventory"}` {
 		t.Fatalf("%+v %q %v", id, in, err)
 	}
 	refused := map[string]func(g *Gate){
 		// a deploy key's session cannot reach ctl root mode, and the ctl login cannot claim another mode
-		"a deploy key's forced command": func(g *Gate) { ctlTree(t, g, g.P.Gate+" key 0123456789ab", "995 995 995 995") },
-		"a forged mode":                 func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl root 9 x", "995 995 995 995") },
-		"sudo from a deploy user":       func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl write 9 x", "995 995 995 995"); g.Caller.SudoUID = "990" },
-		"not through sudo":              func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl write 9 x", "995 995 995 995"); g.Caller.EUID = 995 },
+		"a deploy key's forced command": func(g *Gate) { ctlTree(t, g, g.P.Gate+" key 0123456789ab", cuids) },
+		"a forged mode":                 func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl root 9 x", cuids) },
+		"sudo from a deploy user":       func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl write 9 x", cuids); g.Caller.SudoUID = "990" },
+		"not through sudo":              func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl write 9 x", cuids); g.Caller.EUID = 995 },
 		"login of another uid":          func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl write 9 x", "990 990 990 990") },
 		"control plane mode off": func(g *Gate) {
-			ctlTree(t, g, g.P.Gate+" ctl write 9 x", "995 995 995 995")
+			ctlTree(t, g, g.P.Gate+" ctl write 9 x", cuids)
 			os.Remove(filepath.Join(g.P.Root, "ctl", "ca.pub"))
 		},
 		"tando-ctl not made by the gate": func(g *Gate) {
-			ctlTree(t, g, g.P.Gate+" ctl write 9 x", "995 995 995 995")
-			write(t, g.P.Passwd, "tando-ctl:x:995:995::/home/x:/bin/bash\n")
+			ctlTree(t, g, g.P.Gate+" ctl write 9 x", cuids)
+			write(t, g.P.Passwd, "tando-ctl:x:"+cu+":"+cu+"::/home/x:/bin/bash\n")
 		},
 	}
 	for name, m := range refused {
@@ -157,14 +185,14 @@ func TestCtlLogin(t *testing.T) {
 	fr := &fakeRun{}
 	g.Env.Run = fr
 	args := []string{dashC, g.P.Gate + " ctl write 9 x"}
-	g.Caller = Caller{UID: 995, EUID: 995}
+	g.Caller = Caller{UID: cuid, EUID: cuid}
 	if err := g.Ctl(args); err != nil || len(fr.calls) != 1 || strings.Join(fr.calls[0], " ") != "sudo -n -- "+g.P.Gate+" ctl-root" {
 		t.Fatalf("%v %q", err, fr.calls)
 	}
 	for name, c := range map[string]Caller{
 		"root":          {UID: 0, EUID: 0},
 		"a deploy user": {UID: 990, EUID: 990},
-		"a command":     {UID: 995, EUID: 995, SSHCommand: "date"},
+		"a command":     {UID: cuid, EUID: cuid, SSHCommand: "date"},
 	} {
 		fr.calls = nil
 		g.Caller = c
@@ -194,17 +222,118 @@ func TestCtlAdminBadCA(t *testing.T) {
 // (another way in) is named
 func TestCtlEffective(t *testing.T) {
 	gate, dir := "/opt/tando/bin/tando-gate", "/opt/tando/ctl"
-	good := "port 22\nauthorizedkeysfile none\nauthorizedkeyscommand none\ntrustedusercakeys /opt/tando/ctl/ca.pub\n" +
-		"revokedkeys /opt/tando/ctl/revoked.krl\nauthorizedprincipalscommand /opt/tando/bin/tando-gate ctl-principals %s %i\n" +
-		"passwordauthentication no\npermittty no\n"
+	good := "port 22\nauthenticationmethods publickey\npubkeyauthentication yes\npasswordauthentication no\n" +
+		"kbdinteractiveauthentication no\nhostbasedauthentication no\ngssapiauthentication no\n" +
+		"authorizedkeysfile none\nauthorizedkeyscommand none\ntrustedusercakeys /opt/tando/ctl/ca.pub\n" +
+		"revokedkeys /opt/tando/ctl/revoked.krl\nauthorizedprincipalsfile none\n" +
+		"authorizedprincipalscommand /opt/tando/bin/tando-gate ctl-principals %s %i\n" +
+		"authorizedprincipalscommanduser tando-keys\nforcecommand none\nexposeauthinfo yes\ndisableforwarding yes\npermittty no\n"
 	if why := ctlEffective([]byte(good), gate, dir); why != "" {
 		t.Errorf("good: %s", why)
 	}
-	bad := strings.Replace(good, "authorizedkeyscommand none", "authorizedkeyscommand /usr/bin/fetch-keys %u", 1)
-	if why := ctlEffective([]byte(bad), gate, dir); why != "authorizedkeyscommand /usr/bin/fetch-keys %u" {
-		t.Errorf("a global keys command: %q", why)
+	// every other way in, and a setting that would undo the binding, is named
+	for from, to := range map[string]string{
+		"authorizedkeyscommand none":                 "authorizedkeyscommand /usr/bin/fetch-keys %u",
+		"authenticationmethods publickey":            "authenticationmethods any",
+		"gssapiauthentication no":                    "gssapiauthentication yes",
+		"kbdinteractiveauthentication no":            "kbdinteractiveauthentication yes",
+		"hostbasedauthentication no":                 "hostbasedauthentication yes",
+		"forcecommand none":                          "forcecommand /bin/sh",
+		"exposeauthinfo yes":                         "exposeauthinfo no",
+		"authorizedprincipalsfile none":              "authorizedprincipalsfile /etc/ssh/principals",
+		"authorizedprincipalscommanduser tando-keys": "authorizedprincipalscommanduser root",
+	} {
+		bad := strings.Replace(good, from, to, 1)
+		if why := ctlEffective([]byte(bad), gate, dir); why != to {
+			t.Errorf("%s: %q", to, why)
+		}
+	}
+	// an sshd without GSSAPI does not print it: fine
+	if why := ctlEffective([]byte(strings.Replace(good, "gssapiauthentication no\n", "", 1)), gate, dir); why != "" {
+		t.Errorf("no gssapi line: %s", why)
 	}
 	if why := ctlEffective([]byte("port 22\n"), gate, dir); why == "" {
 		t.Error("nothing applied, but accepted")
+	}
+}
+
+// ctlCheck asks sshd about several connections; one whose Match block differs is refused
+func TestCtlCheckConnections(t *testing.T) {
+	g := ctlGate(t)
+	good := "authenticationmethods publickey\npubkeyauthentication yes\npasswordauthentication no\n" +
+		"kbdinteractiveauthentication no\nhostbasedauthentication no\n" +
+		"authorizedkeysfile none\nauthorizedkeyscommand none\ntrustedusercakeys " + g.ctlDir() + "/ca.pub\n" +
+		"revokedkeys " + g.ctlDir() + "/revoked.krl\nauthorizedprincipalsfile none\n" +
+		"authorizedprincipalscommand " + g.P.Gate + " ctl-principals %s %i\n" +
+		"authorizedprincipalscommanduser tando-keys\nforcecommand none\nexposeauthinfo yes\ndisableforwarding yes\npermittty no\n"
+	var specs []string
+	fr := &fakeRun{out: func(a []string) ([]byte, error) {
+		if len(a) == 2 {
+			return []byte("port 22\nport 2222\n"), nil
+		}
+		specs = append(specs, a[3])
+		if strings.Contains(a[3], "addr=10.11.12.13,") && strings.HasSuffix(a[3], "lport=2222") {
+			return []byte(strings.Replace(good, "passwordauthentication no", "passwordauthentication yes", 1)), nil
+		}
+		return []byte(good), nil
+	}}
+	g.Env.Run = fr
+	err := g.ctlCheck()
+	if err == nil || !strings.Contains(err.Error(), "from 10.11.12.13 to port 2222 (passwordauthentication yes)") {
+		t.Fatalf("%v %q", err, specs)
+	}
+}
+
+// F1: the mode on the command line holds only when sshd's record of the login is one certificate
+// of this CA with that mode's principal, serial and key id
+func TestCtlRootNeedsTheCertificate(t *testing.T) {
+	g := ctlGate(t)
+	ctlTree(t, g, g.P.Gate+" ctl write 7 cp-w", cuids, "write")
+	if id, _, err := g.CtlRoot(nil); err != nil || id.Mode != "write" {
+		t.Fatalf("write certificate: %+v %v", id, err)
+	}
+	refused := map[string]func(g *Gate){
+		"another way in (no certificate record) naming write": func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl write - -", cuids, "") },
+		"an app certificate, the command line says write":     func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl write 9 cp-1", cuids, "app") },
+		"a read certificate, the command line says write":     func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl write 8 cp-r", cuids, "read") },
+		"another CA's certificate":                            func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl app:alpha 9 cp-1", cuids, "other") },
+		"an expired certificate":                              func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl app:alpha 9 cp-1", cuids, "expired") },
+		"another serial on the command line":                  func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl app:alpha 10 cp-1", cuids, "app") },
+		"another key id on the command line":                  func(g *Gate) { ctlTree(t, g, g.P.Gate+" ctl app:alpha 9 cp-2", cuids, "app") },
+		"two methods (publickey and a password)": func(g *Gate) {
+			ctlTree(t, g, g.P.Gate+" ctl app:alpha 9 cp-1", cuids, "app")
+			f := filepath.Join(g.P.AuthTmp, "sshauth.abc123")
+			b, _ := os.ReadFile(f)
+			os.WriteFile(f, append(b, []byte("password\n")...), 0o600)
+		},
+		"an auth file outside sshd's directory": func(g *Gate) {
+			ctlTree(t, g, g.P.Gate+" ctl app:alpha 9 cp-1", cuids, "app")
+			g.P.AuthTmp = t.TempDir()
+		},
+	}
+	for name, m := range refused {
+		t.Run(name, func(t *testing.T) {
+			g := ctlGate(t)
+			m(g)
+			if id, _, err := g.CtlRoot(nil); err == nil {
+				t.Fatalf("bound: %+v", id)
+			}
+		})
+	}
+}
+
+func TestParseCert(t *testing.T) {
+	pub, _ := os.ReadFile(filepath.Join("testdata", "ctl", "app-cert.pub"))
+	f := strings.Fields(string(pub))
+	blob, _ := base64.StdEncoding.DecodeString(f[1])
+	c, ok := ParseCert(blob)
+	if !ok || c.Serial != 9 || c.KeyID != "cp-1" || len(c.Principals) != 1 || c.Principals[0] != "tando-app-alpha" ||
+		c.ValidBefore != 0xffffffffffffffff || len(c.CAKey) == 0 {
+		t.Fatalf("%+v %v", c, ok)
+	}
+	for i := 0; i < len(blob); i += 7 {
+		if _, ok := ParseCert(blob[:i]); ok {
+			t.Fatalf("a cut certificate (%d bytes) parsed", i)
+		}
 	}
 }

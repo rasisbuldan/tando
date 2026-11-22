@@ -184,7 +184,7 @@ func (g *Gate) CtlRoot(args []string) (CtlIdent, []byte, error) {
 	if !fsinfo.RegularFollow(filepath.Join(g.ctlDir(), "ca.pub")) {
 		return CtlIdent{}, nil, die("control plane mode is off on this node (tando host setup <host> ctl_ca=...)")
 	}
-	_, a, err := g.loginProcess(uid)
+	k, a, err := g.loginProcess(uid)
 	if err != nil {
 		return CtlIdent{}, nil, err
 	}
@@ -195,6 +195,15 @@ func (g *Gate) CtlRoot(args []string) (CtlIdent, []byte, error) {
 	id, ok := ParseCtlCommand(a[2], g.P.Gate)
 	if !ok {
 		return CtlIdent{}, nil, die(msgSession)
+	}
+	// the command line is only as good as the way in: sshd's own record of it must be one
+	// certificate of this node's CA with that mode's principal (ctlcert.go)
+	c, err := g.authInfo(k, uid)
+	if err != nil {
+		return CtlIdent{}, nil, err
+	}
+	if !g.certAllows(c, id) {
+		return CtlIdent{}, nil, die("ctl root mode: the session's certificate does not grant %s", id.Mode)
 	}
 	in, err := io.ReadAll(io.LimitReader(g.Stdin, ctlMaxRequest+1))
 	if err != nil {
@@ -253,6 +262,8 @@ Match User %[3]s
 	PasswordAuthentication no
 	KbdInteractiveAuthentication no
 	HostbasedAuthentication no
+	GSSAPIAuthentication no
+	ExposeAuthInfo yes
 	AuthorizedKeysFile none
 	TrustedUserCAKeys %[2]s/ca.pub
 	RevokedKeys %[2]s/revoked.krl
@@ -301,6 +312,16 @@ func (g *Gate) CtlAdmin(w *out.Writer, verb string) error {
 		return g.ctlKRL(w, data)
 	case "ctl-off":
 		return g.ctlOff(w)
+	case "ctl-check":
+		if !fsinfo.RegularFollow(filepath.Join(g.ctlDir(), "ca.pub")) {
+			w.KV("ctl", "off")
+			return nil
+		}
+		if err := g.ctlCheck(); err != nil {
+			return err
+		}
+		w.KV("ctl", "ok")
+		return nil
 	}
 	return die("unknown admin verb")
 }
@@ -414,46 +435,92 @@ func (g *Gate) installDrop(want []byte) error {
 		}
 		return die("sshd rejected the control plane drop-in: %s", clean(strings.TrimSpace(string(o))+" "+err.Error()))
 	}
-	// what sshd will do for tando-ctl, all files and drop-ins together: certificates of the CA,
-	// principals from the gate, and no other way in (another file's Match block, or a global
-	// AuthorizedKeysCommand, would be one)
-	o, err := g.Env.Run.Output(context.Background(), run.Cmd{Argv: []string{"sshd", "-T", "-C",
-		"user=" + ctlUser + ",host=localhost,addr=127.0.0.1"}, Timeout: 30 * time.Second})
-	if why := ctlEffective(o, g.P.Gate, g.ctlDir()); err != nil || why != "" {
+	if err := g.ctlCheck(); err != nil {
 		if oerr == nil {
 			atomicfile.Write(p, old, atomicfile.Mode(0o644))
 		} else {
 			os.Remove(p)
 		}
-		if why == "" {
-			why = "sshd -T failed"
-		}
-		return die("sshd would not apply the control plane settings for %s (%s): another sshd_config file sets them first", ctlUser, why)
+		return err
 	}
 	g.reloadSSHD()
 	return nil
 }
 
-// ctlEffective checks sshd -T's settings for tando-ctl; "" when they are the drop-in's.
+// ctlConns: the connections sshd -T is asked about: loopback, a private and a public address,
+// on each port sshd listens on (a Match Address or LocalPort block elsewhere must not open
+// another way in for any of them).
+var ctlConns = []string{"127.0.0.1", "10.11.12.13", "203.0.113.10"}
+
+// ctlCheck: what sshd will do for tando-ctl, all files and drop-ins together, is the drop-in's
+// (certificates of the CA, principals from the gate, no other way in). Run by ctl-setup, by
+// `tando-gate admin ctl-check` (tando doctor) and by every host setup while the mode is on.
+func (g *Gate) ctlCheck() error {
+	o, err := g.Env.Run.Output(context.Background(), run.Cmd{Argv: []string{"sshd", "-T"}, Timeout: 30 * time.Second})
+	if err != nil {
+		return die("sshd -T failed: %s", clean(err.Error()))
+	}
+	var ports []string
+	for l := range strings.SplitSeq(string(o), "\n") {
+		if p, ok := strings.CutPrefix(l, "port "); ok && ctlSerialRe.MatchString(p) && len(ports) < 4 {
+			ports = append(ports, p)
+		}
+	}
+	if len(ports) == 0 {
+		ports = []string{"22"}
+	}
+	for _, a := range ctlConns {
+		for _, port := range ports {
+			spec := "user=" + ctlUser + ",host=" + a + ",addr=" + a + ",laddr=" + a + ",lport=" + port
+			o, err := g.Env.Run.Output(context.Background(), run.Cmd{Argv: []string{"sshd", "-T", "-C", spec}, Timeout: 30 * time.Second})
+			why := ctlEffective(o, g.P.Gate, g.ctlDir())
+			if err != nil && why == "" {
+				why = "sshd -T failed"
+			}
+			if why != "" {
+				return die("sshd would not apply the control plane settings for %s from %s to port %s (%s): another sshd_config file sets them first, or adds a way in", ctlUser, a, port, why)
+			}
+		}
+	}
+	return nil
+}
+
+// ctlEffective checks sshd -T's settings for one tando-ctl connection; "" when they are the
+// drop-in's. Optional ones may be missing (an sshd built without GSSAPI does not print it).
 func ctlEffective(t []byte, gate, dir string) string {
-	want := map[string]string{
-		"authorizedkeysfile":          "none",
-		"authorizedkeyscommand":       "none",
-		"trustedusercakeys":           dir + "/ca.pub",
-		"revokedkeys":                 dir + "/revoked.krl",
-		"authorizedprincipalscommand": gate + " ctl-principals %s %i",
-		"passwordauthentication":      "no",
-		"permittty":                   "no",
+	want := []struct {
+		k, v     string
+		optional bool
+	}{
+		{"authenticationmethods", "publickey", false},
+		{"pubkeyauthentication", "yes", false},
+		{"passwordauthentication", "no", false},
+		{"kbdinteractiveauthentication", "no", false},
+		{"hostbasedauthentication", "no", false},
+		{"gssapiauthentication", "no", true},
+		{"authorizedkeysfile", "none", false},
+		{"authorizedkeyscommand", "none", false},
+		{"trustedusercakeys", dir + "/ca.pub", false},
+		{"revokedkeys", dir + "/revoked.krl", false},
+		{"authorizedprincipalsfile", "none", false},
+		{"authorizedprincipalscommand", gate + " ctl-principals %s %i", false},
+		{"authorizedprincipalscommanduser", keysUser, false},
+		{"forcecommand", "none", false},
+		{"exposeauthinfo", "yes", false},
+		{"disableforwarding", "yes", false},
+		{"permittty", "no", false},
 	}
 	got := map[string]string{}
 	for l := range strings.SplitSeq(string(t), "\n") {
 		k, v, _ := strings.Cut(strings.TrimSpace(l), " ")
 		got[strings.ToLower(k)] = v
 	}
-	for k, v := range want {
-		if got[k] != v {
-			return k + " " + or(got[k], "unset")
+	for _, w := range want {
+		v, ok := got[w.k]
+		if (!ok && w.optional) || v == w.v {
+			continue
 		}
+		return w.k + " " + or(v, "unset")
 	}
 	return ""
 }
