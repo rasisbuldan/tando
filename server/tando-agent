@@ -760,6 +760,8 @@ core_reserve() {
     id -u "$u" &> /dev/null && ! id -nG "$u" | grepq -w tando-core && usermod -aG tando-core "$u"
   done
   read -r src fst mnt < <(df --output=source,fstype,target "$1" 2> /dev/null | tail -1)
+  # (a root file system can show as /dev/root, which is no device node: its major:minor is)
+  [[ -b $src || -z $mnt ]] || src=$(readlink -f "/dev/block/$(mountpoint -d "$mnt" 2> /dev/null)")
   if [[ $fst != ext[234] || ! -b $src ]]; then CORE_RES="no block reserve on ${fst:-this file system}"; return 0; fi
   cur=$(tune2fs -l "$src" 2> /dev/null | sed -n 's/^Reserved blocks gid: *\([0-9]*\).*/\1/p')
   if [[ $cur != "$gid" ]]; then
