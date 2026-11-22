@@ -417,7 +417,7 @@ awake_lock() { mkdir -p "$WAKE_DIR"; exec 6> "$WAKE_DIR/.lock"; flock -w 10 6; }
 cmd_wake_admit() {
   app "$1"
   idle_app || return 0
-  awake_lock || return 0
+  awake_lock || { echo "tando-agent: $A not woken: the awake count is busy (over 10 s)" >&2; return 1; }   # (refused, never admitted unchecked)
   local now t w=() rate=${H[wake_rate]:-$WAKE_RATE}
   [[ $rate =~ ^[1-9][0-9]*$ ]] || rate=$WAKE_RATE
   now=$(now)
@@ -1204,9 +1204,13 @@ write_slice() {
   case ${BASH_REMATCH[2]} in K) mb=$((mb / 1024));; G) mb=$((mb * 1024));; esac
   # memory: the live app, its pre-flight beside it during a deploy, and a job or shell (3x memory),
   # plus each worker's own cap
-  local n wmb=0
+  local n wmb=0 x p
   [[ " ${!C[*]}" == *" worker."* ]] &&
-    for n in $(worker_names); do wmb=$((wmb + $(size_mb "${C[worker.$n.memory]:-$mem}"))); done
+    for n in $(worker_names); do
+      x=$(size_mb "${C[worker.$n.memory]:-$mem}")
+      p=$(prof_get memory) && (($(size_mb "$p") < x)) && x=$(size_mb "$p")   # (as mem_cap: the profile's)
+      wmb=$((wmb + x))
+    done
   [[ $cpu == *% ]] || { [[ -n $cpu ]] && cpu=$(awk -v c="$cpu" 'BEGIN { printf "%d%%", c * 100 }'); }
   # the app's profile is a ceiling here too: settings that came back with a rollback to a release
   # from before it never raise the slice's CPU or task limit over the profile's
@@ -3314,13 +3318,16 @@ fw_sync() {
   # the same rules as loaded: nothing to do (a host setup again rewrites nothing)
   if cmp -s "$tmp" "$f" && nft list table inet tando &> /dev/null; then rm -f "$tmp"; fw_ctr_load; i=$?; exec 4>&-; return $i; fi
   for i in 1 2 3; do
-    if nft -c -f "$tmp" 2> "$tmp.err" && sync "$tmp" && mv -f "$tmp" "$f" && nft -f "$f" 2> "$tmp.err"; then
-      rm -f "$tmp" "$tmp.err"; fw_ctr_load; i=$?; exec 4>&-; return $i
+    # (the container apps' rules in the same transaction: no moment without them; firewall.nft
+    # itself never has them, it is what loads at boot)
+    { cat "$tmp"; printf 'table inet tando {\n  chain containers {\n%s\n  }\n}\n' "$(fw_ctr_rules)"; } > "$tmp.all"
+    if nft -c -f "$tmp.all" 2> "$tmp.err" && sync "$tmp" && mv -f "$tmp" "$f" && nft -f "$tmp.all" 2> "$tmp.err"; then
+      rm -f "$tmp" "$tmp.err" "$tmp.all"; exec 4>&-; return 0
     fi
     sleep 1
   done
   echo "tando-agent: could not load the loopback rules (the rules from before stay): $(head -c 300 "$tmp.err" | tr '\n' ' ')" >&2
-  rm -f "$tmp" "$tmp.err"; exec 4>&-
+  rm -f "$tmp" "$tmp.err" "$tmp.all"; exec 4>&-
   return 1
 }
 
@@ -3370,7 +3377,7 @@ fw_app_rules() {
 # after it by every fw_sync, and by each start of a container app (its unit's ExecStartPre: a slice
 # made again has a new id). A slice that is not there now (the app is stopped) gets no rules. A
 # failure is a warning: the uid rules stand.
-fw_ctr_load() {
+fw_ctr_rules() {
   local a c="" t
   for a in "${!ctr[@]}"; do
     t="tando.slice/tando-${a//-/\\x2d}.slice"
@@ -3380,6 +3387,11 @@ fw_ctr_load() {
     c+="    oifname != \"lo\" socket cgroupv2 level 2 \"$t\" ct state new ct mark 0 ct mark set ${ctr[$a]}"$'\n'
     c+="    oifname != \"lo\" socket cgroupv2 level 2 \"$t\" counter name out_${ctr[$a]}"$'\n'
   done
+  printf '%s' "$c"
+}
+fw_ctr_load() {
+  local c
+  c=$(fw_ctr_rules)$'\n'; [[ $c == $'\n' ]] && c=""
   if printf 'flush chain inet tando containers\ntable inet tando {\n  chain containers {\n%s  }\n}\n' "$c" > "$R/.firewall-containers.nft" &&
      nft -f "$R/.firewall-containers.nft" 2> "$R/.firewall-containers.err"; then
     return 0
@@ -3412,6 +3424,7 @@ Wants=network-pre.target
 # nftables.service (re)starting flushes the whole ruleset: load the rules again right after it
 After=nftables.service
 PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
 ConditionPathExists=$R/firewall.nft
 
 [Service]
@@ -3421,6 +3434,9 @@ ExecStart=/usr/sbin/nft -f $R/firewall.nft
 # the chain of the container apps by their slice (fw_ctr_load), empty in firewall.nft: loaded again
 # for those running (a restart of nftables flushes everything)
 ExecStartPost=-$AGENT fw-sync
+# a reload of nftables runs its config, which flushes every rule: loaded again with it
+ExecReload=/usr/sbin/nft -f $R/firewall.nft
+ExecReload=-$AGENT fw-sync
 
 [Install]
 WantedBy=multi-user.target
@@ -4363,6 +4379,11 @@ cmd_configure() {
       bind_ip|egress_ip) x=""
         [[ $v == none ]] && { C[$k]=none; continue; }   # (none: cleared)
         [[ $k == bind_ip ]] && main_ip "$v" && die "bind_ip = $v is the server's main address, which every other app is served on: give $A another address of the server"
+        if [[ $k == egress_ip ]]; then
+          for x in ${v//,/ }; do
+            main_ip "$x" && die "egress_ip = $x is the server's main address, which every other app sends from: give $A another address of the server"
+          done
+        fi
         [[ $k == egress_ip ]] && [[ $v =~ ^[^,:]+(,[^,]*:[^,]*)?$ || $v =~ ^[^,]*:[^,]*$ ]] || [[ $k == bind_ip && $v != *,* ]] ||
           die "bad $k: $v (one address$([[ $k == egress_ip ]] && echo ", or an IPv4 and an IPv6 address: 192.0.2.10,2001:db8::10"))"
         for x in ${v//,/ }; do

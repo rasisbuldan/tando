@@ -1039,7 +1039,9 @@ profile on the server applies to each app at its next deploy.
   from that address of the server (SNAT by its user in nftables). One address of each family; a
   family without one leaves from the server's default address. Not for container apps yet. An
   address is one app's: another app cannot set it, and other apps' packets sent from it (a socket
-  bound to it) are dropped (counter `app_egress`).
+  bound to it) are dropped (counter `app_egress`). It must not be the server's main address (every
+  other app sends from it). For IPv6, add the address with `preferred_lft 0` so the kernel never
+  picks it as the source of another app's connections.
 - `profile`, `bind_ip` and `egress_ip` stay as they are when a tando.conf leaves them out;
   `profile = none` (or `bind_ip = none`, `egress_ip = none`) clears one, for the admin. A preview
   takes its parent's profile and none of its addresses.
@@ -1054,7 +1056,9 @@ profile on the server applies to each app at its next deploy.
   again at each start of any unit of the app (the app, its pre-flight, its env check: their
   `ExecStartPre=+tando-agent fw-ctr <app>`, which fails the unit unless the rules are loaded:
   fail closed), and after every (re)start of nftables (`tando-firewall.service`'s
-  `ExecStartPost`). A slice made again has a new id; at boot no slice exists. The
+  `ExecStartPost`; a reload of nftables, which flushes every rule, reloads it too). A slice made
+  again has a new id; at boot no slice exists. When the main rules change, the container rules
+  load in the same transaction. The
   metadata address refusal is counted in `app_meta` (also for directory apps).
 - The `cpu_sustained` alert: the app's slice above `cpu_pct` % (default 90) of its CPU limit (of
   one core without one) for `cpu_for` minutes (default 30) in a row; not counted while a deploy,

@@ -557,6 +557,8 @@ check "U18n at least 1 when nothing fits" eq "$(aa 102400 'memory=500M\n' 'memor
 # governor says no (.full, <app>.cool), before it would start the app
 check "U18o an idle app's unit asks wake-admit before it starts, and may be refused (ExecCondition, no -)" grep -q "ExecCondition=+%s wake-admit %s" "$ROOT/server/tando-agent"
 check "U18p the site of an idle app answers 503 under the governor" eval 'grep -q "try_files .full \$A.cool" "$ROOT/server/tando-agent"'
+check "U18t a wake whose count cannot be taken (lock timeout) is refused, never admitted unchecked" eval 'sed -n "/^cmd_wake_admit() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "awake_lock || {.*return 1; }"'
+check "U18u a reload of nftables reloads tando's rules too" eval 'grep -q "^ReloadPropagatedFrom=nftables.service" "$ROOT/server/tando-agent" && grep -q "^ExecReload=-\$AGENT fw-sync" "$ROOT/server/tando-agent"'
 check "U18q a stop of an idle app leaves the governor's count" eval 'sed -n "/^cmd_idle_stopped() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q awake_gone'
 
 echo "core-unit: $n checks, $nf failed"

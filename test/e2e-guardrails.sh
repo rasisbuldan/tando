@@ -100,6 +100,9 @@ srv "sudo ip addr add $extra/32 dev $dev" > /dev/null
 mk ge "egress_ip = 198.51.100.7"
 up ge; rc=$?
 check "G16 egress_ip that is not the server's: refused, listing its addresses" eval '[ $rc != 0 ] && grep -q "is not an address of this server" "$E/up-ge.log"'
+mk ge "egress_ip = $main"
+up ge; rc=$?
+check "G16b egress_ip on the server's main address (every other app's) is refused" eval '[ $rc != 0 ] && grep -q "main address" "$E/up-ge.log"'
 mk ge "egress_ip = $extra"
 up ge; rc=$?
 ue=$(srv "id -u tando-ge")
@@ -185,6 +188,10 @@ if command -v docker > /dev/null 2>&1 || command -v podman > /dev/null 2>&1; the
   srv "sudo systemctl restart nftables.service" > /dev/null 2>&1 || srv "sudo systemctl restart tando-firewall.service" > /dev/null
   t_until 20 eval 'srv "sudo nft list chain inet tando containers" | grep -qF -e "tando-g\\x2dc.slice" -e "tando-g-c.slice"' > /dev/null; r=$?
   check "G32 after nftables is restarted the running container's rules are back" eval '[ $r = 0 ]'
+  # a reload of nftables runs its config, which flushes everything: tando's rules come back with it
+  srv "sudo systemctl reload nftables.service" > /dev/null 2>&1; rr=$?
+  t_until 20 eval 'srv "sudo nft list chain inet tando containers" | grep -qF -e "tando-g\\x2dc.slice" -e "tando-g-c.slice" && srv "sudo nft list chain inet tando output" | grep -q "skuid"' > /dev/null; r=$?
+  check "G32b after nftables is reloaded every tando rule is back (reload rc $rr)" eval '[ $r = 0 ]'
   # fail closed: with the rules not loadable (nft gone for a moment) the container does not start
   srv "sudo mv /usr/sbin/nft /usr/sbin/nft.off; sudo systemctl restart tando-g-c.service" > /dev/null 2>&1; r=$?
   st=$(srv "systemctl show -P ActiveState tando-g-c.service")
