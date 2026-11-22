@@ -25,6 +25,9 @@ type entry struct {
 	// an app's slice counters at the last sample (-1: not known): cpu.stat nr_periods and
 	// nr_throttled, memory.events oom_kill
 	periods, throttled, ooms int64
+	// an app's uid's network bytes at the last sample (-1: not known): sent and received, the
+	// nftables counters out_<uid> and in_<uid> of fw_sync
+	out, in int64
 }
 
 // state maps an app (or hostKey) to its entry.
@@ -47,7 +50,7 @@ func loadState(path string) (state, error) {
 		if len(f) == 0 {
 			continue
 		}
-		e := entry{usec: -1, periods: -1, throttled: -1, ooms: -1}
+		e := entry{usec: -1, periods: -1, throttled: -1, ooms: -1, out: -1, in: -1}
 		if len(f) > 1 {
 			if n, err := strconv.ParseInt(f[1], 10, 64); err == nil {
 				e.usec = n
@@ -62,7 +65,7 @@ func loadState(path string) (state, error) {
 		if len(f) > 4 {
 			e.x, _ = strconv.ParseInt(f[4], 10, 64)
 		}
-		for i, p := range []*int64{&e.periods, &e.throttled, &e.ooms} {
+		for i, p := range []*int64{&e.periods, &e.throttled, &e.ooms, &e.out, &e.in} {
 			if len(f) > 5+i {
 				if n, err := strconv.ParseInt(f[5+i], 10, 64); err == nil {
 					*p = n
@@ -81,7 +84,7 @@ func (st state) format(keys []string) []byte {
 		e := st[k]
 		fmt.Fprintf(&b, "%s %d %d %d %d", k, e.usec, e.start, e.lines, e.x)
 		if k != hostKey {
-			fmt.Fprintf(&b, " %d %d %d", e.periods, e.throttled, e.ooms)
+			fmt.Fprintf(&b, " %d %d %d %d %d", e.periods, e.throttled, e.ooms, e.out, e.in)
 		}
 		b.WriteByte('\n')
 	}

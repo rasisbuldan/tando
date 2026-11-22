@@ -237,6 +237,7 @@ func (s *Store) Do(req Request, wait time.Duration, run func() Response) Respons
 	if sl, err = lock.Acquire(s.path("store.lock"), 5*time.Minute); err == nil {
 		if resp.Error != nil && (resp.Error.Code == "bad_request" || resp.Error.Code == "not_found") {
 			os.Remove(s.rec(rec.ID)) // refused before it did anything: nothing to keep
+			s.bump(s.NS, -1)
 		} else if err := s.save(rec); err != nil {
 			resp.Warning = "the result could not be stored (" + err.Error() + "): a retry with this id reports it interrupted"
 		}
@@ -326,25 +327,33 @@ func (s *Store) waitTurn(app string, seq int64) {
 	}
 }
 
-// room: the namespace may take one more record; when it is full, its oldest done records older
-// than Recent go first (under the store lock). Other namespaces are never touched.
+// room: the namespace may take one more record (and now holds it in the count); when it is full,
+// its oldest done records older than Recent go first (under the store lock). Other namespaces
+// are never touched.
+//
+// The records are counted in count-<ns> (kept with every add and drop), so a request is O(1)
+// while the namespace has room and while it is full of recent records: a full namespace is
+// scanned (and recounted: the file heals any drift) at most once a minute (scanEvery).
 func (s *Store) room() bool {
-	ents, _ := os.ReadDir(s.path("req", s.NS))
-	n := 0
-	for _, e := range ents {
-		if strings.HasSuffix(e.Name(), ".json") {
-			n++
-		}
+	n, scan, ok := s.counter(s.NS)
+	if !ok {
+		n = s.countRecords()
 	}
+	now := s.now()
 	if n < s.cap() {
+		s.setCounter(s.NS, n+1, 0)
 		return true
 	}
+	if scan > 0 && now.Unix()-scan < int64(scanEvery/time.Second) && now.Unix() >= scan {
+		return false
+	}
+	ents, _ := os.ReadDir(s.path("req", s.NS))
+	n = s.countRecords()
 	type done struct {
 		id  string
 		fin int64
 	}
 	var old []done
-	now := s.now()
 	for _, e := range ents {
 		id, ok := strings.CutSuffix(e.Name(), ".json")
 		if !ok {
@@ -359,11 +368,62 @@ func (s *Store) room() bool {
 		if n < s.cap() {
 			break
 		}
-		if s.drop(s.NS, d.id) {
+		if s.dropFile(s.NS, d.id) {
 			n--
 		}
 	}
-	return n < s.cap()
+	if n < s.cap() {
+		s.setCounter(s.NS, n+1, 0)
+		return true
+	}
+	s.setCounter(s.NS, n, now.Unix())
+	return false
+}
+
+// scanEvery: how often a full namespace is looked at again for records that may go.
+const scanEvery = time.Minute
+
+func (s *Store) countFile(ns string) string { return s.path("count-" + ns) }
+
+// counter reads count-<ns>: "<records> <unix time of the last fruitless scan>".
+func (s *Store) counter(ns string) (n int, scan int64, ok bool) {
+	b, err := os.ReadFile(s.countFile(ns))
+	if err != nil {
+		return 0, 0, false
+	}
+	f := strings.Fields(string(b))
+	if len(f) != 2 {
+		return 0, 0, false
+	}
+	n64, e1 := strconv.Atoi(f[0])
+	scan, e2 := strconv.ParseInt(f[1], 10, 64)
+	if e1 != nil || e2 != nil || n64 < 0 {
+		return 0, 0, false
+	}
+	return n64, scan, true
+}
+
+func (s *Store) setCounter(ns string, n int, scan int64) {
+	atomicfile.Write(s.countFile(ns), []byte(fmt.Sprintf("%d %d\n", n, scan)), atomicfile.Mode(0o600))
+}
+
+// bump changes a namespace's count by d (a record made or gone); with no count yet there is
+// nothing to keep right (room counts the files first).
+func (s *Store) bump(ns string, d int) {
+	if n, scan, ok := s.counter(ns); ok {
+		s.setCounter(ns, max(0, n+d), scan)
+	}
+}
+
+func (s *Store) countRecords() int {
+	ents, _ := os.ReadDir(s.path("req", s.NS))
+	n := 0
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), ".json") {
+			n++
+		}
+	}
+	return n
 }
 
 // prune removes done records older than Retention in every namespace (at most every pruneEvery;
@@ -396,7 +456,17 @@ func (s *Store) prune() {
 	}
 }
 
+// drop removes a record (not one whose request runs) and counts it out.
 func (s *Store) drop(ns, id string) bool {
+	if !s.dropFile(ns, id) {
+		return false
+	}
+	s.bump(ns, -1)
+	return true
+}
+
+// dropFile is drop without the count (room recounts itself).
+func (s *Store) dropFile(ns, id string) bool {
 	if lock.Held(s.path("req", ns, id+".lock")) {
 		return false
 	}

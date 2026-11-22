@@ -347,6 +347,130 @@ EOF
   ((WIC_CHANGED)) && dreload
   systemd-tmpfiles --create "$f" 2> /dev/null || true
 }
+# ---- the awake governor (docs/COMMANDS.md "Idle apps: the awake governor") --------------------
+# A crawler that walks the apps' hostnames would wake every idle app at once. Two limits:
+# - awake_max (host setup; default auto = awake_auto: what admission counted on): idle apps awake
+#   at once. A wake over it stops the awake idle app woken longest ago that has no open connection
+#   to its port and has been awake at least AWAKE_GRACE seconds. When there is none, the wake
+#   still goes on (the request is already waiting) and Caddy answers the next cold requests of any
+#   idle app 503 with Retry-After (marker .full) until one is free again (wake-check, every 30 s).
+#   A busy app is never stopped for another: only one nobody uses; a burst is refused, not thrashed.
+# - wake_rate (default WAKE_RATE a minute): wakes of one app. Over it, Caddy answers that app's
+#   cold requests 503 for a minute (marker <app>.cool).
+# Markers live in WAKE_DIR (tmpfs: none after a reboot); <app>.awake is there from the wake until
+# the app stops (idle-stopped). wake-admit is the ExecStartPre of an idle app's unit (write_unit).
+WAKE_RATE=30 AWAKE_GRACE=60
+awake_cap() {
+  local m=${H[awake_max]:-auto}
+  case $m in off) echo 0;; auto) awake_auto;; *) [[ $m =~ ^[1-9][0-9]*$ ]] && echo "$m" || awake_auto;; esac
+}
+# awake_files: the apps counted awake (<app>.awake), each checked: a marker whose app is gone or
+# whose unit is neither running nor starting (a crash, a destroy) is removed, not counted
+awake_files() {
+  local f a st
+  for f in "$WAKE_DIR"/*.awake; do
+    [[ -f $f ]] || continue
+    a=${f##*/}; a=${a%.awake}
+    st=$(systemctl show -P ActiveState "tando-$a.service" 2> /dev/null)
+    if [[ -f $R/apps/$a/app.conf && ( $st == active || $st == activating || $st == reloading ) ]]; then echo "$f"
+    else rm -f "$f"; fi
+  done
+}
+# awake_victim [except]: the idle app to stop for a new wake (see above), or fails
+awake_victim() {
+  local t a p now; now=$(now)
+  while read -r t a; do
+    [[ $a == "${1:-}" ]] && continue
+    ((t <= now - AWAKE_GRACE)) || continue
+    p=$(sed -n 's/^port=//p' "$R/apps/$a/app.conf" 2> /dev/null)
+    [[ $p =~ ^[0-9]+$ ]] || continue
+    # in use: a connection to its port with traffic within the last AWAKE_GRACE seconds (an idle
+    # keep-alive, Caddy's or a client's, keeps no app awake)
+    ss -Htni state established "( sport = :$p )" 2> /dev/null | awk -v g=$((AWAKE_GRACE * 1000)) '
+      { for (i = 1; i <= NF; i++) if ($i ~ /^last(snd|rcv):[0-9]+$/) { split($i, x, ":"); if (x[2] + 0 < g) busy = 1 } }
+      END { exit !busy }' && continue
+    echo "$a"; return 0
+  done < <(for f in $(awake_files); do a=${f##*/}; echo "$(stat -c %Y "$f") ${a%.awake}"; done | sort -n)
+  return 1
+}
+# awake_trim [except]: (WAKE_DIR/.lock held) stop idle apps until at most awake_max are awake; set
+# or clear .full; while it is set, check again in 30 s
+awake_trim() {
+  local max n=0 f v
+  max=$(awake_cap)
+  if ! [[ $max =~ ^[1-9][0-9]*$ ]]; then rm -f "$WAKE_DIR/.full"; return 0; fi
+  for f in $(awake_files); do n=$((n + 1)); done
+  while ((n > max)) && v=$(awake_victim "${1:-}"); do
+    rm -f "$WAKE_DIR/$v.awake"; n=$((n - 1))
+    systemctl stop --no-block "tando-${v}_wake.service" "tando-$v.service" 2> /dev/null
+    echo "tando-agent: stopped the idle app $v for a wake of ${1:-another app} (awake_max $max)" >&2
+  done
+  if ((n >= max)) && ! awake_victim "${1:-}" > /dev/null; then
+    [[ -f $WAKE_DIR/.full ]] || echo "tando-agent: $n idle apps awake (awake_max $max): other idle apps answer 503 until one stops" >&2
+    : > "$WAKE_DIR/.full"
+    systemd-run --quiet --no-block --collect --unit="tando-wake-check-$(now)" --on-active=30 "$AGENT" wake-check > /dev/null 2>&1
+  else
+    rm -f "$WAKE_DIR/.full"
+  fi
+}
+awake_lock() { mkdir -p "$WAKE_DIR"; exec 6> "$WAKE_DIR/.lock"; flock -w 10 6; }
+cmd_wake_admit() {
+  app "$1"
+  idle_app || return 0
+  awake_lock || { echo "tando-agent: $A not woken: the awake count is busy (over 10 s)" >&2; return 1; }   # (refused, never admitted unchecked)
+  local now t w=() rate=${H[wake_rate]:-$WAKE_RATE}
+  [[ $rate =~ ^[1-9][0-9]*$ ]] || rate=$WAKE_RATE
+  now=$(now)
+  if [[ -f $WAKE_DIR/$A.wakes ]]; then
+    while read -r t; do [[ $t =~ ^[0-9]+$ ]] && ((t > now - 60)) && w+=("$t"); done < "$WAKE_DIR/$A.wakes"
+  fi
+  w+=("$now"); printf '%s\n' "${w[@]}" > "$WAKE_DIR/$A.wakes"
+  if ((${#w[@]} >= rate)) && [[ ! -f $WAKE_DIR/$A.cool ]]; then
+    : > "$WAKE_DIR/$A.cool"
+    systemd-run --quiet --no-block --collect --unit="tando-${A}_cool-$now" --on-active=60 /bin/rm -f "$WAKE_DIR/$A.cool" > /dev/null 2>&1
+    echo "tando-agent: $A was woken ${#w[@]} times within a minute (wake_rate $rate): its cold requests get 503 for a minute" >&2
+  fi
+  # the cap, before the app starts (this is its unit's ExecCondition): a slot, or a quiet app to
+  # stop for it, or the start is skipped (no failure: the unit stays inactive, its wake socket
+  # listens on; Caddy answers this app's and every other idle app's cold requests 503 meanwhile).
+  # tando's own start (a deploy, a restart: <app>.admin) is never refused
+  local max n=0 f v
+  max=$(awake_cap)
+  # (a marker a minute old or more is a start that never came: not honoured)
+  if [[ -f $WAKE_DIR/$A.admin ]] && (($(stat -c %Y "$WAKE_DIR/$A.admin") > now - 60)); then rm -f "$WAKE_DIR/$A.admin"
+  elif [[ $max =~ ^[1-9][0-9]*$ ]]; then
+    rm -f "$WAKE_DIR/$A.admin"
+    for f in $(awake_files); do [[ $f != "$WAKE_DIR/$A.awake" ]] && n=$((n + 1)); done
+    if ((n >= max)) && v=$(awake_victim "$A"); then
+      rm -f "$WAKE_DIR/$v.awake"; n=$((n - 1))
+      systemctl stop --no-block "tando-${v}_wake.service" "tando-$v.service" 2> /dev/null
+      echo "tando-agent: stopped the idle app $v for a wake of $A (awake_max $max)" >&2
+    fi
+    if ((n >= max)); then
+      : > "$WAKE_DIR/.full"
+      systemd-run --quiet --no-block --collect --unit="tando-wake-check-$now" --on-active=30 "$AGENT" wake-check > /dev/null 2>&1
+      # (a skipped start counts against the unit's start limit: cleared, as a clean idle stop does)
+      # and its proxy, started anyway (it needs the app), goes: the socket listens on
+      systemd-run --quiet --no-block --collect --unit="tando-${A}_refused-$now" --on-active=2 /bin/sh -c \
+        "systemctl stop tando-${A}_wake.service; systemctl reset-failed tando-$A.service" > /dev/null 2>&1
+      echo "tando-agent: $A not woken: $n idle apps awake (awake_max $max) and none quiet: its requests get 503 until one stops" >&2
+      return 1
+    fi
+  fi
+  : > "$WAKE_DIR/$A.awake"
+  awake_trim "$A"
+  return 0
+}
+# wake-check: the timer awake_trim sets while .full is there
+cmd_wake_check() { load "$R/host.conf" H; awake_lock || return 0; awake_trim; }
+# awake_gone: (idle-stopped) the app is no longer awake
+awake_gone() {
+  [[ -f $WAKE_DIR/$A.awake || -f $WAKE_DIR/.full ]] || return 0
+  awake_lock || return 0
+  rm -f "$WAKE_DIR/$A.awake"
+  [[ -f $WAKE_DIR/.full ]] && awake_trim
+  exec 6>&-
+}
 # idle-stopped <app> [now]: the ExecStopPost of an idle app's unit (idle_stop), as root. Once the
 # app stopped cleanly (SERVICE_RESULT success: an idle stop, a deploy's restart; not a crash,
 # which restarts at once):
@@ -369,6 +493,7 @@ cmd_idle_stopped() {
   app "$1"
   idle_app || return 0
   if [[ ${2:-} != now ]]; then
+    awake_gone
     [[ ${SERVICE_RESULT:-success} == success ]] || return 0
     systemctl reset-failed "tando-$A.service" 2> /dev/null
     [[ -x $LOGS ]] || return 0
@@ -555,11 +680,11 @@ cmd_domain_check() {
   local since; since=$(date '+%Y-%m-%d %H:%M:%S' -d '-5 sec')
   while ((t < 90)); do
     if [[ $dt == off ]]; then
-      code=$(curl -s -A "$PROBE_UA" -H "@$PROBE_HDR" -o /dev/null -m 5 -w '%{http_code}' -H "Host: $d" "http://127.0.0.1$(health_path)")
+      code=$(curl -s -A "$PROBE_UA" -H "@$PROBE_HDR" -o /dev/null -m 5 -w '%{http_code}' -H "Host: $d" "http://$(caddy_host)$(health_path)")
     else
       opts=(); [[ $dt == internal ]] && opts=(--cacert "$ca")
       code=$(curl -s -A "$PROBE_UA" -H "@$PROBE_HDR" -o /dev/null -m 5 -w '%{http_code}' "${opts[@]}" \
-        --resolve "$d:443:127.0.0.1" "https://$d$(health_path)" 2> /dev/null)
+        --resolve "$d:443:$(caddy_host)" "https://$d$(health_path)" 2> /dev/null)
     fi
     [[ $code == [23]?? ]] && { [[ $dt == off ]] && echo "live=http://$d${C[path]:-}" || echo "live=https://$d${C[path]:-}"
       echo "expires=$(cert_expiry "$d")"; return 0; }
@@ -604,6 +729,7 @@ wake_mark() { echo "$WAKE_DIR/$A.up"; }
 svc_restart() {
   if idle_app; then
     systemctl stop "tando-${A}_wake.service" "tando-$A.service" &&
+      { mkdir -p "$WAKE_DIR" && : > "$WAKE_DIR/$A.admin"; }   # (wake_admit: tando's own start is never refused)
       systemctl start "tando-${A}_wake.socket" "tando-${A}_wake.service"
   else
     systemctl restart "tando-$A"
@@ -842,6 +968,167 @@ mem_admit() {
   ADMIT_WHY="the memory caps of all apps would be $total MB with $A at $mine MB, over $limit MB ($ram MB RAM x $oc, mem_overcommit; an app with idle_stop counts ${IDLE_MB:-2} MB + ${H[idle_awake]:-${IDLE_AWAKE:-20}}% of its memory): lower memory = in tando.conf, set idle_stop, remove an app, or deploy anyway with --force"
   return 1
 }
+# ---- profiles (host setup profile.<name>=...; tando.conf profile = <name>) ----------------------
+# A profile is a named set of limits on the host (host.conf profile.<name>=k=v,k=v): an app with
+# `profile = <name>` gets them as ceilings it cannot raise from its tando.conf, and cpu, tasks and
+# job_timeout become mandatory (the profile's value when the app sets none). Its slice holds the web
+# process, the workers and the jobs, so CPUQuota and TasksMax cover them all. Keys:
+#   memory=<size>   the largest memory = (and worker.<n>.memory =)
+#   cpu=<n>%|<cores> tasks=<n> job_timeout=<seconds>   ceilings, and the default when unset
+#   workers=<n>     at most this many workers (0: none)
+#   job_every=<n>[smh]   jobs at most this often (the shortest gap between two runs of a schedule)
+#   mail_out=off    no outbound mail (ports 25, 465, 587, 2525); on: the app chooses
+PROFILE_KEYS="memory cpu tasks workers job_timeout job_every mail_out"
+# profile_spec_ok spec: the spec is well formed (PROF_WHY when not). bash 3.2 (test/core-unit.sh)
+profile_spec_ok() {
+  local kv k v rest=$1,
+  PROF_WHY=""
+  [[ -n $1 ]] || { PROF_WHY="empty"; return 1; }
+  while [[ -n $rest ]]; do
+    kv=${rest%%,*}; rest=${rest#*,}
+    k=${kv%%=*} v=${kv#*=}
+    [[ $kv == *=* && -n $v ]] || { PROF_WHY="$kv is not key=value"; return 1; }
+    case $k in
+      memory) [[ $v =~ ^[1-9][0-9]*[KMG]$ ]] || { PROF_WHY="memory=$v: a size like 256M"; return 1; };;
+      cpu) [[ $v =~ ^[1-9][0-9]{0,3}%$ || ( $v =~ ^[0-9]{1,2}(\.[0-9]{1,2})?$ && $v != 0 && $v != 0.0 ) ]] || { PROF_WHY="cpu=$v: like 25% or 0.5 (cores)"; return 1; };;
+      tasks) [[ $v =~ ^[1-9][0-9]{1,5}$ ]] || { PROF_WHY="tasks=$v: processes and threads, like 256"; return 1; };;
+      workers) [[ $v =~ ^[0-9]{1,2}$ ]] && ((v <= 20)) || { PROF_WHY="workers=$v: 0 to 20"; return 1; };;
+      job_timeout) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] && ((v <= 86400)) || { PROF_WHY="job_timeout=$v: seconds, 1 to 86400"; return 1; };;
+      job_every) [[ $v =~ ^[1-9][0-9]{0,4}[smh]$ ]] || { PROF_WHY="job_every=$v: like 15m, 1h or 30s"; return 1; };;
+      mail_out) [[ $v == on || $v == off ]] || { PROF_WHY="mail_out=$v: on or off"; return 1; };;
+      *) PROF_WHY="unknown key $k (one of: $PROFILE_KEYS)"; return 1;;
+    esac
+  done
+  return 0
+}
+# profile_check spec < settings (key=value lines): what the profile makes of them. Prints
+# "set <key>=<value>" for each limit the app does not set (the profile's value), and "bad <why>"
+# for each setting over a ceiling. One awk; bash 3.2 (test/core-unit.sh).
+profile_check() {
+  awk -v spec="$1" '
+    function mb(v) { if (v ~ /G$/) return v * 1024; if (v ~ /M$/) return v + 0; if (v ~ /K$/) return int(v / 1024); return 256 }
+    function pct(v) { if (v ~ /%$/) return v + 0; return v * 100 }
+    BEGIN { n = split(spec, p, ","); for (i = 1; i <= n; i++) { k = p[i]; sub(/=.*/, "", k); v = p[i]; sub(/^[^=]*=/, "", v); P[k] = v } }
+    { k = $0; sub(/=.*/, "", k); v = $0; sub(/^[^=]*=/, "", v); A[k] = v
+      if (k ~ /^worker\.[^.]+$/) nw++
+      if (k ~ /^worker\.[^.]+\.memory$/) wm[k] = v
+      if (k ~ /^job\.[^.]+\.timeout$/) jt[k] = v }
+    END {
+      if ("memory" in P) {
+        if (!("memory" in A)) print "set memory=" P["memory"]
+        else if (mb(A["memory"]) > mb(P["memory"])) print "bad memory = " A["memory"] " is over " P["memory"]
+        for (k in wm) if (mb(wm[k]) > mb(P["memory"])) print "bad " k " = " wm[k] " is over " P["memory"]
+      }
+      if ("cpu" in P) {
+        if (!("cpu" in A)) print "set cpu=" P["cpu"]
+        else if (pct(A["cpu"]) > pct(P["cpu"])) print "bad cpu = " A["cpu"] " is over " P["cpu"]
+      }
+      if ("tasks" in P) {
+        if (!("tasks" in A)) print "set tasks=" P["tasks"]
+        else if (A["tasks"] + 0 > P["tasks"] + 0) print "bad tasks = " A["tasks"] " is over " P["tasks"]
+      }
+      if ("job_timeout" in P) {
+        if (!("job_timeout" in A)) print "set job_timeout=" P["job_timeout"]
+        else if (A["job_timeout"] + 0 > P["job_timeout"] + 0) print "bad job_timeout = " A["job_timeout"] " is over " P["job_timeout"]
+        for (k in jt) if (jt[k] + 0 > P["job_timeout"] + 0) print "bad " k " = " jt[k] " is over " P["job_timeout"]
+      }
+      if ("workers" in P && nw + 0 > P["workers"] + 0) print "bad " nw " workers, the profile allows " P["workers"]
+      if (P["mail_out"] == "off") {
+        if (!("mail_out" in A)) print "set mail_out=off"
+        else if (A["mail_out"] == "on") print "bad mail_out = on: the profile has no outbound mail"
+      }
+    }'
+}
+# dur_secs 15m: seconds of a duration (s, m, h)
+dur_secs() {
+  case $1 in *s) echo "${1%s}";; *m) echo $((${1%m} * 60));; *h) echo $((${1%h} * 3600));; *) echo "$1";; esac
+}
+# job_gap calendar: the shortest gap in seconds between the next four runs of a systemd calendar
+# (0 when it cannot tell). The times are read as job_spread_for reads them.
+job_gap() {
+  local o t prev="" g min=0
+  o=$(systemd-analyze calendar --iterations=4 "$1" 2> /dev/null)
+  t=$(sed -n 's/^ *(in UTC): //p' <<< "$o")
+  [[ $t == ?*$'\n'?* ]] || t=$(sed -n 's/^ *Next elapse: //p; s/^ *Iter\. #[0-9]*: //p; s/^ *Iteration #[0-9]*: //p' <<< "$o")
+  while IFS= read -r t; do
+    t=$(date -d "$t" +%s 2> /dev/null) || continue
+    if [[ -n $prev ]]; then g=$((t - prev)); ((min == 0 || g < min)) && min=$g; fi
+    prev=$t
+  done <<< "$t"
+  echo "$min"
+}
+# awake_auto: how many apps with idle_stop may be awake at once when host.conf says awake_max=auto
+# (the default): as many as fit at their caps into what admission allows (RAM x mem_overcommit),
+# beside the caps of the apps that always run and the idle cost of every idle app; at least 1.
+# 0: no cap (no idle app, mem_overcommit=0, RAM not known).
+awake_auto() {
+  local ram oc=${H[mem_overcommit]:-$MEM_OVERCOMMIT}
+  [[ $oc =~ ^[0-9]{1,2}(\.[0-9]{1,2})?$ ]] || oc=$MEM_OVERCOMMIT
+  ram=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2> /dev/null)
+  if [[ $oc =~ ^0+(\.0+)?$ || ! $ram =~ ^[1-9][0-9]*$ ]]; then echo 0; return 0; fi
+  { mem_caps_mb "$R"/apps/*/app.conf; echo --; mem_caps_mb -a "$R"/apps/*/app.conf; } |
+    awk -v lim="$(awk -v r="$ram" -v o="$oc" 'BEGIN { print int(r * o) }')" -v idle="${IDLE_MB:-2}" '
+      $1 == "--" { second = 1; next }
+      !second { full[$1] = $2; next }
+      $2 < full[$1] { ni++; caps += full[$1]; next }   # counted less for admission: an idle app
+      { always += full[$1] }
+      END { if (!ni) { print 0; exit }
+            n = int((lim - always - ni * idle) / (caps / ni)); if (n < 1) n = 1; print n }'
+}
+# profile_apply: the app's profile (C[profile]) applied to its new settings (C): its ceilings
+# refuse the deploy, its defaults fill in what the app does not set; its job_every refuses a job
+# that runs more often. An unknown profile refuses the deploy.
+ADMIN_KEYS="profile bind_ip egress_ip"
+profile_apply() {
+  [[ -n ${C[profile]:-} ]] || return 0
+  local p=${C[profile]} spec l why="" k g min
+  spec=${H[profile.$p]:-}
+  [[ -n $spec ]] || die "there is no profile $p on this server (tando host setup <host> profile.$p=...): remove profile from tando.conf or ask the admin"
+  while IFS= read -r l; do
+    case $l in
+      set\ *) l=${l#set }; C[${l%%=*}]=${l#*=};;
+      bad\ *) why+="${why:+; }${l#bad }";;
+    esac
+  done < <(for k in "${!C[@]}"; do printf '%s=%s\n' "$k" "${C[$k]}"; done | profile_check "$spec")
+  if [[ ,$spec, == *,job_every=* ]]; then
+    min=${spec#*job_every=}; min=$(dur_secs "${min%%,*}")
+    for k in "${!C[@]}"; do
+      [[ $k =~ ^job\.[a-z][a-z0-9-]*$ ]] || continue
+      g=$(job_gap "$(trim "${C[$k]%%|*}")")
+      if ((g == 0)); then why+="${why:+; }cannot tell how often ${k#job.} runs (its schedule has no next runs)"
+      elif ((g < min)); then why+="${why:+; }${k#job.} runs every ${g}s, more often than every ${min}s"; fi
+    done
+  fi
+  [[ -z $why ]] || die "profile $p of this server does not allow this: $why"
+}
+# prof_get key: the value of key in the app's profile (C[profile]); fails when it has none
+prof_get() {
+  local p=${C[profile]:-} s
+  [[ -n $p ]] || return 1
+  s=${H[profile.$p]:-}
+  [[ -n $s ]] || s=$(grep -m1 "^profile\.$p=" "$R/host.conf" 2> /dev/null) s=${s#*=}
+  s=",$s,"
+  [[ $s == *",$1="* ]] || return 1
+  s=${s#*",$1="}; echo "${s%%,*}"
+}
+# mem_cap: the app's memory (C[memory], default 256M), at most its profile's: units are written
+# with it, so a rollback to a release from before the profile does not raise it
+mem_cap() {
+  local m=${C[memory]:-256M} p
+  [[ $m =~ ^[0-9]+[KMG]$ ]] || m=256M
+  if p=$(prof_get memory) && (($(size_mb "$p") < $(size_mb "$m"))); then m=$p; fi
+  echo "$m"
+}
+# node_ips: the addresses of this server (not loopback, not link-local); node_ip addr: one of them
+node_ips() { ip -o addr show 2> /dev/null | awk '$4 !~ /^(127\.|::1\/|fe80:)/ { sub(/\/.*/, "", $4); print $4 }'; }
+# main_ip addr: addr is the source address of the server's default route (IPv4 or IPv6)
+main_ip() {
+  local m
+  m=$(ip route get 192.0.2.1 2> /dev/null; ip -6 route get 2001:db8::1 2> /dev/null)
+  m=$(sed -n 's/.* src \([^ ]*\).*/\1/p' <<< "$m")
+  grep -qixF -- "$1" <<< "$m"
+}
+node_ip() { [[ $1 =~ ^[0-9a-fA-F.:]+$ ]] && grepq -ixF -- "$1" <<< "$(node_ips)"; }
 # prio_sync: tando.slice's MemoryLow is the sum of the high-priority apps' (a child's protection
 # counts only up to what its parent has), in a drop-in written only when it changes
 prio_sync() {
@@ -910,18 +1197,31 @@ core_reserve() {
   CORE_RES="$src reserve: root, PostgreSQL, Caddy"
 }
 write_slice() {
-  local mem=${C[memory]:-256M} mb cpu=${C[cpu]:-}
+  local mem mb cpu=${C[cpu]:-}
+  mem=$(mem_cap)
   [[ $mem =~ ^([0-9]+)([KMG])$ ]] || mem=256M
   [[ $mem =~ ^([0-9]+)([KMG])$ ]]; mb=${BASH_REMATCH[1]}
   case ${BASH_REMATCH[2]} in K) mb=$((mb / 1024));; G) mb=$((mb * 1024));; esac
   # memory: the live app, its pre-flight beside it during a deploy, and a job or shell (3x memory),
   # plus each worker's own cap
-  local n wmb=0
+  local n wmb=0 x p
   [[ " ${!C[*]}" == *" worker."* ]] &&
-    for n in $(worker_names); do wmb=$((wmb + $(size_mb "${C[worker.$n.memory]:-$mem}"))); done
+    for n in $(worker_names); do
+      x=$(size_mb "${C[worker.$n.memory]:-$mem}")
+      p=$(prof_get memory) && (($(size_mb "$p") < x)) && x=$(size_mb "$p")   # (as mem_cap: the profile's)
+      wmb=$((wmb + x))
+    done
   [[ $cpu == *% ]] || { [[ -n $cpu ]] && cpu=$(awk -v c="$cpu" 'BEGIN { printf "%d%%", c * 100 }'); }
+  # the app's profile is a ceiling here too: settings that came back with a rollback to a release
+  # from before it never raise the slice's CPU or task limit over the profile's
+  local tasks=${C[tasks]:-1024} pv
+  if pv=$(prof_get cpu); then
+    [[ $pv == *% ]] || pv=$(awk -v c="$pv" 'BEGIN { printf "%d%%", c * 100 }')
+    [[ -z $cpu ]] || ((${cpu%\%} > ${pv%\%})) && cpu=$pv
+  fi
+  pv=$(prof_get tasks) && ((tasks > pv)) && tasks=$pv
   { printf '[Unit]\nDescription=tando app %s: all its units together\n\n[Slice]\n' "$A"
-    printf 'MemoryMax=%sM\nTasksMax=%s\nCPUWeight=%s\n' $((mb * 3 + wmb)) "${C[tasks]:-1024}" "$(cpu_weight)"
+    printf 'MemoryMax=%sM\nTasksMax=%s\nCPUWeight=%s\n' $((mb * 3 + wmb)) "$tasks" "$(cpu_weight)"
     # (if, not &&: the group's status is its last command's, and "|| return 1" below read a
     # priority that is not high as a failed write: no slice file at all)
     if [[ -n $cpu ]]; then printf 'CPUQuota=%s\n' "$cpu"; fi
@@ -965,7 +1265,7 @@ props() { # port [kind]
   # and is restarted. NODE_OPTIONS in the app's env replaces this (the env file wins over
   # Environment=), so does --max-old-space-size in the start command; adopted apps keep theirs.
   if [[ ( ${C[recipe]:-} == node || ${C[recipe]:-} == next ) && -z ${C[adopted_from]:-} &&
-        ${C[start]:-} != *max-old-space-size* && ${C[memory]:-256M} =~ ^([0-9]+)([KMG])$ ]]; then
+        ${C[start]:-} != *max-old-space-size* && $(mem_cap) =~ ^([0-9]+)([KMG])$ ]]; then
     local mb=${BASH_REMATCH[1]}
     case ${BASH_REMATCH[2]} in K) mb=$((mb / 1024));; G) mb=$((mb * 1024));; esac
     mb=$((mb * 7 / 10)); ((mb >= 64)) && envs+=" NODE_OPTIONS=--max-old-space-size=$mb"
@@ -976,8 +1276,12 @@ props() { # port [kind]
     # as quadlet does: podman starts the container and exits, conmon stays as the main process
     # (Type=notify), the container's cgroup is created inside the unit's (Delegate). No mount
     # namespace options: podman's network namespaces must stay visible to later podman calls
+    # its slice exists now (the unit's cgroup is made before this runs): the network rules by
+    # slice (fw_ctr_load) take its id, which is new when the slice was made again. Fail closed:
+    # the unit (the app, its pre-flight, the env check) does not start unless they are loaded
+    echo "ExecStartPre=+$AGENT fw-ctr $A"
     printf '%s\n' Type=notify NotifyAccess=all Delegate=yes KillMode=mixed \
-      "ExecStop=$AGENT container-stop $A" "MemoryMax=${C[memory]:-256M}" SuccessExitStatus=143 \
+      "ExecStop=$AGENT container-stop $A" "MemoryMax=$(mem_cap)" SuccessExitStatus=143 \
       "Environment=PORT=$p" "Slice=$(app_slice)" "OOMScoreAdjust=$(oom_adj)"
     [[ -x $LOGS ]] && "$LOGS" unit-props "$A"   # conmon passes the container's output to it
     return
@@ -992,7 +1296,7 @@ props() { # port [kind]
   for x in "User=$AU" "Group=$AU" NoNewPrivileges=yes ProtectSystem=strict \
       ProtectHome=yes "$tmp" PrivateDevices=yes PrivateIPC=yes \
       "TemporaryFileSystem=/dev/shm:size=$SHM_SIZE,mode=1777" "ReadWritePaths=$rw" \
-      "${sock[@]}" "MemoryMax=${C[memory]:-256M}" MemorySwapMax=0 \
+      "${sock[@]}" "MemoryMax=$(mem_cap)" MemorySwapMax=0 \
       ${C[memory_high]:+"MemoryHigh=${C[memory_high]}"} \
       SuccessExitStatus=143 "${ef[@]}" "EnvironmentFile=$D/env" "Environment=$envs" \
       "Slice=$(app_slice)" "OOMScoreAdjust=$(oom_adj)" "${SD_HARD[@]}"; do
@@ -1032,8 +1336,10 @@ write_unit() {
     printf '\n[Service]\n'
     printf 'ExecStart=%s exec-app %s\n' "$AGENT" "$A"
     # ready once its port answers (the proxy is ordered after it): up to health_timeout. Then its
-    # mark (wake_mark, as root: +) tells Caddy it runs; it goes when the process stops
+    # mark (wake_mark, as root: +) tells Caddy it runs; it goes when the process stops. Before it
+    # starts, the awake governor counts the wake (wake-admit)
     if idle_app; then
+      printf 'ExecCondition=+%s wake-admit %s\n' "$AGENT" "$A"
       printf 'ExecStartPost=/bin/bash -c '"'"'for i in {1..%s}; do (exec 3<>/dev/tcp/127.0.0.1/%s) 2> /dev/null && exit 0; sleep 0.1; done; exit 1'"'"'\n' \
         $(( ${C[health_timeout]:-60} * 10 )) "${C[port]}"
       printf 'ExecStartPost=+/bin/touch %s\nExecStopPost=+/bin/rm -f %s\n' "$(wake_mark)" "$(wake_mark)"
@@ -1149,6 +1455,11 @@ write_caddy() {
   # an earlier change cut off between its rename and Caddy's reload: the file Caddy last
   # accepted comes back first, so the one below is validated and reloaded, never taken as done
   [[ -f $f.old ]] && mv -f "$f.old" "$f"
+  # bind_ip: the server options of its address first (caddy_bind_opts), in the global block
+  if [[ -n ${C[bind_ip]:-} ]] && ! grep -q "^[[:space:]]*import $CADDY_GLOBAL/" /etc/caddy/Caddyfile 2> /dev/null; then
+    WC_WHY="bind_ip needs the Caddyfile of a newer tando: run tando host setup <host> again"; echo "tando-agent: $WC_WHY" >&2; return 1
+  fi
+  [[ -n ${C[bind_ip]:-} ]] || compgen -G "$CADDY_GLOBAL/bind-*.conf" > /dev/null && caddy_bind_opts
   name=$(site)
   [[ ${H[tls]:-off} == off ]] && name="http://$name"
   # the app's own domains (tando domain add): in the same site block, with HTTPS (Let's Encrypt,
@@ -1186,6 +1497,8 @@ write_caddy() {
     if [[ -n $split ]]; then echo "(tando-site-$A) {"; else echo "$name {"; fi
     if [[ -n $otl ]]; then origin_tls
     elif [[ -z $split && ( ${H[tls]:-off} == internal || ( -n ${C[domains]:-} && $dt == internal ) ) ]]; then echo "	tls internal"; fi
+    # bind_ip (tando.conf, set by the admin): the site is served on that address of the server only
+    [[ -n ${C[bind_ip]:-} ]] && echo "	bind ${C[bind_ip]}"
     # request log for every state of the site; headers and query strings are left out
     [[ -x $LOGS ]] && "$LOGS" caddy-log "$A"
     # compression (compress = off turns it off): Caddy's encode handler wraps every answer of the
@@ -1308,6 +1621,12 @@ write_caddy() {
       # tried again: the wake socket always takes the connection
       if idle_app; then
         mark=$(wake_mark); mark=${mark##*/}
+        # not running, and the awake governor says no wake now (too many idle apps awake, or this
+        # one woken too often: wake_admit): 503 at once, the app is not started
+        echo "	@tandoasleep {"; echo "		not file {"; echo "			root ${WAKE_DIR}"; echo "			try_files $mark"; echo "		}"
+        echo "		file {"; echo "			root ${WAKE_DIR}"; echo "			try_files .full $A.cool"; echo "		}"; echo "	}"
+        echo "	header @tandoasleep Retry-After 60"
+        echo "	respond @tandoasleep \"$A is asleep and the server is busy: try again in a minute\" 503"
         echo "	@tandocold not file {"; echo "		root ${WAKE_DIR}"; echo "		try_files $mark"; echo "	}"
         caddy_proxy @tandocold "$up" "" "${C[cold_timeout]:-30}"
       fi
@@ -1340,6 +1659,7 @@ write_caddy() {
     for d in $redirs; do
       if [[ $dt == off ]]; then echo "http://${d%>*} {"; else echo "${d%>*} {"; fi
       if [[ -n $otl && $dt != off ]]; then origin_tls; elif [[ $dt == internal ]]; then echo "	tls internal"; fi
+      [[ -n ${C[bind_ip]:-} ]] && echo "	bind ${C[bind_ip]}"
       if [[ $dt == off ]]; then echo "	redir http://${d#*>}{uri} permanent"; else echo "	redir https://${d#*>}{uri} permanent"; fi
       echo "}"
     done
@@ -1585,15 +1905,18 @@ probe() {
   done
 }
 
+# caddy_host: the address Caddy serves this app's site on: its bind_ip, else loopback (for a URL:
+# an IPv6 address in brackets)
+caddy_host() { local a=${C[bind_ip]:-127.0.0.1}; [[ $a == *:* ]] && a="[$a]"; echo "$a"; }
 # health check through Caddy, the way a visitor reaches the app
 via_caddy() { # [unit to watch]
   local name t=${C[health_timeout]:-60} base opts=()
   name=$(site)
   if [[ -n ${C[check_url]:-} ]]; then name=${C[check_url]#*://}; name=${name%%/*}; fi
   if [[ ${C[check_url]:-} == http://* || ( -z ${C[check_url]:-} && ${H[tls]:-off} == off ) ]]; then
-    base=http://127.0.0.1 opts=(-H "Host: $name")
+    base=http://$(caddy_host) opts=(-H "Host: $name")
   else
-    base=https://$name opts=(-k --resolve "$name:443:127.0.0.1")
+    base=https://$name opts=(-k --resolve "$name:443:$(caddy_host)")
   fi
   probe "$t" "${1:-}" "${opts[@]}" "$base$(health_path)" && static_ok "$base" "${opts[@]}" || return 1
   # the answer counts only when the process on the app's port is the app's own (a stranger that
@@ -2728,10 +3051,14 @@ origin_doctor() {
   [[ ${OS[last_ok]:-} =~ ^[0-9]+$ ]] && d+="; refreshed $(( ($(now) - OS[last_ok]) / 3600 )) h ago"
   if [[ -z $n ]]; then row check fail origin "origin=${H[origin]} but no ranges: nothing is trusted and, with the lock on, nothing can connect (tando host setup <host> origin=...)"
   elif ! caddy_ge 2 7; then row check fail origin "needs Caddy 2.7 or later (this is ${CADDY_V:-old}): the forwarded address is not used"
-  elif [[ $lock == on && ${H[tls]:-off} != off && ${H[origin_cert]:-} != yes ]]; then
-    row check warn origin "$d; with the lock on, certificates from a CA (tls=auto) renew only through the edge (HTTP-01): a name not proxied by it expires; origin_cert= avoids that"
-  elif ((${OS[fails]:-0} >= 3)); then row check warn origin "$d; ${OS[fails]} failed refreshes in a row, the last good list stays (${OS[last_error]:-unknown})"
-  else row check ok origin "$d"; fi
+  else
+    # both warnings, when both hold: the certificate one must not hide repeated refresh failures
+    local w=""
+    [[ $lock == on && ${H[tls]:-off} != off && ${H[origin_cert]:-} != yes ]] &&
+      w="with the lock on, certificates from a CA (tls=auto) renew only through the edge (HTTP-01): a name not proxied by it expires; origin_cert= avoids that"
+    ((${OS[fails]:-0} >= 3)) && w+="${w:+; }${OS[fails]} failed refreshes in a row, the last good list stays (${OS[last_error]:-unknown})"
+    if [[ -n $w ]]; then row check warn origin "$d; $w"; else row check ok origin "$d"; fi
+  fi
 }
 
 # On its default 127.0.0.1:2019 Caddy's admin API answers any local process: an app could rewrite
@@ -2741,6 +3068,35 @@ origin_doctor() {
 
 CADDY_SOCK=/run/caddy/admin.sock
 
+# caddy_global_import: the Caddyfile's global block imports /etc/caddy/tando-global/*.conf, where
+# write_caddy keeps the options a bind_ip needs (caddy_bind_opts). After caddy_admin_private (its
+# admin line is where the global block is found)
+CADDY_GLOBAL=/etc/caddy/tando-global
+caddy_global_import() {
+  local f=/etc/caddy/Caddyfile
+  mkdir -p "$CADDY_GLOBAL"
+  grep -q "^[[:space:]]*import $CADDY_GLOBAL/\*\.conf\$" "$f" && return 0
+  grep -q "^[[:space:]]*admin unix/$CADDY_SOCK\$" "$f" || return 0
+  sed -i "0,/^[[:space:]]*admin unix\/.*/s||&\n\timport $CADDY_GLOBAL/*.conf|" "$f"
+}
+# caddy_bind_opts: for every address some app's site is bound to (bind_ip) with HTTPS, its own
+# server options: HTTP/1 and 2 only. Caddy 2.6 cannot bind HTTP/3's UDP port on one address beside
+# the other sites' on every address (address already in use: Caddy does not load), so only these
+# sites do without HTTP/3. One file per address; those no app uses any more go.
+caddy_bind_opts() {
+  local ip x want=" " f
+  [[ -d $CADDY_GLOBAL ]] || mkdir -p "$CADDY_GLOBAL"
+  for ip in $(sed -n 's/^bind_ip=//p' "$R"/apps/*/app.conf 2> /dev/null | sort -u); do
+    [[ $ip =~ ^[0-9a-fA-F.:]+$ ]] || continue
+    x=$ip; [[ $x == *:* ]] && x="[$x]"
+    want+="bind-${ip//:/_}.conf "
+    printf 'servers %s:443 {\n\tprotocols h1 h2\n}\n' "$x" | write_if_changed "$CADDY_GLOBAL/bind-${ip//:/_}.conf"
+  done
+  for f in "$CADDY_GLOBAL"/bind-*.conf; do
+    [[ -f $f && $want != *" ${f##*/} "* ]] && rm -f "$f"
+  done
+  return 0
+}
 caddy_admin_private() {
   local f=/etc/caddy/Caddyfile
   printf 'd /run/caddy 0750 caddy caddy -\n' | write_if_changed /etc/tmpfiles.d/tando-caddy.conf
@@ -2848,13 +3204,16 @@ rate_limit_rules() {
 # a refused load keeps the rules from before. A failure is an error (return 1), not a warning.
 CONN_OUT=2048   # connections one app's uid may hold at once (host setup conn_out=)
 DNS_RATE=200    # DNS packets a second one app's uid may send (host setup dns_rate=)
+CONN_RATE_OUT=100   # new outbound connections a second one app's uid may open (host setup conn_rate_out=)
+MAIL_PORTS="25, 465, 587, 2525"   # outbound mail (SMTP, submission): closed for apps with mail_out = off
 DB_CONNS=20     # connections to pgbouncer and PostgreSQL an app may hold, per connection of its db_pool
 fw_sync() {
   command -v nft > /dev/null || return 0
-  local f=$R/firewall.nft a u p sp lo hi db x others tmp i pool
-  local -A own=() pgu=() outside=()
-  local co=${H[conn_out]:-$CONN_OUT} dr=${H[dns_rate]:-$DNS_RATE}
+  local f=$R/firewall.nft a u p sp lo hi db x others tmp i pool mo eg cm="" om="" im=""
+  local -A own=() pgu=() outside=() mail=() snat4=() snat6=() ctr=() egown=()
+  local co=${H[conn_out]:-$CONN_OUT} dr=${H[dns_rate]:-$DNS_RATE} cr=${H[conn_rate_out]:-$CONN_RATE_OUT}
   [[ $co =~ ^[1-9][0-9]{0,5}$ ]] || co=$CONN_OUT; [[ $dr =~ ^[1-9][0-9]{0,5}$ ]] || dr=$DNS_RATE
+  [[ $cr =~ ^[1-9][0-9]{0,5}$ ]] || cr=$CONN_RATE_OUT
   lockfile "$R/.fw.lock"; exec 4>"$R/.fw.lock"
   flock -w 60 4 || { echo "tando-agent: another update of the loopback rules takes over 60 s" >&2; return 1; }
   tmp=$(mktemp "$R/.firewall.nft.XXXXXX") || { exec 4>&-; return 1; }
@@ -2882,6 +3241,25 @@ fw_sync() {
     # its cap on connections to them: db_conns x its db_pool (the largest of apps sharing a user)
     pool=$(sed -n 's/^db_pool=//p' "$R/apps/$a/app.conf"); [[ $pool =~ ^[1-9][0-9]{0,2}$ ]] || pool=$DB_POOL
     [[ ${db#database=} == postgres ]] && ((pool * DB_CONNS > ${pgu[$u]:-0})) && pgu[$u]=$((pool * DB_CONNS))
+    # outbound mail closed (mail_out = off, or the app's profile says so), and the address its
+    # outbound traffic leaves from (egress_ip: SNAT of its uid's connections; one of each family)
+    mo=$(sed -n 's/^mail_out=//p; s/^profile=/p:/p' "$R/apps/$a/app.conf" | tr '\n' ' ')
+    if [[ " $mo" == *" off "* ]]; then mail[$u]=1
+    elif [[ $mo == *p:* ]]; then x=${mo#*p:}; x=${x%% *}; [[ ,${H[profile.$x]:-}, == *,mail_out=off,* ]] && mail[$u]=1   # (the profile's off wins)
+    fi
+    # a container app: its packets leave from slirp4netns and conmon, which run as root inside the
+    # app's unit, so the uid rules never see them: the same rules match its slice (containers)
+    grepq -x 'recipe=container' "$R/apps/$a/app.conf" && ctr[$a]=$u
+    eg=$(sed -n 's/^egress_ip=//p' "$R/apps/$a/app.conf")
+    for x in ${eg//,/ }; do
+      if [[ $x == *:* ]]; then snat6[$u]=$x; else snat4[$u]=$x; fi
+      egown[$x]=$u
+    done
+  done
+  # the per-uid byte counters (out_<uid>, in_<uid>: what tando-metrics reads) and their maps: one
+  # rule each way, whatever the number of apps
+  for u in "${!own[@]}"; do
+    cm+="${cm:+, }$u"; om+="${om:+, }$u : \"out_$u\""; im+="${im:+, }$u : \"in_$u\""
   done
   unset 'outside[2019]'
   others=""; for x in "${!outside[@]}"; do others+=", $x"; done
@@ -2906,38 +3284,45 @@ fw_sync() {
     echo "  counter app_conn {}"
     echo "  counter app_db {}"
     echo "  counter app_dns {}"
+    echo "  counter app_mail {}"
+    echo "  counter app_rate {}"
+    echo "  counter app_meta {}"
+    echo "  counter app_egress {}"
+    for u in "${!own[@]}"; do echo "  counter out_$u {}"; echo "  counter in_$u {}"; done
+    echo "  chain containers {}"
     echo "  chain output {"
     echo "    type filter hook output priority 0; policy accept;"
-    for u in "${!own[@]}"; do
-      # the kernel's connection table is the host's: one app's uid holds at most conn_out TCP and
-      # UDP connections at once (a connect-retry loop would fill nf_conntrack_max, and every new
-      # connection to Caddy would then be dropped), and sends at most dns_rate DNS packets a
-      # second (the resolver every app shares; DNS is not in conn_out: a lookup's entry stays 30 s)
-      echo "    meta skuid $u meta l4proto { tcp, udp } th dport != 53 ct state new ct count over $co counter name app_conn reject"
-      echo "    meta skuid $u meta l4proto { tcp, udp } th dport 53 limit rate over $dr/second burst $((dr * 2)) packets counter name app_dns reject"
-      [[ -z ${own[$u]} ]] || echo "    oifname \"lo\" meta skuid $u tcp dport { ${own[$u]} } accept"
-      echo "    oifname \"lo\" meta skuid $u tcp dport { $lo-$hi, $PF_LO-$PF_HI, 2019$others } reject with tcp reset"
-      # (5432: PostgreSQL itself, 6432: pgbouncer in front of it)
-      # an app with a database: at most db_conns x db_pool connections to them at once
-      # (pgbouncer's max_client_conn is shared by all apps; unauthenticated connections to
-      # PostgreSQL count against no role's limit)
-      # (and the same to the data node, when the databases are there: docs/DATA-NODE.md)
-      for x in "oifname \"lo\"" ${dbm:+"$dbm"}; do
-        if [[ -n ${pgu[$u]:-} ]]; then
-          echo "    $x meta skuid $u tcp dport { 5432, 6432 } ct state new ct count over ${pgu[$u]} counter name app_db reject with tcp reset"
-        else
-          echo "    $x meta skuid $u tcp dport { 5432, 6432 } reject with tcp reset"
-        fi
-      done
-      # the cloud provider's metadata service (instance keys and tokens on many clouds): an app
-      # tricked into fetching a URL (SSRF) must not reach it
-      echo "    meta skuid $u ip daddr 169.254.169.254 reject"
-      echo "    meta skuid $u ip6 daddr fd00:ec2::254 reject"
-      # SocketBindDeny filters bind(), but listen() on an unbound socket autobinds 0.0.0.0:<any>:
-      # the app's packets in a connection opened from outside (not over lo) are dropped
-      echo "    oifname != \"lo\" meta skuid $u ct direction reply drop"
+    # (a container app's slice first: chain containers, loaded after this file, fw_ctr_rules)
+    echo "    jump containers"
+    for u in "${!own[@]}"; do fw_app_rules "meta skuid $u" "$u"; done
+    # an app's egress address is its own: any other app's packets from it (a socket bound to it,
+    # IP_PKTINFO) are dropped, IPv4 and IPv6
+    for x in "${!egown[@]}"; do
+      eg=""; for u in "${!own[@]}"; do [[ $u == "${egown[$x]}" ]] || eg+="${eg:+, }$u"; done
+      [[ -n $eg ]] || continue
+      if [[ $x == *:* ]]; then echo "    oifname != \"lo\" meta skuid { $eg } ip6 saddr $x counter name app_egress drop"
+      else echo "    oifname != \"lo\" meta skuid { $eg } ip saddr $x counter name app_egress drop"; fi
     done
+    # what each app's uid sends and receives over the network (not loopback): its packets out, and
+    # the packets of the connections it opened (their conntrack entry carries its uid as mark)
+    if [[ -n $cm ]]; then
+      echo "    oifname != \"lo\" meta skuid { $cm } ct state new ct mark 0 ct mark set meta skuid"
+      echo "    oifname != \"lo\" counter name meta skuid map { $om }"
+    fi
     echo "  }"
+    if [[ -n $cm ]]; then
+      echo "  chain bytes_in {"
+      echo "    type filter hook input priority 0; policy accept;"
+      echo "    iifname != \"lo\" ct mark { $cm } counter name ct mark map { $im }"
+      echo "  }"
+    fi
+    if ((${#snat4[@]} + ${#snat6[@]})); then
+      echo "  chain egress {"
+      echo "    type nat hook postrouting priority srcnat; policy accept;"
+      for u in "${!snat4[@]}"; do echo "    oifname != \"lo\" meta skuid $u meta nfproto ipv4 counter snat ip to ${snat4[$u]}"; done
+      for u in "${!snat6[@]}"; do echo "    oifname != \"lo\" meta skuid $u meta nfproto ipv6 counter snat ip6 to ${snat6[$u]}"; done
+      echo "  }"
+    fi
     if dn_is; then
       # each app node holds at most data_conn_per_node connections at once (its root is bound by no
       # per-app rule): one node cannot take every pre-auth slot of PostgreSQL and pgbouncer
@@ -2975,16 +3360,101 @@ fw_sync() {
     echo "}"
   } > "$tmp"
   # the same rules as loaded: nothing to do (a host setup again rewrites nothing)
-  if cmp -s "$tmp" "$f" && nft list table inet tando &> /dev/null; then rm -f "$tmp"; exec 4>&-; return 0; fi
+  if cmp -s "$tmp" "$f" && nft list table inet tando &> /dev/null; then rm -f "$tmp"; fw_ctr_load; i=$?; exec 4>&-; return $i; fi
   for i in 1 2 3; do
-    if nft -c -f "$tmp" 2> "$tmp.err" && sync "$tmp" && mv -f "$tmp" "$f" && nft -f "$f" 2> "$tmp.err"; then
-      rm -f "$tmp" "$tmp.err"; exec 4>&-; return 0
+    # (the container apps' rules in the same transaction: no moment without them; firewall.nft
+    # itself never has them, it is what loads at boot)
+    { cat "$tmp"; printf 'table inet tando {\n  chain containers {\n%s\n  }\n}\n' "$(fw_ctr_rules)"; } > "$tmp.all"
+    if nft -c -f "$tmp.all" 2> "$tmp.err" && sync "$tmp" && mv -f "$tmp" "$f" && nft -f "$tmp.all" 2> "$tmp.err"; then
+      rm -f "$tmp" "$tmp.err" "$tmp.all"; exec 4>&-; return 0
     fi
     sleep 1
   done
   echo "tando-agent: could not load the loopback rules (the rules from before stay): $(head -c 300 "$tmp.err" | tr '\n' ' ')" >&2
-  rm -f "$tmp" "$tmp.err"; exec 4>&-
+  rm -f "$tmp" "$tmp.err" "$tmp.all"; exec 4>&-
   return 1
+}
+
+# fw_app_rules match uid: the rules of one app's packets (fw_sync's own, pgu, mail, co, dr, cr, lo,
+# hi, others): those that match "meta skuid <uid>", or a container app's slice (socket cgroupv2)
+fw_app_rules() {
+  local mt=$1 u=$2
+  # the kernel's connection table is the host's: one app's uid holds at most conn_out TCP and
+  # UDP connections at once (a connect-retry loop would fill nf_conntrack_max, and every new
+  # connection to Caddy would then be dropped), and sends at most dns_rate DNS packets a
+  # second (the resolver every app shares; DNS is not in conn_out: a lookup's entry stays 30 s)
+  echo "    $mt meta l4proto { tcp, udp } th dport != 53 ct state new ct count over $co counter name app_conn reject"
+  echo "    $mt meta l4proto { tcp, udp } th dport 53 limit rate over $dr/second burst $((dr * 2)) packets counter name app_dns reject"
+  [[ -z ${own[$u]} ]] || echo "    oifname \"lo\" $mt tcp dport { ${own[$u]} } accept"
+  echo "    oifname \"lo\" $mt tcp dport { $lo-$hi, $PF_LO-$PF_HI, 2019$others } reject with tcp reset"
+  # (5432: PostgreSQL itself, 6432: pgbouncer in front of it)
+  # an app with a database: at most db_conns x db_pool connections to them at once
+  # (pgbouncer's max_client_conn is shared by all apps; unauthenticated connections to
+  # PostgreSQL count against no role's limit)
+  # (and the same to the data node, when the databases are there: docs/DATA-NODE.md)
+  local x
+  for x in "oifname \"lo\"" ${dbm:+"$dbm"}; do
+    if [[ -n ${pgu[$u]:-} ]]; then
+      echo "    $x $mt tcp dport { 5432, 6432 } ct state new ct count over ${pgu[$u]} counter name app_db reject with tcp reset"
+    else
+      echo "    $x $mt tcp dport { 5432, 6432 } reject with tcp reset"
+    fi
+  done
+  # the cloud provider's metadata service (instance keys and tokens on many clouds): an app
+  # tricked into fetching a URL (SSRF) must not reach it
+  # (counted: app_meta; TCP gets a reset, which slirp4netns passes on to a container at once)
+  echo "    $mt ip daddr 169.254.169.254 meta l4proto tcp counter name app_meta reject with tcp reset"
+  echo "    $mt ip daddr 169.254.169.254 counter name app_meta reject"
+  echo "    $mt ip6 daddr fd00:ec2::254 meta l4proto tcp counter name app_meta reject with tcp reset"
+  echo "    $mt ip6 daddr fd00:ec2::254 counter name app_meta reject"
+  # SocketBindDeny filters bind(), but listen() on an unbound socket autobinds 0.0.0.0:<any>:
+  # the app's packets in a connection opened from outside (not over lo) are dropped
+  echo "    oifname != \"lo\" $mt ct direction reply drop"
+  # no outbound mail (mail_out = off): spam from a compromised or abusive app
+  [[ -z ${mail[$u]:-} ]] || echo "    $mt tcp dport { $MAIL_PORTS } counter name app_mail reject with tcp reset"
+  # at most conn_rate_out new outbound connections a second (a scan, a flood; DNS has its own)
+  echo "    oifname != \"lo\" $mt meta l4proto { tcp, udp } th dport != 53 ct state new limit rate over $cr/second burst $((cr * 2)) packets counter name app_rate reject"
+}
+# fw_ctr_load: (inside fw_sync: its arrays) chain containers, the rules of every container app by
+# its slice. Not in firewall.nft: nft resolves a cgroup path when it loads the rule, and at boot
+# (tando-firewall.service, before any app) no slice exists, so the whole file would fail. Loaded
+# after it by every fw_sync, and by each start of a container app (its unit's ExecStartPre: a slice
+# made again has a new id). A slice that is not there now (the app is stopped) gets no rules. A
+# failure is a warning: the uid rules stand.
+fw_ctr_rules() {
+  local a c="" t
+  for a in "${!ctr[@]}"; do
+    t="tando.slice/tando-${a//-/\\x2d}.slice"
+    [[ -d /sys/fs/cgroup/$t ]] || continue
+    c+=$(fw_app_rules "socket cgroupv2 level 2 \"$t\"" "${ctr[$a]}")$'\n'
+    # its bytes, as the uid's (out_<uid>, in_<uid> through the conntrack mark)
+    c+="    oifname != \"lo\" socket cgroupv2 level 2 \"$t\" ct state new ct mark 0 ct mark set ${ctr[$a]}"$'\n'
+    c+="    oifname != \"lo\" socket cgroupv2 level 2 \"$t\" counter name out_${ctr[$a]}"$'\n'
+  done
+  printf '%s' "$c"
+}
+fw_ctr_load() {
+  local c
+  c=$(fw_ctr_rules)$'\n'; [[ $c == $'\n' ]] && c=""
+  if printf 'flush chain inet tando containers\ntable inet tando {\n  chain containers {\n%s  }\n}\n' "$c" > "$R/.firewall-containers.nft" &&
+     nft -f "$R/.firewall-containers.nft" 2> "$R/.firewall-containers.err"; then
+    return 0
+  fi
+  echo "tando-agent: the rules of container apps by their slice could not be loaded: $(head -c 300 "$R/.firewall-containers.err" | tr '\n' ' ')" >&2
+  return 1
+}
+# fw-ctr <app>: (a container unit's ExecStartPre, as root) the network rules of every container app
+# by its slice, loaded now; fails unless this app's are in the chain (its unit then does not start)
+cmd_fw_ctr() {
+  need_root; app "$1"
+  local t="tando.slice/tando-${A//-/\\x2d}.slice"
+  [[ ${C[recipe]:-} == container ]] || return 0
+  command -v nft > /dev/null || die "no nft: the network rules of $A cannot be loaded, so it does not start"
+  [[ -d /sys/fs/cgroup/$t ]] || die "no slice $t: the network rules of $A cannot match it, so it does not start"
+  fw_sync || die "the network rules could not be loaded, so $A does not start"
+  # (nft may print the path as given, \x2d and all, or with the dashes)
+  nft list chain inet tando containers 2> /dev/null | grepq -F -e "\"$t\"" -e "\"tando.slice/tando-$A.slice\"" ||
+    die "the network rules of $A by its slice are not loaded, so it does not start: tando doctor"
 }
 
 fw_install() {
@@ -2998,12 +3468,19 @@ Wants=network-pre.target
 # nftables.service (re)starting flushes the whole ruleset: load the rules again right after it
 After=nftables.service
 PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
 ConditionPathExists=$R/firewall.nft
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f $R/firewall.nft
+# the chain of the container apps by their slice (fw_ctr_load), empty in firewall.nft: loaded again
+# for those running (a restart of nftables flushes everything)
+ExecStartPost=-$AGENT fw-sync
+# a reload of nftables runs its config, which flushes every rule: loaded again with it
+ExecReload=/usr/sbin/nft -f $R/firewall.nft
+ExecReload=-$AGENT fw-sync
 
 [Install]
 WantedBy=multi-user.target
@@ -3101,6 +3578,7 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
       ufw=no|ufw=yes) ufw=${kv#*=};;
       journal_max=*|log_*=*|access_*=*|request_log_max=*) logkv+=("$kv");;
       app_max_mb=*) [[ ${kv#*=} =~ ^[0-9]{2,9}$ ]] || die "bad app_max_mb"; H[app_max_mb]=${kv#*=};;
+      ctl_artifact_max_mb=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,5}$ ]] || die "bad ctl_artifact_max_mb (MB, like 512)"; H[ctl_artifact_max_mb]=${kv#*=};;   # (docs/CONTROL-PLANE.md, Artifacts)
       rate_limit=on|rate_limit=off|rate_limit=auto) H[rate_limit]=${kv#*=};;   # per-client limits (fw_sync)
       conn_limit=*|conn_rate=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
       origin=off) H[origin]=off; ORIGIN_NEW=1;;
@@ -3115,7 +3593,21 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
       origin_cert=*) oc=${kv#*=};;
       origin_key=*) ok=${kv#*=};;
       stream_close_delay=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,3}[smh]$ ]] || die "bad stream_close_delay (like 5m, 30s, 1h)"; H[stream_close_delay]=${kv#*=};;
-      conn_out=*|dns_rate=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;   # per app (fw_sync)
+      conn_out=*|dns_rate=*|conn_rate_out=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;   # per app (fw_sync)
+      # limit profiles (profile_check): profile.<name>=memory=256M,cpu=25%,...; empty: removed
+      profile.*=*) a=${kv%%=*}; a=${a#profile.}
+        [[ $a =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "bad profile name: $a (lower case letters, digits and -, at most 21)"
+        if [[ -z ${kv#*=} ]]; then
+          grep -lsx "profile=$a" "$R"/apps/*/app.conf > /dev/null && die "profile $a is in use: $(grep -lsx "profile=$a" "$R"/apps/*/app.conf | sed 's#.*/apps/##; s#/app.conf##' | tr '\n' ' ')"
+          unset "H[profile.$a]"
+        else
+          profile_spec_ok "${kv#*=}" || die "bad profile $a: $PROF_WHY"
+          H[profile.$a]=${kv#*=}
+        fi;;
+      # the awake governor (wake_admit): idle apps awake at once, and wakes of one app a minute
+      awake_max=auto|awake_max=off) H[awake_max]=${kv#*=};;
+      awake_max=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,3}$ ]] || die "bad awake_max: auto, off or a number of apps"; H[awake_max]=${kv#*=};;
+      wake_rate=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,3}$ ]] || die "bad wake_rate: wakes of one app a minute, like 30"; H[wake_rate]=${kv#*=};;
       ci_max_mb=*|ci_max_files=*|ci_max_file_mb=*)   # upload limits of deploy keys (tando-gate)
         [[ ${kv#*=} =~ ^[0-9]{1,9}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
       # control plane mode (docs/CONTROL-PLANE.md): the CA's public key as <type>:<base64>, or off
@@ -3170,6 +3662,7 @@ EOF
   save "$R/host.conf" H
   chmod 644 "$R/host.conf"
   caddy_admin_private
+  caddy_global_import
   local fallback tmo; fallback=$(caddy_fallback); tmo=$(caddy_timeouts); tmo+="; $(caddy_memory)"
   caddy_origin || die "origin mode: the Caddyfile was not changed (above)"
   origin_on && tmo+="; origin ${H[origin]%%:*}: $(grep -c . "$ORIGIN_RANGES") ranges trusted"
@@ -3324,6 +3817,10 @@ EOF
   ((OC_CHANGED)) && { caddy_reload || die "Caddy did not load the new origin certificate: ${CADDY_ERR:-}"; }
   origin_sched_install || die "could not set up the origin ranges timer (tando-origin.timer)"
   fw_sync || die "the per-app loopback rules could not be loaded (above); run tando host setup again"
+  # active (it loaded nothing the first time: no firewall.nft yet), so that a restart of nftables,
+  # which flushes every rule, restarts it too (PartOf) and the rules come back
+  systemctl is-active -q tando-firewall.service || systemctl start tando-firewall.service ||
+    die "tando-firewall.service did not start: sudo journalctl -u tando-firewall -n 20 shows why"
   step apps ok "$n app$( ((n == 1)) || echo s); $CORE_DETAIL"
   echo ok=1
 }
@@ -3854,8 +4351,10 @@ cmd_configure() {
     new=1
   fi
   app_vars
+  # what only the server's admin sets (admin_keys): kept from before, a deploy key cannot change it
+  local -A ADM=(); for k in $ADMIN_KEYS; do [[ -n ${C[$k]:-} ]] && ADM[$k]=${C[$k]}; unset "C[$k]"; done
   # optional settings are cleared unless given again
-  unset "C[path]" "C[data]" "C[start_shell]" "C[writable]" "C[backup]" "C[database]" "C[image]" "C[soak]" \
+  unset "C[mail_out]" "C[path]" "C[data]" "C[start_shell]" "C[writable]" "C[backup]" "C[database]" "C[image]" "C[soak]" \
     "C[container_port]" "C[build_memory]" "C[log_max]" "C[log_keep]" "C[log_rate]" "C[access_log]" \
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" "C[priority]" \
@@ -3921,6 +4420,23 @@ cmd_configure() {
       max_conns|max_requests) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] || die "bad $k: $v";;
       stop_timeout) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || die "bad stop_timeout: $v (seconds)";;
       priority) [[ $v == high || $v == low || $v == normal ]] || die "bad priority: $v (high, normal or low)";;
+      # the host's limit profile (profile_check), outbound mail (fw_sync), the app's own addresses:
+      # its site only on bind_ip (write_caddy), its outbound traffic from egress_ip (fw_sync)
+      profile) [[ $v =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "bad profile: $v";;
+      mail_out) [[ $v == on || $v == off ]] || die "bad mail_out: $v (on or off)";;
+      bind_ip|egress_ip) x=""
+        [[ $v == none ]] && { C[$k]=none; continue; }   # (none: cleared)
+        [[ $k == bind_ip ]] && main_ip "$v" && die "bind_ip = $v is the server's main address, which every other app is served on: give $A another address of the server"
+        if [[ $k == egress_ip ]]; then
+          for x in ${v//,/ }; do
+            main_ip "$x" && die "egress_ip = $x is the server's main address, which every other app sends from: give $A another address of the server"
+          done
+        fi
+        [[ $k == egress_ip ]] && [[ $v =~ ^[^,:]+(,[^,]*:[^,]*)?$ || $v =~ ^[^,]*:[^,]*$ ]] || [[ $k == bind_ip && $v != *,* ]] ||
+          die "bad $k: $v (one address$([[ $k == egress_ip ]] && echo ", or an IPv4 and an IPv6 address: 192.0.2.10,2001:db8::10"))"
+        for x in ${v//,/ }; do
+          node_ip "$x" || die "$k = $x is not an address of this server (its addresses: $(node_ips | tr '\n' ' '))"
+        done;;
       # the app's /tmp (tmpfs, in its memory), its disk bandwidth (MB/s) and its disk share (alerts)
       tmp_size) [[ $v =~ ^[1-9][0-9]{0,5}[KMG]$ ]] || die "bad tmp_size: $v (like 64M)";;
       io) [[ $v =~ ^[1-9][0-9]{0,4}$ ]] || die "bad io: $v (MB/s, like 50)";;
@@ -3983,6 +4499,33 @@ cmd_configure() {
     C[$k]=$v
   done <<< "$input"
   release_ok
+  # the admin's settings (profile, bind_ip, egress_ip) stay as they were unless tando.conf gives
+  # them (none: cleared); a deploy key (tando ci) cannot change them. A preview made by its
+  # parent's deploy key takes the parent's profile (preview-up gives no addresses)
+  if [[ ${SUDO_USER:-root} == tando-d-* && -n ${C[preview_of]:-} && -z ${ADM[profile]:-} ]] && valid_app "${C[preview_of]}"; then
+    x=$(sed -n 's/^profile=//p' "$R/apps/${C[preview_of]}/app.conf" 2> /dev/null)
+    [[ -n $x ]] && ADM[profile]=$x
+  fi
+  for k in $ADMIN_KEYS; do
+    if [[ ${SUDO_USER:-root} == tando-d-* && -n ${C[$k]:-} && ${C[$k]} != "${ADM[$k]:-}" ]]; then
+      die "$k of $A is set by the server's admin (${ADM[$k]:-none}): a deploy key cannot change it; remove $k from tando.conf or ask the admin"
+    fi
+    if [[ ${C[$k]:-} == none ]]; then unset "C[$k]"
+    elif [[ -z ${C[$k]:-} && -n ${ADM[$k]:-} ]]; then C[$k]=${ADM[$k]}; fi
+  done
+  profile_apply
+  # an egress address is one app's: no other app may send from it (fw_sync drops it for them)
+  if [[ -n ${C[egress_ip]:-} ]]; then
+    for x in ${C[egress_ip]//,/ }; do
+      for f in "$R"/apps/*/app.conf; do
+        [[ $f == "$D/app.conf" ]] && continue
+        sed -n 's/^egress_ip=//p' "$f" | tr ',' '\n' | grepq -ixF -- "$x" &&
+          die "egress_ip = $x is the egress address of another app ($(basename "${f%/app.conf}")): one address, one app"
+      done
+    done
+  fi
+  [[ -n ${C[egress_ip]:-} && ${C[recipe]:-} == container ]] &&
+    die "egress_ip is not supported for recipe = container yet: its traffic leaves through slirp4netns, which the per-app address rule cannot tell apart"
   # the apps' database pools must fit in PostgreSQL's connections (before anything is written)
   [[ ${C[database]:-} == postgres && ${H[postgres]:-} == yes ]] &&
     db_pool_check "${C[db_pool]:-$DB_POOL}" "/etc/postgresql/${H[postgres_version]:-}/main/conf.d/tando.conf"
@@ -6009,7 +6552,7 @@ cmd_preview_up() { # parent preview [ttl]
       # the release command (migrations) only when the parent says preview_release = on: with the
       # parent's external database or services in the env it would change those
       if [[ ${PC[preview_release]:-off} == on ]]; then conf_text PC; else conf_text PC | grep -Ev '^release(_shell|_timeout)?='; fi |
-        grep -Ev '^(job\.|database=|backup=|idle_stop=|db_|job_timeout=|job_spread=|job_missed=|preview_)'
+        grep -Ev '^(job\.|database=|backup=|idle_stop=|db_|job_timeout=|job_spread=|job_missed=|preview_|bind_ip=|egress_ip=)'
       echo "backup=off"
       case ${PC[recipe]:-node} in static|container) ;;
         *) k=${PC[idle_stop]:-6h}; [[ $k == off || -z $k ]] && k=6h; echo "idle_stop=$k";; esac
@@ -7541,6 +8084,7 @@ destroy_finish() {
   [[ $purge == purge ]] && rm -rf "${BK:?}/$A"
   # (the user is gone: fw_sync leaves the app out although its app.conf is still there)
   fp ds.fw
+  rm -f "$WAKE_DIR/$A.awake" "$WAKE_DIR/$A.wakes" "$WAKE_DIR/$A.cool" "$WAKE_DIR/$A.admin"   # (the awake governor's)
   fw_sync || echo "warning=could not reload the loopback rules (tando doctor)" >&2
   # the app's directory last, in one rename (a cut rm -rf could take app.conf and leave the rest,
   # which no recover finds): what a cut leaves of the renamed one, recover-all removes
@@ -7586,8 +8130,9 @@ app_row() { # name of the array with this unit's systemctl fields
   row app "$A" "$state" "${C[port]:-}" "${S[current]:-}" "${S[status_${S[current]:-x}]:-}" \
     "$mem" "$max" "$cpu" "${_u[NRestarts]:-0}" "$up" "$(link)" "${C[recipe]:-}" \
     "${C[backup]:-off}" "${S[last_backup]:-}" "${C[database]:-}" ${LG[$A]:-- - - -} "$(app_domains)" \
-    "${C[cpu]:--}" "${C[tasks]:-1024}" "${C[max_conns]:-256}" "${C[max_requests]:--}" "$(cpu_minute)"
-  # (LG: 4 words, split on purpose; then the app's limits, cpu "-" = none; then cpu_minute)
+    "${C[cpu]:--}" "${C[tasks]:-1024}" "${C[max_conns]:-256}" "${C[max_requests]:--}" "$(cpu_minute)" "${C[profile]:--}"
+  # (LG: 4 words, split on purpose; then the app's limits, cpu "-" = none; then cpu_minute; then
+  # its profile, "-" = none)
 }
 # cpu_minute: the app's CPU over tando-metrics' last sample (about the last minute), per mille of
 # one core: the usec of the last line over the seconds since the line before; "-" without two
@@ -8239,10 +8784,11 @@ CONF_KEYS_A=(recipe image container_port build_memory start start_shell release 
   health path data writable backup database db_statement_timeout db_idle_tx_timeout db_temp_limit
   memory health_timeout soak cpu tasks max_conns max_requests stop_timeout hold log_max log_keep
   log_rate access_log request_log_max health_expect health_fails health_recover job_timeout job_spread
-  job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk response_timeout body_max cold_timeout node_lite)
+  job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk response_timeout body_max cold_timeout node_lite
+  mail_out)
 CONF_KEYS=" ${CONF_KEYS_A[*]} "
 # what a record of the first agent that recorded every setting knew (conf=1 without keys=)
-CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk response_timeout body_max cold_timeout node_lite } job.* "
+CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk response_timeout body_max cold_timeout node_lite mail_out } job.* "
 conf_key() {
   case $1 in job.*|worker.*) return 0;; *[[:space:]]*|'') return 1;; esac
   [[ $CONF_KEYS == *" $1 "* ]]
@@ -8387,6 +8933,13 @@ sync_jobs() {
     fi
     to=${_jobs[$k.timeout]:-${_jobs[job_timeout]:-$JOB_TIMEOUT}}
     [[ $to =~ ^[1-9][0-9]{0,4}$ ]] || to=$JOB_TIMEOUT
+    x=$(prof_get job_timeout) && ((to > x)) && to=$x   # (the profile's ceiling: profile_apply)
+    # a job that runs more often than the profile's job_every (a rollback to a release from before
+    # it, or a profile changed since) is left out
+    if x=$(prof_get job_every); then
+      x=$(dur_secs "$x"); st=$(job_gap "$cal")
+      if ((st < x)); then echo "tando-agent: job $n runs more often than the profile allows (left out)" >&2; continue; fi
+    fi
     sp=${_jobs[$k.spread]:-${_jobs[job_spread]:-}}
     [[ $sp =~ ^[0-9]{1,4}$ ]] || sp=$(job_spread_for "$cal")
     ms=${_jobs[$k.missed]:-${_jobs[job_missed]:-run}}; per=true; [[ $ms == skip ]] && per=false
@@ -8838,7 +9391,9 @@ worker_unit() { echo "tando-${A}_worker-$1"; }   # name -> unit name without .se
 worker_names() {
   local -n _wn=${1:-C}
   local k
-  for k in "${!_wn[@]}"; do [[ $k != worker.* || $k == worker.*.* ]] || echo "${k#worker.}"; done | LC_ALL=C sort
+  local max=99
+  max=$(prof_get workers) || max=99   # (the profile's count: a rollback brings back no more)
+  for k in "${!_wn[@]}"; do [[ $k != worker.* || $k == worker.*.* ]] || echo "${k#worker.}"; done | LC_ALL=C sort | head -n "$max"
 }
 # worker_rows: one row per worker of the live release (app.conf), after its app row (srv/status
 # prints the same): worker <app> <name> <state> <restarts> <memory> <max>. state: systemd's,
@@ -9261,6 +9816,10 @@ case $verb in
   busy) cmd_busy "$@";;
   job-run) cmd_job_run "$@";;
   idle-stopped) cmd_idle_stopped "$@";;
+  wake-admit) cmd_wake_admit "$@"; exit $?;;   # (1: refused, for its ExecCondition)
+  fw-sync) need_root; load "$R/host.conf" H; fw_sync;;   # (tando-firewall.service's ExecStartPost)
+  fw-ctr) cmd_fw_ctr "$@";;
+  wake-check) cmd_wake_check;;
   job-begin) cmd_job_begin "$@";; job-end) cmd_job_end "$@";; job-due) cmd_job_due "$@";; job-gone) cmd_job_gone "$@";; job-pause) cmd_job_pause "$@";; job-log) cmd_job_log "$@";;
   host)   # host care (docs/HOSTCARE.md): the server itself, answered by tando-host (Go, srv/hostcare)
     need_root

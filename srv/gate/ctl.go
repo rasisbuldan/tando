@@ -8,9 +8,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -391,13 +394,7 @@ func (g *Gate) ctlKRL(w *out.Writer, data []byte) error {
 	defer os.Remove(tmp)
 	cur := filepath.Join(dir, "revoked.krl")
 	entries := 0
-	if len(data) == 0 {
-		// one wrong path must not take back every revocation: an empty list replaces a list with
-		// entries only when asked by name (ctl_krl=empty)
-		if fi, err := os.Stat(cur); err == nil && fi.Size() > 0 && !g.krlEmpty {
-			return die("this would empty the revocation list (it has entries): to un-revoke everything, ctl_krl=empty")
-		}
-	} else {
+	if len(data) > 0 {
 		// an unreadable list would make sshd refuse every certificate: only a KRL ssh-keygen reads
 		o, err := g.Env.Run.Output(context.Background(), run.Cmd{Argv: []string{"ssh-keygen", "-Q", "-l", "-f", tmp},
 			Timeout: 30 * time.Second})
@@ -412,6 +409,20 @@ func (g *Gate) ctlKRL(w *out.Writer, data []byte) error {
 		entries, why = krlEntries(o, ff)
 		if why != "" {
 			return die("%s", why)
+		}
+	}
+	// one wrong file must not take back revocations: a list with fewer entries than the current
+	// one (an empty one included) replaces it only when asked (ctl_krl_force=yes, or ctl_krl=none
+	// for an empty list)
+	if !g.krlForce {
+		if fi, err := os.Stat(cur); err == nil && fi.Size() > 0 {
+			if o, err := g.Env.Run.Output(context.Background(), run.Cmd{Argv: []string{"ssh-keygen", "-Q", "-l", "-f", cur},
+				Timeout: 30 * time.Second}); err == nil {
+				if have, _ := krlEntries(o, nil); entries < have {
+					return die("this list has %d entries, the current one has %d: that would take revocations back; "+
+						"to replace it anyway, ctl_krl_force=yes (ctl_krl=none empties it)", entries, have)
+				}
+			}
 		}
 	}
 	if err := os.Rename(tmp, filepath.Join(dir, "revoked.krl")); err != nil {
@@ -498,6 +509,25 @@ func (g *Gate) installDrop(want []byte) error {
 // another way in for any of them).
 var ctlConns = []string{"127.0.0.1", "10.11.12.13", "203.0.113.10"}
 
+// nodeAddrs: the node's own addresses (a Match Address or LocalAddress block may name one of
+// them), besides ctlConns; at most 16, no loopback or link-local.
+func (g *Gate) nodeAddrs() []string {
+	if g.Addrs != nil {
+		return g.Addrs()
+	}
+	var r []string
+	as, _ := net.InterfaceAddrs()
+	for _, a := range as {
+		if n, ok := a.(*net.IPNet); ok && n.IP.IsGlobalUnicast() && len(r) < 16 {
+			ip := n.IP.String()
+			if !slices.Contains(ctlConns, ip) {
+				r = append(r, ip)
+			}
+		}
+	}
+	return r
+}
+
 // ctlCheck: what sshd will do for tando-ctl, all files and drop-ins together, is the drop-in's
 // (certificates of the CA, principals from the gate, no other way in). Run by ctl-setup, by
 // `tando-gate admin ctl-check` (tando doctor) and by every host setup while the mode is on.
@@ -515,7 +545,7 @@ func (g *Gate) ctlCheck() error {
 	if len(ports) == 0 {
 		ports = []string{"22"}
 	}
-	for _, a := range ctlConns {
+	for _, a := range append(append([]string{}, ctlConns...), g.nodeAddrs()...) {
 		for _, port := range ports {
 			spec := "user=" + ctlUser + ",host=" + a + ",addr=" + a + ",laddr=" + a + ",lport=" + port
 			o, err := g.Env.Run.Output(context.Background(), run.Cmd{Argv: []string{"sshd", "-T", "-C", spec}, Timeout: 30 * time.Second})
@@ -559,7 +589,22 @@ func ctlEffective(t []byte, gate, dir string) string {
 	got := map[string]string{}
 	for l := range strings.SplitSeq(string(t), "\n") {
 		k, v, _ := strings.Cut(strings.TrimSpace(l), " ")
-		got[strings.ToLower(k)] = v
+		k = strings.ToLower(k)
+		got[k] = v
+		// the environment a session may get: nothing that sets or accepts the variable the
+		// certificate record travels in (ExposeAuthInfo's SSH_USER_AUTH)
+		switch k {
+		case "setenv":
+			if strings.Contains(v, "SSH_USER_AUTH") {
+				return "setenv " + v
+			}
+		case "acceptenv":
+			for _, p := range strings.Fields(v) {
+				if ok, _ := path.Match(p, "SSH_USER_AUTH"); ok {
+					return "acceptenv " + p
+				}
+			}
+		}
 	}
 	for _, w := range want {
 		v, ok := got[w.k]

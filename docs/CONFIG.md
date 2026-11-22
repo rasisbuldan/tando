@@ -79,6 +79,10 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 | `cold_timeout` | number | `30` | seconds | With `idle_stop`: how long a visitor waits for the idle app to start; then a 503 "waking up" page with `Retry-After: 5` (the app goes on starting). | `cold_timeout = 10` |
 | `stop_timeout` | number | `10` | seconds | How long a stopping process may finish its requests before it is killed, 1 to 999. | `stop_timeout = 30` |
 | `priority` | `high`, `normal` or `low` | `normal` | | Which app the kernel stops last (`high`) or first (`low`) when the server runs out of memory, and its CPU weight under contention (200, 100, 50). `high` also keeps the app's memory, up to its cap, from being reclaimed while other apps have more. | `priority = high` |
+| `profile` | a name of the server's profiles | none | | The server's limit profile (host setup `profile.<name>=`): its ceilings refuse a deploy over them, its `cpu`, `tasks` and `job_timeout` apply when the app sets none. Set by the admin: a deploy key cannot change it. docs/COMMANDS.md "Profiles and guardrails". | `profile = small` |
+| `mail_out` | `on` or `off` | `on` | | `off`: the app cannot open connections to the mail ports (25, 465, 587, 2525). A profile with `mail_out=off` forces it. | `mail_out = off` |
+| `bind_ip` | an address of the server | none | | The app's site is served only on that address (not the server's main one). Set by the admin. | `bind_ip = 192.0.2.11` |
+| `egress_ip` | an address of the server, or an IPv4 and an IPv6 one | none | | The app's outbound connections leave from that address. Set by the admin; not for container apps. | `egress_ip = 192.0.2.10` |
 | `tmp_size` | size | `64M` | `K`, `M`, `G` | The app's `/tmp` and `/var/tmp`, each a tmpfs counted in its memory. | `tmp_size = 256M` |
 | `io` | number | none | MB/s | Read and write bandwidth on the disk of the app's directory, 1 to 99999 (only where the cgroup io controller is). | `io = 50` |
 | `disk` | size | host `app_max_mb` (8192 MB) | `M`, `G` | The app's disk share (files and database) for the `disk_warn` (80%) and `disk` alerts. Not a hard quota. | `disk = 2G` |

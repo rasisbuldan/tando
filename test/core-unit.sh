@@ -256,7 +256,7 @@ ws() { # priority -> the slice file's MemoryMax and MemoryLow lines
   # shellcheck disable=SC2016
   # (bash 3.2 has no associative arrays: C[key] is C_key, and no workers)
   "$BASH" -c 'eval "$1"; C_memory=128M C_priority=$2; A=a1; write_slice; echo "rc=$?"' _ \
-    "$(agent_fn write_slice size_mb write_if_changed app_slice | sed -e "s#/etc/#$T/etc/#g" \
+    "$(agent_fn write_slice size_mb write_if_changed app_slice prof_get mem_cap | sed -e "s#/etc/#$T/etc/#g" \
       -e 's/\${C\[\([a-z]*\)\]:-/${C_\1:-/g' -e 's/" \${!C\[\*\]}"/" "/')" "$1"
   grep -h '^Memory' "$T/etc/systemd/system/tando-a1.slice" 2> /dev/null | tr '\n' ' '
 }
@@ -508,6 +508,58 @@ up1() { # refusals -> the number of rsync runs and upload's status
 }
 check "U17a a refused session: rsync is run again and the upload goes on" eq "$(up1 2)" "3 0"
 check "U17b refused every time: it gives up after 6 runs" eq "$(up1 99)" "6 1"
+
+# ---- U18 profiles (host setup profile.<name>=...; profile = <name>): the spec's keys and values,
+# then what a profile makes of an app's settings: ceilings refuse ("bad"), the mandatory limits it
+# does not set come from the profile ("set"); workers, worker memory, job timeouts, mail
+ps_ok() { "$BASH" -c 'eval "$1"; if profile_spec_ok "$2"; then echo ok; else echo "$PROF_WHY"; fi' _ "$(agent_fn profile_spec_ok)" "$1"; }
+check "U18a a full spec is valid" eq "$(ps_ok 'memory=256M,cpu=25%,tasks=256,workers=0,job_timeout=600,job_every=15m,mail_out=off')" ok
+check "U18b cores for cpu" eq "$(ps_ok 'cpu=0.5')" ok
+check "U18c an unknown key is refused" eval 'ps_ok "memory=256M,disk=1G" | grep -q "unknown key disk"'
+check "U18d a bad value is refused" eval 'ps_ok "cpu=0" | grep -q "^cpu=0"'
+check "U18e an empty value is refused" eval 'ps_ok "memory=" | grep -q "not key=value"'
+check "U18f workers over 20 are refused" eval 'ps_ok "workers=21" | grep -q "0 to 20"'
+pc() { # spec settings... -> profile_check's lines, sorted, joined by |
+  local sp=$1; shift
+  printf '%s\n' "$@" | "$BASH" -c 'eval "$1"; profile_check "$2"' _ "$(agent_fn profile_check)" "$sp" | sort | tr '\n' '|'
+}
+P='memory=256M,cpu=25%,tasks=256,workers=1,job_timeout=600,mail_out=off'
+check "U18g unset limits come from the profile" eq "$(pc "$P" memory=128M)" "set cpu=25%|set job_timeout=600|set mail_out=off|set tasks=256|"
+check "U18g2 no memory set: the profile's" eq "$(pc "$P" cpu=25%)" "set job_timeout=600|set mail_out=off|set memory=256M|set tasks=256|"
+check "U18h settings within it pass as they are" eq "$(pc "$P" memory=256M cpu=0.2 tasks=100 job_timeout=60 mail_out=off)" ""
+check "U18i over a ceiling is refused, each named" eq "$(pc "$P" memory=1G cpu=0.5 tasks=512 job_timeout=601 mail_out=on)" \
+  "bad cpu = 0.5 is over 25%|bad job_timeout = 601 is over 600|bad mail_out = on: the profile has no outbound mail|bad memory = 1G is over 256M|bad tasks = 512 is over 256|"
+check "U18j workers over the count, a worker's memory, a job's own timeout" eq \
+  "$(pc "$P" cpu=25% tasks=256 job_timeout=60 mail_out=off 'worker.a=node a.js' 'worker.b=node b.js' worker.a.memory=512M 'job.x=daily|true' job.x.timeout=900)" \
+  "bad 2 workers, the profile allows 1|bad job.x.timeout = 900 is over 600|bad worker.a.memory = 512M is over 256M|set memory=256M|"
+check "U18k a profile without a key leaves it alone" eq "$(pc 'workers=0' memory=4G cpu=400%)" ""
+# a rollback cannot raise memory past the profile: units take mem_cap
+mcap() { "$BASH" -c 'eval "$1"; R=/nonexistent; C_memory=$2 C_profile=p H_spec=$3; prof_get() { local s=",$H_spec,"; [[ $s == *",$1="* ]] || return 1; s=${s#*",$1="}; echo "${s%%,*}"; }; mem_cap' _ \
+  "$(agent_fn mem_cap size_mb | sed 's/\${C\[memory\]:-/${C_memory:-/')" "$@"; }
+check "U18r mem_cap: over the profile, the profile's" eq "$(mcap 1G memory=256M)" 256M
+check "U18s mem_cap: under it, the app's; no profile memory, the app's" eq "$(mcap 128M memory=256M)/$(mcap 1G cpu=10%)" "128M/1G"
+# awake_auto: idle apps that fit, at their caps, beside the always-on apps' caps (RAM x mem_overcommit)
+aa() { # MemTotal-kB app.conf-contents... -> awake_auto
+  local m=$1 i=0 a; shift
+  rm -rf "${T:?}/aa"; mkdir -p "$T/aa/apps"
+  echo "MemTotal: $m kB" > "$T/aa/meminfo"
+  for a; do i=$((i + 1)); mkdir -p "$T/aa/apps/a$i"; printf '%b' "$a" > "$T/aa/apps/a$i/app.conf"; done
+  # shellcheck disable=SC2016
+  R=$T/aa "$BASH" -c 'eval "$1"; MEM_OVERCOMMIT=1.5 IDLE_MB=2 IDLE_AWAKE=20; awake_auto' _ \
+    "$(agent_fn mem_caps_mb awake_auto | sed "s#/proc/meminfo#$T/aa/meminfo#g")"
+}
+# 1000 MB x 1.5 = 1500; always-on 500; ten idle apps of 100 MB (2 MB each idle): (1500-500-20)/100 = 9
+idle10=""; for i in 1 2 3 4 5 6 7 8 9 10; do idle10="$idle10 memory=100M\nidle_stop=10m\n"; done
+check "U18l awake_auto from RAM and admission" eq "$(aa 1024000 'memory=500M\n' $idle10)" 9
+check "U18m no idle app: no cap" eq "$(aa 1024000 'memory=500M\n')" 0
+check "U18n at least 1 when nothing fits" eq "$(aa 102400 'memory=500M\n' 'memory=100M\nidle_stop=10m\n')" 1
+# the governor's hooks: an idle app's unit counts its wake first; its site answers 503 while the
+# governor says no (.full, <app>.cool), before it would start the app
+check "U18o an idle app's unit asks wake-admit before it starts, and may be refused (ExecCondition, no -)" grep -q "ExecCondition=+%s wake-admit %s" "$ROOT/server/tando-agent"
+check "U18p the site of an idle app answers 503 under the governor" eval 'grep -q "try_files .full \$A.cool" "$ROOT/server/tando-agent"'
+check "U18t a wake whose count cannot be taken (lock timeout) is refused, never admitted unchecked" eval 'sed -n "/^cmd_wake_admit() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "awake_lock || {.*return 1; }"'
+check "U18u a reload of nftables reloads tando's rules too" eval 'grep -q "^ReloadPropagatedFrom=nftables.service" "$ROOT/server/tando-agent" && grep -q "^ExecReload=-\$AGENT fw-sync" "$ROOT/server/tando-agent"'
+check "U18q a stop of an idle app leaves the governor's count" eval 'sed -n "/^cmd_idle_stopped() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q awake_gone'
 
 echo "core-unit: $n checks, $nf failed"
 [ "$nf" = 0 ]

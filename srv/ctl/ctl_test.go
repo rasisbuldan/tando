@@ -461,3 +461,37 @@ func TestServeLogNoInjection(t *testing.T) {
 		}
 	}
 }
+
+// R4: the cap check does not read the namespace's records while it has room or while it is full
+// of recent ones: the count file answers (a full one is looked at again after a minute, and the
+// recount heals a count that drifted)
+func TestStoreCapCounted(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ctl")
+	now := time.Unix(1_800_000_000, 0)
+	s := &Store{Dir: dir, NS: "write", Now: func() time.Time { return now }, Cap: 3}
+	ok := func() Response { return Response{OK: true} }
+	for i := 0; i < 3; i++ {
+		if x := s.Do(req(fmt.Sprintf("fill-%07d", i), "app.restart", "shop", ""), time.Minute, ok); !x.OK {
+			t.Fatalf("fill %d: %+v", i, x)
+		}
+	}
+	if x := s.Do(req("over-0000000", "app.restart", "shop", ""), time.Minute, ok); x.Error == nil || x.Error.Code != "busy" {
+		t.Fatalf("full of recent records: %+v", x)
+	}
+	// the records vanish behind the store's back: a count-based check still says full
+	recs, _ := filepath.Glob(filepath.Join(dir, "req", "write", "*.json"))
+	for _, r := range recs {
+		os.Remove(r)
+	}
+	if x := s.Do(req("over-0000001", "app.restart", "shop", ""), time.Minute, ok); x.Error == nil || x.Error.Code != "busy" {
+		t.Errorf("full by the count: %+v", x)
+	}
+	if x := s.Do(req("over-0000002", "app.restart", "shop", ""), time.Minute, ok); x.Error == nil || x.Error.Code != "busy" {
+		t.Errorf("full by the count, again: %+v", x)
+	}
+	// a minute later the namespace is recounted: it has room
+	now = now.Add(scanEvery + time.Second)
+	if x := s.Do(req("over-0000003", "app.restart", "shop", ""), time.Minute, ok); !x.OK {
+		t.Errorf("after the recount: %+v", x)
+	}
+}

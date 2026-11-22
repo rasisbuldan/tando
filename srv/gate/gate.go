@@ -125,7 +125,10 @@ type Gate struct {
 	Owner, Group int
 	Kill         func(pid int)
 
-	krlEmpty bool // admin ctl-krl empty: the list may become empty
+	// Addrs: the node's own addresses ctl-check asks sshd about (nil: the network interfaces')
+	Addrs func() []string
+
+	krlForce bool // admin ctl-krl force: the list may have fewer entries than the current one (or none)
 
 	// set once the caller is known: refusals of a deploy key go to the journal
 	app, keyID string

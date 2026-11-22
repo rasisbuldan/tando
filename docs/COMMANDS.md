@@ -612,11 +612,14 @@ nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Setting
 (only after moving the databases by hand: "Upgrading PostgreSQL"), `swap=yes|no`,
 `ufw=no`, `domain_tls=internal`; also `app_max_mb=`, `ci_max_mb=`, `ci_max_files=`,
 `ci_max_file_mb=`, `unit_drop=`, `journal_max=` (not in help.txt), control plane mode:
-`ctl_ca=<ca.pub>|off` and `ctl_krl=<file>` (docs/CONTROL-PLANE.md; not in help.txt; artifact fetches read `/opt/tando/ctl/fetch-allow` and `fetch-ca.pem`, files the operator writes as root), and the per-client limits on ports
+`ctl_ca=<ca.pub>|off` and `ctl_krl=<file>` (docs/CONTROL-PLANE.md; not in help.txt; artifact fetches read `/opt/tando/ctl/fetch-allow` and `fetch-ca.pem`, files the operator writes as root, and `ctl_artifact_max_mb=N`, default 512), and the per-client limits on ports
 80/443: `rate_limit=on|off|auto` (auto: on when tando owns Caddy), `conn_limit=N` (connections at
 once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections per second, burst
 3x; default 100), and per app's user `conn_out=N` (connections at once, default 2048), `dns_rate=N`
-(DNS packets a second, default 200), `origin=cloudflare|custom:<ranges>|off`, `origin_lock=on|off`, `origin_cert=`/`origin_key=` ("Behind an edge: origin mode"), `stream_close_delay=5m` (how long a Caddy reload leaves websockets and event streams open, Caddy 2.7+) ("Limits and load"). Scale (docs/ARCHITECTURE.md, "Many apps on one server"): `port_min=`,
+(DNS packets a second, default 200), `conn_rate_out=N` (new outbound connections a second per
+app's user, burst 2x; default 100), limit profiles `profile.<name>=key=value,...` (an empty value
+removes one; "Profiles and guardrails"), the awake governor `awake_max=auto|off|N` and
+`wake_rate=N` ("Scale to zero: idle_stop"), `origin=cloudflare|custom:<ranges>|off`, `origin_lock=on|off`, `origin_cert=`/`origin_key=` ("Behind an edge: origin mode"), `stream_close_delay=5m` (how long a Caddy reload leaves websockets and event streams open, Caddy 2.7+) ("Limits and load"). Scale (docs/ARCHITECTURE.md, "Many apps on one server"): `port_min=`,
 `port_max=` (app ports, default 4100-4999), `preflight_min=`, `preflight_max=` (pre-flight ports,
 default 14100-14999; the ranges must not overlap or hold 2019 or 5432), `uid_min=`, `uid_max=`
 (new app users' ids, default 30000-39999), `mem_overcommit=` (default 1.5; 0 turns the check off),
@@ -990,6 +993,78 @@ no line is lost. A clean idle stop also resets the unit's start limit (5 starts 
 ends a crash loop), so an app woken often is never refused a start. An idle app costs about 2 MB. Admission counts it that way: its web process at
 2 MB plus `idle_awake` % of its `memory` (host setup `idle_awake=`, default 20: the share of such
 apps awake at once), its workers whole.
+
+**The awake governor.** A crawler that walks the apps' hostnames would wake every idle app at
+once. Host setup `awake_max=` caps the idle apps awake at once: `auto` (the default) is as many as
+fit at their `memory` caps into what admission allows (RAM x `mem_overcommit`) beside the always-on
+apps' caps (at least 1; no cap with `mem_overcommit=0`); `off` or a number. A wake over the cap
+stops the awake idle app that was woken longest ago, has been awake at least 60 s and has had
+no traffic on any connection to its port for 60 s (an idle keep-alive keeps nothing awake). When
+no such app exists the wake is refused before the app starts (the unit's `ExecCondition`: the
+unit stays inactive, not failed, and is not marked down; that request gets an error page), and
+Caddy answers every idle app's cold requests at once with 503 and `Retry-After: 60` until one is
+free (checked every 30 s). tando's own starts (a deploy, `tando restart`) are never refused. Why not always stop the least recently used app: under a crawl that
+thrashes, each wake stopping an app someone is using; a 503 to the crawler costs nothing, and a
+busy app is never stopped for another. `wake_rate=` (default 30) caps the wakes of one app a
+minute: over it, that app's cold requests get the same 503 for a minute. The markers are in
+`/run/tando-wake` (`.full`, `<app>.cool`, `<app>.awake`); `tando-agent wake-check` re-checks.
+
+### Profiles and guardrails
+
+For a server shared by people who do not trust each other (a hosting operator's node). A profile
+is a named set of limits on the server: `tando host setup <host> profile.small=memory=256M,cpu=25%,tasks=256,workers=0,job_timeout=600,job_every=15m,mail_out=off`.
+An app with `profile = small` in its tando.conf gets them as ceilings: a setting over one refuses
+the deploy and says which (`memory = 512M is over 256M`), and `memory`, `cpu`, `tasks` and
+`job_timeout` are mandatory (the profile's value when the app sets none; the client sends
+`memory = 256M` when tando.conf has none, so set `memory` within the profile). The app's slice holds its web process,
+workers and jobs, so the CPU and task limits cover all of them; the slice and job units take the
+profile's ceilings again when they are written (a rollback to a release from before the profile
+does not raise them): CPU, tasks, memory, the number of workers, job timeouts, jobs more frequent
+than `job_every` (left out), and outbound mail (the profile's `off` wins). `workers=N` allows at most N workers (0: none: a worker runs while an idle
+app sleeps), `job_every=` refuses a job scheduled more often, `mail_out=off` closes outbound mail.
+The profile, `bind_ip` and `egress_ip` are the admin's: a deploy key (`tando ci`) cannot change
+or remove them. `tando-agent status` shows the profile as the app row's last column. Changing a
+profile on the server applies to each app at its next deploy.
+
+- `mail_out = off` (tando.conf, or the profile): the app's user cannot open TCP connections to
+  ports 25, 465, 587 and 2525 (IPv4 and IPv6; refused at once). Counted in the nftables counter
+  `app_mail`.
+- `conn_rate_out=` (host setup, default 100): new outbound connections a second per app's user
+  (a scan, a flood; DNS has `dns_rate`). Counter `app_rate`.
+- Bytes: every app's user's network traffic (not loopback) is counted, sent (`out_<uid>`) and
+  received on the connections it opened (`in_<uid>`, by a conntrack mark set to the uid);
+  `tando-metrics` writes the difference per minute as columns 11 and 12 of the app's metrics
+  file. The conntrack mark is tando's: another tool that uses the mark conflicts.
+- `egress_ip = 192.0.2.10` (or `192.0.2.10,2001:db8::10`): the app's outbound connections leave
+  from that address of the server (SNAT by its user in nftables). One address of each family; a
+  family without one leaves from the server's default address. Not for container apps yet. An
+  address is one app's: another app cannot set it, and other apps' packets sent from it (a socket
+  bound to it) are dropped (counter `app_egress`). It must not be the server's main address (every
+  other app sends from it). For IPv6, add the address with `preferred_lft 0` so the kernel never
+  picks it as the source of another app's connections.
+- `profile`, `bind_ip` and `egress_ip` stay as they are when a tando.conf leaves them out;
+  `profile = none` (or `bind_ip = none`, `egress_ip = none`) clears one, for the admin. A preview
+  takes its parent's profile and none of its addresses.
+- `bind_ip = 192.0.2.11`: the app's site is served only on that address of the server. It must not
+  be the server's main address (every other site is served there, and Caddy serves only the bound
+  sites on a bound address). With HTTPS, Caddy 2.6 cannot open HTTP/3's UDP port on one address
+  beside the others, so sites on a bound address use HTTP/1 and 2 (a `servers` block per address in
+  /etc/caddy/tando-global, which host setup imports); the certificate is obtained as for any site.
+- Container apps (`recipe = container`): their packets leave from slirp4netns and conmon, which
+  run as root inside the app's unit, so the rules by user do not see them. The same rules match
+  the app's slice (`socket cgroupv2`) in the chain `containers`, loaded after the main rules and
+  again at each start of any unit of the app (the app, its pre-flight, its env check: their
+  `ExecStartPre=+tando-agent fw-ctr <app>`, which fails the unit unless the rules are loaded:
+  fail closed), and after every (re)start of nftables (`tando-firewall.service`'s
+  `ExecStartPost`; a reload of nftables, which flushes every rule, reloads it too). A slice made
+  again has a new id; at boot no slice exists. When the main rules change, the container rules
+  load in the same transaction. The
+  metadata address refusal is counted in `app_meta` (also for directory apps).
+- The `cpu_sustained` alert: the app's slice above `cpu_pct` % (default 90) of its CPU limit (of
+  one core without one) for `cpu_for` minutes (default 30) in a row; not counted while a deploy,
+  build, release command, shell or backup of the app runs. Never stops the app. `tando alerts set
+  <app>.cpu_sustained=off` turns it off for one app.
+
 ### Database connections and pgbouncer
 
 Apps with `database = postgres` share one PostgreSQL. `tando host setup` sizes it from the

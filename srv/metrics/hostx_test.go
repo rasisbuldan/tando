@@ -163,13 +163,13 @@ func TestSliceColumns(t *testing.T) {
 	}
 	slice(100, 10, 1)
 	h.m.Sample(context.Background())
-	if got := lastLine(h.read("web.tsv"))[5:]; strings.Join(got, " ") != "- - 17 512 250" {
+	if got := lastLine(h.read("web.tsv"))[5:10]; strings.Join(got, " ") != "- - 17 512 250" {
 		t.Errorf("first sample: %q", got)
 	}
 	h.now += 60
 	slice(700, 160, 3)
 	h.m.Sample(context.Background())
-	if got := lastLine(h.read("web.tsv"))[5:]; strings.Join(got, " ") != "250 2 17 512 250" {
+	if got := lastLine(h.read("web.tsv"))[5:10]; strings.Join(got, " ") != "250 2 17 512 250" {
 		t.Errorf("a minute later: %q (want 150 of 600 periods throttled, 2 OOM kills)", got)
 	}
 	// no CPU limit: no period runs, no throttling to show; no task limit: "max"
@@ -179,11 +179,11 @@ func TestSliceColumns(t *testing.T) {
 	h.m.Sample(context.Background())
 	h.now += 60
 	h.m.Sample(context.Background())
-	if got := lastLine(h.read("web.tsv"))[5:]; strings.Join(got, " ") != "- 0 17 - 250" {
+	if got := lastLine(h.read("web.tsv"))[5:10]; strings.Join(got, " ") != "- 0 17 - 250" {
 		t.Errorf("without limits: %q", got)
 	}
 	// an app still under system.slice has no slice of its own
-	if got := lastLine(h.read("old.tsv"))[5:]; strings.Join(got, " ") != "- - - - -" {
+	if got := lastLine(h.read("old.tsv"))[5:10]; strings.Join(got, " ") != "- - - - -" {
 		t.Errorf("old: %q", got)
 	}
 }

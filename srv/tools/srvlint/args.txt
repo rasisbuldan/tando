@@ -3,6 +3,7 @@ ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent activat
 ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent artifact-put <valid:app>
 ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent begin <valid:app> <valid:c.Caller>
 ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent configure <valid:app>
+ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent configure <valid:r.App>
 ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent deploy-status <valid:app> <valid:id>
 ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent destroy <valid:r.App> purge
 ctl/verbs.go agent	/opt/tando/bin/tando-agent	/opt/tando/bin/tando-agent end <valid:app>
@@ -20,6 +21,7 @@ gate/ctl.go Ctl	sudo	sudo -n -- tando-gate ctl-root
 gate/ctl.go ctlCheck	sshd	sshd -T
 gate/ctl.go ctlCheck	sshd	sshd -T -C user=tando-ctl,host=<..>
 gate/ctl.go ctlKRL	ssh-keygen	ssh-keygen -Q -l -f <valid:joined path .../.revoked.krl.new>
+gate/ctl.go ctlKRL	ssh-keygen	ssh-keygen -Q -l -f <valid:joined path .../revoked.krl>
 gate/ctl.go ctlKRL	ssh-keygen	ssh-keygen -l -f <valid:joined path .../ca.pub>
 gate/ctl.go ctlSetup	ssh-keygen	ssh-keygen -l -f <valid:joined path .../ca.pub>
 gate/ctl.go ctlSetup	useradd	useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment "tando sshd reads CI keys as this user" -- tando-keys
@@ -122,6 +124,7 @@ logs/setup.go systemctl	systemctl	systemctl restart systemd-journald
 logs/setup.go systemctl	systemctl	systemctl restart systemd-journald@<..>
 logs/setup.go systemctl	systemctl	systemctl stop systemd-journald@<..> systemd-journald@<..> systemd-journald-varlink@<..> systemd-journald@<..>
 logs/stats.go updateStats	journalctl	journalctl --no-pager -q -a -o short-unix --show-cursor --namespace=<..> --after-cursor=<..> --since=@<..> -n <int>
+metrics/sample.go netBytes	nft	nft -j list counters table inet tando
 offsite/sync.go systemctl	systemctl	systemctl daemon-reload
 offsite/sync.go systemctl	systemctl	systemctl disable --now tando-offsite.timer
 offsite/sync.go systemctl	systemctl	systemctl enable --now tando-offsite.timer
@@ -156,4 +159,4 @@ watch/verbs_install.go systemctl	systemctl	systemctl enable -q tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl reset-failed tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl start tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl try-restart tandod.service
-# positions: 673 constant, 56 prefixed, 3 int, 79 validated, 6 value of an option, 13 after --, 0 other
+# positions: 686 constant, 56 prefixed, 3 int, 81 validated, 6 value of an option, 13 after --, 0 other

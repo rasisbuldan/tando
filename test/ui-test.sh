@@ -671,7 +671,8 @@ out=$(mon_run 'WATCH=1 WATCH_TIMEOUT=2; n=0
   fetch() { [ -f "$TMPD/calls" ] || { : > "$TMPD/calls"; fetch_status; return; }; sleep 30; }
   rend() { n=$((n + 1)); [ $n -ge 3 ] && exit 0; render_ls; }
   s=$SECONDS; n=0; watch_loop rend fetch' | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
-if [[ $out == *"updated 0s ago"*"every 1s"*"not answering: no answer within 2 s"*"STALE: data "*" old, reconnecting"* ]]; then ok
+# (the first frame is "updated 0s ago", or 1s when a loaded machine crosses a second boundary)
+if [[ $out =~ updated\ [01]s\ ago.*every\ 1s ]] && [[ $out == *"not answering: no answer within 2 s"*"STALE: data "*" old, reconnecting"* ]]; then ok
 else bad "ls --watch: a hung refresh does not show as stale ($out)"; fi
 out=$(mon_run 'WATCH=1; n=0
   fetch() { [ -f "$TMPD/calls" ] || { : > "$TMPD/calls"; fetch_status; return; }; echo "ssh: connect to host vps port 22: Connection refused" >&2; return 255; }

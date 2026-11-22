@@ -406,6 +406,7 @@ C_preview_ttl="" C_preview_skip="" C_preview_env="" C_preview_release=""   # pre
 C_response_timeout="" C_body_max="" C_cold_timeout=""   # Caddy's limits per request (checked by the server too)
 C_priority=""   # high or low: who the OOM killer takes last or first (checked by the server too)
 C_tmp_size="" C_io="" C_disk=""   # /tmp's size, disk MB/s, disk share for alerts (checked by the server too)
+C_profile="" C_mail_out="" C_bind_ip="" C_egress_ip=""   # the server's limit profile, outbound mail, the app's own addresses (checked by the server)
 
 # trim_v text -> TRIM: without leading and trailing white space (no fork; conf_load runs it per line)
 trim_v() { TRIM=${1#"${1%%[![:space:]]*}"}; TRIM=${TRIM%"${TRIM##*[![:space:]]}"}; }
@@ -682,6 +683,13 @@ conf_load() { # [file]; a file already loaded in this run is not read again
           die "$f:$n: body_max is a size like 100MB or 2GB, or off (got \"$v\")";;
       cold_timeout) C_cold_timeout=$v
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 999 ] || die "$f:$n: cold_timeout is 1 to 999 seconds (got \"$v\")";;
+      profile) C_profile=$v
+        case $v in [a-z]*) case $v in *[!a-z0-9-]*) die "$f:$n: profile is a name of the server's profiles, like small (got \"$v\")";; esac;;
+          *) die "$f:$n: profile is a name of the server's profiles, like small (got \"$v\")";; esac;;
+      mail_out) C_mail_out=$v
+        case $v in on|off) ;; *) die "$f:$n: mail_out must be on or off (got \"$v\")";; esac;;
+      bind_ip|egress_ip) case $v in none) ;; *[!0-9a-fA-F.:,]*|"") die "$f:$n: $k is one of the server's IP addresses (got \"$v\")";; esac
+        if [ "$k" = bind_ip ]; then C_bind_ip=$v; else C_egress_ip=$v; fi;;
       priority) C_priority=$v
         case $v in high|normal|low) ;; *) die "$f:$n: priority must be high, normal or low (got \"$v\")";; esac;;
       tmp_size) C_tmp_size=$v
@@ -1063,8 +1071,9 @@ agent_raw() {
   # session's SSH_CONNECTION, so the audit line says from=dashboard (srv/logs Origin). Only this
   # value; never with a deploy key (its gate refuses such a command)
   [ -n "$s" ] && [ "${TANDO_FROM:-}" = dashboard ] && [ -z "${DEPLOY_KEY:-}" ] && s="TANDO_FROM=dashboard $s"
+  # (% too: a profile's cpu=25% for host setup; not special to the remote shell)
   for a in "$@"; do
-    case $a in ""|*[!A-Za-z0-9_.:=/@,+-]*) die "internal: unsafe argument '$a'";; esac
+    case $a in ""|*[!A-Za-z0-9_.:=/@,+%-]*) die "internal: unsafe argument '$a'";; esac
   done
   local try=0
   while :; do

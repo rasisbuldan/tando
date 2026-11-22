@@ -268,6 +268,18 @@ func TestCtlEffective(t *testing.T) {
 			t.Errorf("%s: %q", to, why)
 		}
 	}
+	if why := ctlEffective([]byte(good+"setenv SSH_USER_AUTH=/tmp/x\n"), gate, dir); why != "setenv SSH_USER_AUTH=/tmp/x" {
+		t.Errorf("setenv: %q", why)
+	}
+	// acceptenv patterns that match SSH_USER_AUTH (the others, LANG, LC_*, are fine)
+	for _, p := range []string{"*", "SSH_*", "SSH_USER_AUTH", "SSH_USER_A?TH"} {
+		if why := ctlEffective([]byte(good+"acceptenv LANG\nacceptenv "+p+"\n"), gate, dir); why != "acceptenv "+p {
+			t.Errorf("acceptenv %s: %q", p, why)
+		}
+	}
+	if why := ctlEffective([]byte(good+"acceptenv LANG\nacceptenv LC_*\nsetenv LC_ALL=C\nsetenv LANG=C\n"), gate, dir); why != "" {
+		t.Errorf("harmless env: %s", why)
+	}
 	// an sshd without GSSAPI does not print it: fine
 	if why := ctlEffective([]byte(strings.Replace(good, "gssapiauthentication no\n", "", 1)), gate, dir); why != "" {
 		t.Errorf("no gssapi line: %s", why)
@@ -358,32 +370,55 @@ func TestParseCert(t *testing.T) {
 	}
 }
 
-// F5: an empty list replaces one with entries only when asked by name; a list for another CA
-// is refused
+// F5/R1: a list with fewer entries than the current one (an empty one too) replaces it only when
+// forced; one with as many or more goes in; a list for another CA is refused
 func TestCtlKRL(t *testing.T) {
 	g := ctlGate(t)
 	krl := filepath.Join(g.ctlDir(), "revoked.krl")
-	write(t, krl, "KRL-with-entries")
-	empty := filepath.Join(t.TempDir(), "empty")
-	write(t, empty, "")
-	f, _ := os.Open(empty)
-	g.Stdin = f
-	var b bytes.Buffer
-	if err := g.CtlAdmin(out.New(&b), "ctl-krl"); err == nil || !strings.Contains(err.Error(), "ctl_krl=empty") {
-		t.Errorf("emptied without asking: %v", err)
+	write(t, krl, "KRL-current")
+	// ssh-keygen -Q -l: the current list has 3 entries, the candidates as their file says
+	g.Env.Run = &fakeRun{out: func(a []string) ([]byte, error) {
+		if len(a) > 1 && a[1] == "-Q" {
+			b, _ := os.ReadFile(a[len(a)-1])
+			switch string(b) {
+			case "KRL-current":
+				return []byte("# KRL version 0\nserial: 1\nserial: 2\nserial: 3\n"), nil
+			case "KRL-two":
+				return []byte("# KRL version 0\nserial: 1\nserial: 2\n"), nil
+			case "KRL-four":
+				return []byte("# KRL version 0\nserial: 1\nserial: 2\nserial: 3\nserial: 9\n"), nil
+			}
+		}
+		return nil, nil
+	}}
+	try := func(content string, force bool) error {
+		in := filepath.Join(t.TempDir(), "in")
+		write(t, in, content)
+		f, _ := os.Open(in)
+		defer f.Close()
+		g.Stdin, g.krlForce = f, force
+		var b bytes.Buffer
+		return g.CtlAdmin(out.New(&b), "ctl-krl")
 	}
-	if data, _ := os.ReadFile(krl); string(data) != "KRL-with-entries" {
-		t.Error("the list changed")
+	cur := func() string { d, _ := os.ReadFile(krl); return string(d) }
+	for _, c := range []string{"", "KRL-two"} {
+		if err := try(c, false); err == nil || !strings.Contains(err.Error(), "ctl_krl_force=yes") || cur() != "KRL-current" {
+			t.Errorf("%q replaced the list without asking: %v %q", c, err, cur())
+		}
 	}
-	f.Seek(0, 0)
-	g.krlEmpty = true
-	if err := g.CtlAdmin(out.New(&b), "ctl-krl"); err != nil {
-		t.Errorf("ctl_krl=empty: %v", err)
+	if err := try("KRL-four", false); err != nil || cur() != "KRL-four" {
+		t.Errorf("a longer list: %v %q", err, cur())
 	}
-	if data, _ := os.ReadFile(krl); len(data) != 0 {
-		t.Error("not emptied")
+	write(t, krl, "KRL-current")
+	if err := try("KRL-two", true); err != nil || cur() != "KRL-two" {
+		t.Errorf("forced: %v %q", err, cur())
 	}
-	f.Close()
+	if err := try("", true); err != nil || cur() != "" {
+		t.Errorf("forced empty: %v %q", err, cur())
+	}
+	if err := try("", false); err != nil {
+		t.Errorf("empty over empty: %v", err)
+	}
 
 	listing := "# KRL version 0\n# CA key ssh-ed25519 SHA256:other\nserial: 99\nserial: 100\n"
 	if _, why := krlEntries([]byte(listing), []string{"256", "SHA256:ours", "ca"}); why == "" {
@@ -403,5 +438,29 @@ func TestParseCAKeyRSASize(t *testing.T) {
 	}
 	if _, ok := ParseCAKey("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC+mJa+8gFvcIlhd+fCT+dY8JVb8hAHL5u8RlFS6ffX+hefMd7a9gHRiJ+dEnJpo04G2/WYewaBWAVMQGWja5O5YAva6eg0Pc6RuJ510ZzmqGO3KS9st4x1krKaF239ex3fQb8v4bGDrBmee6GtwBfnhzHMKBEPyEFLaYhoGG76wMOvXpWiNFQRYJzVA5X6KRddmzdBeGtn+tMMKquowF9NUVILN6RBi6axZVARcHww0s8M1p7SM3x02+PuQQxxtk3eyOnGuHQGc7a/oZ8t5z613RhsvIGSJ9L5ijzKHtif5FIwgLxLktCfgZHo5FzUXSznSUbleEMGSuQ+0sqq6My/nOdJZQ0llYfFWr+8LcwjhUT0XY8ezChaTn0w3gLWh884y9K+syN86K1u9JAuqwVYv7KXeXwPMZ1A7LsTklD9pXjRuEt14RehTcNSiwMcc05VCXxgTIacdRzP4YmSlSzvFCl61QtMS+5GhfJV5sTvIw2ZPRC40xMG/Mrt+Nq0Dic="); !ok {
 		t.Error("a 3072-bit RSA CA was refused")
+	}
+}
+
+// R2: a Match block on the node's own address is looked at too
+func TestCtlCheckNodeAddress(t *testing.T) {
+	g := ctlGate(t)
+	g.Addrs = func() []string { return []string{"198.51.100.7"} }
+	good := "authenticationmethods publickey\npubkeyauthentication yes\npasswordauthentication no\n" +
+		"kbdinteractiveauthentication no\nhostbasedauthentication no\n" +
+		"authorizedkeysfile none\nauthorizedkeyscommand none\ntrustedusercakeys " + g.ctlDir() + "/ca.pub\n" +
+		"revokedkeys " + g.ctlDir() + "/revoked.krl\nauthorizedprincipalsfile none\n" +
+		"authorizedprincipalscommand " + g.P.Gate + " ctl-principals %s %i\n" +
+		"authorizedprincipalscommanduser tando-keys\nforcecommand none\nexposeauthinfo yes\ndisableforwarding yes\npermittty no\n"
+	g.Env.Run = &fakeRun{out: func(a []string) ([]byte, error) {
+		if len(a) == 2 {
+			return []byte("port 22\n"), nil
+		}
+		if strings.Contains(a[3], "addr=198.51.100.7,") {
+			return []byte(strings.Replace(good, "forcecommand none", "forcecommand /bin/sh", 1)), nil
+		}
+		return []byte(good), nil
+	}}
+	if err := g.ctlCheck(); err == nil || !strings.Contains(err.Error(), "from 198.51.100.7") {
+		t.Fatalf("%v", err)
 	}
 }

@@ -41,7 +41,7 @@ srv/internal/usage. Tests: `test/e2e-ctl.sh`, the Go tests of those packages.
    revocation list, the principals command and its user, no key file, no keys command, no
    ForceCommand, `ExposeAuthInfo yes`. When another sshd_config file sets one of them first, setup
    stops and says which. Every later `tando host setup` and `tando doctor` checks the same again
-   (`sudo /opt/tando/bin/tando-gate admin ctl-check`): a drop-in added since is caught. Run it again with a new key to rotate the CA; `ctl_ca=off` turns the mode off (the
+   (`sudo /opt/tando/bin/tando-gate admin ctl-check`): a drop-in added since is caught, also one that matches the node's own addresses, or that sets or accepts the variable `SSH_USER_AUTH` (`SetEnv`, `AcceptEnv`). Run it again with a new key to rotate the CA; `ctl_ca=off` turns the mode off (the
    drop-in, the sudo rule and the CA file go; the request store stays).
 
 3. Sign a short-lived certificate for each call or batch of calls:
@@ -97,8 +97,10 @@ tando host setup <host> ctl_krl=revoked.krl
 
 The server accepts only a file `ssh-keygen -Q -l` reads: a broken list would make sshd refuse every
 certificate. A list with certificate sections must have one for this node's CA (one made with
-another `-s` revokes nothing here), and the answer says how many entries it has. An empty file
-never replaces a list with entries by accident: `ctl_krl=empty` empties it by name. Short validity is the main defence; the list is for a certificate
+another `-s` revokes nothing here), and the answer says how many entries it has. A list with fewer
+entries than the current one (an empty file included) never replaces it by accident: add
+`ctl_krl_force=yes` to replace it anyway, or `ctl_krl=none` to empty it by name (`ctl_krl=empty` still
+works, unless a file called `empty` is there: then it is that file). Short validity is the main defence; the list is for a certificate
 that must stop working before it expires.
 
 OpenSSH 9.8 and newer drops every connection from an address for a while after failed logins

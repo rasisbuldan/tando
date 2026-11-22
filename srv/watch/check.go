@@ -49,6 +49,7 @@ func firstChecks() []hostCheck {
 func appCheckList() []appCheck {
 	return []appCheck{
 		appFunc{"stuck", checkStuck},            // also: an activation alive holds the app
+		appFunc{"cpu", checkCPU},                // the slice's CPU (before down: an idle web process holds the app)
 		appFunc{"restart count", countRestarts}, // NRestarts since the last run, how it last ended
 		appFunc{"down", checkDown},              // not running holds the app for what follows
 		appFunc{"restarts", checkRestarts},

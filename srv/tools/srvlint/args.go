@@ -478,7 +478,7 @@ var shapes = map[string][]string{
 	"node":     {"--version"},
 	"caddy":    {"version", "validate --config * --adapter caddyfile"},
 	"sendmail": {"-t -oi"},
-	"nft":      {"list table inet tando", "-f **"}, // ** : a constant, or a path joined to a fixed name; never an unknown value
+	"nft":      {"list table inet tando", "-j list counters table inet tando", "-f **"}, // ** : a constant, or a path joined to a fixed name; never an unknown value
 	"du":       {"-smxc -- ..."},
 	"visudo":   {"-c -q -f *"},
 	"crontab":  {"-r -u *"},

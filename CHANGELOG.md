@@ -10,8 +10,23 @@ Highlights: a server holds 100 apps and more; a dashboard add-on (web app, insta
 laptop); an always-on database studio; cloud-style monitoring of the server, the apps and their
 databases; scale to zero; faster deploys. Several defaults change: read "On upgrade" first.
 
+### Control plane and origin follow-ups
+
+- `ctl_krl=<file>` with fewer entries than the current list (an empty file too) is refused unless
+  `ctl_krl_force=yes`; `ctl_krl=none` empties the list by name (`empty` still works when no file has
+  that name). `ctl-check` also asks sshd about the node's own addresses and refuses a `SetEnv` or
+  `AcceptEnv` of `SSH_USER_AUTH`. The request store's cap check is O(1) (a count file).
+- `tando doctor` shows the origin lock's certificate warning and repeated refresh failures together.
+
 ### New
 
+- Guardrails for shared servers (docs/COMMANDS.md "Profiles and guardrails"): limit profiles
+  (`host setup profile.<name>=...`, `profile = <name>`) with mandatory CPU, task and job limits,
+  worker counts and job frequency; `mail_out = off`; a per-app outbound connection rate
+  (`conn_rate_out=`); per-app network byte counters, written by tando-metrics; `egress_ip` and
+  `bind_ip` per app; the awake governor for idle apps (`awake_max=`, `wake_rate=`); the
+  `cpu_sustained` alert; container apps' packets are now matched by their slice (they bypassed
+  every per-user network rule).
 - Data nodes (docs/DATA-NODE.md): `tando host setup <h> role=data` runs PostgreSQL and pgbouncer
   for other servers' apps, on the node's addresses with TLS (a CA made on the node, or your own
   certificates with `data_cert=`, `data_key=`, `data_ca=`), sized from its RAM. `tando host link

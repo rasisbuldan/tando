@@ -37,6 +37,7 @@ logs	caddy
 logs	journalctl
 logs	logger
 logs	systemctl
+metrics	nft
 offsite	systemctl
 status	caddy
 status	getconf
