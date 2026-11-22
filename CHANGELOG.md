@@ -35,7 +35,7 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
     on starting. Caddy keeps a connection to an idle app's proxy 30 s (was: none), so the
     idle_stop timer starts up to 30 s after the last request.
   - Caddy 2.7 and later: a reload (a new app, another app's site change) no longer ends every
-    websocket and event stream at once: they end 30 minutes later (`stream_close_delay`). Caddy
+    websocket and event stream at once: they end 5 minutes later (`stream_close_delay`; `tando host setup <host> stream_close_delay=30m` to change it). Caddy
     2.6 (Ubuntu's package) has no such setting: there a reload still ends them.
 - Scale: a server holds 100 apps and more (tuned for 4 vCPU / 8 GB). Upgrade with
   `tando host setup <host>`; apps keep their ports, users and settings. docs/ARCHITECTURE.md,

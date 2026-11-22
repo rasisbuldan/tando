@@ -725,6 +725,10 @@ printf 'http://127.0.0.1:9999/hb/S3CR3Thb1\n' | "$R" alerts heartbeat > /dev/nul
 "$R" doctor > "$E/doctor-hb.out" 2>&1
 check "32c with a heartbeat the warning is gone" not grep -q 'heartbeat .*warn' "$E/doctor-hb.out"
 
+# The test drives the daily backups by hand. The host's backup queue (tando-backups.timer, 01:00 on
+# the server's clock, which is real UTC) would run them itself when a run crosses 01:00 UTC, and the
+# ping would then be due before the check below: stop it, and forget any run it already made.
+srv 'sudo systemctl stop tando-backups.timer tando-backups.service; sudo sed -i "/^backup_daily_/d" /opt/tando/apps/*/state'
 nbp() { srv "sudo grep -c '\"path\":\"/$1/' /root/recv.log" | tr -d ' '; }
 dailies=$(srv "sudo grep -l '^backup=daily' /opt/tando/apps/*/app.conf" | sed 's,/app.conf$,,; s,.*/,,' | tr '\n' ' ')
 # the daily backups, as their timers start them; prints the units that failed

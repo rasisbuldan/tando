@@ -53,7 +53,7 @@ check "P2 the site sets the dial timeout, the app's response timeout and body ca
 cv=$("$SSH" 'caddy version' 2> /dev/null | grep -o '[0-9][0-9]*\.[0-9][0-9]*' | head -1)
 new=0; case $cv in 2.[0-6]|1.*|'') ;; *) new=1;; esac
 if [ $new = 1 ]; then
-  check "P3 Caddy $cv: streams survive a reload for 30 minutes (stream_close_delay)" eval 'site pa | grep -q "stream_close_delay 30m"'
+  check "P3 Caddy $cv: streams survive a reload for 5 minutes (stream_close_delay)" eval 'site pa | grep -q "stream_close_delay 5m"'
 else
   check "P3 Caddy $cv has no stream_close_delay: none is written (the site would not load)" eval '! site pa | grep -q stream_close_delay'
 fi

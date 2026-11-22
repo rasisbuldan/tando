@@ -584,7 +584,7 @@ svc_restart() {
 
 # caddy_ge major minor: the installed Caddy is that version or later. CADDY_V: its version
 # (2.6.2), asked once per run, kept in $R/.caddy-version with the binary's change time
-STREAM_CLOSE_DELAY=30m
+STREAM_CLOSE_DELAY=5m   # host setup stream_close_delay=: how long a reload leaves the old config's streams
 caddy_ge() {
   if [[ -z ${CADDY_V:-} ]]; then
     local b k="" ok; b=$(command -v caddy 2> /dev/null) && k=$(stat -Lc %Y-%s "$b" 2> /dev/null)
@@ -1059,7 +1059,7 @@ caddy_proxy() {
   # app, a site change of another app) unless this delay is set: they then end this long after
   # it (the client reconnects then). Caddy 2.6 has no such setting: there a reload ends them at
   # once (docs/COMMANDS.md "Limits and load")
-  if caddy_ge 2 7; then echo "		stream_close_delay $STREAM_CLOSE_DELAY"; fi
+  if caddy_ge 2 7; then echo "		stream_close_delay ${H[stream_close_delay]:-$STREAM_CLOSE_DELAY}"; fi
   # load shedding, when max_requests is set: with that many in flight the app counts as full;
   # a request beyond it waits at most lb_try_duration (the hold) and then gets the 503 "busy"
   # page below. Caddy 2.6 has one retry loop for "full" and "restarting", so the 503 comes only
@@ -2566,6 +2566,7 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
       app_max_mb=*) [[ ${kv#*=} =~ ^[0-9]{2,9}$ ]] || die "bad app_max_mb"; H[app_max_mb]=${kv#*=};;
       rate_limit=on|rate_limit=off|rate_limit=auto) H[rate_limit]=${kv#*=};;   # per-client limits (fw_sync)
       conn_limit=*|conn_rate=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
+      stream_close_delay=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,3}[smh]$ ]] || die "bad stream_close_delay (like 5m, 30s, 1h)"; H[stream_close_delay]=${kv#*=};;
       conn_out=*|dns_rate=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;   # per app (fw_sync)
       ci_max_mb=*|ci_max_files=*|ci_max_file_mb=*)   # upload limits of deploy keys (tando-gate)
         [[ ${kv#*=} =~ ^[0-9]{1,9}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;

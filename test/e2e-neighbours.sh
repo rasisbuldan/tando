@@ -36,11 +36,11 @@ t_host_add test
 mkdir -p "$W/$A" "$W/$B" "$W/$C"
 cat > "$W/$A/server.js" << 'EOF'
 // The misbehaving app. Every failure is a request; /status says what it did so far.
-const http = require('http'), fs = require('fs'), net = require('net'), cp = require('child_process');
+const http = require('http'), fs = require('fs'), os = require('os'), net = require('net'), cp = require('child_process');
 const { Worker } = require('worker_threads');
 const port = Number(process.env.PORT), data = process.env.TANDO_DATA_DIR;
 const st = { spin: 0, leak_mb: 0, tried: 0, forked: 0, fork_err: 0, fork_last: '', logged: 0,
-  conns_open: 0, conns_err: 0, disk_mb: 0, disk_err: '' };
+  conns_open: 0, conns_err: 0, disk_mb: 0, disk_err: '', tmp_mb: 0, tmp_err: '' };
 const hold = [], socks = [];
 // a crash loop: the flag file makes every start exit (the data directory survives a restart)
 if (fs.existsSync(data + '/crashloop')) { console.error('crashloop flag: exiting'); process.exit(1); }
@@ -94,6 +94,15 @@ function disk(mb) { // 1 MB files until mb or an error
     } catch (e) { st.disk_err = e.code || String(e); clearInterval(iv); }
   }, 5);
 }
+function tmpfill(mb) { // 1 MB files in /tmp (a 64M tmpfs of the app's own) until mb or an error
+  let i = 0; const chunk = Buffer.alloc(1 << 20, 7), dir = os.tmpdir();
+  const iv = setInterval(() => {
+    try {
+      if (i >= mb) return clearInterval(iv);
+      fs.writeFileSync(`${dir}/tfill-${i++}.bin`, chunk); st.tmp_mb = i;
+    } catch (e) { st.tmp_err = e.code || String(e); clearInterval(iv); }
+  }, 5);
+}
 const server = http.createServer((req, res) => {
   const p = req.url.split('?')[0], say = (s) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end(s + '\n'); };
   switch (p) {
@@ -108,6 +117,9 @@ const server = http.createServer((req, res) => {
     case '/slow': return setTimeout(() => say('slow done'), q(req.url, 'ms', 30000));
     case '/conns': conns(q(req.url, 'n', 2000), q(req.url, 'port', port)); return say('connecting');
     case '/disk': disk(q(req.url, 'mb', 150)); return say('filling');
+    case '/tmpfill': tmpfill(q(req.url, 'mb', 150)); return say('filling /tmp');
+    case '/tmpclear': for (const f of fs.readdirSync(os.tmpdir())) if (f.startsWith('tfill-')) fs.unlinkSync(os.tmpdir() + '/' + f);
+      st.tmp_mb = 0; st.tmp_err = ''; return say('cleared /tmp');
     case '/clear': for (const f of fs.readdirSync(data)) if (f.startsWith('fill-')) fs.unlinkSync(data + '/' + f);
       st.disk_mb = 0; st.disk_err = ''; return say('cleared');
     case '/status': res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify(st) + '\n');
@@ -126,6 +138,7 @@ start = node server.js
 health = /health
 health_timeout = 15
 memory = 160M
+disk = 40M
 tasks = 100
 cpu = 50%
 max_conns = 20
@@ -363,8 +376,21 @@ if srv "sudo nft list ruleset 2> /dev/null | grep -Eq 'skuid.*ct count|ct count.
 else skip "N8b per-uid conntrack cap (nft ct count per app user): not in this version (density slice 3)"; fi
 srv "sudo /opt/tando/bin/tando-agent restart $A" > /dev/null 2>&1; t_until 30 a_up > /dev/null
 
-# ---- 9. files until a cap ---------------------------------------------------------------------
+# ---- 9. files: /tmp is a 64M tmpfs of A's own; the data directory has a share (alerts), no quota --
 log "9. disk"
+# 9.1 /tmp: the fill stops at tmp_size (64M) with ENOSPC, A answers, B and C are untouched
+get "/tmpfill?mb=120" > /dev/null
+tmp_done() { [ -n "$(get /status | sed -n 's/.*"tmp_err":"\([A-Z]*\)".*/\1/p')" ]; }
+t_until 30 tmp_done > /dev/null 2>&1
+tst=$(st_json)
+echo "  A after the /tmp fill: $tst" >&2
+tmb=$(echo "$tst" | sed -n 's/.*"tmp_mb":\([0-9]*\).*/\1/p')
+check "N9t the /tmp fill stopped with ENOSPC at the 64M tmp_size, not at the 120 MB asked (A wrote ${tmb:-?} MB)" eval '
+  echo "$tst" | grep -q "\"tmp_err\":\"ENOSPC\"" && [ "${tmb:-0}" -ge 20 ] && [ "${tmb:-0}" -le 64 ]'
+check "N9u with its /tmp full A still answers, and B and C answer untouched" eval '
+  a_up && [ "$(code $B 5 /)" = 200 ] && [ "$(mainpid $B)" = "$b_pid" ]'
+get /tmpclear > /dev/null
+# 9.2 the data directory: no hard quota (the fill goes on), the disk share (40M here) raises the alert
 get "/disk?mb=120" > /dev/null
 b_start disk; sleep 6; c_wake; sleep 3
 b_stop disk 600
@@ -373,12 +399,17 @@ echo "  A after the disk fill: $dst" >&2
 dmb=$(echo "$dst" | sed -n 's/.*"disk_mb":\([0-9]*\).*/\1/p')
 common N9 disk 600 "A wrote ${dmb:-?} MB"
 check "N9a the fill ran (A wrote at least 20 MB)" eval '[ "${dmb:-0}" -ge 20 ]'
-if srv 'grep -q "tmp_size\|disk_max" /opt/tando/bin/tando-agent'; then
-  check "N9b a disk cap on A: the fill stopped with an error before the cap of the test (120 MB)" eval '
-    [ -n "$(echo "$dst" | sed -n "s/.*\"disk_err\":\"\\([A-Z]*\\)\".*/\\1/p")" ]'
-else skip "N9b per-app disk cap (disk = / tmp_size): not in this version (density slice 4); the fill went to $dmb MB"; fi
+check "N9b the data-directory fill is no hard quota (A wrote past its 40M share: ${dmb:-?} MB, no error)" eval '
+  [ "${dmb:-0}" -gt 40 ] && ! echo "$dst" | grep -q "\"disk_err\":\"[A-Z]"'
+"$R" alerts set disk_every=0 -H test > /dev/null 2>&1
+disk_alert() { srv 'sudo systemctl start tando-watch.service' > /dev/null 2>&1; srv "sudo grep -Eq '^$A\\.disk\\.st=firing' /var/lib/tando/watch/state"; }
+t_until 120 disk_alert > /dev/null 2>&1
+check "N9d A over its 40M disk share raises the disk alert, and no other app has one" eval '
+  srv "sudo grep -Eq \"^$A\\.disk\\.st=firing\" /var/lib/tando/watch/state" &&
+  ! srv "sudo grep -Eq \"^($B|$C)\\.disk(_warn)?\\.st=(pending|firing)\" /var/lib/tando/watch/state"'
+"$R" alerts set disk_every= -H test > /dev/null 2>&1
 get /clear > /dev/null
-check "N9c the files A wrote are removed (cleanup; the data directory has no fill-* left)" eval '! srv "ls /opt/tando/apps/$A/shared/data | grep -q fill-"'
+check "N9c the files A wrote are removed (cleanup; the data directory has no fill-* left)" eval '! srv "sudo ls /opt/tando/apps/$A/shared/data | grep -q fill-"'
 
 # ---- the table ---------------------------------------------------------------------------------
 {
