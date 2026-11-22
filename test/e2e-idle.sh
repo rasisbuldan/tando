@@ -63,6 +63,19 @@ sock_up() { "$SSH" 'systemctl -q is-active tando-zz_wake.socket && test -S /run/
 "$SSH" 'sudo systemctl start tando-watch.service' > /dev/null 2>&1
 check "I14 the monitor's run starts a wake socket that is gone again, and the app answers" eval 't_until 30 sock_up && [ "$(code)" = 200 ]'
 
+# ---- cold_timeout: a visitor waits at most that long for a slow start, then gets a 503 -----------
+cp -R "$ROOT/examples/hello" "$W/zc"
+printf 'app = zc\nidle_stop = 5s\ncold_timeout = 2\n' >> "$W/zc/tando.conf"
+(cd "$W/zc" && "$R" up --yes > "$E/up-zc.log" 2>&1 && "$R" env set SLOW_START=6 > "$E/env-zc.log" 2>&1); rc=$?
+zc_idle() { [ "$("$SSH" 'systemctl show -P ActiveState tando-zc.service' 2> /dev/null)" = inactive ]; }
+check "I15 an idle app that starts in 6 s (cold_timeout = 2) deploys and goes idle" eval '[ $rc = 0 ] && t_until 75 zc_idle'
+r=$(curl -s -D "$E/zc.h" -o "$E/zc.body" -w '%{http_code} %{time_total}' --max-time 30 "$(t_url zc)")
+echo "cold start over cold_timeout 2 s: $r" >> "$E/numbers"
+check "I16 its first request gets a 503 \"waking up\" with Retry-After within about cold_timeout, not after its start" eval '
+  [ "${r%% *}" = 503 ] && awk -v t="${r#* }" "BEGIN { exit !(t < 5) }" && grep -qi "^retry-after: 5" "$E/zc.h" && grep -q "zc is waking up" "$E/zc.body"'
+zc_ok() { [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$(t_url zc)")" = 200 ]; }
+check "I17 and the app goes on starting: a later request is answered" t_until 20 zc_ok
+
 # ---- not for a static site, and destroy ----------------------------------------------------------
 cp -R "$ROOT/examples/site" "$W/st"; printf 'app = zst\nidle_stop = 10m\n' >> "$W/st/tando.conf"
 (cd "$W/st" && "$R" up --yes > "$E/up3.log" 2>&1); rc=$?

@@ -23,6 +23,20 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   - Memory and CPU: Caddy, sshd, tandod, PostgreSQL and pgbouncer get `MemoryLow`; an app's
     journald runs in its slice (a log flood counts against the app); `priority` sets the CPU
     weight (high 200, low 50); `io = 50` caps an app's disk bandwidth in MB/s.
+- Caddy per app, so a slow or flooding app ties up only itself (docs/COMMANDS.md, "Limits and
+  load"); applied at the app's next deploy or `tando host setup`:
+  - `response_timeout = 60` (seconds, or `off`): an answer whose headers do not come in time is a
+    504 "<app> took too long to answer". Websockets and event streams are not cut by it.
+  - `body_max = 100MB` (or `off`): a larger request body is a 413, also on Caddy 2.6 (which
+    reported it as a 502).
+  - A connection to the app that does not open in 3 s counts as a restart (held, tried again).
+  - `cold_timeout = 30` (seconds) for an app with `idle_stop`: a visitor waits at most that long
+    for the app to start, then gets a 503 "waking up" page with `Retry-After: 5`; the app goes
+    on starting. Caddy keeps a connection to an idle app's proxy 30 s (was: none), so the
+    idle_stop timer starts up to 30 s after the last request.
+  - Caddy 2.7 and later: a reload (a new app, another app's site change) no longer ends every
+    websocket and event stream at once: they end 30 minutes later (`stream_close_delay`). Caddy
+    2.6 (Ubuntu's package) has no such setting: there a reload still ends them.
 - Scale: a server holds 100 apps and more (tuned for 4 vCPU / 8 GB). Upgrade with
   `tando host setup <host>`; apps keep their ports, users and settings. docs/ARCHITECTURE.md,
   "Many apps on one server".
@@ -207,6 +221,9 @@ Steps and checks: docs/release-notes/0.3.0.md.
   second.
 - Database studio: `tando host setup` installs `tando-studio.service` (see New). An older tando on
   the laptop is told to update before it can open the studio.
+- Caddy limits per app (see New): an answer whose headers take over 60 s is now a 504 and a request
+  body over 100MB a 413, on each app's next deploy or `tando host setup`. Set `response_timeout = off`
+  (or more seconds) for an app with long polls or slow reports, `body_max` for large uploads.
 - `tando ls` (and `ls --all`, per server) above 50 apps shows a summary: the count per state and
   only the apps that are down or have an alert firing; `--all-rows` lists every app; `--json` is
   unchanged.
