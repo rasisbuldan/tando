@@ -1,4 +1,3 @@
-  [[ $state == inactive ]] && idle_app && state=idle   # (idle_stop) waits for its next request, as srv/status
 #!/bin/bash
 # tando-agent: the server side of tando. Installed as /opt/tando/bin/tando-agent (root, 755).
 #
