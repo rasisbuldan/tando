@@ -6,30 +6,24 @@ first, grouped by area.
 
 ## Unreleased
 
-- New: preview apps. `tando preview up [--branch B] [--ttl 7d]` deploys this project as
-  `<app>-<branch>` (24 characters at most; a checksum keeps two branches apart) on its own link:
-  the parent's settings and env (minus `preview_skip`), no database, jobs or backups, `idle_stop`
-  6h, removed by the server after `preview_ttl` (default 7d). `preview ls` and `preview rm` list
-  and remove them. A CI deploy key of the app may make, deploy to and remove previews of its own
-  app only (new gate verbs and two more exact sudo commands; run `tando host setup` once); a
-  GitHub Actions example is in docs/CI.md. Design: docs/PREVIEWS.md.
-- New: `tando backup drill [app]` restores the newest backup into a throwaway database and
-  directory on the server, checks file and table counts and `pg_restore`'s exit, reports and
-  removes the copy (the live data is never touched). The server does it monthly after the backup
-  queue (`backup_drill = monthly|off` in `tando host setup`); `backup ls` shows the last result,
-  `doctor` warns and an alert fires when a drill fails.
-
-- New: `idle_stop = 6h` in tando.conf (scale to zero; `on` = 6h): the app's web process stops
-  after that long without a request and its next request starts it (workers and jobs run on) (systemd socket activation and systemd-socket-proxyd
-  behind Caddy; the first request waits about 0.1-0.3 s for a small app). `tando ls` says
-  `idle`; the monitor and the per-minute recovery do not wake it. Not for static sites,
-  containers (docs/COMMANDS.md, "Scale to zero").
 Highlights: a server holds 100 apps and more; a dashboard add-on (web app, installed on the
 laptop); an always-on database studio; cloud-style monitoring of the server, the apps and their
 databases; scale to zero; faster deploys. Several defaults change: read "On upgrade" first.
 
 ### New
 
+- Preview apps: `tando preview up [--branch B] [--ttl 7d]` deploys this project as
+  `<app>-<branch>` (24 characters at most; a checksum keeps two branches apart) on its own link:
+  the parent's settings and env (minus `preview_skip`), no database, jobs or backups, `idle_stop`
+  6h, removed by the server after `preview_ttl` (default 7d). `preview ls` and `preview rm` list
+  and remove them. A CI deploy key of the app may make, deploy to and remove previews of its own
+  app only (new gate verbs and two more exact sudo commands; run `tando host setup` once); a
+  GitHub Actions example is in docs/CI.md. Design: docs/PREVIEWS.md.
+- Restore drill: `tando backup drill [app]` restores the newest backup into a throwaway database
+  and directory on the server, checks file and table counts and `pg_restore`'s exit, reports and
+  removes the copy (the live data is never touched). The server does it monthly after the backup
+  queue (`backup_drill = monthly|off` in `tando host setup`); `backup ls` shows the last result,
+  `doctor` warns and an alert fires when a drill fails.
 - Scale: a server holds 100 apps and more (tuned for 4 vCPU / 8 GB). Upgrade with
   `tando host setup <host>`; apps keep their ports, users and settings. docs/ARCHITECTURE.md,
   "Many apps on one server".
