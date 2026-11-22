@@ -169,6 +169,7 @@ cmd_host() {
           journal_max=*|log_budget=*|log_max=*|log_keep=*|log_rate=*|access_log=*|access_size=*|access_keep=*) ;;
           access_keep_for=*|ci_max_mb=*|ci_max_files=*|ci_max_file_mb=*|app_max_mb=*) ;;
           rate_limit=on|rate_limit=off|rate_limit=auto|conn_limit=*|conn_rate=*) ;;
+          origin=off|origin=cloudflare|origin=custom:*|origin_lock=on|origin_lock=off|origin_cert=*|origin_key=*) ;;   # behind an edge (docs/COMMANDS.md)
           request_log_max=*) ;;
           conn_out=*|dns_rate=*|conn_rate_out=*|stream_close_delay=*) ;;   # per app's user (the server checks them)
           profile.*=*|awake_max=*|wake_rate=*) ;;   # limit profiles, the awake governor (the server checks them)
