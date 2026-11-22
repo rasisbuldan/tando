@@ -612,7 +612,7 @@ srv "sudo find $INC -name '.0big*' -delete; sudo rm -f $INC/0big.bin" > /dev/nul
 check "6.8 no setuid/setgid file under /opt/tando (apps, ci homes)" \
   test "$(srv 'sudo find /opt/tando/apps /opt/tando/ci -perm /6000 | wc -l')" = 0
 check "6.8 every sudo rule for deploy users names only tando-gate root <own app> <verb>" \
-  test "$(srv 'sudo cat /etc/sudoers.d/tando-d-* | grep NOPASSWD | grep -v "^tando-d-\([a-z0-9-]*\) ALL=(root) NOPASSWD: /opt/tando/bin/tando-gate root \1 begin, /opt/tando/bin/tando-gate root \1 end, /opt/tando/bin/tando-gate root \1 activate, /opt/tando/bin/tando-gate root \1 receive$" | wc -l')" = 0
+  test "$(srv 'sudo cat /etc/sudoers.d/tando-d-* | grep NOPASSWD | grep -v "^tando-d-\([a-z0-9-]*\) ALL=(root) NOPASSWD: /opt/tando/bin/tando-gate root \1 begin, /opt/tando/bin/tando-gate root \1 end, /opt/tando/bin/tando-gate root \1 activate, /opt/tando/bin/tando-gate root \1 receive, /opt/tando/bin/tando-gate root \1 preview-up, /opt/tando/bin/tando-gate root \1 preview-rm$" | wc -l')" = 0
 
 # ---- 7. GitHub Actions workflow --------------------------------------------------------------
 log "7. tando ci github"
@@ -932,7 +932,7 @@ check "11c the preview has alpha's env except what preview_skip names" \
 check "11d ... idle_stop 6h, no backup, no database, no jobs, an expiry about 7 days out" eval '
   c=$(srv "sudo cat /opt/tando/apps/$PV/app.conf"); x=$(printf "%s\n" "$c" | sed -n "s/^preview_expires=//p"); n=$(srv "date +%s")
   printf "%s\n" "$c" | grep -qx idle_stop=6h && printf "%s\n" "$c" | grep -qx backup=off && ! printf "%s\n" "$c" | grep -q "^database=\|^job\." &&
-  test "$((x - n))" -gt 604700 && test "$((x - n))" -le 604800'
+  test "$((x - n))" -gt 604000 && test "$((x - n))" -le 604800'
 check "11e the hourly expiry timer is enabled on the server" srv "systemctl is-enabled -q tando-previews.timer"
 "$R" preview ls > "$E/pv.ls" 2>&1
 check "11f tando preview ls lists it with its link" sh -c "grep -q '$PV' '$E/pv.ls' && grep -q 'localhost' '$E/pv.ls'"

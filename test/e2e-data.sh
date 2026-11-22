@@ -407,7 +407,7 @@ check "D11b status shows the database and the last backup" \
   eval 'grep -q "database.*postgres" "$E/status.out" && grep -q "backup.*daily, last" "$E/status.out"'
 
 # D11d. the restore drill: the newest backup restored into a throwaway database and directory
-note drillrow1; note drillrow2
+page_before=$(page)
 "$R" backup now > /dev/null 2>&1
 LIVE_SQL="SELECT coalesce(sum((xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint), 0) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')"
 live_before=$(echo "$LIVE_SQL" | pgsu tando_notes | tail -1)
@@ -416,7 +416,7 @@ live_after=$(echo "$LIVE_SQL" | pgsu tando_notes | tail -1)
 check "D11d backup drill restores the newest backup and reports it (rc=$rc)" \
   eval 'test $rc = 0 && grep -q "tables, $live_before rows" "$E/drill.out" && grep -q "drill .*ok" "$E/drill.out"'
 check "D11e ... the live database was not touched (rows $live_before -> $live_after) and the live data stays" \
-  eval 'test "$live_before" = "$live_after" && test "$live_before" -ge 2 && page | grep -q drillrow2'
+  eval 'test "$live_before" = "$live_after" && test "$live_before" -ge 1 && test "$(page)" = "$page_before"'
 check "D11f ... the throwaway database and directory are gone" \
   eval 'test "$(echo "select count(*) from pg_database where datname like '"'"'tando_drill%'"'"'" | pgsu postgres | tail -1)" = 0 &&
         test "$(srv "sudo ls -A /opt/tando/apps/notes/shared | grep -c drill")" = 0'
@@ -442,12 +442,6 @@ srv "sudo rm -rf $BK/notes/$idb"
 "$R" backup now > /dev/null 2>&1; "$R" backup drill > "$E/drill-ok2.out" 2>&1
 check "D11l the next drill that works clears it" \
   eval 'srv "sudo grep -qx drill_result=ok /opt/tando/apps/notes/state" && ! srv "sudo $AGENT doctor" 2> /dev/null | grep "app notes" | grep -q "restore drill"'
-# backup_drill = off: no timer, and the host's run does nothing
-"$R" host setup test backup_drill=off > /dev/null 2>&1
-check "D11m host setup backup_drill=off removes the timer; backup-drill-all then drills nothing" \
-  eval '! srv "systemctl is-enabled -q tando-drill.timer" && test "$(srv "sudo $AGENT backup-drill-all" 2> /dev/null | head -1)" = drilled=0'
-"$R" host setup test backup_drill=monthly > /dev/null 2>&1
-check "D11n ... and monthly puts it back" srv "systemctl is-enabled -q tando-drill.timer"
 
 # D12. retention: 7 daily plus 4 weekly
 srv "for d in \$(seq 1 40); do i=\$(date -u -d \"-\$d days\" +%Y%m%d)-030000-daily; sudo mkdir -p $BK/notes/\$i;
@@ -642,6 +636,13 @@ check "D15 destroy: final backup kept, database dropped (rc=$rc, db left: $gone)
 check "G8 destroy took tando_notes2 out of pgbouncer (its user and its database); tando_notes stays" \
   eval '! srv "sudo grep -q tando_notes2 /etc/pgbouncer/userlist.txt /etc/pgbouncer/pgbouncer.ini" &&
         srv "sudo grep -q tando_notes /etc/pgbouncer/pgbouncer.ini"'
+
+# D16. backup_drill = off: no timer, and the host's run does nothing (last: host setup runs again here)
+"$R" host setup test backup_drill=off > /dev/null 2>&1
+check "D11m host setup backup_drill=off removes the timer; backup-drill-all then drills nothing" \
+  eval '! srv "systemctl is-enabled -q tando-drill.timer" && test "$(srv "sudo $AGENT backup-drill-all" 2> /dev/null | head -1)" = drilled=0'
+"$R" host setup test backup_drill=monthly > /dev/null 2>&1
+check "D11n ... and monthly puts it back" srv "systemctl is-enabled -q tando-drill.timer"
 
 echo
 cat "$E/pgmem"

@@ -4704,7 +4704,7 @@ cmd_backup_drill() { # app [id]
   valid_backup "$id" && [[ -d $BK/$A/$id ]] || die "no such backup: $id"
   dir=$BK/$A/$id; t0=$(now)
   # room for it: the data is unpacked beside the live data, so the disk must hold it twice over
-  need=$(du -sk "$dir" | cut -f1); need=$((need * 4 + 102400))
+  need=$(du -sk "$dir" | cut -f1); need=$((need * 3 + 16384))
   free=$(df -Pk "$R/apps" | awk 'NR == 2 { print $4 }')
   if [[ $free =~ ^[0-9]+$ ]] && ((free < need)); then
     why="not enough free disk space to unpack the backup ($((need / 1024)) MB needed)"
