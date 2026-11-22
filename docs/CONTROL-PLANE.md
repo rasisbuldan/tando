@@ -35,9 +35,13 @@ srv/internal/usage. Tests: `test/e2e-ctl.sh`, the Go tests of those packages.
    `/opt/tando/ctl`, root-owned), writes `/opt/tando/ctl/ca.pub`, an empty revocation list, one
    sudo rule (`tando-ctl ALL=(root) NOPASSWD: /opt/tando/bin/tando-gate ctl-root`) and the sshd
    drop-in `/etc/ssh/sshd_config.d/50-tando-ctl.conf`. Before sshd is reloaded it checks the
-   whole configuration (`sshd -t`) and what sshd will apply to `tando-ctl` (`sshd -T`): the CA,
-   the revocation list, the principals command, no key file and no keys command. When another
-   sshd_config file sets one of them first, setup stops and says which. Run it again with a new key to rotate the CA; `ctl_ca=off` turns the mode off (the
+   whole configuration (`sshd -t`) and what sshd will apply to `tando-ctl` (`sshd -T`, for a
+   loopback, a private and a public client address on every port sshd listens on): publickey as
+   the only method (no password, keyboard-interactive, hostbased or GSSAPI), the CA, the
+   revocation list, the principals command and its user, no key file, no keys command, no
+   ForceCommand, `ExposeAuthInfo yes`. When another sshd_config file sets one of them first, setup
+   stops and says which. Every later `tando host setup` and `tando doctor` checks the same again
+   (`sudo /opt/tando/bin/tando-gate admin ctl-check`): a drop-in added since is caught. Run it again with a new key to rotate the CA; `ctl_ca=off` turns the mode off (the
    drop-in, the sudo rule and the CA file go; the request store stays).
 
 3. Sign a short-lived certificate for each call or batch of calls:
@@ -63,7 +67,23 @@ The principal is matched by sshd: `AuthorizedPrincipalsCommand` runs `tando-gate
 command; a `tando-app-<app>` line exists only while that app is on the server. A certificate with
 several principals gets the first in the order write, app, read: give each certificate one.
 tando-gate's root mode reads the mode from the session's login process (set by sshd), never from
-the request (srv/gate/ctl.go has the details).
+the request, and does not take even that on trust: it also reads what sshd recorded as the way
+the session was authenticated (`ExposeAuthInfo`: the `SSH_USER_AUTH` file) and requires exactly
+one method, publickey with a certificate of this node's CA that carries that mode's principal,
+serial and key id. A login by any other method is refused, whatever its command line says
+(srv/gate/ctlcert.go).
+
+Keep these in mind when you issue certificates:
+
+- `tando-app-<app>` names an app, not one deployment of it: an app destroyed and made again
+  under the same name is controlled by a certificate for the old one that is still valid. Keep
+  validity to minutes.
+- An app's principal can change its env (`env.set`), which is running code in that app
+  (`NODE_OPTIONS`, for one). Give it to what may deploy the app anyway.
+- `app.destroy` with `purge` drops the final backup too; `confirm` only guards against a typo in
+  `app`. Issue write certificates for it to the part of the control plane that decides that.
+- `usage` cursors count every app's rows: an app's principal learns roughly how many apps the
+  node meters.
 
 ## Revocation
 
@@ -75,14 +95,18 @@ printf 'serial: 1042\n' > spec && ssh-keygen -k -f revoked.krl -s ctl-ca.pub spe
 tando host setup <host> ctl_krl=revoked.krl
 ```
 
-The server accepts only a file `ssh-keygen -Q -l` reads (or an empty one): a broken list would make
-sshd refuse every certificate. Short validity is the main defence; the list is for a certificate
+The server accepts only a file `ssh-keygen -Q -l` reads: a broken list would make sshd refuse every
+certificate. A list with certificate sections must have one for this node's CA (one made with
+another `-s` revokes nothing here), and the answer says how many entries it has. An empty file
+never replaces a list with entries by accident: `ctl_krl=empty` empties it by name. Short validity is the main defence; the list is for a certificate
 that must stop working before it expires.
 
 OpenSSH 9.8 and newer drops every connection from an address for a while after failed logins
 (`PerSourcePenalties`), the admin's too. A control plane that sends an expired certificate a few
-times locks itself out for that long; put its address in `PerSourcePenaltyExemptList` if that
-matters more to you than the slowdown of guessing from it.
+times locks itself out for that long. Mint a fresh certificate for each call instead of retrying
+an old one. `PerSourcePenaltyExemptList` is server-wide (it cannot be set for one user): it lifts
+the throttling for every user from that address, root and the admin included. Use it only for an
+address that is the control plane's alone (a dedicated egress IP), never a shared NAT.
 
 ## Requests
 
@@ -148,9 +172,13 @@ draining a server are not in this version.
 
 Every mutating request goes through the request store, `/var/lib/tando/ctl` (root 700):
 
-- Before it runs, a record with the request's digest (verb, app, arguments; a hash only: env
-  values are never stored) is written and fsynced under `req/<request_id>.json`, and the process
-  running it holds `req/<request_id>.lock`.
+- Request ids belong to a principal: `tando-ctl-write`, `tando-ctl-read` and each
+  `tando-app-<app>` have their own namespace (`req/<principal>/`), so one certificate can neither
+  claim nor replay nor push out another's ids.
+- Before it runs, a record with the request's digest (principal, verb, app, arguments, as an
+  HMAC with a key that never leaves the node: env values are neither stored nor guessable from a
+  copy of the store) is written and fsynced under `req/<principal>/<request_id>.json`, and the
+  process running it holds its `.lock`.
 - A retry with the same id and the same request gets the first response (`replayed: true`). If
   the first is still running, the retry waits for it (up to the verb's time limit, then
   `pending`: ask again). Nothing runs twice.
@@ -159,7 +187,11 @@ Every mutating request goes through the request store, `/var/lib/tando/ctl` (roo
   and for good: tando's own recovery finishes or undoes the step; read `app.status` and send a new
   request with a new id.
 - Requests for one app run one at a time, in the order they arrived; other apps' run alongside.
-- Records are kept 7 days (at most 20,000), then removed: a retry after that runs again.
+- Records are kept 7 days, then removed: a retry after that runs again. A principal keeps at most
+  20,000; past that its own oldest records older than 24 hours go, and when there are none, its
+  new requests get `busy`. Another principal's records are never touched.
+- A request refused before it did anything (`bad_request`, `not_found`) is not kept: the same id
+  with the request fixed runs.
 
 ## Metering
 
@@ -186,7 +218,8 @@ the ledger in `/var/lib/tando/usage` (fsynced; kept 14 days). Read it with `usag
 ## Audit
 
 Every request writes one line to the journal (`journalctl -t tando-gate`): principal, the
-certificate's serial and key id, verb, app, request id, result and time. sshd logs the
+certificate's serial and key id, verb, app, request id, result and time. A value from the request
+that is not a plain word is written quoted (Go syntax), so no request can add fields or lines. sshd logs the
 certificate it accepted; tando-agent writes its usual audit line (`tando audit`) with
 `tando-ctl` as the user.
 

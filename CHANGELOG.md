@@ -24,7 +24,10 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   first response (waiting for it while it runs), nothing runs twice, one app's requests run in
   order. Metering: a per-minute ledger of each app's allocated memory and awake seconds (measured
   memory and CPU beside them, informational), read with a cursor, kept 14 days, across restarts.
-  The laptop CLI is unchanged.
+  Root mode checks sshd's own record of the login (`ExposeAuthInfo`): one certificate of the
+  node's CA with the mode's principal, or nothing; `tando doctor` and every host setup check that
+  sshd still admits `tando-ctl` by certificate only. Request ids, quotas and eviction are per
+  principal. The laptop CLI is unchanged.
 - bench: `bench/fleet.sh` (100-app fleet and reboot test on a real server), `bench/rebuild-drill.sh` (rebuild and offsite restore drill) and `bench/container-egress.sh` (container apps bypass the per-uid network rules: measured, fix proposed); docs/THREAT-MODEL.md.
 - Preview apps: `tando preview up [--branch B] [--ttl 7d]` deploys this project as
   `<app>-<branch>` (24 characters at most; a checksum keeps two branches apart) on its own link:
