@@ -93,6 +93,7 @@ logs/setup.go systemctl	systemctl	systemctl restart systemd-journald
 logs/setup.go systemctl	systemctl	systemctl restart systemd-journald@<..>
 logs/setup.go systemctl	systemctl	systemctl stop systemd-journald@<..> systemd-journald@<..> systemd-journald-varlink@<..> systemd-journald@<..>
 logs/stats.go updateStats	journalctl	journalctl --no-pager -q -a -o short-unix --show-cursor --namespace=<..> --after-cursor=<..> --since=@<..> -n <int>
+metrics/sample.go netBytes	nft	nft -j list counters table inet tando
 offsite/sync.go systemctl	systemctl	systemctl daemon-reload
 offsite/sync.go systemctl	systemctl	systemctl disable --now tando-offsite.timer
 offsite/sync.go systemctl	systemctl	systemctl enable --now tando-offsite.timer
@@ -127,4 +128,4 @@ watch/verbs_install.go systemctl	systemctl	systemctl enable -q tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl reset-failed tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl start tandod.service
 watch/verbs_install.go systemctl	systemctl	systemctl try-restart tandod.service
-# positions: 569 constant, 55 prefixed, 3 int, 54 validated, 3 value of an option, 12 after --, 0 other
+# positions: 576 constant, 55 prefixed, 3 int, 54 validated, 3 value of an option, 12 after --, 0 other
