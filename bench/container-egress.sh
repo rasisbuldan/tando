@@ -60,7 +60,9 @@ nft add rule inet fbprobe out ip daddr 192.0.2.1 tcp dport 25 meta skuid \$U cou
 nft add rule inet fbprobe out ip daddr 192.0.2.1 tcp dport 25 meta skuid 0 counter name c_root
 nft add rule inet fbprobe out ip daddr 192.0.2.1 tcp dport 25 counter name c_any
 # the proposed key: the app's slice (slirp4netns and conmon run inside the app's unit cgroup)
-cgp=\$(awk -F: '{ print \$3 }' /proc/\$(pgrep -o -x slirp4netns)/cgroup | cut -d/ -f2,3)
+# (this app's: its container's conmon runs in the app's unit, as its slirp4netns does; another
+# container app's slirp4netns may be older)
+cgp=\$(awk -F: '{ print \$3 }' /proc/\$(podman inspect -f '{{.State.ConmonPid}}' tando-\$A-\$PORT)/cgroup | cut -d/ -f2,3)
 echo "slice_key \$cgp"
 nft add rule inet fbprobe out ip daddr 192.0.2.1 tcp dport 25 socket cgroupv2 level 2 "\"\$cgp\"" counter name c_cg
 cnt() { nft list counter inet fbprobe \$1 | sed -n 's/.*packets \([0-9]*\).*/\1/p'; }
