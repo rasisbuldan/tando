@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -165,7 +167,7 @@ var lim = Limits{MaxEntries: 100, MaxBytes: 1 << 20}
 
 func TestUnpackGood(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "t")
-	u, err := Unpack(bytes.NewReader(mktar(t, good())), dst, lim)
+	u, err := Unpack(context.Background(), bytes.NewReader(mktar(t, good())), dst, lim)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +213,7 @@ func TestUnpackMalicious(t *testing.T) {
 	}
 	for name, es := range cases {
 		dst := filepath.Join(t.TempDir(), "t")
-		if _, err := Unpack(bytes.NewReader(mktar(t, es)), dst, lim); err == nil {
+		if _, err := Unpack(context.Background(), bytes.NewReader(mktar(t, es)), dst, lim); err == nil {
 			t.Errorf("%s: unpacked, want refused", name)
 		}
 	}
@@ -222,7 +224,7 @@ func TestUnpackLimits(t *testing.T) {
 	for i := 0; i < 150; i++ {
 		es = append(es, ent{name: "release/f" + string(rune('a'+i%26)) + strings.Repeat("x", i/26), typ: tar.TypeReg, body: "1"})
 	}
-	if _, err := Unpack(bytes.NewReader(mktar(t, es)), filepath.Join(t.TempDir(), "t"), lim); err == nil || !strings.Contains(err.Error(), "entries") {
+	if _, err := Unpack(context.Background(), bytes.NewReader(mktar(t, es)), filepath.Join(t.TempDir(), "t"), lim); err == nil || !strings.Contains(err.Error(), "entries") {
 		t.Errorf("entries: %v", err)
 	}
 	// a decompression bomb: 64 MB of zeros, a few KB gzipped; the limit is 1 MB
@@ -281,5 +283,97 @@ func TestManifest(t *testing.T) {
 	in := configureInput(map[string]string{"memory": "512M", "port": "3001", "worker.q.memory": "128M", "worker.z.memory": "64M", "start": "old"}, m.Settings, nil)
 	if in != "memory=512M\nstart=node s.js\nworker.q=node q.js\nworker.q.memory=128M\n" {
 		t.Errorf("configure input:\n%s", in)
+	}
+}
+
+// review findings (docs/CONTROL-PLANE.md): IPv4-compatible and Teredo IPv6, 4in6 allowlist
+// entries, link chains, global headers counted, a directory entry after its files, no digest or
+// status in what an app's principal sees, the allowlist only for the write principal, the cap
+func TestReviewFetchUnpack(t *testing.T) {
+	var p FetchPolicy
+	for _, s := range []string{"::7f00:1", "::a9fe:a9fe", "2001::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2"} {
+		if p.AddrAllowed(netip.MustParseAddr(s)) {
+			t.Errorf("%s: allowed, want refused", s)
+		}
+	}
+	p.Allow = []netip.Prefix{netip.MustParsePrefix("::ffff:10.0.0.0/104")}
+	if !p.AddrAllowed(netip.MustParseAddr("10.1.2.3")) || p.AddrAllowed(netip.MustParseAddr("192.168.1.1")) {
+		t.Error("a 4in6 allowlist entry matches its IPv4 range")
+	}
+	m := ent{name: ManifestName, typ: tar.TypeReg, body: goodManifest}
+	r := ent{name: "release/", typ: tar.TypeDir}
+	chain := []ent{m, r, {name: "release/l1", typ: tar.TypeSymlink, link: "."},
+		{name: "release/a/", typ: tar.TypeDir}, {name: "release/a/b/", typ: tar.TypeDir},
+		{name: "release/a/b/l2", typ: tar.TypeSymlink, link: "../../l1/.."}}
+	if _, err := Unpack(context.Background(), bytes.NewReader(mktar(t, chain)), filepath.Join(t.TempDir(), "t"), lim); err == nil {
+		t.Error("a chain of links out of release/ was unpacked")
+	}
+	late := []ent{m, {name: "release/a/x", typ: tar.TypeReg, body: "x"}, {name: "release/a/", typ: tar.TypeDir}, r}
+	if _, err := Unpack(context.Background(), bytes.NewReader(mktar(t, late)), filepath.Join(t.TempDir(), "t"), lim); err != nil {
+		t.Errorf("a directory entry after its files: %v", err)
+	}
+	var b bytes.Buffer
+	tw := tar.NewWriter(&b)
+	for i := 0; i < 200; i++ {
+		tw.WriteHeader(&tar.Header{Typeflag: tar.TypeXGlobalHeader, Name: "g", PAXRecords: map[string]string{"comment": "x"}})
+	}
+	tw.Close()
+	if _, err := Unpack(context.Background(), bytes.NewReader(b.Bytes()), filepath.Join(t.TempDir(), "t"), lim); err == nil || !strings.Contains(err.Error(), "entries") {
+		t.Errorf("global headers are not counted: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Unpack(ctx, bytes.NewReader(mktar(t, good())), filepath.Join(t.TempDir(), "t"), lim); err == nil {
+		t.Error("a cancelled unpack went on")
+	}
+	// the digest of what was fetched is never told
+	body := []byte("artifact bytes")
+	srv, fp := tlsServer(t, body)
+	fp.Allow = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	_, err := fp.Fetch(context.Background(), t.TempDir(), srv.URL+"/a", int64(len(body)), sha([]byte("x")))
+	if err == nil || strings.Contains(err.Error(), sha(body)) || strings.Contains(err.Error(), sha(body)[:16]) {
+		t.Errorf("sha256 mismatch tells the digest: %v", err)
+	}
+	_, err = fp.Fetch(context.Background(), t.TempDir(), srv.URL+"/nope", 5, sha(body))
+	fe, ok := err.(*FetchError)
+	if !ok || strings.Contains(fe.Kind, "404") {
+		t.Errorf("an app's principal would learn the status: %#v", err)
+	}
+}
+
+func TestReviewPrincipals(t *testing.T) {
+	c, _, serve := ctlHarness(t, nil)
+	// an allowlist file that is not root's: the write principal's fetch policy reads it (and
+	// refuses it), an app's never reads it at all
+	os.MkdirAll(filepath.Join(c.Env.Root, "ctl"), 0o755)
+	os.WriteFile(filepath.Join(c.Env.Root, "ctl", "fetch-allow"), []byte("10.0.0.0/8\n"), 0o644)
+	if os.Geteuid() != 0 {
+		if _, _, e := c.fetchPolicy(Ident{Mode: ModeWrite}); e == nil {
+			t.Error("the write principal's policy did not read the allowlist")
+		}
+	}
+	if p, _, e := c.fetchPolicy(Ident{Mode: ModeApp, App: "shop"}); e != nil || len(p.Allow) != 0 {
+		t.Errorf("an app's principal gets the allowlist: %+v %v", p.Allow, e)
+	}
+	if p, _, _ := c.fetchPolicy(Ident{Mode: ModeApp, App: "shop"}); p.MaxSize != ArtifactMaxMB<<20 {
+		t.Errorf("default artifact cap %d", p.MaxSize)
+	}
+	r := serve(shp, `{"v":1,"verb":"app.deploy","app":"shop","request_id":"deploy-big-1","args":{"url":"https://a.example.com/x.tar.gz","sha256":"`+strings.Repeat("a", 64)+`","size":`+strconv.Itoa(600<<20)+`}}`)
+	if r.Error == nil || !strings.Contains(r.Error.Message, "ctl_artifact_max_mb") {
+		t.Errorf("over the cap: %+v", r)
+	}
+	// the spec goes with the app; export to an app's principal has no URL query
+	c.saveSpec("shop", Spec{Generation: 4, Artifact: &DeployArgs{URL: "https://s.example.com/a.tar.gz?X-Sig=secret", SHA256: strings.Repeat("a", 64), Size: 1}})
+	r = serve(shp, `{"v":1,"verb":"app.export","app":"shop"}`)
+	if b, _ := json.Marshal(r.Result); !r.OK || strings.Contains(string(b), "secret") || !strings.Contains(string(b), "a.tar.gz") {
+		t.Errorf("export to the app: %s", b)
+	}
+	r = serve(wr, `{"v":1,"verb":"app.export","app":"shop"}`)
+	if b, _ := json.Marshal(r.Result); !strings.Contains(string(b), "X-Sig=secret") {
+		t.Errorf("export to write: %s", b)
+	}
+	r = serve(wr, `{"v":1,"verb":"app.destroy","app":"shop","request_id":"destroy-001","args":{"confirm":"shop"}}`)
+	if _, err := os.Stat(c.specPath("shop")); !r.OK || err == nil {
+		t.Errorf("the spec outlives the app: %+v", r)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -48,7 +49,7 @@ var blocked = func() []netip.Prefix {
 		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
 		"192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15",
 		"198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
-		"::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64",
+		"::/96", "::ffff:0:0/96", "2001::/23", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64",
 		"2001:db8::/32", "2002::/16", "fc00::/7", "fe80::/10", "fec0::/10", "ff00::/8",
 	} {
 		p = append(p, netip.MustParsePrefix(s))
@@ -60,7 +61,7 @@ var blocked = func() []netip.Prefix {
 func (p FetchPolicy) AddrAllowed(ip netip.Addr) bool {
 	ip = ip.Unmap()
 	for _, a := range p.Allow {
-		if a.Contains(ip) {
+		if a.Contains(ip) || a.Addr().Is4In6() && a.Bits() >= 96 && netip.PrefixFrom(a.Addr().Unmap(), a.Bits()-96).Contains(ip) {
 			return true
 		}
 	}
@@ -73,6 +74,18 @@ func (p FetchPolicy) AddrAllowed(ip netip.Addr) bool {
 		}
 	}
 	return true
+}
+
+// FetchError is a failed fetch: Kind says what failed in words that tell nothing about what is
+// behind the URL (no status, length, digest, host or TLS message: an app's principal gets only
+// that); Detail is for the write principal.
+type FetchError struct{ Kind, Detail string }
+
+func (e *FetchError) Error() string {
+	if e.Detail == "" {
+		return e.Kind
+	}
+	return e.Kind + " (" + e.Detail + ")"
 }
 
 // ErrAddr: the destination is not one a fetch may reach.
@@ -161,21 +174,27 @@ func (p FetchPolicy) Fetch(ctx context.Context, dir, rawURL string, size int64, 
 	req.Header.Set("User-Agent", "tando-ctl")
 	resp, err := p.client().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch: %s", strings.ReplaceAll(err.Error(), rawURL, "<url>"))
+		kind := "the artifact could not be fetched"
+		if errors.Is(err, ErrAddr) {
+			kind = "the artifact's address is not one this node fetches from"
+		} else if strings.Contains(err.Error(), "redirect") {
+			kind = "the artifact's URL redirects where this node does not fetch from"
+		}
+		return nil, &FetchError{kind, strings.ReplaceAll(err.Error(), rawURL, "<url>")}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch: HTTP %d", resp.StatusCode)
+		return nil, &FetchError{"the artifact could not be fetched", fmt.Sprintf("HTTP %d", resp.StatusCode)}
 	}
 	if resp.ContentLength >= 0 && resp.ContentLength != size {
-		return nil, fmt.Errorf("fetch: the server says %d bytes, the request %d", resp.ContentLength, size)
+		return nil, &FetchError{"the artifact is not the size the request says", fmt.Sprintf("the server says %d bytes", resp.ContentLength)}
 	}
 	n, err := io.Copy(f, io.LimitReader(resp.Body, size+1))
 	if err != nil {
-		return nil, fmt.Errorf("fetch: %v", err)
+		return nil, &FetchError{"the artifact could not be fetched", err.Error()}
 	}
 	if n != size {
-		return nil, fmt.Errorf("fetch: got %d bytes, the request says %d", n, size)
+		return nil, &FetchError{"the artifact is not the size the request says", fmt.Sprintf("got %d bytes", n)}
 	}
 	if err := f.Sync(); err != nil {
 		return nil, err
@@ -189,7 +208,7 @@ func (p FetchPolicy) Fetch(ctx context.Context, dir, rawURL string, size int64, 
 		return nil, err
 	}
 	if got := h.Sum(nil); !equal(got, want) {
-		return nil, fmt.Errorf("sha256 mismatch: got %x", got)
+		return nil, &FetchError{"sha256 mismatch: the artifact is not the one the request names", ""}
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return nil, err
@@ -245,10 +264,21 @@ func LoadAllow(path string) ([]netip.Prefix, error) {
 // readRootFile reads a file that must be a regular file of root's, writable by root only; a
 // missing file is nil, nil.
 func readRootFile(path string, max int64) ([]byte, error) {
-	fi, err := os.Lstat(path)
+	// opened once, without following a link; the checks are on that descriptor
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, fmt.Errorf("%s must be a file of root's that only root can write", path)
+	}
+	// the directory too: root's, writable by root only (else the file could be swapped)
+	if di, err := os.Lstat(filepath.Dir(path)); err != nil || !di.IsDir() || di.Sys().(*syscall.Stat_t).Uid != 0 || di.Mode().Perm()&0o022 != 0 {
+		f.Close()
+		return nil, fmt.Errorf("%s must be root's and writable by root only", filepath.Dir(path))
+	}
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
@@ -256,11 +286,6 @@ func readRootFile(path string, max int64) ([]byte, error) {
 	if !fi.Mode().IsRegular() || !ok || st.Uid != 0 || fi.Mode().Perm()&0o022 != 0 {
 		return nil, fmt.Errorf("%s must be a file of root's that only root can write", path)
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, max+1))
 	if err != nil {
 		return nil, err

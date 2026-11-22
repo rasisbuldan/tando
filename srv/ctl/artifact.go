@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"tando/srv/internal/apps"
@@ -157,20 +158,35 @@ func (a DeployArgs) check() *Error {
 // ctlConf is /opt/tando/ctl (root's: the CA, the fetch allowlist and CA).
 func (c *Ctl) ctlConf() string { return filepath.Join(c.Env.Root, "ctl") }
 
-// fetchPolicy: host.conf's limits, the operator's allowlist and extra CA.
-func (c *Ctl) fetchPolicy() (FetchPolicy, Limits, *Error) {
+// ArtifactMaxMB is the default cap of one artifact (host.conf ctl_artifact_max_mb): the download,
+// and a quarter of what it may unpack to (never more than app_max_mb).
+const ArtifactMaxMB = 512
+
+// ArtReserveMB: the free space the file system of the store keeps while an artifact is fetched
+// and unpacked (and 5% of it, whichever is more).
+const ArtReserveMB = 1024
+
+// fetchPolicy: host.conf's limits, and for the write principal the operator's allowlist (an
+// app's principal never reaches an address the allowlist opens: it is for the control plane's
+// own artifact store) and extra CA.
+func (c *Ctl) fetchPolicy(id Ident) (FetchPolicy, Limits, *Error) {
 	h := c.host()
 	mb := int64(8192)
 	if n, err := strconv.ParseInt(h["app_max_mb"], 10, 64); err == nil && n > 0 {
 		mb = n
 	}
-	// (the download and what it unpacks to: each at most the per-app limit, app_max_mb)
-	p := FetchPolicy{Timeout: 15 * time.Minute, MaxSize: mb << 20}
-	allow, err := LoadAllow(filepath.Join(c.ctlConf(), "fetch-allow"))
-	if err != nil {
-		return p, Limits{}, &Error{"internal", clean(err.Error())}
+	amb := int64(ArtifactMaxMB)
+	if n, err := strconv.ParseInt(h["ctl_artifact_max_mb"], 10, 64); err == nil && n > 0 {
+		amb = n
 	}
-	p.Allow = allow
+	p := FetchPolicy{Timeout: 15 * time.Minute, MaxSize: min(amb, mb) << 20}
+	if id.Mode == ModeWrite {
+		allow, err := LoadAllow(filepath.Join(c.ctlConf(), "fetch-allow"))
+		if err != nil {
+			return p, Limits{}, &Error{"internal", clean(err.Error())}
+		}
+		p.Allow = allow
+	}
 	pem, err := readRootFile(filepath.Join(c.ctlConf(), "fetch-ca.pem"), 1<<20)
 	if err != nil {
 		return p, Limits{}, &Error{"internal", clean(err.Error())}
@@ -185,24 +201,58 @@ func (c *Ctl) fetchPolicy() (FetchPolicy, Limits, *Error) {
 		}
 		p.Roots = pool
 	}
-	return p, Limits{MaxEntries: 200000, MaxBytes: mb << 20}, nil
+	return p, Limits{MaxEntries: 200000, MaxBytes: min(4*amb, mb) << 20}, nil
+}
+
+// freeMB is the free space of the file system that holds dir, in MB, and its 5% (-1: unknown).
+func freeMB(dir string) (free, pct5 int64) {
+	var st syscall.Statfs_t
+	if syscall.Statfs(dir, &st) != nil {
+		return -1, 0
+	}
+	return int64(st.Bavail) * int64(st.Bsize) >> 20, int64(st.Blocks) * int64(st.Bsize) >> 20 / 20
+}
+
+// sweepArt removes what a crashed deploy left in art/ (older than the longest deploy).
+func sweepArt(art string, now time.Time) {
+	ents, _ := os.ReadDir(art)
+	for _, e := range ents {
+		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > 3*time.Hour {
+			os.RemoveAll(filepath.Join(art, e.Name()))
+		}
+	}
 }
 
 // stage fetches and unpacks the artifact into a fresh directory under the store (root 700); the
 // caller removes it.
-func (c *Ctl) stage(ctx context.Context, tag string, a DeployArgs) (dir string, m Manifest, e *Error) {
-	pol, lim, perr := c.fetchPolicy()
+func (c *Ctl) stage(ctx context.Context, id Ident, tag string, a DeployArgs) (dir string, m Manifest, e *Error) {
+	pol, lim, perr := c.fetchPolicy(id)
 	if perr != nil {
 		return "", m, perr
+	}
+	if a.Size > pol.MaxSize {
+		return "", m, &Error{"failed", fmt.Sprintf("artifact: %d bytes is over this node's limit of %d MB (ctl_artifact_max_mb)", a.Size, pol.MaxSize>>20)}
 	}
 	art := filepath.Join(c.Dir, "art")
 	if err := os.MkdirAll(art, 0o700); err != nil {
 		return "", m, &Error{"internal", "cannot make " + art}
 	}
 	os.Chmod(art, 0o700)
+	sweepArt(art, c.Env.Now())
+	// room for the download and what it unpacks to, and the reserve kept besides
+	free, pct := freeMB(art)
+	reserve := max(int64(ArtReserveMB), pct)
+	lim.MinFreeMB, lim.Dir = reserve, art
+	if free >= 0 && free < (2*a.Size>>20)+reserve {
+		return "", m, &Error{"failed", fmt.Sprintf("artifact: not enough free disk space on the node for it (%d MB free, %d MB kept free)", free, reserve)}
+	}
 	f, err := pol.Fetch(ctx, art, a.URL, a.Size, a.SHA256)
 	if err != nil {
-		return "", m, &Error{"failed", "artifact: " + clean(err.Error())}
+		msg := err.Error()
+		if fe, ok := err.(*FetchError); ok && id.Mode != ModeWrite {
+			msg = fe.Kind // (an app's principal learns nothing about what is behind the URL)
+		}
+		return "", m, &Error{"failed", "artifact: " + clean(msg)}
 	}
 	defer f.Close()
 	dir, err = os.MkdirTemp(art, tag+"-")
@@ -248,14 +298,21 @@ func (c *Ctl) appDeploy(ctx context.Context, r Request) (any, *Error) {
 // deployArtifact runs one artifact deploy: spec (nil: the app's current spec settings) and
 // domains (apply's) go with the artifact's code settings.
 func (c *Ctl) deployArtifact(ctx context.Context, r Request, a DeployArgs, spec map[string]string, domains []string) (map[string]string, *Error) {
-	dir, m, e := c.stage(ctx, tagRe.ReplaceAllString(r.App+"-"+r.RequestID, "_"), a)
+	if spec == nil {
+		spec, _ = apps.Conf(c.Env.Root, r.App)
+	}
+	// before anything is fetched: an existing app that is held, busy past its wait, or over the
+	// node's memory admission with this spec is refused by configure's own check
+	if c.exists(r.App) == nil && valid.App(r.App) {
+		if _, e := c.agent(ctx, configureInput(spec, nil, domains)+"check=1\n", "configure", r.App); e != nil {
+			return nil, e
+		}
+	}
+	dir, m, e := c.stage(ctx, r.ident, tagRe.ReplaceAllString(r.App+"-"+r.RequestID, "_"), a)
 	if e != nil {
 		return nil, e
 	}
 	defer os.RemoveAll(dir)
-	if spec == nil {
-		spec, _ = apps.Conf(c.Env.Root, r.App)
-	}
 	res, e := c.deployTree(ctx, r.App, filepath.Join(dir, "t", "release"), configureInput(spec, m.Settings, domains))
 	if res != nil {
 		res["sha256"] = a.SHA256

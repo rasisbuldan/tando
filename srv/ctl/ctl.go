@@ -131,7 +131,7 @@ func (c *Ctl) Serve(ctx context.Context, id Ident, in []byte, w io.Writer) int {
 		// fields from the request may be anything on an error path: a value that is not a plain
 		// word is quoted (Go syntax: no space, newline or control character reaches the journal raw)
 		c.Log("ctl " + string(id.Mode) + appSuffix(id) + " serial=" + field(id.Serial) + " key=" + field(id.KeyID) +
-			" verb=" + field(or(r.Verb, "?")) + " app=" + field(or(r.App, "-")) + " request_id=" + field(or(r.RequestID, "-")) + " result=" + res +
+			" verb=" + field(or(r.Verb, "?")) + " app=" + field(or(r.App, "-")) + " request_id=" + field(or(r.RequestID, "-")) + values(r) + " result=" + res +
 			" secs=" + time.Duration(c.Env.Now().Sub(start)).Truncate(time.Millisecond).String())
 	}
 	b, err := json.Marshal(resp)
@@ -156,6 +156,17 @@ func field(s string) string {
 		s = s[:100]
 	}
 	return strconv.QuoteToASCII(s)
+}
+
+// values marks a request that reads secrets (app.export with values): " values=1".
+func values(r Request) string {
+	var a struct {
+		Values bool `json:"values"`
+	}
+	if r.Verb == "app.export" && json.Unmarshal(r.Args, &a) == nil && a.Values {
+		return " values=1"
+	}
+	return ""
 }
 
 // Namespace is the principal's part of the request store: write, read or app-<app>.

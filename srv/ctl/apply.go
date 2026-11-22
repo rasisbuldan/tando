@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -283,8 +284,20 @@ func (c *Ctl) export(_ context.Context, r Request) (any, *Error) {
 	if h := c.host(); conf["database"] == "postgres" && h["db_host"] != "" {
 		data["data_node"] = h["db_host"]
 	}
+	art := s.Artifact
+	if art != nil && r.ident.Mode != ModeWrite {
+		// (a presigned URL's query is a credential: only the write principal gets it)
+		cp := *art
+		if u, err := url.Parse(cp.URL); err == nil {
+			u.RawQuery, u.Fragment, u.User = "", "", nil
+			cp.URL = u.String()
+		} else {
+			cp.URL = ""
+		}
+		art = &cp
+	}
 	out := map[string]any{"v": 1, "app": r.App, "generation": s.Generation, "settings": spec, "code_settings": code,
-		"domains": doms, "env_names": names, "artifact": s.Artifact, "release": st["current"], "data": data}
+		"domains": doms, "env_names": names, "artifact": art, "release": st["current"], "data": data}
 	if a.Values {
 		out["env"] = env
 	}

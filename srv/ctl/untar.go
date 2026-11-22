@@ -37,7 +37,9 @@ const ManifestName = "tando-artifact.json"
 // Limits of one unpack.
 type Limits struct {
 	MaxEntries int
-	MaxBytes   int64 // the sum of the files' sizes
+	MaxBytes   int64  // the sum of the files' sizes
+	Dir        string // the file system to watch ("": none)
+	MinFreeMB  int64  // the unpack stops when Dir's file system has less free than this
 }
 
 // Unpacked is what Unpack produced.
@@ -96,7 +98,7 @@ func UnpackFile(ctx context.Context, rn run.Runner, f *os.File, dst string, lim 
 			return Unpacked{}, fmt.Errorf("gzip: %v", err)
 		}
 		z.Multistream(false)
-		r = z
+		r = z // (Unpack checks ctx between entries)
 	case "zstd":
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel() // (an unpack that stops early ends zstd)
@@ -106,7 +108,7 @@ func UnpackFile(ctx context.Context, rn run.Runner, f *os.File, dst string, lim 
 	default:
 		return Unpacked{}, errors.New("the artifact is neither gzip nor zstd compressed (a .tar.gz or .tar.zst)")
 	}
-	u, err := Unpack(r, dst, lim)
+	u, err := Unpack(ctx, r, dst, lim)
 	if err != nil {
 		return u, err
 	}
@@ -119,14 +121,26 @@ func UnpackFile(ctx context.Context, rn run.Runner, f *os.File, dst string, lim 
 }
 
 // Unpack reads a tar stream into dst (created here, 0700).
-func Unpack(r io.Reader, dst string, lim Limits) (Unpacked, error) {
+func Unpack(ctx context.Context, r io.Reader, dst string, lim Limits) (Unpacked, error) {
 	var u Unpacked
 	if err := os.Mkdir(dst, 0o700); err != nil {
 		return u, err
 	}
 	tr := tar.NewReader(r)
 	seen := map[string]byte{} // path -> 'd', 'f', 'l'
+	var links []string
+	var sinceCheck int64
 	for {
+		if err := ctx.Err(); err != nil {
+			return u, err
+		}
+		// the disk keeps its reserve: checked every 64 MB written
+		if lim.Dir != "" && sinceCheck >= 64<<20 {
+			sinceCheck = 0
+			if free, _ := freeMB(lim.Dir); free >= 0 && free < lim.MinFreeMB {
+				return u, fmt.Errorf("the node's disk is down to %d MB free while unpacking: stopped", free)
+			}
+		}
 		h, err := tr.Next()
 		if err == io.EOF {
 			break
@@ -134,12 +148,13 @@ func Unpack(r io.Reader, dst string, lim Limits) (Unpacked, error) {
 		if err != nil {
 			return u, fmt.Errorf("tar: %v", err)
 		}
-		if h.Typeflag == tar.TypeXGlobalHeader {
-			continue
-		}
+		// (every header counts, a global one too: none is free)
 		u.Entries++
 		if u.Entries > lim.MaxEntries {
 			return u, fmt.Errorf("more than %d entries", lim.MaxEntries)
+		}
+		if h.Typeflag == tar.TypeXGlobalHeader {
+			continue
 		}
 		name, err := entryName(h.Name)
 		if err != nil {
@@ -152,6 +167,9 @@ func Unpack(r io.Reader, dst string, lim Limits) (Unpacked, error) {
 				}
 			}
 			continue
+		}
+		if seen[name] == 'd' && h.Typeflag == tar.TypeDir {
+			continue // (a directory's own entry after its files)
 		}
 		if seen[name] != 0 {
 			return u, fmt.Errorf("%s: twice in the archive", clean(name))
@@ -188,6 +206,11 @@ func Unpack(r io.Reader, dst string, lim Limits) (Unpacked, error) {
 			if h.Size < 0 || u.Bytes+h.Size > lim.MaxBytes {
 				return u, fmt.Errorf("over %d bytes unpacked", lim.MaxBytes)
 			}
+			if lim.Dir != "" {
+				if free, _ := freeMB(lim.Dir); free >= 0 && free-(h.Size>>20) < lim.MinFreeMB {
+					return u, fmt.Errorf("%s: no room for it on the node's disk (%d MB free, %d MB kept free)", clean(name), free, lim.MinFreeMB)
+				}
+			}
 			mode := os.FileMode(0o644)
 			if h.Mode&0o111 != 0 {
 				mode = 0o755
@@ -203,6 +226,7 @@ func Unpack(r io.Reader, dst string, lim Limits) (Unpacked, error) {
 				return u, fmt.Errorf("%s: short or unreadable (%v)", clean(name), err)
 			}
 			u.Bytes += n
+			sinceCheck += n
 			seen[name] = 'f'
 		case tar.TypeSymlink:
 			if err := linkInside(name, h.Linkname); err != nil {
@@ -212,10 +236,24 @@ func Unpack(r io.Reader, dst string, lim Limits) (Unpacked, error) {
 				return u, fmt.Errorf("%s: %v", clean(name), err)
 			}
 			seen[name] = 'l'
+			links = append(links, name)
 		case tar.TypeLink:
 			return u, fmt.Errorf("%s: a hard link (not allowed in an artifact)", clean(name))
 		default:
 			return u, fmt.Errorf("%s: a device, FIFO or other special file (type %q)", clean(name), h.Typeflag)
+		}
+	}
+	// a link's target may not pass through another link of the archive (a chain of links, each
+	// inside on its own, can lead out: l1 -> ., a/b/l2 -> ../../l1/..)
+	for _, l := range links {
+		t, _ := os.Readlink(filepath.Join(dst, filepath.FromSlash(l)))
+		p := path.Dir(l)
+		parts := strings.Split(t, "/")
+		for i, s := range parts {
+			p = path.Join(p, s)
+			if i < len(parts)-1 && seen[p] == 'l' {
+				return u, fmt.Errorf("%s: a symbolic link through another link of the archive (%s)", clean(l), clean(p))
+			}
 		}
 	}
 	if u.Manifest == nil {

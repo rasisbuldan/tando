@@ -3,6 +3,7 @@ package ctl
 import (
 	"bytes"
 	"context"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -233,7 +234,11 @@ func (c *Ctl) destroy(ctx context.Context, r Request) (any, *Error) {
 	if a.Purge {
 		args = append(args, "purge")
 	}
-	return c.agent(ctx, "", args...)
+	res, e := c.agent(ctx, "", args...)
+	if e == nil {
+		os.Remove(c.specPath(r.App)) // (the agent removes it too: a laptop destroy)
+	}
+	return res, e
 }
 
 // releases: the app's releases, newest first (the agent's rel rows).
