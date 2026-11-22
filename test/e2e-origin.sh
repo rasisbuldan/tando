@@ -126,7 +126,7 @@ check "OR21 origin_lock=on without an origin is refused" eval '[ "$rc" != 0 ]'
 # overlapping ranges and a range with host bits: normalised, merged, loaded (nft refuses them as they are)
 "$R" host setup test "origin=custom:$B_IP/32,203.0.113.5/24,203.0.113.64/26" >&2; rc=$?
 check "OR21b overlapping and host-bit ranges are accepted (rc=$rc), normalised in the ranges file" eval '
-  [ $rc = 0 ] && srv "sudo grep -qx 203.0.113.0/24 /opt/tando/origin.ranges" && [ "$(via_edge -H "X-Forwarded-For: 203.0.113.7" | rip)" = 203.0.113.7 ]'
+  [ $rc = 0 ] && srv "sudo grep -qx 203.0.113.0/24 /opt/tando/origin.ranges" && [ "$(via_edge -H "X-Forwarded-For: 198.51.100.7" | rip)" = 198.51.100.7 ]'
 # ---- origin=cloudflare, the updater ------------------------------------------------------------
 "$R" host setup test origin=cloudflare >&2; rc=$?
 check "OR22 origin=cloudflare succeeds and seeds the built-in ranges" eval '[ $rc = 0 ] && srv "sudo grep -qx 173.245.48.0/20 /opt/tando/origin.ranges" && srv "sudo grep -qx 2606:4700::/32 /opt/tando/origin.ranges"'
