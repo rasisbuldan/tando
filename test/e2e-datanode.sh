@@ -128,7 +128,7 @@ check "dn20 the role's password is in no PostgreSQL log on the data node" \
 "$R" host setup b role=data data_conn_per_node=10 > "$E/setupB2.out" 2>&1 || cat "$E/setupB2.out" >&2
 srv "sudo bash -c 'for i in \$(seq 16); do (exec 3<>/dev/tcp/$BIP/5432 && sleep 3) 2> /dev/null || echo refused & done; wait'" > "$E/cap.out" 2>&1
 check "dn21 one app node holds at most data_conn_per_node connections to the data node ($(grep -c refused "$E/cap.out") of 16 refused at 10)" \
-  eval '[ "$(grep -c refused "$E/cap.out")" -ge 5 ]'
+  eval 'n=$(grep -c refused "$E/cap.out"); [ "$n" -ge 5 ] && [ "$n" -le 12 ]'   # (some refused, the first ones not)
 
 # ---- backup, restore and the restore drill through the remote database -----------------------
 id=$("$R" backup now 2>&1 | sed -n 's/^backed up [a-z0-9-]*: \([^ ]*\).*/\1/p')
