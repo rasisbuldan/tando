@@ -13,8 +13,8 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 ### New
 
 - New: `node_lite = true` in tando.conf (node and next recipes, opt-in, never written by
-  `tando init`): V8's `--lite-mode`, warm memory 24 MB down to 13 MB at about half the peak
-  throughput (docs/COMMANDS.md, "node_lite").
+  `tando init`): V8's `--lite-mode`: a few MB less warm (25.1 to 23.1 MB PSS measured on a
+  hello-world Express app; the audit's 24 to 13 MB RSS was not reproduced), slower under load (docs/COMMANDS.md, "node_lite").
 - New: `recipe = workerd`, opt-in, for apps written for the Workers API (a `fetch` handler).
   One workerd process per app under the app's unit and limits, a pinned workerd installed by
   `tando up` (checksum-verified), env variables as bindings. `tando init` suggests it for a

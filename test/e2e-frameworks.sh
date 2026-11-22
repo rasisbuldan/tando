@@ -71,8 +71,8 @@ cmdline() { # app: the command line and the user of the main process of its unit
   t_srv "p=\$(systemctl show -p MainPID --value tando-$1); tr '\\0' ' ' < /proc/\$p/cmdline; echo; ps -o user= -p \$p"
 }
 mem() { # app: PSS and RSS of every process of the app's unit (smaps_rollup)
-  t_srv "for p in \$(cat /sys/fs/cgroup\$(systemctl show -p ControlGroup --value tando-$1)/cgroup.procs); do awk '/^(Pss|Rss):/ { a[\$1] += \$2 } END { print a[\"Pss:\"], a[\"Rss:\"] }' /proc/\$p/smaps_rollup; done" |
-    awk '{ p += $1; r += $2 } END { printf "PSS %d KB, RSS %d KB", p, r }'
+  t_srv "sudo sh -c 'for p in \$(cat /sys/fs/cgroup\$(systemctl show -p ControlGroup --value tando-$1)/cgroup.procs); do grep -hE \"^(Pss|Rss):\" /proc/\$p/smaps_rollup; done'" |
+    awk '$1 == "Pss:" { p += $2 } $1 == "Rss:" { r += $2 } END { printf "PSS %d KB, RSS %d KB", p, r }'
 }
 warm() { local i; for i in 1 2 3 4 5 6 7 8 9 10; do curl -s -o /dev/null -m 5 "$(t_url "$1" /)"; done; }
 up workerd-hello

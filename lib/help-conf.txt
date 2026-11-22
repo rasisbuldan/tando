@@ -34,7 +34,7 @@ Limits
   max_requests    requests in flight, over it a 503 (default off)
   hold            seconds Caddy holds requests at a restart (default 15)
   stop_timeout    seconds a stopping process may finish (default 10)
-  node_lite       true: Node runs with V8 --lite-mode, about 10 MB less memory warm, about half the speed (node, next; default false)
+  node_lite       true: Node runs with V8 --lite-mode, a few MB less memory warm, slower under load (node, next; default false)
   idle_stop       6h, 10m, 30s, on (6h): stop the web process after that long without a request, start it on the next one (default off)
   cold_timeout    seconds a visitor waits for an idle app to start, then a 503 (default 30)
   response_timeout seconds Caddy waits for an answer, then a 504; streams are not cut (default 60, or off)

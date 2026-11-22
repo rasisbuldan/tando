@@ -87,7 +87,7 @@ test/ui-test.sh fails when this page and the code disagree: one table row per ke
 | `preview_skip` | env names | none | | Variables a preview never gets, even when `preview_env` names them. | `preview_skip = STRIPE_SECRET_KEY, SMTP_PASSWORD` |
 | `preview_release` | `on` or `off` | `off` | | Whether a preview runs this app's `release` command (migrations) on its deploys. Off: a branch nobody reviewed never migrates what the env points at. | `preview_release = on` |
 | `idle_stop` | time or `on` or `off` | `off` | `s`, `m`, `h` | Scale to zero: stop the app's web process after this long without a request and start it on the next one (`on` is `6h`). Only the web process stops; workers and scheduled jobs keep running. Not for `static` sites or containers. The first request after idle waits while the app starts; no down alert is raised while it is idle (docs/COMMANDS.md, "Scale to zero"). | `idle_stop = 10m` |
-| `node_lite` | `true` or `false` | `false` | | V8's `--lite-mode` for the app's `node` (recipes `node`, `next`): no optimizing JIT, about 10 MB less memory once warm, about half the peak throughput. For small, low-traffic apps. `tando init` never sets it (docs/COMMANDS.md, "node_lite"). | `node_lite = true` |
+| `node_lite` | `true` or `false` | `false` | | V8's `--lite-mode` for the app's `node` (recipes `node`, `next`): no optimizing JIT, a few MB less memory once warm, slower under load. For small, low-traffic apps. `tando init` never sets it (docs/COMMANDS.md, "node_lite"). | `node_lite = true` |
 
 ## Assets
 

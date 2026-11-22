@@ -851,8 +851,9 @@ limits" counts what the per-app rules refused.
 ### Lower memory for Node: node_lite
 
 `node_lite = true` (node and next recipes; default false, `tando init` never writes it) runs the
-app's `node` with V8's `--lite-mode`: no optimizing JIT. Measured on a small Express app: warm
-memory 24 MB down to 13 MB, at about half the peak throughput (squeeze audit). Right for small,
+app's `node` with V8's `--lite-mode`: no optimizing JIT. The squeeze audit measured
+warm RSS 24 MB down to 13 MB at about half the peak throughput; in tando's unit (e2e-frameworks,
+hello-world Express) PSS went 25.1 MB to 23.1 MB (RSS 67 to 60 MB), so expect a few MB, not 10. Right for small,
 low-traffic apps where memory is what you pay for; wrong for an app that is CPU-bound or must
 answer fast under load. V8 options like it are refused in `NODE_OPTIONS`, so tando puts a `node`
 shim (`/opt/tando/lite/node`) first in the app's PATH: it works for `node server.js`, npm
@@ -863,8 +864,10 @@ the heap cap stay as they are.
 
 `recipe = workerd` runs an app written for the Workers API (an ES module that exports
 `default { fetch(request, env) }`) on workerd, Cloudflare's open-source runtime. Opt-in, for small
-stateless apps: idle it holds about 9-16 MB PSS, against 47-72 MB for plain Node (spike measured in
-Docker; the numbers for this implementation are in the report of the change).
+stateless apps. Measured in the e2e-frameworks suite (Docker, hello-world, after 10 requests): the
+unit holds about 37 MB PSS, a hello-world Express app about 25 MB PSS. The earlier spike's 9-16 MB
+was not reproduced in tando's unit, so workerd is not a memory saving over a small Node app; it
+is for code written for the Workers API.
 `tando init` suggests it when it finds `wrangler.toml` (or `wrangler.json`), or an entry file that
 exports a fetch handler and starts no server. `start` is the module in the release, like
 `src/index.js` (from wrangler's `main`). To use it: `build`/`out` produce the JavaScript (bundle
