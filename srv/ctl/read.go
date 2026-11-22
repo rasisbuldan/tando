@@ -185,6 +185,7 @@ func (c *Ctl) inventory(ctx context.Context, r Request) (any, *Error) {
 		"alloc_mb":         alloc,
 		"admitted_mb":      admitted,
 		"apps":             len(ai),
+		"draining":         c.draining(),
 	}
 	if oc > 0 {
 		limit := int64(float64(mi["MemTotal"]>>10) * oc)
