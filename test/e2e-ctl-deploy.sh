@@ -172,7 +172,18 @@ else
   skip "D16 a tar.zst artifact deploys (no zstd on the test server)"
 fi
 # ---- apply (a generation), export, import, drain --------------------------------------------------
-req() { ctl w "{\"v\":1,\"verb\":\"$1\",\"app\":\"$2\",\"request_id\":\"$3\",\"args\":$4}"; local rc=$?; log "$3: $(head -c 600 "$E/out")"; return $rc; }
+# req verb app id args: a request of the write principal; an answer that never came (empty, or
+# "interrupted": the session ended first) is asked for again with the same id, as a control plane
+# does (the store answers it), and the first try is logged with ssh's status and stderr
+req() {
+  local j="{\"v\":1,\"verb\":\"$1\",\"app\":\"$2\",\"request_id\":\"$3\",\"args\":$4}" rc
+  ctl w "$j"; rc=$?
+  log "$3: rc=$rc $(head -c 600 "$E/out") $(head -c 300 "$E/err")"
+  if [ ! -s "$E/out" ] || [ "$(code)" = interrupted ]; then
+    ctl w "$j"; rc=$?; log "$3 (again): rc=$rc $(head -c 600 "$E/out")"
+  fi
+  return $rc
+}
 req apply web apply-0001 "{\"generation\":1,\"settings\":{\"memory\":\"160M\"},\"env\":{\"set\":{\"GREETING\":\"hello from the spec\"}},\"artifact\":$(art v1)}"
 check "A1 apply generation 1 (spec memory, an env value, the artifact): done; the app serves it with that memory" eval '
   ok && [ "$(body)" = version-one ] && "$SSH" "sudo grep -qx memory=160M /opt/tando/apps/web/app.conf" &&

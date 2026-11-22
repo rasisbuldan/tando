@@ -149,12 +149,35 @@ func (g *Gate) Ctl(args []string) error {
 	if err != nil {
 		return die("could not read the request: %v", err)
 	}
+	out := &countWriter{w: g.Stdout}
 	c := run.Cmd{Argv: []string{"sudo", "-n", "--", g.P.Gate, "ctl-root"}, Stdin: bytes.NewReader(in),
-		Stdout: g.Stdout, Stderr: g.Stderr, Timeout: 3 * time.Hour}
-	if _, err := g.Env.Run.Output(context.Background(), c); err != nil {
+		Stdout: out, Stderr: g.Stderr, Timeout: 3 * time.Hour}
+	_, err = g.Env.Run.Output(context.Background(), c)
+	// every request gets one JSON answer: root mode stopped before it wrote one (killed, cut off)
+	// is answered here; the request store has the request's fate, so the same request_id again
+	// gets it (docs/CONTROL-PLANE.md, "Idempotency and order")
+	if out.n == 0 {
+		fmt.Fprintln(g.Stdout, `{"v":1,"ok":false,"error":{"code":"interrupted","message":"the node's side of this request ended without an answer: send the same request again (same request_id) for its result"}}`)
+		if err == nil {
+			return Exit{1}
+		}
+	}
+	if err != nil {
 		return Exit{ExitCode(err)}
 	}
 	return nil
+}
+
+// countWriter counts what goes through it.
+type countWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // readCapped reads f to its end, at most max bytes, within d.

@@ -2,12 +2,14 @@ package gate
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"tando/srv/internal/run"
 	"testing"
 
 	"tando/srv/internal/out"
@@ -206,9 +208,22 @@ func TestCtlLogin(t *testing.T) {
 	g.Env.Run = fr
 	args := []string{dashC, g.P.Gate + " ctl write 9 x"}
 	g.Caller = Caller{UID: cuid, EUID: cuid}
-	if err := g.Ctl(args); err != nil || len(fr.calls) != 1 || strings.Join(fr.calls[0], " ") != "sudo -n -- "+g.P.Gate+" ctl-root" {
-		t.Fatalf("%v %q", err, fr.calls)
+	// (the fake root mode writes nothing: the login answers for it, and fails)
+	var err error
+	out := stdoutOf(t, g, func() error { err = g.Ctl(args); return nil })
+	if err == nil || len(fr.calls) != 1 || strings.Join(fr.calls[0], " ") != "sudo -n -- "+g.P.Gate+" ctl-root" ||
+		!strings.Contains(out, `"code":"interrupted"`) {
+		t.Fatalf("%v %q %q", err, fr.calls, out)
 	}
+	// root mode that answers: its answer only
+	g.Env.Run = run.Func(func(_ context.Context, c run.Cmd) ([]byte, error) {
+		c.Stdout.Write([]byte(`{"v":1,"ok":true}` + "\n"))
+		return nil, nil
+	})
+	if out := stdoutOf(t, g, func() error { return g.Ctl(args) }); out != `{"v":1,"ok":true}`+"\n" {
+		t.Fatalf("answer: %q", out)
+	}
+	g.Env.Run = fr
 	for name, c := range map[string]Caller{
 		"root":          {UID: 0, EUID: 0},
 		"a deploy user": {UID: 990, EUID: 990},

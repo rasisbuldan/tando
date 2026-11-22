@@ -384,6 +384,9 @@ Every mutating request goes through the request store, `/var/lib/tando/ctl` (roo
   the first is still running, the retry waits for it (up to the verb's time limit, then
   `pending`: ask again). Nothing runs twice.
 - The same id with another request is refused (`conflict`).
+- Every session that reaches the node gets one line of JSON: when the node's side ends without an
+  answer (killed, cut off), the login answers `interrupted` itself. Send the same request (same
+  `request_id`) again: the store has its fate (its result, `pending`, or `interrupted` for good).
 - A request cut off by a crash or reboot (a record nobody runs) is answered `interrupted`, once
   and for good: tando's own recovery finishes or undoes the step; read `app.status` and send a new
   request with a new id.
