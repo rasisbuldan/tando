@@ -396,6 +396,7 @@ cmd_destroy() {
   # a database on a data node: where is the link record's to say, never the app node's report
   if [ -n "$dbr" ] || { [ "$K_database" = postgres ] && [ -f "$CFG/links/$HOST" ]; }; then
     . "$TANDO_HOME/lib/datanode.sh"; link_check "$dbr" "$dbn"; dbr=$LINK_DN
+    [ -f "$CFG/hosts/$dbr" ] && link_ca_check
   fi
   what="$(plural "${K_releases:-0}" release)"
   [ "${K_env:-0}" -gt 0 ] && what="$what, $(plural "$K_env" "env key")"

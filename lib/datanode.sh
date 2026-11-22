@@ -22,6 +22,19 @@ link_check() {
   fi
 }
 
+# link_ca_check: the data node still has the CA the link pinned (a server put in its place, or a
+# new CA, is refused: tando host link again after checking it)
+link_ca_check() {
+  local want got
+  want=$(link_get "$HOST" ca)
+  got=$(dn_call "$LINK_DN" data-ca) || exit 1
+  got=$(printf '%s\n' "$got" | sed -n 's/^ca=//p')
+  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+    die "REFUSED: the data node $LINK_DN has another CA (${got:-none}) than the one linked for $HOST (${want:-none})." \
+      "Nothing was changed. If its CA was replaced on purpose: tando host link $HOST $LINK_DN again."
+  fi
+}
+
 # dn_call <data-node> verb args...: the data node's agent (its own host entry and connection),
 # in a subshell so this command's host stays the app node
 dn_call() {
@@ -78,6 +91,7 @@ db_remote_provision() {
   link_check "$K_db_remote" "$K_db_node"
   dn=$LINK_DN node=$LINK_NODE
   [ -f "$CFG/hosts/$dn" ] || die "$HOST is linked to the data node $dn, which is not a host here: tando host add $dn <user@address>"
+  link_ca_check
   # the limits from this tando.conf (the server checks them against its own bounds), never the
   # app node's report
   while IFS='=' read -r k v; do
@@ -99,6 +113,7 @@ EOF
 db_remote_drop() {
   local dn node
   dn=$(link_get "$HOST" data) && node=$(link_get "$HOST" node) || return 0
+  LINK_DN=$dn; [ -f "$CFG/hosts/$dn" ] && link_ca_check
   if [ -f "$CFG/hosts/$dn" ] && dn_call "$dn" data-db drop "$APP" "$node" > /dev/null; then
     note "dropped the database of $APP on $dn"
   else

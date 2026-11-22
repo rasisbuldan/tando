@@ -107,6 +107,23 @@ srv "for i in 1 2 3 4 5 6 7 8; do PGPASSWORD=$pw psql -X -At \"$direct\" -c \"SE
 check "dn11 connection limit enforced: sessions over the role's limit are refused ($(grep -c 'too many connections' "$E/conns.out") of 8)" \
   eval 'grep -q "too many connections for role \"tando_notes\"" "$E/conns.out"'
 
+# re-review: the project's role owns its schema public (PostgreSQL 14 and older gave it to the
+# superuser, and the revoke would then fail migrations); a migration can create a table there
+check "dn24 the project's role owns schema public and a migration creates a table in it" \
+  eval '[ "$(bsql "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = '"'"'public'"'"'" tando_notes)" = tando_notes ] &&
+        apsql "$direct" "CREATE TABLE public.mig_check (i int); DROP TABLE public.mig_check" | grep -qx "DROP TABLE"'
+# 5432 holds at most what the node's projects may (here 5 + db_pool 1 + 5 = 11); pgbouncer more
+holdconn() { srv "sudo bash -c 'for i in \$(seq $2); do (exec 3<>/dev/tcp/$BIP/$1 && sleep 3) 2> /dev/null || echo refused & done; wait'" 2>&1 | grep -c refused; }
+r5432=$(holdconn 5432 30) r6432=$(holdconn 6432 30)
+check "dn25 one app node: at most its projects' share of PostgreSQL's slots on 5432 ($r5432 of 30 refused), more on pgbouncer ($r6432 of 30)" \
+  eval '[ "$r5432" -ge 10 ] && [ "$r5432" -le 25 ] && [ "$r6432" = 0 ]'
+# the link record's CA: a data node with another CA is refused
+cp "$E/cfg/links/a" "$E/link.a" && sed -i.bak 's/^ca=.*/ca=00:11:22/' "$E/cfg/links/a" && rm -f "$E/cfg/links/a.bak"
+"$R" up > "$E/up-ca.out" 2>&1; rc=$?; cat "$E/up-ca.out" >&2
+cp "$E/link.a" "$E/cfg/links/a"
+check "dn26 the data node's CA is not the one linked: tando up refused (rc=$rc)" \
+  eval '[ $rc != 0 ] && grep -q "REFUSED: the data node b has another CA" "$E/up-ca.out"'
+
 # ---- the data node's own bounds, the catalog, re-link, the certificate (security review) -------
 # limits come from this tando.conf and the data node's bounds, never off there
 printf 'db_temp_limit = off\n' >> tando.conf

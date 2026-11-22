@@ -2906,6 +2906,22 @@ fw_sync() {
       echo "    type filter hook input priority 0; policy accept;"
       echo "    iifname != \"lo\" tcp dport { 5432, 6432 } ct state new add @dn4c { ip saddr ct count over $cpn } counter name data_capped reject with tcp reset"
       echo "    iifname != \"lo\" tcp dport { 5432, 6432 } ct state new add @dn6c { ip6 saddr ct count over $cpn } counter name data_capped reject with tcp reset"
+      # PostgreSQL's own port: what that node's projects may hold (their pools and tool slots, and
+      # tool slots once more), never all of max_connections; pgbouncer's port keeps the larger cap
+      local nd na ncap
+      for nd in "$DN"/nodes/*; do
+        [[ -f $nd ]] || continue
+        na=$(sed -n 's/^addr=//p' "$nd"); valid_ip "$na" || continue
+        ncap=$DB_TOOL_SLOTS
+        for x in "$DN"/db/*; do
+          [[ -f $x ]] && grepq -x "node=${nd##*/}" "$x" || continue
+          p=$(sed -n 's/^pool=//p' "$x"); [[ $p =~ ^[0-9]+$ ]] || p=$DB_POOL
+          ncap=$((ncap + p + DB_TOOL_SLOTS))
+        done
+        ((ncap < 10)) && ncap=10
+        if [[ $na == *:* ]]; then x="ip6 saddr $na"; else x="ip saddr $na"; fi
+        echo "    iifname != \"lo\" $x tcp dport 5432 ct state new ct count over $ncap counter name data_capped reject with tcp reset"
+      done
       [[ -z $dn4 ]] || echo "    iifname != \"lo\" ip saddr { $dn4 } tcp dport { 5432, 6432 } accept"
       [[ -z $dn6 ]] || echo "    iifname != \"lo\" ip6 saddr { $dn6 } tcp dport { 5432, 6432 } accept"
       echo "    iifname != \"lo\" tcp dport { 5432, 6432 } counter name data_refused reject with tcp reset"
@@ -6778,6 +6794,12 @@ cmd_data_link() {
   echo "addr=$via"
   echo "ca=$(base64 -w0 < "$DN_TLS/ca.pem")"
 }
+# data-ca: the SHA-256 fingerprint of the CA app nodes pin (the client checks its link record)
+cmd_data_ca() {
+  need_root; load "$R/host.conf" H
+  dn_is || die "<host> is not a data node"
+  echo "ca=$(openssl x509 -noout -fingerprint -sha256 -in "$DN_TLS/ca.pem" 2> /dev/null | sed 's/.*=//')"
+}
 # data-unlink <node>: refused while projects of it are here (data-db drop them first)
 cmd_data_unlink() {
   need_root; host_lock; load "$R/host.conf" H
@@ -6842,7 +6864,10 @@ cmd_data_db() {
           die "could not restrict database $x"
         # (and its schema public: no USAGE for other roles either; the catalog itself, the names
         # of databases and roles, stays readable to every role: docs/DATA-NODE.md)
-        pgsql -d "$x" -c "REVOKE ALL ON SCHEMA public FROM PUBLIC" > /dev/null || die "could not restrict the schema of $x"
+        # (the project's role owns it first: on PostgreSQL 14 and older public belongs to the
+        # superuser, and the revoke would take the role's own CREATE and USAGE, failing migrations)
+        pgsql -d "$x" -c "ALTER SCHEMA public OWNER TO $r" -c "REVOKE ALL ON SCHEMA public FROM PUBLIC" > /dev/null ||
+          die "could not restrict the schema of $x"
       done
       pgsql -c "COMMENT ON DATABASE $d IS '$DRILL_MARK'" > /dev/null || die "could not mark $d"
       # the per-role limits (as db_limits on a single node; docs/CONFIG.md "Database limits")
@@ -6853,6 +6878,7 @@ cmd_data_db() {
         die "could not record $app (disk full?)"
       ( A="" pgb_sync ) || echo "tando-agent: could not update pgbouncer's databases (tando doctor)" >&2
       dn_hba || die "could not write pg_hba.conf"
+      fw_sync || die "could not load the firewall rules"
       echo "role=$r"
       [[ -n ${pw:-} ]] && echo "password=$pw"
       return 0;;
@@ -6863,6 +6889,7 @@ cmd_data_db() {
       rm -f "$DN/db/$app"
       ( A="" pgb_sync ) || echo "tando-agent: could not take $r out of pgbouncer (tando doctor)" >&2
       dn_hba || die "could not write pg_hba.conf"
+      fw_sync || echo "tando-agent: could not load the firewall rules (tando host setup <host>)" >&2
       echo "dropped=$r";;
     *) die "data-db ensure|drop|ls";;
   esac
@@ -8968,7 +8995,7 @@ case $verb in
   db-url) cmd_db_url "$@";;
   db-psql) cmd_db_psql "$@";;
   db-info) cmd_db_info "$@";;
-  data-link) cmd_data_link "$@";; data-unlink) cmd_data_unlink "$@";; data-db) cmd_data_db "$@";; data-renew) cmd_data_renew;;
+  data-link) cmd_data_link "$@";; data-unlink) cmd_data_unlink "$@";; data-db) cmd_data_db "$@";; data-renew) cmd_data_renew;; data-ca) cmd_data_ca;;
   db-link) cmd_db_link "$@";; db-remote-set) cmd_db_remote_set "$@";;
   db-studio) cmd_db_studio "$@";; db-studio-ls) cmd_db_studio_ls "$@";; db-studio-stop) cmd_db_studio_stop "$@";;
   db-studio-code) cmd_db_studio_code "$@";; db-studio-lower) cmd_db_studio_lower "$@";;
