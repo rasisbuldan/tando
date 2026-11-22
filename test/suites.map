@@ -146,6 +146,7 @@ test/e2e-jobs.sh         e2e-jobs lint
 test/cron-ref.py         e2e-jobs lint
 test/e2e-matrix*         e2e-matrix-quick e2e-matrix-weekly lint
 test/e2e-workers.sh      e2e-workers lint
+test/e2e-proxy.sh        e2e-proxy lint
 test/e2e-upgrade.sh      e2e-upgrade lint
 test/faults/*            @faults e2e-matrix-quick e2e-matrix-weekly lint
 test/sec2/*              e2e-sec2 lint

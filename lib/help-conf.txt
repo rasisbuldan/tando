@@ -35,6 +35,9 @@ Limits
   hold            seconds Caddy holds requests at a restart (default 15)
   stop_timeout    seconds a stopping process may finish (default 10)
   idle_stop       6h, 10m, 30s, on (6h): stop the web process after that long without a request, start it on the next one (default off)
+  cold_timeout    seconds a visitor waits for an idle app to start, then a 503 (default 30)
+  response_timeout seconds Caddy waits for an answer, then a 504; streams are not cut (default 60, or off)
+  body_max        largest request body, over it a 413: 100MB, 2GB, off (default 100MB)
   priority        high or low: killed last or first when memory runs out
 Assets
   compress        off: send answers as they are (default on: text is gzip or zstd compressed)
