@@ -280,7 +280,7 @@ func (t *tick) forgetRemoved() {
 			continue
 		}
 		switch p {
-		case "dg", "tls", "oomk", "win", "top", "ema", "sup", "du", "dumb", "pgsz", "pgc", "pgl", "xi":
+		case "dg", "tls", "oomk", "cpu", "win", "top", "ema", "sup", "du", "dumb", "pgsz", "pgc", "pgl", "xi":
 			if !fsinfo.DirFollow(t.w.appDir(a)) {
 				t.vs.del(k)
 			}

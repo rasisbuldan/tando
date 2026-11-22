@@ -3,6 +3,7 @@ package metrics
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,10 +12,12 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"tando/srv/internal/apps"
 	"tando/srv/internal/atomicfile"
 	"tando/srv/internal/cgroup"
+	"tando/srv/internal/run"
 	"tando/srv/internal/systemd"
 )
 
@@ -42,7 +45,8 @@ func (m Metrics) Sample(ctx context.Context) error {
 	next := state{}
 	keys := append(slices.Clone(names), hostKey) // .state's order: the apps, then the host
 
-	appErr := m.sampleApps(ctx, now, names, prev, next)
+	net := m.netBytes(ctx) // (before systemctl: one nft call for every app)
+	appErr := m.sampleApps(ctx, now, names, prev, next, net)
 	if appErr != nil {
 		// systemd did not answer (or a file could not be written): no line this minute for the
 		// apps not done yet, but their files' line counts and start times must survive, or the
@@ -71,7 +75,7 @@ func (m Metrics) Sample(ctx context.Context) error {
 	return nil
 }
 
-func (m Metrics) sampleApps(ctx context.Context, now int64, names []string, prev, next state) error {
+func (m Metrics) sampleApps(ctx context.Context, now int64, names []string, prev, next state, net map[uint32][2]int64) error {
 	if len(names) == 0 {
 		return nil
 	}
@@ -108,12 +112,14 @@ func (m Metrics) sampleApps(ctx context.Context, now int64, names []string, prev
 			}
 		}
 		sl := readSlice(dir, p, seen)
-		e, err := m.appendLine(a, now, p, fmt.Sprintf("%d\t%d\t%d\t%s\t%s\t%s", now, mem, d, restarts, stateLetter(props[i]["ActiveState"]), sl.line))
+		nb, out, in := m.appNet(a, net, p, seen)
+		e, err := m.appendLine(a, now, p, fmt.Sprintf("%d\t%d\t%d\t%s\t%s\t%s\t%s", now, mem, d, restarts, stateLetter(props[i]["ActiveState"]), sl.line, nb))
 		if err != nil {
 			return err
 		}
 		e.usec, e.x = usec, p.x
 		e.periods, e.throttled, e.ooms = sl.periods, sl.throttled, sl.ooms
+		e.out, e.in = out, in
 		next[a] = e
 	}
 	return nil
@@ -340,4 +346,78 @@ func keysIn(st state, keys []string) []string {
 		}
 	}
 	return out
+}
+
+// netBytes reads the per-uid byte counters of tando's nftables table (fw_sync: out_<uid> what the
+// uid sent over the network, in_<uid> what came back on the connections it opened): uid ->
+// {out, in}. Empty when nft is not there or answers nothing usable.
+func (m Metrics) netBytes(ctx context.Context) map[uint32][2]int64 {
+	b, err := m.Env.Run.Output(ctx, run.Cmd{Argv: []string{"nft", "-j", "list", "counters", "table", "inet", "tando"}, Timeout: 5 * time.Second})
+	if err != nil {
+		return nil
+	}
+	var doc struct {
+		Nftables []struct {
+			Counter *struct {
+				Name  string `json:"name"`
+				Bytes int64  `json:"bytes"`
+			} `json:"counter"`
+		} `json:"nftables"`
+	}
+	if json.Unmarshal(b, &doc) != nil {
+		return nil
+	}
+	out := map[uint32][2]int64{}
+	for _, o := range doc.Nftables {
+		if o.Counter == nil {
+			continue
+		}
+		dir, uid, ok := strings.Cut(o.Counter.Name, "_")
+		if !ok || (dir != "out" && dir != "in") {
+			continue
+		}
+		u, err := strconv.ParseUint(uid, 10, 32)
+		if err != nil {
+			continue
+		}
+		v := out[uint32(u)]
+		if dir == "out" {
+			v[0] = o.Counter.Bytes
+		} else {
+			v[1] = o.Counter.Bytes
+		}
+		out[uint32(u)] = v
+	}
+	return out
+}
+
+// appNet is the line's columns 11 and 12: bytes the app's uid sent and received over the network
+// since the last sample ("-": not known), and the raw counters for .state. The uid is the owner of
+// the app's shared/ directory (its user's, made by configure). A counter that went down was made
+// again (the rules were loaded anew, a reboot): what it holds now is the difference.
+func (m Metrics) appNet(a string, net map[uint32][2]int64, p entry, seen bool) (string, int64, int64) {
+	fi, err := os.Stat(filepath.Join(m.Env.Root, "apps", a, "shared"))
+	if err != nil {
+		return "-\t-", -1, -1
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "-\t-", -1, -1
+	}
+	v, ok := net[st.Uid]
+	if !ok {
+		return "-\t-", -1, -1
+	}
+	col := [2]string{"-", "-"}
+	for i, prev := range [2]int64{p.out, p.in} {
+		if !seen || prev < 0 {
+			continue
+		}
+		d := v[i] - prev
+		if d < 0 {
+			d = v[i]
+		}
+		col[i] = strconv.FormatInt(d, 10)
+	}
+	return col[0] + "\t" + col[1], v[0], v[1]
 }

@@ -22,6 +22,7 @@ type host struct {
 	m        Metrics
 	now      int64
 	systemd  string // systemctl's answer
+	nft      string // nft -j list counters' answer
 	sysErr   error
 	lastArgv []string
 }
@@ -37,6 +38,9 @@ func newHost(t testing.TB) *host {
 		EUID:   0,
 		Now:    func() time.Time { return time.Unix(h.now, 0) },
 		Run: run.Func(func(_ context.Context, c run.Cmd) ([]byte, error) {
+			if len(c.Argv) > 0 && c.Argv[0] == "nft" {
+				return []byte(h.nft), nil
+			}
 			h.lastArgv = c.Argv
 			return []byte(h.systemd), h.sysErr
 		}),
@@ -95,10 +99,10 @@ func TestSample(t *testing.T) {
 			t.Errorf("%s:\n got %q\nwant %q", name, got, want)
 		}
 	}
-	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\t-\t-\t-\t-\t-\n")
-	check("web.tsv", "1800000000\t1000\t0\t3\tf\t-\t-\t-\t-\t-\n")
+	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\t-\t-\t-\t-\t-\t-\t-\n")
+	check("web.tsv", "1800000000\t1000\t0\t3\tf\t-\t-\t-\t-\t-\t-\t-\n")
 	check("host.tsv", "1800000000\t52\t1536000000\t2048000000\t-\t4000\t10000\n")
-	check(".state", "api-2 9000000 1800000000 1 1800000000 -1 -1 -1\nweb 5000000 1800000000 1 1800000000 -1 -1 -1\n.host 0 1800000000 1 0\n")
+	check(".state", "api-2 9000000 1800000000 1 1800000000 -1 -1 -1 -1 -1\nweb 5000000 1800000000 1 1800000000 -1 -1 -1 -1 -1\n.host 0 1800000000 1 0\n")
 	// root's alone: an app must not read another app's samples (tando top reads through sudo);
 	// the directory is made 700 although it existed with 755 (an older version's)
 	for f, want := range map[string]os.FileMode{"": 0o700, "web.tsv": 0o600, "host.tsv": 0o600, ".state": 0o600} {
@@ -116,10 +120,10 @@ func TestSample(t *testing.T) {
 	if err := h.m.Sample(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	check("web.tsv", "1800000000\t1000\t0\t3\tf\t-\t-\t-\t-\t-\n1800000060\t1100\t1200000\t0\ts\t-\t-\t-\t-\t-\n")
-	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\t-\t-\t-\t-\t-\n1800000060\t2000\t400000\t2\ta\t-\t-\t-\t-\t-\n")
+	check("web.tsv", "1800000000\t1000\t0\t3\tf\t-\t-\t-\t-\t-\t-\t-\n1800000060\t1100\t1200000\t0\ts\t-\t-\t-\t-\t-\t-\t-\n")
+	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\t-\t-\t-\t-\t-\t-\t-\n1800000060\t2000\t400000\t2\ta\t-\t-\t-\t-\t-\t-\t-\n")
 	check("host.tsv", "1800000000\t52\t1536000000\t2048000000\t-\t4000\t10000\n1800000060\t1234\t1536000000\t2048000000\t-\t4000\t10000\n")
-	check(".state", "api-2 400000 1800000000 2 1800000000 -1 -1 -1\nweb 6200000 1800000000 2 1800000000 -1 -1 -1\n.host 0 1800000000 2 0\n")
+	check(".state", "api-2 400000 1800000000 2 1800000000 -1 -1 -1 -1 -1\nweb 6200000 1800000000 2 1800000000 -1 -1 -1 -1 -1\n.host 0 1800000000 2 0\n")
 
 	// web is destroyed: its line leaves .state; a unit without a cgroup samples zeros
 	os.RemoveAll(filepath.Join(h.m.Env.Root, "apps", "web"))
@@ -129,8 +133,8 @@ func TestSample(t *testing.T) {
 	if err := h.m.Sample(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	check(".state", "api-2 0 1800000000 3 1800000000 -1 -1 -1\n.host 0 1800000000 3 0\n")
-	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\t-\t-\t-\t-\t-\n1800000060\t2000\t400000\t2\ta\t-\t-\t-\t-\t-\n1800000120\t0\t0\t0\ts\t-\t-\t-\t-\t-\n")
+	check(".state", "api-2 0 1800000000 3 1800000000 -1 -1 -1 -1 -1\n.host 0 1800000000 3 0\n")
+	check("api-2.tsv", "1800000000\t2000\t0\t1\tr\t-\t-\t-\t-\t-\t-\t-\n1800000060\t2000\t400000\t2\ta\t-\t-\t-\t-\t-\t-\t-\n1800000120\t0\t0\t0\ts\t-\t-\t-\t-\t-\t-\t-\n")
 }
 
 func TestSampleRotates(t *testing.T) {
@@ -161,7 +165,7 @@ func TestSampleRotates(t *testing.T) {
 		t.Errorf("fresh rotated too early")
 	}
 	n := decimal.Itoa(now)
-	want := "fresh 100 " + decimal.Itoa(now-302399) + " 5100 " + n + " -1 -1 -1\nfull 100 " + n + " 1 " + n + " -1 -1 -1\nold 100 " + n + " 1 " + n + " -1 -1 -1\n.host 0 " + n + " 2 0\n"
+	want := "fresh 100 " + decimal.Itoa(now-302399) + " 5100 " + n + " -1 -1 -1 -1 -1\nfull 100 " + n + " 1 " + n + " -1 -1 -1 -1 -1\nold 100 " + n + " 1 " + n + " -1 -1 -1 -1 -1\n.host 0 " + n + " 2 0\n"
 	if got := h.read(".state"); got != want {
 		t.Errorf(".state:\n got %q\nwant %q", got, want)
 	}
@@ -180,7 +184,7 @@ func TestSampleSystemdDown(t *testing.T) {
 		t.Error("an app line was written without systemd's answer")
 	}
 	// the host was sampled, and web's file keeps its count and start
-	if got := h.read(".state"); got != "web 50 1799990000 7 1800000000 -1 -1 -1\n.host 0 1799990000 8 0\n" {
+	if got := h.read(".state"); got != "web 50 1799990000 7 1800000000 -1 -1 -1 -1 -1\n.host 0 1799990000 8 0\n" {
 		t.Errorf(".state = %q", got)
 	}
 }
@@ -226,7 +230,47 @@ func TestSampleRestartsLost(t *testing.T) {
 	if err := h.m.Sample(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := h.read("web.tsv"); got != "1800000000\t1000\t0\t11\tr\t-\t-\t-\t-\t-\n" {
+	if got := h.read("web.tsv"); got != "1800000000\t1000\t0\t11\tr\t-\t-\t-\t-\t-\t-\t-\n" {
 		t.Errorf("web.tsv: %q", got)
+	}
+}
+
+// The bytes an app's uid sent and received (fw_sync's nftables counters out_<uid>, in_<uid>) are
+// columns 11 and 12: the difference since the last sample; a counter made again counts from 0.
+func TestSampleNetBytes(t *testing.T) {
+	h := newHost(t)
+	h.app("web", `tando.slice/tando-web.slice/tando-web.service`, 1000, 5_000_000)
+	if err := os.MkdirAll(filepath.Join(h.m.Env.Root, "apps", "web", "shared"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid := decimal.Itoa(int64(os.Getuid()))
+	counters := func(out, in int64) {
+		h.nft = `{"nftables": [{"metainfo": {"version": "1.0.9"}}, {"counter": {"family": "inet", "name": "app_conn", "table": "tando", "packets": 1, "bytes": 9}},` +
+			`{"counter": {"family": "inet", "name": "out_` + uid + `", "table": "tando", "packets": 3, "bytes": ` + decimal.Itoa(out) + `}},` +
+			`{"counter": {"family": "inet", "name": "in_` + uid + `", "table": "tando", "packets": 3, "bytes": ` + decimal.Itoa(in) + `}}]}`
+	}
+	h.systemd = "ActiveState=active\nNRestarts=0\n"
+	counters(1000, 5000)
+	for _, step := range []struct {
+		out, in int64
+		want    string
+	}{
+		{1000, 5000, "-\t-"},      // the first sample: nothing to compare with
+		{1600, 9000, "600\t4000"}, // a minute later
+		{200, 300, "200\t300"},    // the rules were loaded anew: the counters began again
+	} {
+		counters(step.out, step.in)
+		if err := h.m.Sample(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(h.read("web.tsv")), "\n")
+		f := strings.Split(lines[len(lines)-1], "\t")
+		if len(f) != 12 || f[10]+"\t"+f[11] != step.want {
+			t.Errorf("line %q: want bytes %q", lines[len(lines)-1], step.want)
+		}
+		h.now += 60
+	}
+	if st := h.read(".state"); !strings.Contains(st, " 200 300\n") {
+		t.Errorf(".state keeps the raw counters: %q", st)
 	}
 }

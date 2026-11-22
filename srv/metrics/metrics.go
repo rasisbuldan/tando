@@ -9,6 +9,8 @@
 //	<app>.tsv, <app>.tsv.1   time  mem_bytes  cpu_usec_since_last_sample  restarts  state(r|s|f|a)
 //	                         then (since 2026-11) the slice's: throttled_permille  oom_kills  tasks
 //	                         tasks_max  memory_psi_x100 ("-": not known; sample.go readSlice)
+//	                         then (since 2026-11) net_out_bytes  net_in_bytes: what the app's uid
+//	                         sent and got back over the network since the last line (sample.go appNet)
 //	host.tsv, host.tsv.1     time  load1x100  mem_used_bytes  mem_total_bytes  cpu_permille_all_cores
 //	                         disk_used_bytes  disk_total_bytes  (the last three since 2026-11; "-":
 //	                         not known; the disk is the file system holding Dir)
@@ -16,7 +18,7 @@
 //	host.x, tandod.x (.1)    the host's extended line and what the monitoring costs, a minute at a
 //	                         time (hostx.go, self.go; named columns: readx.go)
 //	.state                   "<app> <cpu usage_usec> <file start time> <lines> <last disk walk>
-//	                         <nr_periods> <nr_throttled> <oom_kill>" per app, and ".host <busy
+//	                         <nr_periods> <nr_throttled> <oom_kill> <net out> <net in>" per app, and ".host <busy
 //	                         jiffies> <start> <lines> <total jiffies>"
 //	.x.state                 "<key> <value>": the raw counters host.x and tandod.x were last
 //	                         computed from, and their files' start and line count

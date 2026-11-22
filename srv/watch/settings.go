@@ -13,6 +13,8 @@ var defaults = []struct{ key, def, desc string }{
 	{"health_timeout", "10", "seconds per health probe"},
 	{"mem_pct", "90", "app memory (anon+shmem) as % of its MemoryMax"},
 	{"mem_for", "5", "samples above mem_pct before firing"},
+	{"cpu_pct", "90", "CPU of an app's slice (web, workers, jobs) as % of its CPU limit (of one core without one) that counts as high for cpu_sustained"},
+	{"cpu_for", "30", "samples in a row above cpu_pct before cpu_sustained fires (not counted while a deploy, build, release, shell or backup of the app runs)"},
 	{"restarts_max", "3", "automatic restarts within restarts_window minutes before firing"},
 	{"restarts_window", "15", "minutes"},
 	{"oom_quiet", "30", "minutes without a new OOM kill before an oom alert resolves"},
@@ -65,7 +67,7 @@ var defaults = []struct{ key, def, desc string }{
 // The checks that can be turned off ("<check>=off", "<app>.<check>=off"). "logs" is of low
 // severity: no high priority in ntfy, "(low)" in the text.
 var (
-	appChecks  = []string{"down", "health", "memory", "oom", "restarts", "tls", "backup", "stuck", "disk", "http", "slow", "errors", "logs", "job", "worker", "db_conns", "db_deadlock", "db_wrap", "db_wrap_warn", "disk_warn"}
+	appChecks  = []string{"down", "health", "memory", "oom", "restarts", "tls", "backup", "stuck", "disk", "http", "slow", "errors", "logs", "job", "worker", "db_conns", "db_deadlock", "db_wrap", "db_wrap_warn", "disk_warn", "cpu_sustained"}
 	hostChecks = []string{"disk", "inodes", "host_memory", "swap", "load", "host_oom", "caddy", "caddy_config", "firewall", "monitor", "monitor_cost", "postgres"}
 )
 

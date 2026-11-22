@@ -81,7 +81,7 @@ func TestSampleDisk(t *testing.T) {
 	if n < 60000 || n >= 60000+90000 {
 		t.Errorf("web disk %d: want the app dir, data_dir and journal (hard link once), not webx's journal", n)
 	}
-	if !strings.Contains(h.read(".state"), "web 100 1800000000 1 1800000000 -1 -1 -1\n") {
+	if !strings.Contains(h.read(".state"), "web 100 1800000000 1 1800000000 -1 -1 -1 -1 -1\n") {
 		t.Errorf(".state %q: want the walk's time", h.read(".state"))
 	}
 	// 14 minutes later: not walked again; 15: walked
@@ -102,7 +102,7 @@ func TestSampleDisk(t *testing.T) {
 	if strings.Count(h.read("web.disk"), "\n") != 2 {
 		t.Error("a walk over the budget wrote a line")
 	}
-	if !strings.Contains(h.read(".state"), "web 100 1800000000 4 "+decimal.Itoa(h.now)+" -1 -1 -1\n") {
+	if !strings.Contains(h.read(".state"), "web 100 1800000000 4 "+decimal.Itoa(h.now)+" -1 -1 -1 -1 -1\n") {
 		t.Errorf(".state %q: the failed walk is not remembered", h.read(".state"))
 	}
 }
