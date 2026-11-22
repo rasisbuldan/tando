@@ -170,7 +170,7 @@ cmd_host() {
           access_keep_for=*|ci_max_mb=*|ci_max_files=*|ci_max_file_mb=*|app_max_mb=*) ;;
           rate_limit=on|rate_limit=off|rate_limit=auto|conn_limit=*|conn_rate=*) ;;
           request_log_max=*) ;;
-          port_min=*|port_max=*|preflight_min=*|preflight_max=*|uid_min=*|uid_max=*|mem_overcommit=*|job_slots=*|backup_window=*|backup_jobs=*) ;;
+          port_min=*|port_max=*|preflight_min=*|preflight_max=*|uid_min=*|uid_max=*|mem_overcommit=*|job_slots=*|backup_window=*|backup_jobs=*|backup_drill=monthly|backup_drill=off) ;;
           care=on|care=off) ;;   # host care's security updates (tando-host install; not the agent's)
           --pg-stat-statements) pgss=1;;   # PostgreSQL's top statements (a restart: asked below)
           --pg-restart) pgrs=1;;           # PostgreSQL's new memory settings (a restart: asked below)
@@ -409,6 +409,22 @@ cmd_backup() {
       agent sudo backup-run "$APP" manual > "$TMPD/o"; kv_read "$TMPD/o" id
       note "backed up $APP: $K_id (tando backup ls)";;
     ls) cmd_backup_ls;;
+    drill)
+      local rc=0
+      agent_raw sudo backup-drill "$APP" > "$TMPD/o" || rc=$?
+      kv_read "$TMPD/o" result id files tables rows secs why
+      ui_box_open "restore drill $APP" "$HOST"
+      ui_kv backup "${K_id:--}  ${UI_DIM}restored into a throwaway copy; the live data was not touched${UI_NC}"
+      if [ "$K_result" = ok ]; then
+        [ -n "$K_files" ] && ui_kv files "$K_files restored, as many as the archive lists"
+        [ -n "$K_tables" ] && ui_kv database "$K_tables tables, $K_rows rows, pg_restore exit 0"
+        ui_kv took "$(secs "$K_secs")"
+        ui_box_close "drill $(ui_badge ok ok): the copy was removed"
+      else
+        ui_kv why "${K_why:-the drill did not run (see above)}"
+        ui_box_close "drill $(ui_badge failed failed): tando backup ls shows it; tando doctor warns until a drill works"
+        exit 1
+      fi;;
     restore)
       valid_backup_id "$id" || usage_err "bad backup id: $id (tando backup ls lists them)" backup
       confirm "This replaces the live data of $APP on $HOST with backup $id (the current data is kept as a safety backup; a backup only offsite is fetched and verified first)." "$APP"
@@ -496,7 +512,7 @@ pos_app() {
   k=""
   if [ -n "$sub" ]; then
     case $cmd:${ARGS[pos[0]]} in
-      env:ls|backup:ls|backup:now|db:info|db:psql|db:url|db:studio|domain:ls|jobs:ls|requests:summary|requests:tail|requests:errors)
+      env:ls|backup:ls|backup:now|backup:drill|db:info|db:psql|db:url|db:studio|domain:ls|jobs:ls|requests:summary|requests:tail|requests:errors)
         [ ${#pos[@]} -ge 2 ] && k=${pos[1]};;
     esac
   else

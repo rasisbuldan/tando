@@ -401,6 +401,7 @@ C_workers=""       # worker.<name> = <command> and their .memory, .stop_timeout 
 C_release="" C_release_shell="" C_release_timeout=""   # the release command (lib/deploy.sh; checked by the server too)
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
 C_idle_stop=""     # scale to zero: stop after this long without a connection (10m, 30s, 2h, off)
+C_preview_ttl="" C_preview_skip=""   # previews: how long one lives (7d), env names it does not get (docs/COMMANDS.md "Preview apps")
 C_priority=""   # high or low: who the OOM killer takes last or first (checked by the server too)
 
 # trim_v text -> TRIM: without leading and trailing white space (no fork; conf_load runs it per line)
@@ -658,6 +659,11 @@ conf_load() { # [file]; a file already loaded in this run is not read again
       idle_stop) C_idle_stop=$v
         case $v in on|off|[1-9]s|[1-9]m|[1-9]h|[1-9][0-9]s|[1-9][0-9]m|[1-9][0-9]h|[1-9][0-9][0-9]s|[1-9][0-9][0-9]m|[1-9][0-9][0-9]h) ;;
           *) die "$f:$n: idle_stop is a time like 6h, 10m or 30s, on (6h) or off (got \"$v\")";; esac;;
+      preview_ttl) C_preview_ttl=$v
+        case $v in [1-9][smhd]|[1-9][0-9][smhd]|[1-9][0-9][0-9][smhd]|[1-9][0-9][0-9][0-9][smhd]) ;;
+          *) die "$f:$n: preview_ttl is a time like 7d, 12h or 90m (got \"$v\")";; esac;;
+      preview_skip) C_preview_skip=$(printf '%s' "$v" | tr ' ' ',' | tr -s ',')
+        case $C_preview_skip in ""|*[!A-Za-z0-9_,]*|[0-9,]*|*,) die "$f:$n: preview_skip is env names, like STRIPE_SECRET_KEY, SMTP_PASSWORD (got \"$v\")";; esac;;
       priority) C_priority=$v
         case $v in high|normal|low) ;; *) die "$f:$n: priority must be high, normal or low (got \"$v\")";; esac;;
       hold) C_hold=$v

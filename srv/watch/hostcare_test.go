@@ -109,3 +109,21 @@ func TestNewErrorKeptAcrossDeadRun(t *testing.T) {
 		t.Errorf("sent again: %d", n)
 	}
 }
+
+// A failed restore drill (tando backup drill) fires "drill" with the recorded reason; the next one
+// that works resolves it. An app with backups off is not judged.
+func TestRestoreDrillAlert(t *testing.T) {
+	f := newFakeHost(t)
+	f.app("hog", "backup=daily")
+	f.notifier("hook", "type=webhook\nurl=http://127.0.0.1:9/hook/S3CR3T\n")
+	f.write("opt/apps/hog/state", "current=20261114-170102\nphase=idle\nbackup_daily_ok="+decimal.Itoa(f.now.Unix())+"\ndrill_result=fail\ndrill_why=pg_restore exited with 1\n")
+	f.ticks(2)
+	if f.st("hog.drill.st") != "firing" || !strings.Contains(f.st("hog.drill.det"), "restore drill of the last backup failed: pg_restore exited with 1") {
+		t.Fatalf("state %v", f.state())
+	}
+	f.write("opt/apps/hog/state", "current=20261114-170102\nphase=idle\nbackup_daily_ok="+decimal.Itoa(f.now.Unix())+"\ndrill_result=ok\n")
+	f.ticks(2)
+	if f.st("hog.drill.st") == "firing" {
+		t.Errorf("not resolved after a drill that worked: %v", f.state())
+	}
+}

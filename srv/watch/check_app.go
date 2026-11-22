@@ -42,6 +42,7 @@ func checkBackup(t *tick, a *appTick) {
 		return
 	}
 	checkOffsite(t, a)
+	checkDrill(t, a)
 	if or(a.conf["backup"], "off") != "daily" {
 		return
 	}
@@ -58,6 +59,21 @@ func checkBackup(t *tick, a *appTick) {
 	case decimal.IsDigits(a.conf["created"]) && t.now-num(a.conf["created"], 0) > bh*3600:
 		t.sample(k, a.name, "backup", bad, "no backup recorded since the app was created "+dur(t.now-num(a.conf["created"], 0))+" ago", 1)
 	}
+}
+
+// checkDrill: the last restore drill of the app (tando backup drill; the host runs one a month). A
+// failed drill fires "drill" with the reason the agent recorded, and the next one that works
+// resolves it. An app that never had a drill, or one with backups off, is not judged.
+func checkDrill(t *tick, a *appTick) {
+	if a.state["drill_result"] == "" {
+		return
+	}
+	k := a.key("drill")
+	if a.state["drill_result"] == "fail" && or(a.conf["backup"], "off") == "daily" {
+		t.sample(k, a.name, "drill", bad, "the restore drill of the last backup failed: "+or(a.state["drill_why"], "no reason recorded"), 1)
+		return
+	}
+	t.sample(k, a.name, "drill", ok, "", 1)
 }
 
 // checkOffsite: the app's backups in the offsite bucket, from the state file tando-offsite keeps

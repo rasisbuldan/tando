@@ -385,14 +385,22 @@ Example: `tando db studio shop`
 
 ### backup
 `tando backup ls [app] [--json]` · `tando backup now [app]` · `tando backup restore <id> [--yes]` ·
-`tando backup pull <id> <file>`. Flags: `-a -H --yes`. Subcommands: ls (default, 0-1), now (0-1), restore (1),
-pull (2).
+`tando backup drill [app]` · `tando backup pull <id> <file>`. Flags: `-a -H --yes`. Subcommands: ls (default, 0-1), now (0-1),
+drill (0-1), restore (1), pull (2).
 Backups of the data directory and database. `restore` asks first and keeps a safety backup. `ls`
 and `pull` work for a destroyed app's final backup. `pull` creates the file mode 600 (it holds the
 data and a database dump) and refuses an existing file. `ls` heads its time column `TIME (GMT)`.
 `ls --json`: `{"host", "app", "backups": [{"id", "kind", "created", "size_bytes", "holds",
 "where"}], "offsite_error"}` (`where`: local, both, offsite, local+pending, local+uploading,
 local+failed; null without offsite).
+`backup drill` proves the newest backup restores: it is restored into a throwaway directory and
+database on the server (the live ones are never touched), the files and tables restored are counted
+against what the backup lists, `pg_restore`'s exit is checked, and the copy is removed. It prints
+the counts and exits 1 with the reason when it fails. The server drills every app with daily
+backups monthly (`backup_drill=monthly|off` in `tando host setup`, after the backup queue, inside
+`backup_window`); `ls` shows the last result below its table (`--json`: `"drill": {"at", "result",
+"backup", "files", "tables", "rows", "seconds", "why"}`, absent before the first), `tando doctor`
+warns about a failed drill, and the alert `drill` fires for it (docs/PREVIEWS.md).
 A restore of an app stopped with `tando stop` leaves it stopped (the data restored; `tando start`
 starts it). A restore cut off by a kill or a reboot is ended by the server's recovery: the app runs
 its release again (a stopped app stays stopped). When the database (or an adopted app's data directory) was being replaced at that moment,
@@ -607,7 +615,8 @@ once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections 
 default 14100-14999; the ranges must not overlap or hold 2019 or 5432), `uid_min=`, `uid_max=`
 (new app users' ids, default 30000-39999), `mem_overcommit=` (default 1.5; 0 turns the check off),
 `job_slots=`, `backup_window=HH:MM-HH:MM` (default 01:00-05:00, the server's time),
-`backup_jobs=1|2` (backups at once, default 1), `log_budget=` (all apps' logs together, default
+`backup_jobs=1|2` (backups at once, default 1), `backup_drill=monthly|off` (the monthly restore drill,
+default monthly; see `backup`), `log_budget=` (all apps' logs together, default
 `auto`: 20% of the log file system). Without `apps_domain`, links use
 `<ip-with-dashes>.sslip.io` (an outside service). `--deploy` and `--insecure-test` are not in the
 usage (docs/DEV-NOTES.md, mismatch 7). `care=on|off`: host care's security updates (on by default where tando
@@ -677,6 +686,20 @@ the CI secrets once; `rotate` replaces every key; `github` writes `.github/workf
 `hook` installs a git pre-push hook. See docs/CI.md. `--env` is not in help.txt's usage
 (docs/DEV-NOTES.md, mismatch 5).
 Example: `tando ci setup > ci-secrets.txt`
+
+### preview
+`tando preview up [--branch B] [--ttl 7d]` · `tando preview ls [--json]` · `tando preview rm [--branch B]`.
+Flags: `-a -H --branch --ttl --json --yes`. Subcommands: up, ls (default), rm.
+A temporary copy of the app for a branch, at `<app>-<branch>` (24 characters at most, a checksum
+added when the branch name had to change) on its own link. `up` makes it on the server from the
+parent's settings, then deploys this directory to it (again to update it; it renews the expiry):
+no database, no jobs, no backups, no domains, `idle_stop` 6h unless the parent has its own, the
+parent's env at that moment minus `preview_skip`. Removed by the server after `preview_ttl`
+(default 7d, hourly sweep) or by `rm`. The branch is `--branch`, else CI's (`GITHUB_HEAD_REF`,
+`GITHUB_REF_NAME`), else the checkout's. With a CI deploy key the same commands work for previews of
+the key's own app (docs/CI.md). `ls` lists the previews of this app. Design: docs/PREVIEWS.md.
+tando.conf: `preview_ttl = 3d`, `preview_skip = STRIPE_SECRET_KEY, SMTP_PASSWORD`.
+Example: `tando preview up --branch feature/login`
 
 ## More
 

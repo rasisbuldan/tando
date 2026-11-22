@@ -78,6 +78,8 @@ func (g *Gate) Root(args []string) (err error) {
 	}
 	who := "ci-" + s.KeyID
 	switch verb {
+	case "preview-up", "preview-rm":
+		return g.rootPreview(app, verb)
 	case "receive":
 		return g.rootReceive(app, who, s)
 	case "begin":

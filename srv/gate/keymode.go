@@ -72,6 +72,16 @@ func (g *Gate) dispatchKey(app string, req Request) error {
 		}
 		p := fmt.Sprintf("token=%s\nbuild=%s\nupload=%s\n", tok, req.Build, req.Upload)
 		return g.sudoRoot(app, "activate", strings.NewReader(p), 2*60*60)
+	case VPreviewUp, VPreviewRm:
+		verb := "preview-up"
+		if req.Verb == VPreviewRm {
+			verb = "preview-rm"
+		}
+		p := "preview=" + req.Preview + "\n"
+		if req.TTL != "" {
+			p += "ttl=" + req.TTL + "\n"
+		}
+		return g.sudoRoot(app, verb, strings.NewReader(p), 10*60)
 	case VDeployStatus:
 		a := []string{"deploy-status", app, req.ID}
 		if req.Wait != "" {

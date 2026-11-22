@@ -65,6 +65,7 @@ lib/cmd-next.sh          lint ui-test e2e-cli e2e-ease
 lib/cmd-open.sh          lint ui-test e2e-cli e2e-ease
 lib/cmd-requests.sh      lint ui-test e2e-cli e2e-logs
 lib/cmd-restore.sh       lint ui-test e2e-cli e2e-data e2e-offsite
+lib/cmd-preview.sh       lint ui-test e2e-cli e2e-ci e2e-data
 lib/cmd-ssh.sh           lint ui-test e2e-cli e2e
 lib/cmd-top.sh           lint ui-test e2e-cli e2e-top
 lib/cmd-snapshot.sh      lint ui-test e2e-cli e2e-status e2e-top

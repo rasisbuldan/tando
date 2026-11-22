@@ -58,6 +58,13 @@ func (g *Gate) Admin(args []string) error {
 		err = g.keyLs(w, app)
 	case "key-revoke":
 		err = g.keyRevoke(w, app)
+	case "preview-keys":
+		// a preview app's deploy user gets the keys of the app it belongs to (tando preview up, as admin)
+		if parent := g.previewOf(app); parent == "" {
+			err = die("%s is not a preview app", app)
+		} else {
+			err = g.mirrorKeys(parent, app)
+		}
 	case "receive":
 		return g.adminReceive(app, args[2:])
 	case "remove":
@@ -182,6 +189,7 @@ func (g *Gate) keyAdd(w *out.Writer, app string, rotate bool) error {
 		g.endLeaseOf(app, revoked)
 		g.evictUser(app)
 	}
+	g.syncPreviews(app, revoked)
 	w.KV("keyid", id)
 	w.KV("fingerprint", fp)
 	w.KV("user", "tando-d-"+app)
@@ -244,6 +252,7 @@ func (g *Gate) keyRevoke(w *out.Writer, app string) error {
 		g.endLeaseOf(app, ids)
 	}
 	g.evictUser(app)
+	g.syncPreviews(app, ids)
 	w.KV("revoked", strconv.Itoa(n))
 	return nil
 }

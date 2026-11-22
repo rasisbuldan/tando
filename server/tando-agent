@@ -2299,6 +2299,7 @@ cmd_setup() { # [apps_domain=D] [tls=off|internal|auto] [public_port=N] [swap=ye
         [[ ${kv#*=} =~ ^[0-9]{4,5}$ ]] || die "bad ${kv%%=*}"; H[${kv%%=*}]=${kv#*=};;
       backup_window=*) [[ ${kv#*=} =~ ^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "bad backup_window: like 01:00-05:00"; H[backup_window]=${kv#*=};;
       backup_jobs=1|backup_jobs=2|backup_jobs=3|backup_jobs=4) H[backup_jobs]=${kv#*=};;
+      backup_drill=monthly|backup_drill=off) H[backup_drill]=${kv#*=};;
       job_slots=*) [[ ${kv#*=} =~ ^[1-9][0-9]{0,2}$ ]] || die "bad job_slots: 1 to 999 job runs at once"; H[job_slots]=${kv#*=};;
       mem_overcommit=*) [[ ${kv#*=} =~ ^[0-9]{1,2}(\.[0-9]{1,2})?$ ]] || die "bad mem_overcommit: like 1.5 (0: no check)"; H[mem_overcommit]=${kv#*=};;
       uid_min=*|uid_max=*)   # the band of new app users' ids (new_uid); apps made before keep theirs
@@ -2492,6 +2493,7 @@ EOF
   DR_FLAG=$drf prio_sync
   [[ -f $drf ]] && { rm -f "$drf"; systemctl daemon-reload; }
   backup_sched_install || die "could not enable the backup queue (tando-backups.timer)"
+  drill_sched_install || die "could not set up the restore drill timer (tando-drill.timer)"
   caddy_install_staged || die "$WC_WHY; the sites are as they were: run tando host setup again once that is fixed"
   fw_sync || die "the per-app loopback rules could not be loaded (above); run tando host setup again"
   step apps ok "$n app$( ((n == 1)) || echo s)"
@@ -2773,6 +2775,13 @@ cmd_doctor() {
       if [[ ${C[backup]:-off} == daily ]] && [[ ${S[last_backup]:-0} =~ ^[0-9]{1,12}$ ]] && (( $(now) - 10#${S[last_backup]:-0} > 2 * 86400 )); then
         msg="${msg:+$msg, }last backup older than 2 days"
       fi
+      if [[ ${C[backup]:-off} == daily && ${S[drill_result]:-} == fail ]]; then
+        msg="${msg:+$msg, }the last restore drill failed (${S[drill_why]:-no reason recorded}): tando backup drill -a $a"
+      elif [[ ${C[backup]:-off} == daily && ${H[backup_drill]:-monthly} != off && ${C[created]:-0} =~ ^[0-9]+$ ]] &&
+           (( $(now) - 10#${C[created]:-0} > 40 * 86400 )) &&
+           (( $(now) - 10#${S[drill_at]:-0} > 40 * 86400 )); then
+        msg="${msg:+$msg, }no restore drill in 40 days (tando backup drill -a $a)"
+      fi
       [[ -n $msg ]] && row check warn "app $a" "$msg"
       exit 0
     )
@@ -2821,7 +2830,7 @@ name_free() {
     d-*|m-*) NAME_WHY="$1 is reserved (tando-$1 is the deploy user or settings group of an app ${1#?-})";;
     rx-*|adopt-*|unadopt-*) NAME_WHY="$1 is reserved (tando-$1 is a unit tando uses for the app ${1#*-})";;
     *-backup) NAME_WHY="$1 is reserved (tando-$1 is the backup unit of an app ${1%-backup})";;
-    watch|watch-fallback|host|host-boot|host-window|metrics|offsite|recover|firewall|down|backups)
+    watch|watch-fallback|host|host-boot|host-window|metrics|offsite|recover|firewall|down|backups|previews|drill)
       NAME_WHY="$1 is reserved (tando-$1 is one of tando's own units)";;
   esac
   [[ -z $NAME_WHY ]]
@@ -2907,7 +2916,7 @@ cmd_configure() {
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" "C[priority]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" "C[db_pool]" "C[db_direct]" \
-    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]" "C[idle_stop]"
+    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]" "C[idle_stop]" "C[preview_skip]" "C[preview_ttl]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -2927,6 +2936,11 @@ cmd_configure() {
       path) [[ $v =~ ^(/[A-Za-z0-9._~-]+)+$ ]] || die "bad path: $v (like /shop)";;
       spa) [[ $v =~ ^(true|false)$ ]] || die "spa must be true or false";;
       compress) [[ $v =~ ^(on|off)$ ]] || die "compress must be on or off";;
+      # previews (docs/COMMANDS.md "Preview apps"): the parent's rules, and a preview's own marks
+      preview_skip) [[ $v =~ ^[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*)*$ && ${#v} -le 500 ]] || die "bad preview_skip: $v (env names, comma separated)";;
+      preview_ttl) preview_secs "$v" > /dev/null && (($(preview_secs "$v") <= 7776000)) || die "bad preview_ttl: $v (like 7d or 12h; 90 days at most)";;
+      preview_of) valid_app "$v" || die "bad preview_of: $v";;
+      preview_expires) [[ $v =~ ^[0-9]{9,11}$ ]] || die "bad preview_expires: $v";;
       idle_stop) [[ $v =~ ^(on|off)$ || $v =~ ^[1-9][0-9]{0,3}[smh]$ ]] || die "bad idle_stop: $v (like 6h, 10m, 30s; on = 6h; off)";;
       data) if [[ ${C[recipe]:-} == container ]]; then   # the volume's path inside the container
               [[ $v =~ ^(/[A-Za-z0-9_.-]+)+$ && $v != */../* ]] || die "bad data path: $v (like /data)"
@@ -4425,6 +4439,10 @@ app_or_gone() {
 cmd_backup_ls() {
   need_root; app_or_gone "$1"
   local i size created where
+  # the last restore drill (tando backup drill): at, result, backup, files, tables, rows, seconds, why
+  local -A DS=(); load "$R/apps/$A/state" DS
+  [[ ${DS[drill_at]:-} =~ ^[0-9]+$ ]] && row drill "${DS[drill_at]}" "${DS[drill_result]:-fail}" "${DS[drill_id]:-}" \
+    "${DS[drill_files]:-}" "${DS[drill_tables]:-}" "${DS[drill_rows]:-}" "${DS[drill_secs]:-}" "${DS[drill_why]:-}"
   [[ -d $BK/$A ]] || return 0
   for i in $(ls -1 "$BK/$A" | sort -r); do
     valid_backup "$i" || continue
@@ -4654,6 +4672,269 @@ cmd_backup_all() {
   echo "started=$n"
   ((late == 0)) || echo "tando-agent: $late backup(s) not started: the backup window ($s-$e) ended first; widen it (tando host setup <host> backup_window=01:00-06:00) or set backup_jobs=2" >&2
   return 0
+}
+
+# ---- the restore drill: the latest backup of an app restored into a throwaway place -------------
+# `tando backup drill`: backup-drill <app> [id] restores the newest backup (or the one given) into a
+# directory and a database of its own on this server, checks them, drops them and records the
+# result in the app's state (drill_at, drill_result ok|fail, drill_id, drill_why, drill_files,
+# drill_tables, drill_rows, drill_secs). The live data and the live database are never touched.
+# The host's monthly run (tando-drill.timer, backup_drill = monthly|off in host.conf) is
+# backup-drill-all: after the backup queue, inside the same window, one app at a time.
+drill_pg() { (cd / && exec runuser -u postgres -- ${H[postgres_version]:+env "PGCLUSTER=${H[postgres_version]}/main"} "$@"); }
+drill_dbname() { printf 'tando_drill_%s' "${1//-/_}"; }
+# drill_record result id why: the outcome in the state (under the app's lock, held only for this)
+drill_record() {
+  lock 600
+  load "$D/state" S
+  st drill_at "$(now)" drill_result "$1" drill_id "$2" drill_why "${3:0:200}" drill_files "${DR_FILES:-}" \
+    drill_tables "${DR_TABLES:-}" drill_rows "${DR_ROWS:-}" drill_secs "${DR_SECS:-}"
+  exec 9>&-
+}
+cmd_backup_drill() { # app [id]
+  need_root; app "$1"
+  local id=${2:-} dir t0 tmp="" dbn="" rc why="" nf tf ntab ttab free need
+  has_backup_data || die "$A has no data or database: there is nothing to drill"
+  [[ -z $id ]] && id=$(bk_order | head -1)
+  DR_FILES="" DR_TABLES="" DR_ROWS="" DR_SECS=""
+  if [[ -z $id ]]; then
+    drill_record fail "" "no backup to restore"; die "no backup of $A yet to drill: tando backup now"
+  fi
+  valid_backup "$id" && offsite_fetch "$id"
+  valid_backup "$id" && [[ -d $BK/$A/$id ]] || die "no such backup: $id"
+  dir=$BK/$A/$id; t0=$(now)
+  # room for it: the data is unpacked beside the live data, so the disk must hold it twice over
+  need=$(du -sk "$dir" | cut -f1); need=$((need * 4 + 102400))
+  free=$(df -Pk "$R/apps" | awk 'NR == 2 { print $4 }')
+  if [[ $free =~ ^[0-9]+$ ]] && ((free < need)); then
+    why="not enough free disk space to unpack the backup ($((need / 1024)) MB needed)"
+  fi
+  if [[ -z $why && -f $dir/data.tar.gz ]]; then
+    tmp=$D/shared/.drill-$$
+    as_app mkdir -m 700 "$tmp" 2> /dev/null || why="could not make a directory for the drill in shared/"
+    if [[ -z $why ]]; then
+      tf=$(tar -tvzf "$dir/data.tar.gz" 2> /dev/null | grep -c '^-')
+      if as_app tar -C "$tmp" --no-same-owner -xzf - < "$dir/data.tar.gz" 2> /dev/null; then
+        nf=$(as_app find "$tmp" -type f | wc -l | tr -d ' ')
+        DR_FILES=$nf
+        [[ $nf == "$tf" ]] || why="the data archive lists $tf files and $nf were restored"
+      else why="the data archive does not unpack (tar failed)"; fi
+    fi
+  fi
+  if [[ -z $why && -f $dir/db.dump ]]; then
+    dbn=$(drill_dbname "$A")
+    if ! { pgsql -c "DROP DATABASE IF EXISTS $dbn" && pgsql -c "CREATE DATABASE $dbn"; } > /dev/null 2>&1; then
+      why="could not create the throwaway database $dbn"
+    else
+      ttab=$(drill_pg pg_restore -l < "$dir/db.dump" 2> /dev/null | awk '$4 == "TABLE" { n++ } END { print n + 0 }')
+      timeout 3600 runuser -u postgres -- ${H[postgres_version]:+env "PGCLUSTER=${H[postgres_version]}/main"} \
+        pg_restore --no-owner --no-acl -d "$dbn" < "$dir/db.dump" > /dev/null 2> "$D/.drill.err"; rc=$?
+      if ((rc != 0)); then
+        why="pg_restore exited with $rc: $(head -c 150 "$D/.drill.err" | tr '\n' ' ')"
+      else
+        ntab=$(pgsql -d "$dbn" -c "SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')")
+        DR_TABLES=$ntab
+        DR_ROWS=$(pgsql -d "$dbn" -c "SELECT coalesce(sum((xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint), 0) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')")
+        [[ $ntab == "$ttab" ]] || why="the dump lists $ttab tables and $ntab were restored"
+      fi
+      rm -f "$D/.drill.err"
+    fi
+  fi
+  # the throwaway copies go, whatever happened
+  [[ -n $dbn ]] && pgsql -c "DROP DATABASE IF EXISTS $dbn" > /dev/null 2>&1
+  [[ -n $tmp ]] && as_app rm -rf "$tmp"
+  DR_SECS=$(($(now) - t0))
+  if [[ -z $why ]]; then
+    drill_record ok "$id" ""
+    echo "result=ok"; echo "id=$id"; echo "files=${DR_FILES:-}"; echo "tables=${DR_TABLES:-}"; echo "rows=${DR_ROWS:-}"; echo "secs=$DR_SECS"
+  else
+    drill_record fail "$id" "$why"
+    echo "result=fail"; echo "id=$id"; echo "why=$why"
+    AUDIT_RESULT=failed; exit 1
+  fi
+}
+backup_drill_time() { # -> HH:MM, five minutes after the start of the backup window (the queue starts first)
+  local w; w=$(backup_window)
+  date -d "2000-01-01 ${w% *} + 5 minutes" +%H:%M
+}
+drill_sched_install() {
+  WIC_CHANGED=0
+  if [[ ${H[backup_drill]:-monthly} == off ]]; then
+    if [[ -f /etc/systemd/system/tando-drill.timer ]]; then
+      systemctl disable -q --now tando-drill.timer 2> /dev/null
+      rm -f /etc/systemd/system/tando-drill.timer /etc/systemd/system/tando-drill.service
+      systemctl daemon-reload
+    fi
+    return 0
+  fi
+  write_if_changed /etc/systemd/system/tando-drill.service <<EOF
+[Unit]
+Description=tando: the monthly restore drill of every app's latest backup
+
+[Service]
+Type=oneshot
+ExecStart=$AGENT backup-drill-all
+EOF
+  write_if_changed /etc/systemd/system/tando-drill.timer <<EOF
+[Unit]
+Description=tando: the monthly restore drill
+
+[Timer]
+OnCalendar=*-*-01 $(backup_drill_time):00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  ((WIC_CHANGED)) && systemctl daemon-reload
+  systemctl -q is-enabled tando-drill.timer 2> /dev/null && systemctl -q is-active tando-drill.timer ||
+    systemctl enable -q --now tando-drill.timer
+  return 0
+}
+cmd_backup_drill_all() {
+  need_root
+  load "$R/host.conf" H
+  [[ ${H[backup_drill]:-monthly} == off ]] && { echo "drilled=0"; return 0; }
+  local w s e t0 endt f a apps=() n=0 late=0 bad=0
+  w=$(backup_window); s=${w% *}; e=${w#* }
+  t0=$(now); endt=$(date -d "today $e" +%s)
+  ((endt > t0)) || endt=$((endt + 86400))
+  for f in "$R"/apps/*/app.conf; do
+    [[ -f $f ]] && grepq -x 'backup=daily' "$f" || continue
+    a=${f%/app.conf}; apps+=("${a##*/}")
+  done
+  # the backup queue runs first, in the same window: a drill never competes with it
+  while systemctl -q is-active tando-backups.service && (($(now) < endt)); do sleep 15; done
+  for a in $(backup_order ${apps[@]+"${apps[@]}"}); do
+    if (($(now) >= endt)); then late=$((late + 1)); continue; fi
+    if "$AGENT" backup-drill "$a" > /dev/null 2>&1; then n=$((n + 1)); else bad=$((bad + 1)); fi
+  done
+  echo "drilled=$n"; echo "failed=$bad"
+  ((late == 0)) || echo "tando-agent: $late restore drill(s) not started: the backup window ($s-$e) ended first" >&2
+  return 0
+}
+
+# ---- preview apps: <app>-<branch>, a temporary copy of an app for a branch -------------------------
+# `tando preview up` (and CI, through the gate) makes the app <parent>-<slug> from the parent's own
+# settings: no database, no scheduled jobs, no backups, no domains of its own, idle_stop on (6h by
+# default), the parent's env except what the parent's preview_skip names, and an expiry
+# (preview_expires; preview_ttl of the parent, 7d by default) after which preview-sweep (the hourly
+# tando-previews.timer) destroys it. Its code is deployed like any app's (the parent's deploy key
+# may deploy it: tando-gate mirrors the key list, srv/gate).
+PREVIEW_MAX=10
+preview_secs() { # 7d, 12h, 30m, 90s -> seconds
+  [[ ${1:-} =~ ^([1-9][0-9]{0,3})([smhd])$ ]] || return 1
+  local n=${BASH_REMATCH[1]}
+  case ${BASH_REMATCH[2]} in s) echo "$n";; m) echo $((n * 60));; h) echo $((n * 3600));; d) echo $((n * 86400));; esac
+}
+valid_preview_name() { # parent preview
+  [[ $2 == "$1"-* ]] && valid_app "$2" && [[ ${2#"$1"-} =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
+}
+preview_sched_install() {
+  WIC_CHANGED=0
+  write_if_changed /etc/systemd/system/tando-previews.service <<EOF
+[Unit]
+Description=tando: remove the preview apps that expired
+
+[Service]
+Type=oneshot
+ExecStart=$AGENT preview-sweep
+EOF
+  write_if_changed /etc/systemd/system/tando-previews.timer <<EOF
+[Unit]
+Description=tando: look for expired preview apps every hour
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  ((WIC_CHANGED)) && systemctl daemon-reload
+  systemctl -q is-enabled tando-previews.timer 2> /dev/null || systemctl enable -q --now tando-previews.timer
+  return 0
+}
+cmd_preview_up() { # parent preview [ttl]
+  need_root
+  local parent=${1:-} pv=${2:-} ttl=${3:-} secs k skip new=1 copied=0 skipped=0 sf
+  valid_app "$parent" || die "invalid app name"
+  valid_preview_name "$parent" "$pv" || die "bad preview name: ${pv:-(none)} (it is <app>-<name>: lower case letters, digits and -, at most 24 characters)"
+  [[ -f $R/apps/$parent/app.conf ]] || die "no such app: $parent"
+  local -A PC=() XC=() PE=()
+  load "$R/apps/$parent/app.conf" PC
+  [[ -z ${PC[preview_of]:-} ]] || die "$parent is itself a preview: a preview has no previews"
+  [[ -n $ttl ]] || ttl=${PC[preview_ttl]:-7d}
+  secs=$(preview_secs "$ttl") || die "bad preview ttl: $ttl (like 7d, 12h, 90m)"
+  ((secs <= 7776000)) || die "a preview lives 90 days at most (got $ttl)"
+  if [[ -f $R/apps/$pv/app.conf ]]; then
+    load "$R/apps/$pv/app.conf" XC
+    [[ ${XC[preview_of]:-} == "$parent" ]] || die "$pv exists and is not a preview of $parent: choose another branch name"
+    new=0
+  fi
+  if ((new)); then
+    # a deploy key can make previews: not without limit (each one runs an app)
+    local np=0 pf
+    for pf in "$R"/apps/*/app.conf; do grepq -x "preview_of=$parent" "$pf" 2> /dev/null && np=$((np + 1)); done
+    ((np < PREVIEW_MAX)) || die "$parent has $np previews already (at most $PREVIEW_MAX): tando preview rm removes one; they also expire"
+    sf=$(mktemp) || die "could not make a temporary file"
+    {
+      conf_text PC | grep -Ev '^(job\.|database=|backup=|idle_stop=|db_|job_timeout=|job_spread=|job_missed=)'
+      echo "backup=off"
+      case ${PC[recipe]:-node} in static|container) ;;
+        *) k=${PC[idle_stop]:-6h}; [[ $k == off || -z $k ]] && k=6h; echo "idle_stop=$k";; esac
+      echo "preview_of=$parent"; echo "preview_expires=$(($(now) + secs))"
+    } > "$sf"
+    ( cmd_configure "$pv" < "$sf" > /dev/null ) || { rm -f "$sf"; die "could not create the preview $pv"; }
+    rm -f "$sf"
+    # the parent's env, minus what it marked preview_skip (and what the server sets itself)
+    skip=",${PC[preview_skip]:-},"
+    app "$parent"; local -A E=(); env_load E
+    # shellcheck disable=SC2034  # PE is read by env_save through its nameref
+    for k in "${!E[@]}"; do
+      if [[ $skip == *",$k,"* ]] || protected_key "$k"; then skipped=$((skipped + 1)); else PE[$k]=${E[$k]}; copied=$((copied + 1)); fi
+    done
+    app "$pv"
+    env_save PE || die "could not write the env of $pv (disk full?)"
+    preview_sched_install || echo "tando-agent: could not enable tando-previews.timer: previews will not expire by themselves" >&2
+  else
+    app "$pv"; lock 120
+    C[preview_expires]=$(($(now) + secs)); save "$D/app.conf" C
+  fi
+  echo "preview=$pv"; echo "parent=$parent"; echo "created=$new"; echo "expires=$(sed -n 's/^preview_expires=//p' "$R/apps/$pv/app.conf")"
+  echo "env_copied=$copied"; echo "env_skipped=$skipped"; echo "link=$(link)"
+}
+cmd_preview_ls() { # [parent]
+  need_root
+  local f a
+  for f in "$R"/apps/*/app.conf; do
+    [[ -f $f ]] || continue
+    a=${f%/app.conf}; a=${a##*/}
+    grepq '^preview_of=' "$f" || continue
+    [[ -z ${1:-} ]] || grepq -x "preview_of=$1" "$f" || continue
+    ( app "$a"; row preview "$a" "${C[preview_of]}" "${C[preview_expires]:-0}" "${C[created]:-0}" "${S[current]:--}" "$(link)" )
+  done
+  return 0
+}
+cmd_preview_rm() { # parent preview
+  need_root
+  valid_app "${1:-}" || die "invalid app name"
+  valid_preview_name "$1" "${2:-}" || die "bad preview name: ${2:-(none)}"
+  [[ -f $R/apps/$2/app.conf ]] && grepq -x "preview_of=$1" "$R/apps/$2/app.conf" || die "$2 is not a preview of $1"
+  cmd_destroy "$2" purge
+}
+cmd_preview_sweep() {
+  need_root
+  local f a e t n=0 bad=0; t=$(now)
+  for f in "$R"/apps/*/app.conf; do
+    [[ -f $f ]] || continue
+    grepq '^preview_of=' "$f" || continue
+    e=$(sed -n 's/^preview_expires=//p' "$f")
+    [[ $e =~ ^[0-9]+$ ]] && ((e <= t)) || continue
+    a=${f%/app.conf}; a=${a##*/}
+    if "$AGENT" destroy "$a" purge > /dev/null 2>&1; then n=$((n + 1)); else bad=$((bad + 1)); echo "tando-agent: could not remove the expired preview $a" >&2; fi
+  done
+  echo "removed=$n"; echo "failed=$bad"
 }
 
 # ---- PostgreSQL: one role and one database per app, named tando_<app> ---------------------
@@ -5616,7 +5897,9 @@ destroy_finish() {
     for f in "$R/run/$A-"*.env; do [[ ${f#"$R/run/$A-"} =~ ^[0-9]+\.env$ ]] && rm -f "$f"; done
   fi
   [[ -x $LOGS ]] && "$LOGS" app-remove "$A" > /dev/null
-  [[ -x $R/bin/tando-gate ]] && { $R/bin/tando-gate admin remove "$A" > /dev/null ||
+  # (SUDO_USER=root: a preview removed by its app's deploy key runs here with that key's user in
+  # SUDO_USER, and the gate's admin mode refuses deploy users; this process is root's)
+  [[ -x $R/bin/tando-gate ]] && { SUDO_USER=root $R/bin/tando-gate admin remove "$A" > /dev/null ||
     echo "warning=could not remove the deploy user" >&2; }
   rm -f "/var/lib/tando/metrics/$A.tsv" "/var/lib/tando/metrics/$A.tsv.1" "/var/lib/tando/metrics/$A.disk" "/var/lib/tando/metrics/$A.disk.1" \
     "/var/lib/tando/metrics/$A.db" "/var/lib/tando/metrics/$A.db.1" "/var/lib/tando/metrics/$A.dbtop"
@@ -7112,13 +7395,15 @@ case $verb in
   configure|rollback|env-set|env-unset|env-ls|start|stop|restart|unlock|destroy|backup-run|\
   backup-restore|backup-cat|db-url|db-psql|shell|job-run|job-pause) audit "$verb" "${1:-}";;
   db-studio|db-studio-code|db-studio-stop) audit "$verb" "${1:-}";;
+  backup-drill) audit "$verb" "${1:-}";;
+  preview-up|preview-rm) audit "$verb" "${2:-}";;
 esac
 # Verbs that change an app run to their end when the ssh session that started them drops: the
 # next write to the closed connection would otherwise kill the agent half-way (an app stopped
 # for a restore and never started again, a new env never checked). Their output then goes
 # nowhere. (A handler, not an ignored signal: the commands they run keep the default.)
 case $verb in
-  configure|rollback|env-set|env-unset|start|stop|restart|destroy|backup-run|backup-restore|domain-add|domain-rm)
+  configure|rollback|env-set|env-unset|start|stop|restart|destroy|backup-run|backup-restore|domain-add|domain-rm|preview-up|preview-rm|backup-drill)
     trap 'exec > /dev/null 2>&1' PIPE HUP;;
 esac
 case $verb in
@@ -7170,6 +7455,12 @@ case $verb in
   destroy) cmd_destroy "$@";;
   backup-run) cmd_backup_run "$@";;
   backup-all) cmd_backup_all;;   # the backup queue (tando-backups.service)
+  backup-drill) cmd_backup_drill "$@";;
+  backup-drill-all) cmd_backup_drill_all;;   # the monthly drills (tando-drill.service)
+  preview-up) cmd_preview_up "$@";;
+  preview-ls) cmd_preview_ls "$@";;
+  preview-rm) cmd_preview_rm "$@";;
+  preview-sweep) cmd_preview_sweep;;   # tando-previews.service, hourly
   backup-ls) cmd_backup_ls "$@";;
   backup-cat) cmd_backup_cat "$@";;
   backup-restore) cmd_backup_restore "$@";;

@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"io"
 	"strings"
+
+	"tando/srv/internal/valid"
 )
 
 // Params are root mode's parameters: key=value lines on stdin, written by key mode. Only
 // whitelisted keys, each checked; nothing else is read.
-type Params struct{ Token, Build, Upload string }
+type Params struct{ Token, Build, Upload, Preview, TTL string }
 
 const (
 	maxParamLine = 200 // bytes per read (a longer line is read in pieces, as `read -n 200` did)
@@ -48,6 +50,16 @@ func ReadParams(r io.Reader) (Params, error) {
 				return p, die("bad timing")
 			}
 			p.Upload = v
+		case "preview":
+			if len(v) > 24 || !valid.App(v) {
+				return p, die("bad preview name")
+			}
+			p.Preview = v
+		case "ttl":
+			if !previewTTLRe.MatchString(v) {
+				return p, die("bad ttl")
+			}
+			p.TTL = v
 		case "":
 		default:
 			return p, die("unknown parameter")

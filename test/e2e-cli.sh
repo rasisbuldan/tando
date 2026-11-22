@@ -556,5 +556,26 @@ best() { local m x i; m=99999; for i in 1 2 3; do x=$(ms "$@"); [ "$x" -lt "$m" 
 tr_=$(best restart); tu=$(best unlock)
 check "RT5 restart returns when the agent answers (restart ${tr_} ms, a plain call ${tu} ms, the agent 300 ms)" \
   test $((tr_ - tu - 300)) -lt 120
+
+# PV: preview names (tando preview): <app>-<slug>, 24 characters at most, never shared by two branches
+pvn() { ( . "$ROOT/lib/cmd-preview.sh"; die() { echo "DIE $*"; exit 1; }; preview_name "$1" "$2" && echo "$PV_NAME" ); }
+check "PV1 a plain branch keeps its name: alpha + fix-typo = alpha-fix-typo" test "$(pvn alpha fix-typo)" = alpha-fix-typo
+n1=$(pvn alpha feature/Login); n2=$(pvn alpha feature-login)
+check "PV2 a branch that had to change gets a checksum ($n1), the one that did not does not ($n2)" \
+  eval 'test "$n2" = alpha-feature-login && printf "%s" "$n1" | grep -Eq "^alpha-feature-login-[0-9a-f]{4}$" && test "$n1" != "$n2"'
+n3=$(pvn alpha "release/2026.11 hotfix very long name")
+check "PV3 a long branch is cut to 24 characters in all, a valid app name ($n3)" \
+  eval 'test ${#n3} -le 24 && printf "%s" "$n3" | grep -Eq "^alpha-[a-z0-9-]+-[0-9a-f]{4}$" && ! printf "%s" "$n3" | grep -q -- "--"'
+n4=$(pvn alpha "release/2026.11 hotfix very long nome")
+check "PV4 two long branches with the same start do not share a name ($n3, $n4)" test "$n3" != "$n4"
+check "PV5 an app name too long for previews is refused with why" eval 'pvn averyverylongappname-x b | grep -q "^DIE the app name .* too long for previews"'
+check "PV6 a branch of only symbols still gets a valid name ($(pvn alpha '///'))" eval 'pvn alpha "///" | grep -Eq "^alpha-branch-[0-9a-f]{4}$"'
+out=$("$R" preview up --ttl 7w 2>&1); rc=$?
+check "PV7 tando preview up --ttl 7w: refused before any call" eval 'test $rc != 0 && printf "%s" "$out" | grep -q "bad --ttl"'
+out=$("$R" preview frob 2>&1); rc=$?
+check "PV8 tando preview frob is a usage error" test $rc = 2
+out=$("$R" backup drill --help 2>&1)
+check "PV9 backup drill is in the help" eval 'printf "%s" "$out" | grep -Fq "tando backup drill [app]"'
+check "PV10 none of the preview checks reached a server (ssh/rsync calls: $(calls))" test "$(calls)" = 0
 rm -rf "${E:?}/w/hello/.tando"
 t_done

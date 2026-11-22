@@ -406,6 +406,49 @@ COLUMNS=100 "$R" status > "$E/status.out" 2>&1; cat "$E/status.out" >&2
 check "D11b status shows the database and the last backup" \
   eval 'grep -q "database.*postgres" "$E/status.out" && grep -q "backup.*daily, last" "$E/status.out"'
 
+# D11d. the restore drill: the newest backup restored into a throwaway database and directory
+note drillrow1; note drillrow2
+"$R" backup now > /dev/null 2>&1
+LIVE_SQL="SELECT coalesce(sum((xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint), 0) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')"
+live_before=$(echo "$LIVE_SQL" | pgsu tando_notes | tail -1)
+"$R" backup drill > "$E/drill.out" 2>&1; rc=$?
+live_after=$(echo "$LIVE_SQL" | pgsu tando_notes | tail -1)
+check "D11d backup drill restores the newest backup and reports it (rc=$rc)" \
+  eval 'test $rc = 0 && grep -q "tables, $live_before rows" "$E/drill.out" && grep -q "drill ok" "$E/drill.out"'
+check "D11e ... the live database was not touched (rows $live_before -> $live_after) and the live data stays" \
+  eval 'test "$live_before" = "$live_after" && test "$live_before" -ge 2 && page | grep -q drillrow2'
+check "D11f ... the throwaway database and directory are gone" \
+  eval 'test "$(echo "select count(*) from pg_database where datname like '"'"'tando_drill%'"'"'" | pgsu postgres | tail -1)" = 0 &&
+        test "$(srv "sudo ls -A /opt/tando/apps/notes/shared | grep -c drill")" = 0'
+"$R" backup ls > "$E/bkls.out" 2>&1; "$R" backup ls --json > "$E/bkls.json" 2>&1
+check "D11g backup ls shows the last drill (text and --json)" \
+  eval 'grep -q "restore drill: .*ok" "$E/bkls.out" && grep -q "\"drill\":{\"at\":[0-9]*,\"result\":\"ok\"" "$E/bkls.json"'
+check "D11h the host runs a drill monthly: tando-drill.timer on the 1st, five minutes after the backup window opens" \
+  eval 'srv "systemctl is-enabled -q tando-drill.timer" && srv "systemctl cat tando-drill.timer" | grep -qx "OnCalendar=\*-\*-01 01:05:00"'
+dall=$(srv "sudo $AGENT backup-drill-all" 2> /dev/null | tr '\n' ' ')
+check "D11i backup-drill-all drills every app with daily backups ($dall)" eval 'case $dall in "drilled=1 failed=0 ") true;; *) false;; esac'
+# a backup that does not restore: the drill says so, the state keeps it (the alert and doctor read it)
+"$R" backup now > "$E/bk-bad.out" 2>&1
+idb=$(sed -n 's/^backed up [a-z0-9-]*: \([^ ]*\).*/\1/p' "$E/bk-bad.out")
+srv "sudo sh -c 'head -c 200 $BK/notes/$idb/db.dump > $BK/notes/$idb/db.cut && mv $BK/notes/$idb/db.cut $BK/notes/$idb/db.dump'"
+"$R" backup drill > "$E/drill-bad.out" 2>&1; rc=$?
+check "D11j a backup that does not restore: the drill fails, names why and exits non-zero (rc=$rc)" \
+  eval 'test $rc != 0 && grep -q "drill failed" "$E/drill-bad.out" && grep -q "pg_restore" "$E/drill-bad.out"'
+check "D11k ... the failure is in the state (the alert reads it), the throwaway database is gone, doctor warns" \
+  eval 'srv "sudo grep -qx drill_result=fail /opt/tando/apps/notes/state" &&
+        test "$(echo "select count(*) from pg_database where datname like '"'"'tando_drill%'"'"'" | pgsu postgres | tail -1)" = 0 &&
+        srv "sudo $AGENT doctor" 2> /dev/null | grep "app notes" | grep -q "restore drill failed"'
+srv "sudo rm -rf $BK/notes/$idb"
+"$R" backup now > /dev/null 2>&1; "$R" backup drill > "$E/drill-ok2.out" 2>&1
+check "D11l the next drill that works clears it" \
+  eval 'srv "sudo grep -qx drill_result=ok /opt/tando/apps/notes/state" && ! srv "sudo $AGENT doctor" 2> /dev/null | grep "app notes" | grep -q "restore drill"'
+# backup_drill = off: no timer, and the host's run does nothing
+"$R" host setup test backup_drill=off > /dev/null 2>&1
+check "D11m host setup backup_drill=off removes the timer; backup-drill-all then drills nothing" \
+  eval '! srv "systemctl is-enabled -q tando-drill.timer" && test "$(srv "sudo $AGENT backup-drill-all" 2> /dev/null | head -1)" = drilled=0'
+"$R" host setup test backup_drill=monthly > /dev/null 2>&1
+check "D11n ... and monthly puts it back" srv "systemctl is-enabled -q tando-drill.timer"
+
 # D12. retention: 7 daily plus 4 weekly
 srv "for d in \$(seq 1 40); do i=\$(date -u -d \"-\$d days\" +%Y%m%d)-030000-daily; sudo mkdir -p $BK/notes/\$i;
   echo created=0 | sudo tee $BK/notes/\$i/meta > /dev/null; done"

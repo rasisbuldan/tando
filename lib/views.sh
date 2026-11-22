@@ -1246,11 +1246,18 @@ cmd_backup_ls() {
     awk -F '\t' -v OFS='\t' '$1 == "backup" { print $2, $3, $4, $5, $6, $7 }' "$TMPD/st" |
       to_json "id:s,kind:s,created:n,size_bytes:n,holds:s,where:s"
     err=$(awk -F '\t' '$1 == "offsite-error" { e = $2 } END { print e }' "$TMPD/st")
-    printf ',"offsite_error":%s}\n' "$( [ -n "$err" ] && json_str "$err" || printf null)"
+    printf ',"offsite_error":%s' "$( [ -n "$err" ] && json_str "$err" || printf null)"
+    # the last restore drill (tando backup drill): null when none ran
+    if grep -q '^drill	' "$TMPD/st"; then
+      printf ',"drill":'
+      awk -F '\t' -v OFS='\t' '$1 == "drill" { print $2, $3, $4, $5, $6, $7, $8, $9 }' "$TMPD/st" |
+        to_json "at:n,result:s,backup:s,files:n,tables:n,rows:n,seconds:n,why:s" | sed 's/^\[//; s/\]$//'
+    fi
+    printf '}\n'
     return 0
   fi
   # WHERE (a 7th field from an agent with offsite copies): local, both, offsite, local+pending ...
-  grep -Eq '	(offsite|both|local\+[a-z]+)$' "$TMPD/st" && off=1
+  grep -v '^drill	' "$TMPD/st" | grepq -E '	(offsite|both|local\+[a-z]+)$' && off=1
   {
     printf 'TIME (GMT)\tBACKUP\tKIND\tSIZE\tHOLDS%s\n' "${off:+	WHERE}"
     while IFS=$TAB read -r r id kind created size what where; do
@@ -1271,6 +1278,18 @@ cmd_backup_ls() {
     if [ -n "$off" ]; then ui_table "l,l,l!2,r,l!1,l" < "$TMPD/rows"; else ui_table "l,l,l!2,r,l!1" < "$TMPD/rows"; fi
   else ui_box_line "No backups. Apps with data = <dir> or database = ... in tando.conf are backed up daily."; fi
   [ -n "$err" ] && ui_box_wrap "${UI_YELLOW}offsite storage did not answer:${UI_NC} $err"
+  # the last restore drill: the proof that a backup restores (tando backup drill, monthly on the host)
+  local dr dat dres dbk dfiles dtab drows dsecs dwhy
+  dr=$(awk -F '\t' '$1 == "drill"' "$TMPD/st")
+  if [ -n "$dr" ]; then
+    IFS=$TAB read -r _ dat dres dbk dfiles dtab drows dsecs dwhy <<< "$dr"
+    [ "$dbk" != - ] || dbk=""; [ "$dfiles" != - ] || dfiles=""; [ "$dtab" != - ] || dtab=""; [ "$dwhy" != - ] || dwhy=""
+    if [ "$dres" = ok ]; then
+      ui_box_line "restore drill: $(ui_badge ok ok) $(ago "$dat"), backup $dbk${dfiles:+, $dfiles files}${dtab:+, $dtab tables, $drows rows}"
+    else
+      ui_box_wrap "restore drill: $(ui_badge failed failed) $(ago "$dat")${dbk:+, backup $dbk}: ${dwhy:-no reason recorded}"
+    fi
+  fi
   if [ -n "$off" ]; then ui_box_close "keeps 7 daily, 4 weekly, 5 of each other kind, every final; offsite: tando backup offsite"
   else ui_box_close "keeps 7 daily, 4 weekly, 5 of each other kind, every final"; fi
 }

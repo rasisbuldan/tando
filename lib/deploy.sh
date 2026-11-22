@@ -42,6 +42,8 @@ configure() {
     [ -n "${C_hold:-}" ] && printf 'hold=%s\n' "$C_hold"
     [ -n "${C_idle_stop:-}" ] && printf 'idle_stop=%s\n' "$C_idle_stop"
     [ -n "${C_priority:-}" ] && printf 'priority=%s\n' "$C_priority"
+    [ -n "${C_preview_ttl:-}" ] && printf 'preview_ttl=%s\n' "$C_preview_ttl"
+    [ -n "${C_preview_skip:-}" ] && printf 'preview_skip=%s\n' "$C_preview_skip"
     [ -n "${C_assets:-}" ] && printf 'assets=%s\n' "$C_assets"
     [ "${C_compress:-}" = off ] && printf 'compress=off\n'   # (on is the default; an older agent knows no compress)
     [ -n "$C_job_timeout" ] && printf 'job_timeout=%s\n' "$C_job_timeout"
@@ -307,7 +309,7 @@ show_phases() {
 # app or server (an edit, a pull, a pull request) asks once (--yes or --force: go on)
 target_guard() {
   local last="" want="$HOST $APP $PWD" a
-  [ -n "${DEPLOY_KEY:-}" ] && return 0
+  [ -n "${DEPLOY_KEY:-}${PREVIEW_DEPLOY:-}" ] && return 0
   [ -f .tando/target ] && last=$(cat .tando/target 2> /dev/null)
   # (the server renamed since: tando host rename left its old name as an alias of this one)
   case $last in "$HOST "*|"") ;; *) [ ! -f "$CFG/hosts/${last%% *}" ] && [ "$(host_alias "${last%% *}")" = "$HOST" ] && last="$HOST ${last#* }";; esac
@@ -547,7 +549,8 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   fi
   # tando.conf is checked by the server before anything is built (a deploy key cannot change it:
   # it deploys with the settings of the admin's last tando up)
-  if [ -z "${DEPLOY_KEY:-}" ]; then
+  # (a preview deploys what the parent's settings made on the server, as a deploy key does: tando preview)
+  if [ -z "${DEPLOY_KEY:-}${PREVIEW_DEPLOY:-}" ]; then
     configure check
     existed=$K_exists current=$K_current
     # (a dry run installs nothing on the server: it says what tando up or deploy would install)
@@ -640,7 +643,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
     box_say "$UI_DIM" "        over 50 MB; largest: $(stage_largest 3 | awk -F'\t' '{ printf "%s%s %s", (NR > 1 ? ", " : ""), $1, $2 }')"
   fi
 
-  if [ -z "${DEPLOY_KEY:-}" ]; then   # create the app now that there is something to deploy
+  if [ -z "${DEPLOY_KEY:-}${PREVIEW_DEPLOY:-}" ]; then   # create the app now that there is something to deploy
     configure
     [ "$K_created" = 1 ] && ui_box_line "        created $APP on $HOST: user tando-$APP, port $K_port"
     [ "$K_created" = 1 ] && : > "$TMPD/created"
@@ -776,7 +779,7 @@ after_live() {
     cat "$TMPD/dns.$d" >&2
     note "  then: tando domain add $d --wait"
   done
-  [ -n "${DEPLOY_KEY:-}" ] && return 0
+  [ -n "${DEPLOY_KEY:-}${PREVIEW_DEPLOY:-}" ] && return 0
   if [ -n "$C_database" ] && [ "${K_created:-0}" = 1 ]; then
     note "database $C_database created; the app gets DATABASE_URL (tando db url --show)"
   fi

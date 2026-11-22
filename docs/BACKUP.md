@@ -28,6 +28,13 @@ Contents: [What is backed up](#what-is-backed-up) · [Local backups](#local-back
 | uploads in `incoming/`, logs, metrics, alert history, Caddy's certificates | no | no (certificates are issued again by Caddy) |
 | the server's own config (users, sshd, firewall) | no | no: `tando host setup` makes it again |
 
+## Restore drill
+
+`tando backup drill [app]` restores the newest backup into a throwaway database and directory on the
+server, checks it and removes it; the server does it monthly for every app with daily backups
+(`backup_drill=off` in `tando host setup` stops that), and `tando backup ls`, `tando doctor` and an
+alert report a drill that failed. What it checks and when it runs: docs/PREVIEWS.md.
+
 ## Local backups
 
 `/var/backups/tando/<app>/<YYYYMMDD-HHMMSS>-<kind>/` (root 700): `data.tar.gz`, `db.dump`, `meta`.

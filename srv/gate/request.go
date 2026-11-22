@@ -17,6 +17,8 @@ import (
 //	[sudo -n] <agent> releases <app>
 //	[sudo -n] <agent> history <app> [<1-3 digits>]
 //	[sudo -n] <agent> status <app>
+//	[sudo -n] <agent> preview-up <app> <preview> [<ttl>]    preview: <app>-<name> (preview.go); ttl: 7d, 12h, 90m
+//	[sudo -n] <agent> preview-rm <app> <preview>
 //
 // <agent> is the full path /opt/tando/bin/tando-agent and <app> must be the caller's own app
 // (from its uid). The whole request is at most 300 bytes of [A-Za-z0-9_.:=/@,+ -] (no control
@@ -42,6 +44,8 @@ const (
 	VReleases
 	VHistory
 	VStatus
+	VPreviewUp
+	VPreviewRm
 )
 
 // Request is a checked request. Only the fields of its verb are set.
@@ -55,6 +59,8 @@ type Request struct {
 	Wait      string // VDeployStatus: "wait=<phase>" or "" (the agent answers once past that phase)
 	HistoryN  string // VHistory: 1-3 digits ("20" when not given)
 	TokenSent bool   // the token was a word of the request (not on stdin)
+	Preview   string // VPreviewUp, VPreviewRm: the preview app's name, <app>-<name>
+	TTL       string // VPreviewUp: how long it lives ("" = the app's preview_ttl)
 }
 
 var (
@@ -93,7 +99,7 @@ func helperVerb(cmd string) string {
 		return ""
 	}
 	switch m[1] {
-	case "info", "begin", "end", "activate", "deploy-status", "releases", "history", "status":
+	case "info", "begin", "end", "activate", "deploy-status", "releases", "history", "status", "preview-up", "preview-rm":
 		return ""
 	}
 	return m[1]
@@ -159,6 +165,10 @@ func ParseRequest(cmd string, want Want) (Request, error) {
 		v = VHistory
 	case "status":
 		v = VStatus
+	case "preview-up":
+		v = VPreviewUp
+	case "preview-rm":
+		v = VPreviewRm
 	default:
 		return Request{}, die(refusedMsg, clean(verb))
 	}
@@ -213,6 +223,22 @@ func ParseRequest(cmd string, want Want) (Request, error) {
 	case VReleases, VStatus:
 		if len(args) != 0 {
 			return Request{}, bad
+		}
+	case VPreviewUp, VPreviewRm:
+		// only a preview of this key's own app: <app>-<name>, nothing else
+		max := 1
+		if v == VPreviewUp {
+			max = 2
+		}
+		if len(args) < 1 || len(args) > max || !ValidPreview(want.App, args[0]) {
+			return Request{}, die("this key may make and remove previews named %s-<name> only", want.App)
+		}
+		r.Preview = args[0]
+		if len(args) == 2 {
+			if !previewTTLRe.MatchString(args[1]) {
+				return Request{}, bad
+			}
+			r.TTL = args[1]
 		}
 	case VHistory:
 		r.HistoryN = "20"

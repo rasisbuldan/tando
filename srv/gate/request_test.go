@@ -249,3 +249,42 @@ func TestClean(t *testing.T) {
 // dashC is how sshd starts a login shell with a command; the tests pass it as the gate's argument.
 // lint: allow RL16 the argument sshd gives the login shell, not a shell being started
 const dashC = "-c"
+
+// Previews: a key makes and removes <app>-<name> of its own app, and nothing else.
+func TestParseRequestPreview(t *testing.T) {
+	ok := []struct {
+		cmd  string
+		want Request
+	}{
+		{"sudo -n " + tAgent + " preview-up alpha alpha-feature-x", Request{Verb: VPreviewUp, Preview: "alpha-feature-x"}},
+		{"sudo -n " + tAgent + " preview-up alpha alpha-fix-3fa1 7d", Request{Verb: VPreviewUp, Preview: "alpha-fix-3fa1", TTL: "7d"}},
+		{"sudo -n " + tAgent + " preview-rm alpha alpha-feature-x", Request{Verb: VPreviewRm, Preview: "alpha-feature-x"}},
+	}
+	for _, tt := range ok {
+		got, err := ParseRequest(tt.cmd, tWant)
+		if err != nil || fmt.Sprint(got) != fmt.Sprint(tt.want) {
+			t.Errorf("%s: got %+v, %v; want %+v", tt.cmd, got, err, tt.want)
+		}
+	}
+	for _, cmd := range []string{
+		"sudo -n " + tAgent + " preview-up alpha beta-x",                           // another app's name
+		"sudo -n " + tAgent + " preview-up alpha alpha",                            // the app itself
+		"sudo -n " + tAgent + " preview-up alpha alpha-",                           // no name
+		"sudo -n " + tAgent + " preview-up alpha alphabet-x",                       // a prefix that is not <app>-
+		"sudo -n " + tAgent + " preview-up alpha alpha--x",                         // empty word
+		"sudo -n " + tAgent + " preview-up alpha alpha-X",                          // capital
+		"sudo -n " + tAgent + " preview-up alpha alpha-../beta",                    // path
+		"sudo -n " + tAgent + " preview-up alpha alpha-" + strings.Repeat("a", 20), // over 24 characters
+		"sudo -n " + tAgent + " preview-up beta beta-x",                            // not this key's app
+		"sudo -n " + tAgent + " preview-up alpha alpha-x 0d",                       // bad ttl
+		"sudo -n " + tAgent + " preview-up alpha alpha-x 7w",                       // bad ttl
+		"sudo -n " + tAgent + " preview-rm alpha alpha-x 7d",                       // rm takes no ttl
+		"sudo -n " + tAgent + " preview-up alpha",                                  // no name
+		"sudo -n " + tAgent + " preview-ls alpha",                                  // not a key verb
+		"sudo -n " + tAgent + " destroy alpha-x purge",                             // the admin's
+	} {
+		if _, err := ParseRequest(cmd, tWant); err == nil {
+			t.Errorf("accepted: %s", cmd)
+		}
+	}
+}

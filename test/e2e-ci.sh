@@ -189,9 +189,9 @@ check "1f one login user per app, shell = gate, home root-owned 711, key file ro
 check "1g authorized_keys: restrict + forced command" \
   test "$(srv 'sudo grep -c "^restrict,command=\"/opt/tando/bin/tando-gate key [0-9a-f]*\" ssh-ed25519 " /opt/tando/ci/alpha/.ssh/authorized_keys')" = 1
 srv "sudo sudo -l -U tando-d-alpha" > "$E/sudo-l" 2>&1
-check "1h sudo: exactly four fixed commands for alpha" test \
-  "$(grep -o '/opt/tando/bin/tando-gate root alpha [a-z]*' "$E/sudo-l" | tr '\n' ' ')" = \
-  "/opt/tando/bin/tando-gate root alpha begin /opt/tando/bin/tando-gate root alpha end /opt/tando/bin/tando-gate root alpha activate /opt/tando/bin/tando-gate root alpha receive "
+check "1h sudo: exactly six fixed commands for alpha (the four of a deploy, and preview-up and preview-rm)" test \
+  "$(grep -o '/opt/tando/bin/tando-gate root alpha [a-z-]*' "$E/sudo-l" | tr '\n' ' ')" = \
+  "/opt/tando/bin/tando-gate root alpha begin /opt/tando/bin/tando-gate root alpha end /opt/tando/bin/tando-gate root alpha activate /opt/tando/bin/tando-gate root alpha receive /opt/tando/bin/tando-gate root alpha preview-up /opt/tando/bin/tando-gate root alpha preview-rm "
 check "1i sudo rule names nothing else (no ALL, no wildcard)" sh -c "sed -n '/may run/,\$p' '$E/sudo-l' | grep -Eq '\\*|: *ALL|, *ALL'; test \$? = 1"
 srv "sudo sshd -T -C user=tando-d-alpha,host=x,addr=127.0.0.1" > "$E/sshd.d"
 srv "sudo sshd -T -C user=vmadmin,host=x,addr=127.0.0.1" > "$E/sshd.a"
@@ -912,6 +912,77 @@ check "10d after end returns, nothing more is written into incoming/" \
 check "10e ... the receiver's ticket is gone and no receiver runs" \
   srv_no "sudo test -e /opt/tando/ci/alpha/receiver || systemctl list-units --all --plain --no-legend 'tando-rx-alpha.service' 'tando-rx-alpha@*.service' | grep -Eq ' (active|activating|reloading) '"
 srv "sudo rm -f /opt/tando/ci/alpha/.after-end; sudo find $INC -name '.0big*' -delete; sudo rm -f $INC/0big.bin" > /dev/null 2>&1
+
+# ---- 11. preview apps (tando preview; docs/PREVIEWS.md) -------------------------------------------
+# alpha's key makes, deploys and removes alpha-<branch> only; the admin does the same without a key.
+log "11. previews"
+cd "$E/w/alpha" || exit 1
+conf_set tando.conf preview_skip SECRET_A
+"$R" env set KEEP_A=kept-value > /dev/null 2>&1
+echo 9 > VERSION
+"$R" deploy > "$E/pv.d9" 2>&1       # (configure: alpha's preview_skip reaches the server)
+check "11a preview_skip reaches the server (app.conf of alpha)" srv "sudo grep -qx preview_skip=SECRET_A /opt/tando/apps/alpha/app.conf"
+echo 10 > VERSION
+"$R" preview up --branch feature/Login > "$E/pv.up" 2>&1; rc=$?
+PV=$("$R" preview ls --json 2> /dev/null | sed -n 's/.*"name":"\([a-z0-9-]*\)".*/\1/p' | head -1)
+check "11b admin: tando preview up deploys the branch as its own app ($PV, rc=$rc)" \
+  eval 'test $rc = 0 && printf "%s" "$PV" | grep -Eq "^alpha-feature-login-[0-9a-f]{4}$" && test "$(ver "$PV")" = 10'
+check "11c the preview has alpha's env except what preview_skip names" \
+  eval 'srv "sudo cat /opt/tando/apps/$PV/env" | grep -q "^KEEP_A=\"kept-value\"" && ! srv "sudo cat /opt/tando/apps/$PV/env" | grep -q SECRET_A'
+check "11d ... idle_stop 6h, no backup, no database, no jobs, an expiry about 7 days out" eval '
+  c=$(srv "sudo cat /opt/tando/apps/$PV/app.conf"); x=$(printf "%s\n" "$c" | sed -n "s/^preview_expires=//p"); n=$(srv "date +%s")
+  printf "%s\n" "$c" | grep -qx idle_stop=6h && printf "%s\n" "$c" | grep -qx backup=off && ! printf "%s\n" "$c" | grep -q "^database=\|^job\." &&
+  test "$((x - n))" -gt 604700 && test "$((x - n))" -le 604800'
+check "11e the hourly expiry timer is enabled on the server" srv "systemctl is-enabled -q tando-previews.timer"
+"$R" preview ls > "$E/pv.ls" 2>&1
+check "11f tando preview ls lists it with its link" sh -c "grep -q '$PV' '$E/pv.ls' && grep -q 'localhost' '$E/pv.ls'"
+check "11g the parent app is untouched (alpha still v9)" test "$(ver alpha)" = 9
+# the deploy key: pull request opened -> deploy; closed -> remove
+echo 11 > VERSION
+CI=true GITHUB_HEAD_REF=pr-7 as_key "$E/setup.alpha" "$R" preview up > "$E/pv.key" 2>&1; rc=$?
+check "11h a CI deploy key makes and deploys alpha-pr-7 (rc=$rc)" eval 'test $rc = 0 && test "$(ver alpha-pr-7)" = 11'
+check "11i ... as a deploy user of its own with the same key (tando-d-alpha-pr-7, one key line)" \
+  eval 'test "$(srv "getent passwd tando-d-alpha-pr-7 | cut -d: -f7; sudo grep -c ssh-ed25519 /opt/tando/ci/alpha-pr-7/.ssh/authorized_keys" | tr "\n" " ")" = "/opt/tando/bin/tando-gate 1 "'
+echo 12 > VERSION
+CI=true GITHUB_HEAD_REF=pr-7 as_key "$E/setup.alpha" "$R" preview up > "$E/pv.key2" 2>&1
+check "11j pushing to the pull request again updates the same preview (v12)" test "$(ver alpha-pr-7)" = 12
+# what the key may not do: other names, other apps' previews, the admin's verbs
+for v in "preview-up alpha bravo-x" "preview-up alpha alpha" "preview-up alpha alpha-" "preview-up alpha alpha-X" "preview-up alpha alpha--x" \
+    "preview-up alpha alpha-ok 0d" "preview-up bravo bravo-x" "preview-rm alpha bravo" "preview-rm alpha alpha" "preview-rm bravo bravo-2" \
+    "preview-ls alpha" "preview-sweep" "destroy alpha-pr-7 purge" "preview-up alpha alpha-aaaaaaaaaaaaaaaaaaaa"; do
+  refused "11k key of alpha cannot run '$v'" ka "sudo -n $AG $v"
+done
+refused_by "11l alpha's key cannot make a preview of another app (bravo-x)" "previews named alpha-<name> only" ka "sudo -n $AG preview-up alpha bravo-x"
+check "11m ... and made none" srv_no "sudo test -e /opt/tando/apps/bravo-x/app.conf"
+refused "11n the key of bravo-2 cannot log in as a preview of alpha" kssh "$KB2" tando-d-alpha-pr-7 "$AG info"
+refused "11o alpha's preview user cannot make previews of its own (previews have no previews)" kssh "$KA" tando-d-alpha-pr-7 "sudo -n $AG preview-up alpha-pr-7 alpha-pr-7-x"
+refused_by "11p ... nor deploy to alpha itself (its key may deploy alpha-pr-7 only)" "this key deploys alpha-pr-7 only" \
+  kssh "$KA" tando-d-alpha-pr-7 "sudo -n $AG begin alpha x"
+refused_by "11q a preview has no previews (the server refuses)" "is itself a preview" kssh "$KA" tando-d-alpha-pr-7 "sudo -n $AG preview-up alpha-pr-7 alpha-pr-7-x"
+# remove: with the key (pull request closed), and as the admin
+CI=true GITHUB_HEAD_REF=pr-7 as_key "$E/setup.alpha" "$R" preview rm > "$E/pv.rm" 2>&1; rc=$?
+check "11r the key removes alpha-pr-7 (rc=$rc): app, deploy user and sudo rule are gone" \
+  eval 'test $rc = 0 && srv_no "sudo test -e /opt/tando/apps/alpha-pr-7/app.conf" && srv_no "getent passwd tando-d-alpha-pr-7" &&
+        srv_no "sudo test -e /etc/sudoers.d/tando-d-alpha-pr-7" && srv_no "sudo test -e /opt/tando/ci/alpha-pr-7"'
+check "11s ... and the key still deploys alpha" eval 'echo 13 > VERSION; CI=true as_key "$E/setup.alpha" "$R" deploy > "$E/pv.d13" 2>&1; test "$(ver alpha)" = 13'
+"$R" preview rm --branch feature/Login > "$E/pv.rm2" 2>&1; rc=$?
+check "11t the admin removes the other preview (rc=$rc)" eval 'test $rc = 0 && srv_no "sudo test -e /opt/tando/apps/$PV/app.conf"'
+# expiry: the sweep (tando-previews.timer runs it every hour) removes an expired preview, never a live one
+srv "sudo $AG preview-up alpha alpha-ttl 2s" > /dev/null 2>&1
+srv "sudo $AG preview-up alpha alpha-keep 3d" > /dev/null 2>&1
+check "11u an expired preview is removed by the sweep, one that is not stays" \
+  eval 't_until 30 eval "srv \"sudo $AG preview-sweep\" | grep -qx removed=1" && srv_no "sudo test -e /opt/tando/apps/alpha-ttl/app.conf" &&
+        srv "sudo test -f /opt/tando/apps/alpha-keep/app.conf"'
+srv "sudo $AG preview-rm alpha alpha-keep" > /dev/null 2>&1
+# a key that is revoked or rotated stops working for the previews too
+CI=true GITHUB_HEAD_REF=pr-8 as_key "$E/setup.alpha" "$R" preview up > "$E/pv.pr8" 2>&1
+check "11v pr-8 deployed (v13)" test "$(ver alpha-pr-8)" = 13
+check "11w its key works as the preview's user" eval 'test "$(kssh "$KA" tando-d-alpha-pr-8 "$AG info" | grep -c arch)" = 1'
+(cd "$E/w/alpha" && "$R" ci rotate > "$E/setup.alpha2" 2> /dev/null)
+refused "11x after ci rotate the old key no longer works as the preview's user" kssh "$KA" tando-d-alpha-pr-8 "$AG info"
+KA2=$E/key.alpha2; secret "$E/setup.alpha2" TANDO_DEPLOY_KEY > "$KA2"; chmod 600 "$KA2"
+check "11y ... the new key does" eval 'test "$(kssh "$KA2" tando-d-alpha-pr-8 "$AG info" | grep -c arch)" = 1'
+"$R" preview rm --branch pr-8 > /dev/null 2>&1
 
 echo
 echo "$PASSES passed, $FAILS failed"

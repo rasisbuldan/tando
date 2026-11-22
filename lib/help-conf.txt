@@ -36,6 +36,8 @@ Limits
   stop_timeout    seconds a stopping process may finish (default 10)
   idle_stop       6h, 10m, 30s, on (6h): stop the web process after that long without a request, start it on the next one (default off)
   priority        high or low: killed last or first when memory runs out
+  preview_ttl     how long a preview app lives, like 7d, 12h (default 7d; tando preview)
+  preview_skip    env names a preview does not get: STRIPE_SECRET_KEY, SMTP_PASSWORD
 Assets
   compress        off: send answers as they are (default on: text is gzip or zstd compressed)
   assets          off, or <dir>[, <url prefix>]: hashed files kept across releases (next and static: found by themselves)

@@ -29,8 +29,8 @@ _tando_plugins() { # plugin commands next to the tando on PATH
   done
 }
 _tando_commands="init up deploy rollback releases history status ls snapshot logs start stop restart top env 
-  jobs db backup restore host domain doctor version destroy unlock recipes ci alerts health 
-  errors requests audit adopt help addon cheat dashboard go link menubar next open ssh"
+  jobs db backup restore host domain doctor version destroy unlock recipes ci preview alerts 
+  health errors requests audit adopt help addon cheat dashboard go link menubar next open ssh"
 
 _tando() {
   local cur prev cmd w i
@@ -77,7 +77,7 @@ _tando() {
     env) subs="ls set unset import log" flags="$flags --show --names --json -a -H --note" args="apps";;
     jobs) subs="run log pause resume ls" flags="$flags -H --json -a -n" args="apps";;
     db) subs="psql url studio info" flags="$flags -a -H --show --no-open --json --idle --stop" args="apps";;
-    backup) subs="ls now restore pull offsite" flags="$flags --json -a -H --yes --show --saved --import --rotate" args="apps";;
+    backup) subs="ls now drill restore pull offsite" flags="$flags --json -a -H --yes --show --saved --import --rotate" args="apps";;
     restore) subs="" flags="$flags -a --yes -H --from-host --all" args="";;
     host) subs="add setup ls rm rename status care update reboot" flags="$flags --port --key --yes --force --insecure-test --no-check --deploy --json --watch --all --now --updates --reboot --window --tz --lead --even-with-other-sites --drop-alias --pg-stat-statements --pg-restart" args=""
       [ "$COMP_CWORD" -eq $((i + 2)) ] && case $sub in setup|rm|rename) args=hosts;; esac;;
@@ -88,6 +88,7 @@ _tando() {
     unlock) subs="" flags="$flags -H -a" args="apps";;
     recipes) subs="" flags="$flags " args="";;
     ci) subs="setup rotate ls revoke github hook" flags="$flags -a -H --ref --repo --branch --node --env --force --remove" args="";;
+    preview) subs="up ls rm" flags="$flags --branch --ttl -a -H --json --yes" args="";;
     alerts) subs="enable disable test history set silence notifier rm ls heartbeat backup-ping show notifiers" flags="$flags --watch --json -n -a -H" args="apps";;
     health) subs="" flags="$flags --json -a -H --forget" args="apps";;
     errors) subs="" flags="$flags --since -n --json -a -H --last" args="apps";;
