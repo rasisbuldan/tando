@@ -380,6 +380,13 @@ Steps and checks: docs/release-notes/0.3.0.md.
 
 ### Fixed
 
+- The awake governor: `awake_max=auto` is now the larger of the caps figure and what free memory
+  (MemAvailable beyond a reserve) holds at the idle apps' caps. On a small server whose always-on
+  caps fill RAM x `mem_overcommit` it was 1, and every idle app but the first answered 503 although
+  most of the memory was free. A refused wake clears its unit's start-limit count at once, does not
+  count against `wake_rate`, and app-down and recover leave such an app idle, never down. An
+  explicit `awake_max=N` is unchanged. The agent's shebang is its first line again (a stray line
+  above it made the agent run under `/bin/sh`).
 - Fixed: `tando history` for all apps (no `-a`) answered "invalid app name": a lone number is the
   count, in the agent, tando-status and the shell fallback (old clients work too). The dashboard's
   Deploys page works again.

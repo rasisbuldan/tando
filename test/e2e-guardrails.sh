@@ -2,8 +2,9 @@
 # Guardrails for a shared server (docs/COMMANDS.md "Profiles and guardrails"): limit profiles
 # (ceilings, mandatory CPU/task/job limits, no workers), outbound mail closed per app, the outbound
 # connection rate, per-uid byte counters and their metrics columns, egress_ip (SNAT) and bind_ip
-# (the site on one address), the awake governor (awake_max, wake_rate) against a crawler that
-# walks the idle apps, and a container app's packets matched by its slice (they leave as root).
+# (the site on one address), the awake governor (awake_max fixed and auto, wake_rate, refusals
+# never down) against a crawler that walks the idle apps, and a container app's packets matched
+# by its slice (they leave as root).
 #
 #   test/e2e-guardrails.sh [--reset]     --reset: recreate the server first (only one this suite owns)
 #
@@ -160,6 +161,39 @@ rates=""; for i in 1 2 3 4 5; do
   rates="$rates$(code gi2) "
 done
 check "G27 an app woken more than wake_rate times a minute answers 503 while cooling ($rates)" eval 'case "$rates" in *503*) true;; *) false;; esac'
+# every idle app asleep, the governor's markers gone
+sleep_all() {
+  for a in gi1 gi2 gi3; do srv "sudo systemctl stop tando-${a}_wake.service tando-$a.service" > /dev/null; done
+  t_until 20 eval 'stopped gi1 && stopped gi2 && stopped gi3' > /dev/null
+  srv 'sudo rm -f /run/tando-wake/*.wakes /run/tando-wake/*.cool /run/tando-wake/*.refused /run/tando-wake/.full' > /dev/null
+}
+# awake_max=auto on a host whose always-on caps fill RAM x mem_overcommit (here a tiny
+# mem_overcommit): the caps leave one slot, but the memory is free, so the idle apps all wake
+"$R" host setup test awake_max=auto mem_overcommit=0.01 wake_rate=30 > "$E/setup-auto.out" 2>&1; rc=$?
+sleep_all
+crawl=""; for a in gi1 gi2 gi3; do crawl="$crawl$a=$(code "$a") "; done
+check "G34 awake_max=auto, caps for 1 but memory free: every idle app wakes ($crawl)" eval '[ $rc = 0 ] && [ "$crawl" = "gi1=200 gi2=200 gi3=200 " ]'
+# an explicit awake_max=1 is honoured exactly: gi1 wakes (and, just woken, may not be stopped for
+# another), gi2's wake is refused before it starts
+"$R" host setup test awake_max=1 mem_overcommit=1.5 > "$E/setup-one.out" 2>&1; rc=$?
+sleep_all
+c1=$(code gi1); c2=$(code gi2)
+check "G35 awake_max=1: one idle app wakes, the next is refused before it starts ($c1 $c2)" eval '[ $rc = 0 ] && [ "$c1" = 200 ] && [ "$c2" != 200 ] && stopped gi2'
+check "G36 its next requests get 503 with Retry-After at once" eval 'curl -s -D - -o /dev/null --max-time 10 "$(t_url gi2)" | tr -d "\r" | grep -q "^Retry-After: 60" && [ "$(code gi2)" = 503 ]'
+# refused wakes in quick succession (what the wake socket does for requests that race .full):
+# each is a skipped start of the unit; past its start limit (5 in 60 s) the unit failed, and
+# tando-down@ marked the app down
+srv 'for i in 1 2 3 4 5 6 7; do sudo systemctl start tando-gi2.service; done' > /dev/null
+sleep 3   # (a wait: tando-down@ and the 2 s reset would act within it)
+res=$(srv 'systemctl show -P ActiveState,Result tando-gi2.service | tr "\n" " "')
+check "G37 refused wakes never fail the unit nor mark the app down: it is idle ($res)" eval '
+  case "$res" in failed*) false;; *) true;; esac &&
+  ! srv "sudo grep -qx down=1 /opt/tando/apps/gi2/state" &&
+  [ "$(srv "sudo $AG status gi2" | awk -F"\t" "\$1 == \"app\" { print \$3 }")" = idle ]'
+# once the awake app stops, the slot is free: .full goes and the next request wakes the refused app
+srv "sudo systemctl stop tando-gi1_wake.service tando-gi1.service" > /dev/null; t_until 20 stopped gi1 > /dev/null
+t_until 40 eval '[ "$(code gi2)" = 200 ]' > /dev/null; r=$?
+check "G38 a slot freed: the refused app wakes on its next request" eval '[ $r = 0 ]'
 
 # ---- container apps: matched by their slice ---------------------------------------------------
 if command -v docker > /dev/null 2>&1 || command -v podman > /dev/null 2>&1; then

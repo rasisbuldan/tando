@@ -349,20 +349,41 @@ EOF
 }
 # ---- the awake governor (docs/COMMANDS.md "Idle apps: the awake governor") --------------------
 # A crawler that walks the apps' hostnames would wake every idle app at once. Two limits:
-# - awake_max (host setup; default auto = awake_auto: what admission counted on): idle apps awake
-#   at once. A wake over it stops the awake idle app woken longest ago that has no open connection
-#   to its port and has been awake at least AWAKE_GRACE seconds. When there is none, the wake
-#   still goes on (the request is already waiting) and Caddy answers the next cold requests of any
+# - awake_max (host setup; default auto = awake_auto: what admission counted on, or what memory
+#   free right now still holds, whichever is more): idle apps awake at once. A wake over it stops
+#   the awake idle app woken longest ago that has no open connection to its port and has been
+#   awake at least AWAKE_GRACE seconds. When there is none, the wake is refused (the unit's
+#   ExecCondition skips the start) and Caddy answers the next cold requests of any
 #   idle app 503 with Retry-After (marker .full) until one is free again (wake-check, every 30 s).
 #   A busy app is never stopped for another: only one nobody uses; a burst is refused, not thrashed.
 # - wake_rate (default WAKE_RATE a minute): wakes of one app. Over it, Caddy answers that app's
 #   cold requests 503 for a minute (marker <app>.cool).
 # Markers live in WAKE_DIR (tmpfs: none after a reboot); <app>.awake is there from the wake until
-# the app stops (idle-stopped). wake-admit is the ExecStartPre of an idle app's unit (write_unit).
+# the app stops (idle-stopped); <app>.refused from a refused wake until the next admitted one.
+# wake-admit is the ExecCondition of an idle app's unit (write_unit): a refusal skips the start,
+# it never fails the unit.
 WAKE_RATE=30 AWAKE_GRACE=60
+# awake_cap: the cap now (0: none); with awake_max=auto it uses AWN and AWF (awake_count)
 awake_cap() {
   local m=${H[awake_max]:-auto}
-  case $m in off) echo 0;; auto) awake_auto;; *) [[ $m =~ ^[1-9][0-9]*$ ]] && echo "$m" || awake_auto;; esac
+  [[ $m == off ]] && { echo 0; return 0; }
+  [[ $m =~ ^[1-9][0-9]*$ ]] && { echo "$m"; return 0; }
+  awake_auto "${AWN:-}" "${AWF:-}"
+}
+# awake_count [except]: AWN the idle apps counted awake (awake_files) other than except, AWF those
+# of them woken within AWAKE_GRACE (still starting or warming up: MemAvailable does not show them
+# yet). One stat for all of them.
+awake_count() {
+  local fs t f now fl; now=$(now)
+  AWN=0 AWF=0
+  fs=$(awake_files)
+  [[ -n $fs ]] || return 0
+  mapfile -t fl <<< "$fs"
+  while read -r t f; do
+    [[ -n ${1:-} && $f == "$WAKE_DIR/$1.awake" ]] && continue
+    AWN=$((AWN + 1)); ((t > now - AWAKE_GRACE)) && AWF=$((AWF + 1))
+  done < <(stat -c '%Y %n' "${fl[@]}" 2> /dev/null)
+  return 0
 }
 # awake_files: the apps counted awake (<app>.awake), each checked: a marker whose app is gone or
 # whose unit is neither running nor starting (a crash, a destroy) is removed, not counted
@@ -396,10 +417,10 @@ awake_victim() {
 # awake_trim [except]: (WAKE_DIR/.lock held) stop idle apps until at most awake_max are awake; set
 # or clear .full; while it is set, check again in 30 s
 awake_trim() {
-  local max n=0 f v
+  local max n v
+  awake_count; n=$AWN
   max=$(awake_cap)
   if ! [[ $max =~ ^[1-9][0-9]*$ ]]; then rm -f "$WAKE_DIR/.full"; return 0; fi
-  for f in $(awake_files); do n=$((n + 1)); done
   while ((n > max)) && v=$(awake_victim "${1:-}"); do
     rm -f "$WAKE_DIR/$v.awake"; n=$((n - 1))
     systemctl stop --no-block "tando-${v}_wake.service" "tando-$v.service" 2> /dev/null
@@ -418,9 +439,43 @@ cmd_wake_admit() {
   app "$1"
   idle_app || return 0
   awake_lock || { echo "tando-agent: $A not woken: the awake count is busy (over 10 s)" >&2; return 1; }   # (refused, never admitted unchecked)
-  local now t w=() rate=${H[wake_rate]:-$WAKE_RATE}
+  local now; now=$(now)
+  # the cap, before the app starts (this is its unit's ExecCondition): a slot, or a quiet app to
+  # stop for it, or the start is skipped (no failure: the unit stays inactive, its wake socket
+  # listens on; Caddy answers this app's and every other idle app's cold requests 503 meanwhile).
+  # tando's own start (a deploy, a restart: <app>.admin) is never refused
+  local max=0 n v
+  # (a marker a minute old or more is a start that never came: not honoured)
+  if [[ -f $WAKE_DIR/$A.admin ]] && (($(stat -c %Y "$WAKE_DIR/$A.admin") > now - 60)); then rm -f "$WAKE_DIR/$A.admin"
+  elif [[ ${H[awake_max]:-auto} != off ]] && awake_count "$A" && max=$(awake_cap) && [[ $max =~ ^[1-9][0-9]*$ ]]; then
+    rm -f "$WAKE_DIR/$A.admin"
+    n=$AWN
+    if ((n >= max)) && v=$(awake_victim "$A"); then
+      rm -f "$WAKE_DIR/$v.awake"; n=$((n - 1))
+      systemctl stop --no-block "tando-${v}_wake.service" "tando-$v.service" 2> /dev/null
+      echo "tando-agent: stopped the idle app $v for a wake of $A (awake_max $max)" >&2
+    fi
+    if ((n >= max)); then
+      : > "$WAKE_DIR/.full"
+      systemd-run --quiet --no-block --collect --unit="tando-wake-check-$now" --on-active=30 "$AGENT" wake-check > /dev/null 2>&1
+      # a skipped start counts against the unit's start limit (5 in 60 s): refused wakes that come
+      # faster than the 2 s reset below (cold requests racing .full, a burst on the socket) would
+      # end in start-limit-hit, a failed unit, tando-down@ and the down page for an app that is
+      # only asleep. So the count is cleared now, for this start (a reset-failed is no job: no
+      # wait on the start in progress), and again once the proxy, started anyway (it needs the
+      # app), is stopped: the socket listens on. <app>.refused tells app-down and recover that a
+      # failure of this unit is a refusal, not a crash
+      : > "$WAKE_DIR/$A.refused"
+      systemctl reset-failed "tando-$A.service" 2> /dev/null
+      systemd-run --quiet --no-block --collect --unit="tando-${A}_refused-$now" --on-active=2 /bin/sh -c \
+        "systemctl stop tando-${A}_wake.service; systemctl reset-failed tando-$A.service" > /dev/null 2>&1
+      echo "tando-agent: $A not woken: $n idle apps awake (awake_max $max) and none quiet: its requests get 503 until one stops" >&2
+      return 1
+    fi
+  fi
+  # wake_rate: the wakes of this app within a minute (a refused one is no wake: it started nothing)
+  local t w=() rate=${H[wake_rate]:-$WAKE_RATE}
   [[ $rate =~ ^[1-9][0-9]*$ ]] || rate=$WAKE_RATE
-  now=$(now)
   if [[ -f $WAKE_DIR/$A.wakes ]]; then
     while read -r t; do [[ $t =~ ^[0-9]+$ ]] && ((t > now - 60)) && w+=("$t"); done < "$WAKE_DIR/$A.wakes"
   fi
@@ -430,36 +485,17 @@ cmd_wake_admit() {
     systemd-run --quiet --no-block --collect --unit="tando-${A}_cool-$now" --on-active=60 /bin/rm -f "$WAKE_DIR/$A.cool" > /dev/null 2>&1
     echo "tando-agent: $A was woken ${#w[@]} times within a minute (wake_rate $rate): its cold requests get 503 for a minute" >&2
   fi
-  # the cap, before the app starts (this is its unit's ExecCondition): a slot, or a quiet app to
-  # stop for it, or the start is skipped (no failure: the unit stays inactive, its wake socket
-  # listens on; Caddy answers this app's and every other idle app's cold requests 503 meanwhile).
-  # tando's own start (a deploy, a restart: <app>.admin) is never refused
-  local max n=0 f v
-  max=$(awake_cap)
-  # (a marker a minute old or more is a start that never came: not honoured)
-  if [[ -f $WAKE_DIR/$A.admin ]] && (($(stat -c %Y "$WAKE_DIR/$A.admin") > now - 60)); then rm -f "$WAKE_DIR/$A.admin"
-  elif [[ $max =~ ^[1-9][0-9]*$ ]]; then
-    rm -f "$WAKE_DIR/$A.admin"
-    for f in $(awake_files); do [[ $f != "$WAKE_DIR/$A.awake" ]] && n=$((n + 1)); done
-    if ((n >= max)) && v=$(awake_victim "$A"); then
-      rm -f "$WAKE_DIR/$v.awake"; n=$((n - 1))
-      systemctl stop --no-block "tando-${v}_wake.service" "tando-$v.service" 2> /dev/null
-      echo "tando-agent: stopped the idle app $v for a wake of $A (awake_max $max)" >&2
-    fi
-    if ((n >= max)); then
-      : > "$WAKE_DIR/.full"
-      systemd-run --quiet --no-block --collect --unit="tando-wake-check-$now" --on-active=30 "$AGENT" wake-check > /dev/null 2>&1
-      # (a skipped start counts against the unit's start limit: cleared, as a clean idle stop does)
-      # and its proxy, started anyway (it needs the app), goes: the socket listens on
-      systemd-run --quiet --no-block --collect --unit="tando-${A}_refused-$now" --on-active=2 /bin/sh -c \
-        "systemctl stop tando-${A}_wake.service; systemctl reset-failed tando-$A.service" > /dev/null 2>&1
-      echo "tando-agent: $A not woken: $n idle apps awake (awake_max $max) and none quiet: its requests get 503 until one stops" >&2
-      return 1
-    fi
-  fi
+  rm -f "$WAKE_DIR/$A.refused"
   : > "$WAKE_DIR/$A.awake"
   awake_trim "$A"
   return 0
+}
+# wake_refused: the unit of this idle app failed only because the governor refused its wakes (a
+# start limit hit by skipped starts, <app>.refused under 5 minutes old): it is asleep, not down
+wake_refused() {
+  idle_app && [[ -f $WAKE_DIR/$A.refused ]] || return 1
+  (($(stat -c %Y "$WAKE_DIR/$A.refused") > $(now) - 300)) || return 1
+  [[ $(systemctl show -P Result "tando-$A.service" 2> /dev/null) == start-limit-hit ]]
 }
 # wake-check: the timer awake_trim sets while .full is there
 cmd_wake_check() { load "$R/host.conf" H; awake_lock || return 0; awake_trim; }
@@ -1057,23 +1093,48 @@ job_gap() {
   done <<< "$t"
   echo "$min"
 }
-# awake_auto: how many apps with idle_stop may be awake at once when host.conf says awake_max=auto
-# (the default): as many as fit at their caps into what admission allows (RAM x mem_overcommit),
-# beside the caps of the apps that always run and the idle cost of every idle app; at least 1.
-# 0: no cap (no idle app, mem_overcommit=0, RAM not known).
+# awake_auto [awake fresh]: how many apps with idle_stop may be awake at once when host.conf says
+# awake_max=auto (the default): the more of
+# - by caps: as many as fit at their caps into what admission allows (RAM x mem_overcommit),
+#   beside the caps of the apps that always run and the idle cost of every idle app; at least 1.
+#   On a host whose always-on caps fill RAM x mem_overcommit that is 1, however much is free:
+#   one awake idle app held the only slot for AWAKE_GRACE and every other one answered 503.
+# - by what is free now (given awake, the idle apps counted awake, and fresh, those of them woken
+#   within AWAKE_GRACE): awake + (MemAvailable - reserve - fresh x cap) / cap, where cap is the
+#   idle apps' mean memory cap and reserve the more of RAM/10 and what host setup keeps for Caddy,
+#   sshd, tandod and the database (system.slice's MemoryLow, core_protect). A wake is let in while
+#   what is free beyond the reserve still holds one more idle app at its full cap; an app woken
+#   in the last AWAKE_GRACE counts at its full cap too (it may not use its memory yet), so a burst
+#   of wakes cannot all count the same free memory. Under memory pressure it falls back to the caps
+#   figure (never below it). At most (RAM - reserve) / cap.
+# 0: no cap (no idle app, mem_overcommit=0, RAM not known). One read of /proc/meminfo, no fork per app.
 awake_auto() {
-  local ram oc=${H[mem_overcommit]:-$MEM_OVERCOMMIT}
+  local ram avail low=0 oc=${H[mem_overcommit]:-$MEM_OVERCOMMIT} mi l
   [[ $oc =~ ^[0-9]{1,2}(\.[0-9]{1,2})?$ ]] || oc=$MEM_OVERCOMMIT
-  ram=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2> /dev/null)
+  mi=$(awk '/^MemTotal:/ { t = int($2 / 1024) } /^MemAvailable:/ { a = int($2 / 1024) } END { print t + 0, a + 0 }' /proc/meminfo 2> /dev/null)
+  read -r ram avail <<< "$mi"
   if [[ $oc =~ ^0+(\.0+)?$ || ! $ram =~ ^[1-9][0-9]*$ ]]; then echo 0; return 0; fi
+  if [[ -r /etc/systemd/system/system.slice.d/tando-low.conf ]]; then
+    while IFS= read -r l; do [[ $l =~ ^MemoryLow=([0-9]+)M$ ]] && low=${BASH_REMATCH[1]}; done < /etc/systemd/system/system.slice.d/tando-low.conf
+  fi
   { mem_caps_mb "$R"/apps/*/app.conf; echo --; mem_caps_mb -a "$R"/apps/*/app.conf; } |
-    awk -v lim="$(awk -v r="$ram" -v o="$oc" 'BEGIN { print int(r * o) }')" -v idle="${IDLE_MB:-2}" '
+    awk -v lim="$(awk -v r="$ram" -v o="$oc" 'BEGIN { print int(r * o) }')" -v idle="${IDLE_MB:-2}" \
+        -v ram="$ram" -v avail="${avail:-0}" -v low="$low" -v awake="${1:-}" -v fresh="${2:-0}" '
       $1 == "--" { second = 1; next }
       !second { full[$1] = $2; next }
       $2 < full[$1] { ni++; caps += full[$1]; next }   # counted less for admission: an idle app
       { always += full[$1] }
+      function fl(x) { return x >= 0 ? int(x) : -int(-x + 0.999999) }
       END { if (!ni) { print 0; exit }
-            n = int((lim - always - ni * idle) / (caps / ni)); if (n < 1) n = 1; print n }'
+            cap = caps / ni
+            n = int((lim - always - ni * idle) / cap); if (n < 1) n = 1
+            if (awake != "" && avail > 0) {
+              res = int(ram / 10); if (low > res) res = low
+              m = awake + fl((avail - res - fresh * cap) / cap)
+              top = int((ram - res) / cap); if (m > top) m = top
+              if (m > n) n = m
+            }
+            print n }'
 }
 # profile_apply: the app's profile (C[profile]) applied to its new settings (C): its ceilings
 # refuse the deploy, its defaults fill in what the app does not set; its job_every refuses a job
@@ -5675,6 +5736,8 @@ rec_service() {
       restart_app || true
     fi
   else
+    # (an idle app failed only on the awake governor's refusals is asleep: as inactive below)
+    [[ $as == failed ]] && wake_refused && as=inactive
     case $as in
       failed) S[down]=1; save "$D/state" S; write_caddy;;    # systemd gave up; app-down did not get to it
       # an idle app (idle_stop) waits for its next request: its socket listens, Caddy proxies to it
@@ -8096,7 +8159,7 @@ destroy_finish() {
   [[ $purge == purge ]] && rm -rf "${BK:?}/$A"
   # (the user is gone: fw_sync leaves the app out although its app.conf is still there)
   fp ds.fw
-  rm -f "$WAKE_DIR/$A.awake" "$WAKE_DIR/$A.wakes" "$WAKE_DIR/$A.cool" "$WAKE_DIR/$A.admin"   # (the awake governor's)
+  rm -f "$WAKE_DIR/$A.awake" "$WAKE_DIR/$A.wakes" "$WAKE_DIR/$A.cool" "$WAKE_DIR/$A.admin" "$WAKE_DIR/$A.refused"   # (the awake governor's)
   fw_sync || echo "warning=could not reload the loopback rules (tando doctor)" >&2
   # the app's directory last, in one rename (a cut rm -rf could take app.conf and leave the rest,
   # which no recover finds): what a cut leaves of the renamed one, recover-all removes
@@ -8654,6 +8717,12 @@ cmd_app_down() {
   load "$D/state" S
   [[ $(systemctl show -P ActiveState "tando-$A") == failed ]] || return 0
   [[ -z ${S[stopped]:-} ]] || return 0
+  # an idle app whose wakes the awake governor refused is asleep: its socket listens on
+  if wake_refused; then
+    systemctl reset-failed "tando-$A.service" "tando-${A}_wake.socket" 2> /dev/null
+    systemctl start "tando-${A}_wake.socket" 2> /dev/null
+    return 0
+  fi
   S[down]=1
   fp down.caddy
   write_caddy || return 0          # (the page first: the state says down once visitors get it)

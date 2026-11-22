@@ -539,20 +539,36 @@ mcap() { "$BASH" -c 'eval "$1"; R=/nonexistent; C_memory=$2 C_profile=p H_spec=$
 check "U18r mem_cap: over the profile, the profile's" eq "$(mcap 1G memory=256M)" 256M
 check "U18s mem_cap: under it, the app's; no profile memory, the app's" eq "$(mcap 128M memory=256M)/$(mcap 1G cpu=10%)" "128M/1G"
 # awake_auto: idle apps that fit, at their caps, beside the always-on apps' caps (RAM x mem_overcommit)
-aa() { # MemTotal-kB app.conf-contents... -> awake_auto
+aa() { # MemTotal-kB app.conf-contents... -> awake_auto (AA_AVAIL kB MemAvailable, AA_ARGS awake fresh, AA_LOW MB)
   local m=$1 i=0 a; shift
   rm -rf "${T:?}/aa"; mkdir -p "$T/aa/apps"
   echo "MemTotal: $m kB" > "$T/aa/meminfo"
+  [ -n "${AA_AVAIL:-}" ] && echo "MemAvailable: $AA_AVAIL kB" >> "$T/aa/meminfo"
+  [ -n "${AA_LOW:-}" ] && printf '[Slice]\nMemoryLow=%sM\n' "$AA_LOW" > "$T/aa/low.conf"
   for a; do i=$((i + 1)); mkdir -p "$T/aa/apps/a$i"; printf '%b' "$a" > "$T/aa/apps/a$i/app.conf"; done
-  # shellcheck disable=SC2016
-  R=$T/aa "$BASH" -c 'eval "$1"; MEM_OVERCOMMIT=1.5 IDLE_MB=2 IDLE_AWAKE=20; awake_auto' _ \
-    "$(agent_fn mem_caps_mb awake_auto | sed "s#/proc/meminfo#$T/aa/meminfo#g")"
+  # shellcheck disable=SC2016,SC2086
+  R=$T/aa "$BASH" -c 'eval "$1"; shift; MEM_OVERCOMMIT=1.5 IDLE_MB=2 IDLE_AWAKE=20; awake_auto "$@"' _ \
+    "$(agent_fn mem_caps_mb awake_auto | sed -e "s#/proc/meminfo#$T/aa/meminfo#g" -e "s#/etc/systemd/system/system.slice.d/tando-low.conf#$T/aa/low.conf#g")" ${AA_ARGS:-}
 }
 # 1000 MB x 1.5 = 1500; always-on 500; ten idle apps of 100 MB (2 MB each idle): (1500-500-20)/100 = 9
 idle10=""; for i in 1 2 3 4 5 6 7 8 9 10; do idle10="$idle10 memory=100M\nidle_stop=10m\n"; done
 check "U18l awake_auto from RAM and admission" eq "$(aa 1024000 'memory=500M\n' $idle10)" 9
 check "U18m no idle app: no cap" eq "$(aa 1024000 'memory=500M\n')" 0
 check "U18n at least 1 when nothing fits" eq "$(aa 102400 'memory=500M\n' 'memory=100M\nidle_stop=10m\n')" 1
+# by what is free: a 2 GB host whose always-on caps fill RAM x 1.5 (caps say 1), three idle apps
+# of 256 MB, 1100 MB available, reserve RAM/10 = 200 MB
+full12=""; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do full12="$full12 memory=256M\n"; done
+idle3=""; for i in 1 2 3; do idle3="$idle3 memory=256M\nidle_stop=10m\n"; done
+check "U18v auto by caps alone is 1 on a host whose always-on caps fill admission" eq "$(aa 2048000 $full12 $idle3)" 1
+check "U18w with 1100 MB free, nothing awake: (1100-200)/256 = 3" eq "$(AA_AVAIL=1126400 AA_ARGS='0 0' aa 2048000 $full12 $idle3)" 3
+check "U18x one awake and just woken counts at its full cap: 1 + (1100-200-256)/256 = 3" eq "$(AA_AVAIL=1126400 AA_ARGS='1 1' aa 2048000 $full12 $idle3)" 3
+check "U18y memory short (300 MB free, one awake): back to the caps figure, 1" eq "$(AA_AVAIL=307200 AA_ARGS='1 0' aa 2048000 $full12 $idle3)" 1
+check "U18z the reserve is host setup's core MemoryLow when larger than RAM/10: (1100-400)/256 = 2" eq "$(AA_AVAIL=1126400 AA_LOW=400 AA_ARGS='0 0' aa 2048000 $full12 $idle3)" 2
+check "U18aa at most (RAM - reserve) / cap" eq "$(AA_AVAIL=4096000 AA_ARGS='0 0' aa 2048000 $full12 $idle3)" 7
+check "U18ab a refused wake never fails the unit: its start-limit count is cleared at once, and app-down and recover leave a refused app asleep" eval '
+  sed -n "/^cmd_wake_admit() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "^      systemctl reset-failed \"tando-\$A.service\"" &&
+  sed -n "/^cmd_app_down() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "if wake_refused; then" &&
+  sed -n "/^rec_service() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "wake_refused && as=inactive"'
 # the governor's hooks: an idle app's unit counts its wake first; its site answers 503 while the
 # governor says no (.full, <app>.cool), before it would start the app
 check "U18o an idle app's unit asks wake-admit before it starts, and may be refused (ExecCondition, no -)" grep -q "ExecCondition=+%s wake-admit %s" "$ROOT/server/tando-agent"

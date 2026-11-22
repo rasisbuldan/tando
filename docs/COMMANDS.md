@@ -995,19 +995,35 @@ ends a crash loop), so an app woken often is never refused a start. An idle app 
 apps awake at once), its workers whole.
 
 **The awake governor.** A crawler that walks the apps' hostnames would wake every idle app at
-once. Host setup `awake_max=` caps the idle apps awake at once: `auto` (the default) is as many as
-fit at their `memory` caps into what admission allows (RAM x `mem_overcommit`) beside the always-on
-apps' caps (at least 1; no cap with `mem_overcommit=0`); `off` or a number. A wake over the cap
+once. Host setup `awake_max=` caps the idle apps awake at once: `auto` (the default), `off`, or a
+number (honoured exactly). `auto` is the larger of two figures, worked out at each wake:
+
+- by caps: as many as fit at their `memory` caps into what admission allows (RAM x
+  `mem_overcommit`) beside the always-on apps' caps, at least 1. On a small server whose
+  always-on caps fill that, this is 1 however much memory is free;
+- by free memory: the idle apps awake now plus `(MemAvailable - reserve - fresh x cap) / cap`,
+  where `cap` is the idle apps' mean `memory` cap, `reserve` the larger of RAM/10 and what host
+  setup keeps for Caddy, sshd, tandod and the database, and `fresh` the awake idle apps woken in
+  the last 60 s (they count at their full cap: they may not use their memory yet, so a burst of
+  wakes cannot all count the same free memory). At most `(RAM - reserve) / cap`.
+
+So a wake is let in while what is free beyond the reserve still holds one more idle app at its
+full cap; when memory is short it falls back to the caps figure, never below it. Example: 2 GB
+RAM, always-on caps filling RAM x 1.5, idle apps capped at 256 MB, 1.1 GB available: by caps 1,
+by free memory `(1100 - 200) / 256` = 3, so three idle apps may be awake. No cap with
+`mem_overcommit=0`. A wake over the cap
 stops the awake idle app that was woken longest ago, has been awake at least 60 s and has had
 no traffic on any connection to its port for 60 s (an idle keep-alive keeps nothing awake). When
 no such app exists the wake is refused before the app starts (the unit's `ExecCondition`: the
-unit stays inactive, not failed, and is not marked down; that request gets an error page), and
+start is skipped, the unit stays inactive, not failed, its start-limit count is cleared at once,
+and the app shows idle, never down; that request gets an error page), and
 Caddy answers every idle app's cold requests at once with 503 and `Retry-After: 60` until one is
-free (checked every 30 s). tando's own starts (a deploy, `tando restart`) are never refused. Why not always stop the least recently used app: under a crawl that
+free (checked every 30 s, and at once when an awake idle app stops); the next request then wakes
+it. A refused wake does not count against `wake_rate`. tando's own starts (a deploy, `tando restart`) are never refused. Why not always stop the least recently used app: under a crawl that
 thrashes, each wake stopping an app someone is using; a 503 to the crawler costs nothing, and a
 busy app is never stopped for another. `wake_rate=` (default 30) caps the wakes of one app a
 minute: over it, that app's cold requests get the same 503 for a minute. The markers are in
-`/run/tando-wake` (`.full`, `<app>.cool`, `<app>.awake`); `tando-agent wake-check` re-checks.
+`/run/tando-wake` (`.full`, `<app>.cool`, `<app>.awake`, `<app>.refused`); `tando-agent wake-check` re-checks.
 
 ### Profiles and guardrails
 
