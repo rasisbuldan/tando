@@ -1125,7 +1125,7 @@ agent() {
   [ "$v" = sudo ] && v=$2
   [ -s "${ERRF:-$TMPD/err}" ] ||
     explain "the server ended '$v' with status $rc and gave no reason (a connection cut, or the server under load)" \
-      "try again; if it happens again: tando doctor $HOST"
+      "try again; if it happens again: tando doctor ${HOST:-}"
   [ "${UI_BOX:-0}" = 1 ] && ui_box_close >&2
   exit 1
 }

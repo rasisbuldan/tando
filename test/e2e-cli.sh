@@ -348,7 +348,8 @@ check "S7c TMPDIR with a space: commands still work (rc=$rc)" \
   eval 'test $rc = 0 && printf "%s" "$out" | grep -q "TIME (GMT)"'
 # sshd turns sessions away when too many share one connection (MaxSessions 10): the stub refuses
 # the first two tries of each of 30 parallel commands; every one must still succeed, and one that
-# is always refused names the cause
+# is always refused names the cause after 9 tries (about 10 s: a deploy following its activation
+# holds a session up to 10 s)
 mkdir -p "$E/busybin" "$E/busy"; rm -f "$E/busy/"c.*
 cat > "$E/busybin/ssh" <<'STUB'
 #!/bin/bash
@@ -370,7 +371,7 @@ check "S7d 30 parallel commands, each refused twice by sshd MaxSessions, all suc
 out=$(cd "$E/w/hello" && BUSY_DIR=$E/busy BUSY_ID=x BUSY_ALWAYS=1 PATH="$E/busybin:$PATH" "$R" history < /dev/null 2>&1); rc=$?
 check "S7e a session that stays refused: one sentence that names the cause (rc=$rc)" \
   eval 'test $rc != 0 && printf "%s" "$out" | grep -q "too many tando commands at once to vps" &&
-        test "$(cat "$E/busy/c.x")" = 4'
+        test "$(cat "$E/busy/c.x")" = 9'
 out=$(cd "$E/w/noconf" && "$R" ssh -- id 2>&1); rc=$?
 check "S8 ssh -- cmd outside a project names the app form (rc=$rc)" \
   eval 'test $rc = 1 && printf "%s" "$out" | grep -q "tando ssh <app> -- <command>"'

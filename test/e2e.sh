@@ -366,12 +366,15 @@ dn=$(curl -s -o "$E/down.body" -w '%{http_code} %{time_total}' http://hello.loca
 check "21d a unit that gave up: 503 \"unavailable\" at once, not a held request ($dn)" \
   eval 'echo "$dn" | grep -qE "^503 0\.[0-4]" && grep -q "hello is unavailable" "$E/down.body"'
 nrb=$(srv "systemctl show -P NRestarts tando-hello")
+# recover (tando-watch runs it every minute) starts the app systemd gave up on: that start begins
+# systemd's NRestarts at 0, so the loop's restarts are kept for tando-watch and the metrics
+# (restarts_lost: its NRestarts when it gave up, plus that start; more if it looped again)
+srv "sudo /opt/tando/bin/tando-agent recover hello" > /dev/null 2>&1
+nrl=$(st hello restarts_lost)
+check "21e2 the crash loop's $nrb restarts are kept when recover starts the down app again (restarts_lost $nrl)" \
+  eval '[ -n "$nrb" ] && [ "$nrb" -gt 0 ] && [ -n "$nrl" ] && [ "$nrl" -gt "$nrb" ]'
 "$R" env unset CRASH_VERSION >&2
 check "21e env unset restarts it and proxying resumes (v$live)" eqv "$live"
-# that start begins systemd's NRestarts at 0: the crash loop's restarts are kept for tando-watch
-# and the metrics (restarts_lost: its NRestarts when it gave up, plus that start)
-check "21e2 the crash loop's $nrb restarts are kept when the down app starts again (restarts_lost $(st hello restarts_lost))" \
-  eval '[ -n "$nrb" ] && [ "$nrb" -gt 0 ] && [ "$(st hello restarts_lost)" = $((nrb + 1)) ]'
 
 # 21f. an app with no release yet (first deploy still running, or failed): 503 "being deployed"
 # at once with Retry-After, not a held request and an empty 502; the page goes away by itself when
