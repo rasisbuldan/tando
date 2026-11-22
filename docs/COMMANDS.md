@@ -870,8 +870,10 @@ tando host setup <host> origin=off                   # back to normal (origin_lo
   right-to-left parsing for `X-Forwarded-For`) and everything else reads its answer: the
   request log's `client_ip`, the `X-Real-IP` header your app gets, and tando's request
   statistics (they read the log). The same headers from any other address are ignored: the
-  app gets that address. Read the visitor from `X-Real-IP`; `CF-Connecting-IP` itself reaches
-  the app as sent and is only true when the request came through the edge.
+  app gets that address. The headers an app might read the visitor from are Caddy's answer too:
+  `X-Real-IP` is always set from it; with `cloudflare`, `CF-Connecting-IP` is set to it (with
+  `custom:` it is removed); `True-Client-IP` is removed; `X-Forwarded-For` is replaced by Caddy
+  unless the connection is the edge's. A client cannot hand an app a visitor address.
 - **Caddy 2.7 or later.** Older Caddy (Ubuntu's package is 2.6) cannot tell which headers to
   believe, so `origin=` is refused with a message, and nothing is changed. Install Caddy from its
   official repository first (https://caddyserver.com/docs/install), then run the setup again.
@@ -880,8 +882,10 @@ tando host setup <host> origin=off                   # back to normal (origin_lo
   `conn_limit`/`conn_rate` rules exempt the edge's ranges (every visitor would share one
   budget). The per-app limits (`max_conns`, `max_requests`, ...) stay as they are. Limit
   visitors at the edge itself (its rate rules); tando cannot see them.
-- **`origin_lock=on`.** Ports 80 and 443 answer only the edge's ranges; any other address gets
-  no answer (dropped). ssh and everything else are untouched, and so is the server's own
+- **`origin_lock=on`.** Ports 80 and 443, TCP and UDP (HTTP/3), answer only the edge's ranges;
+  any other address gets no answer (dropped). The lock does not tell your edge account from any
+  other customer of the same edge: for that, turn on the edge's authenticated origin pulls
+  (client certificate) as well. ssh and everything else are untouched, and so is the server's own
   loopback (health checks, an app calling its own link). Turn it on only after you have seen
   the edge reach the server (it needs the edge's DNS and a working origin); `origin_lock=off`
   undoes it. Visitors that bypass the edge (a direct `curl` to the server's address) stop working
@@ -889,8 +893,12 @@ tando host setup <host> origin=off                   # back to normal (origin_lo
 - **The ranges.** `cloudflare`: tando starts from a built-in copy of the published list and
   `tando-origin.timer` refreshes it daily from the published address lists over HTTPS (there is
   no published checksum: the trust is the HTTPS connection to the edge's own site). A list that
-  does not parse completely, has a catch-all range (anything wider than IPv4 /8 or IPv6 /16), has
-  too few ranges, or that Caddy refuses is thrown away: the last good list stays in use, the
+  does not parse completely, has a range that is private, loopback, link-local, multicast or
+  reserved, one wider than the real lists use (IPv4 /12, IPv6 /28; the published widest are /13 and
+  /29), far more ranges or addresses than the real list (over 30 IPv4, 15 IPv6, 4 million IPv4
+  addresses), keeps less than half of the last good list (a replacement, not an update: apply
+  it with `sudo /opt/tando/bin/tando-agent origin-update --force` once you checked it), or that
+  Caddy or the firewall refuses (both go back to the last good list together), is thrown away: the last good list stays in use, the
   failure is counted, and the third failure in a row is an alert (host alerts channel) and a
   warning in `tando doctor`. To refresh now: `sudo systemctl start tando-origin.service` on the
   server. The ranges are in `/opt/tando/origin.ranges`.
