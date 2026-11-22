@@ -407,6 +407,7 @@ check "D11b status shows the database and the last backup" \
   eval 'grep -q "database.*postgres" "$E/status.out" && grep -q "backup.*daily, last" "$E/status.out"'
 
 # D11d. the restore drill: the newest backup restored into a throwaway database and directory
+# shellcheck disable=SC2034  # (read in the check's eval)
 page_before=$(page)
 "$R" backup now > /dev/null 2>&1
 LIVE_SQL="SELECT coalesce(sum((xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint), 0) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')"
