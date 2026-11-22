@@ -163,11 +163,8 @@ func (c *Ctl) fetchPolicy() (FetchPolicy, Limits, *Error) {
 	if n, err := strconv.ParseInt(h["app_max_mb"], 10, 64); err == nil && n > 0 {
 		mb = n
 	}
-	amb := int64(1024)
-	if n, err := strconv.ParseInt(h["ctl_artifact_max_mb"], 10, 64); err == nil && n > 0 {
-		amb = n
-	}
-	p := FetchPolicy{Timeout: 15 * time.Minute, MaxSize: min(amb, mb) << 20}
+	// (the download and what it unpacks to: each at most the per-app limit, app_max_mb)
+	p := FetchPolicy{Timeout: 15 * time.Minute, MaxSize: mb << 20}
 	allow, err := LoadAllow(filepath.Join(c.ctlConf(), "fetch-allow"))
 	if err != nil {
 		return p, Limits{}, &Error{"internal", clean(err.Error())}

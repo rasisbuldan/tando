@@ -60,7 +60,7 @@ srv/internal/usage. Tests: `test/e2e-ctl.sh`, the Go tests of those packages.
 |---|---|
 | `tando-ctl-read` | every read verb, every app |
 | `tando-ctl-write` | every verb, every app |
-| `tando-app-<app>` | that app's read verbs and its `restart`, `stop`, `start`, `rollback`, `env.set`, `env.unset`; `alerts` and `usage` narrowed to it; never `inventory` or `destroy` |
+| `tando-app-<app>` | that app's read verbs (`app.export` without env values) and its `restart`, `stop`, `start`, `rollback`, `env.set`, `env.unset`, `deploy` (of the app as it is: it cannot create one); `alerts` and `usage` narrowed to it; never `inventory`, `destroy`, `apply`, `app.import` or `node.drain` |
 
 The principal is matched by sshd: `AuthorizedPrincipalsCommand` runs `tando-gate ctl-principals`
 (as the unprivileged user `tando-keys`), which prints one line per principal with its forced
@@ -153,6 +153,7 @@ Read (no request id needed):
 | `app.history` | `n` (1-1000, default 20) | `history`: time, id, kind, result, seconds, note |
 | `alerts` | (`app` optional) | `alerts` that are firing or pending: scope (an app or `host`), check, state, since, detail |
 | `usage` | `since` (cursor, default 0), `limit` (default 5000); `app` optional | see Metering |
+| `app.export` | `values` (bool: env values too; write principal only) | see Export and import |
 
 Mutating (`request_id` required), each the agent verb the laptop CLI runs:
 
@@ -163,10 +164,129 @@ Mutating (`request_id` required), each the agent verb the laptop CLI runs:
 | `app.env.set` | `vars`: {"NAME": "value"} (no control characters) | `tando env set`; the app restarts and is checked, a change that breaks it is undone |
 | `app.env.unset` | `names`: ["NAME"] | `tando env unset` |
 | `app.destroy` | `confirm` (must be the app's name), `purge` (bool) | `tando destroy [--purge]`; write principal only |
+| `app.deploy` | `url`, `sha256`, `size`: an artifact (below) | `tando deploy` of a build made elsewhere; a new app: write principal only |
+| `apply` | `generation`, `settings`, `domains`, `env`, `artifact` | the app spec, declared whole (below); write principal only |
+| `app.import` | as `apply` | `apply` that makes a new app (refused when it exists); write principal only |
+| `node.drain` | `stop_apps` (bool), `stop_order` (app names), or `off` (bool) | below; write principal only |
 
 The result of a mutating verb is the agent's `key=value` lines as an object (`healthy`,
-`changed`, `restarted`, ...). Deploying an artifact, holding an app, applying a whole app spec and
-draining a server are not in this version.
+`changed`, `restarted`, ...).
+
+## Artifacts: app.deploy
+
+The control plane builds; the node deploys. An artifact is an archive of what a laptop deploy
+would upload, made once, stored where the control plane keeps builds, and named by its sha256:
+
+```
+tando-artifact.json     the manifest (at most 64 KB)
+release/...             the built output
+```
+
+compressed as `.tar.gz` or `.tar.zst` (zstd needs the `zstd` package on the node). The manifest:
+
+```json
+{"v": 1, "settings": {"recipe": "node", "start": "node server.js", "health": "/health"}, "source": "commit 3f2a9c1"}
+```
+
+`settings` are the `tando.conf` keys of the code, and only those: `recipe` (node, next, static
+or workerd: an artifact is already built, so recipes that build or pull on the node, python and
+container, are not deployed from one), `start`, `start_shell`, `health`, `health_expect`,
+`health_timeout`, `path`, `spa`, `compress`, `data`, `writable`, `assets`, `release`,
+`release_shell`, `release_timeout`, `node_lite`, `job_timeout`, `job_spread`, `job_missed`,
+`job.<name>` (and its `.timeout`, `.spread`, `.missed`, `.cron`), `worker.<name>` (and its
+`.stop_timeout`). Resources, domains, data and schedules of the node (`memory`, `cpu`, `domain`,
+`database`, `backup`, `idle_stop`, `worker.<name>.memory`, ...) are the app spec's (`apply`): an
+artifact that sets one is refused. `source` (at most 200 characters) comes back in the result.
+
+```json
+{"v":1,"verb":"app.deploy","app":"shop","request_id":"...","args":{"url":"https://builds.example.com/shop/3f2a9c1.tar.gz","sha256":"<64 hex>","size":1830211}}
+```
+
+What the node does, in order, and what it refuses:
+
+1. **Fetch.** `https` only, also after a redirect (at most 3); no proxy. The address is checked
+   when the connection is made, after the name is resolved: loopback, private (RFC 1918, ULA),
+   link-local (the cloud metadata service), CGNAT, multicast, documentation and other reserved
+   ranges are refused, so a URL cannot make the node reach what only it can reach. An operator who
+   serves artifacts from a private network lists those ranges in `/opt/tando/ctl/fetch-allow` (one
+   address or CIDR per line, `#` comments; root's file, writable by root only, or it is not used).
+   The certificate must chain to the system's CAs, or to the ones in `/opt/tando/ctl/fetch-ca.pem`
+   (same rule). The body must be exactly `size` bytes (at most the server's `app_max_mb`; a longer
+   body stops at `size + 1`), within 15 minutes.
+2. **Verify.** The download goes to a file that is unlinked at once, in `/var/lib/tando/ctl/art`
+   (root 700). Its sha256 is computed on that file descriptor, and the same descriptor is unpacked:
+   nothing can swap the bytes between the check and the use.
+3. **Unpack.** Into a fresh root-only directory. Refused: absolute paths, `..`, names with control
+   characters, an entry outside `release/` (other than the manifest), an entry below a symbolic
+   link or a file of the archive, a name twice, a symbolic link whose target is absolute or leaves
+   `release/`, hard links, devices, FIFOs; more than 200,000 entries or more than `app_max_mb`
+   unpacked (a decompression bomb stops there). Modes become 0644 or 0755 (no setuid, setgid or
+   sticky bit), every file root's.
+4. **Deploy.** The laptop deploy's path from its upload on: `configure` with the app's spec
+   settings (the last `apply`, or what the app has now) and the manifest's, the upload lease
+   (`begin`), the unpacked tree into the app's `incoming/` (`tando-agent artifact-put`), `activate`.
+   The activation is tando's: copy (with its own checks again: links, special files, `.env`),
+   pre-flight on a spare port, backup, release command, switch, health check, soak, and the way
+   back to the live release when any of it fails. Nothing is built. Memory admission applies.
+   The response comes when the activation ends: `result` is `verified`, with `release`, `sha256`,
+   `created`; a failed release is `failed` with tando's reason, and the live release keeps serving.
+   The staging directory is removed in every case.
+
+The node's runtimes (Node for node and next, workerd) are the operator's to install (`tando host
+setup <host> node=...`): a deploy that needs one the node lacks is `failed` and says which. An app
+the control plane made has a root-owned `incoming/`; the first deploy from an admin's laptop takes
+it over.
+
+## Apply: the app spec
+
+```json
+{"v":1,"verb":"apply","app":"shop","request_id":"...","args":{
+  "generation": 12,
+  "settings": {"memory": "256M", "idle_stop": "10m", "database": "postgres"},
+  "domains": ["shop.example.com"],
+  "env": {"set": {"API_URL": "https://api.example.com"}, "unset": ["OLD_FLAG"]},
+  "artifact": {"url": "https://...", "sha256": "...", "size": 1830211}}}
+```
+
+- `generation` orders specs: one older than any sent before, or the one applied already, is
+  refused (`conflict`). The generation is recorded only when every step is done: a failed one
+  can be sent again (with a new request id), and an older one stays refused.
+- `settings`: the app spec's keys (the ones an artifact may not carry, above). They are the whole
+  spec: one left out is not set by this apply (it keeps tando's default). `domains` adds domains;
+  removing one is not in this version.
+- Steps, in this order: `env.set`, `env.unset` (each as `app.env.set`: the app restarts and is
+  checked, and a value that breaks it is undone), then `deploy` (the artifact with these settings
+  and domains, as `app.deploy`). `deploy` runs when `settings`, `domains` or `artifact` is given or
+  the app is new; without `artifact` it deploys the artifact of the last apply again (fetched again:
+  the URL must still work).
+- A failed step stops the apply: `failed` (or the step's own code), and the message names the step
+  and the steps done. The deploy step undoes itself (the live release keeps serving); env steps
+  done before it stay (forward-only: send the spec again, or a newer one).
+- The node keeps the last spec in `/var/lib/tando/ctl/spec/<app>.json` (root 600): generation,
+  settings, domains, the artifact reference. No env value.
+
+## Export and import
+
+`app.export` (a read verb) returns what recreates the app on another node: `settings` (the spec),
+`code_settings`, `domains`, `env_names`, `artifact` (of the last apply or `app.deploy` through
+apply), `release` (the live release's id), `generation`, and `data`: `database`, `backup`, and
+`data_node` when its database is on a data node (docs/DATA-NODE.md). With `"values": true` and the
+write principal, `env` has the values too. Nothing of it is written on the node: read verbs are
+not kept by the request store, so an export leaves no secret behind that the node did not have.
+The data itself moves with a backup and `tando backup restore`, or stays on its data node.
+
+`app.import` takes `apply`'s arguments (`env.set` with the exported values) and makes the app: it
+is refused when an app of that name is on the node, or when the node is draining.
+
+## Drain
+
+`node.drain` marks the node as draining (`/var/lib/tando/ctl/draining`): `inventory` says
+`draining: true`; `app.deploy`, `apply` and `app.import` of an app that is not on the node are
+refused, and so is the first deploy of a new app from a laptop. The apps on it are deployed to,
+restarted and read as before. With `stop_apps`, the apps are stopped one at a time (as
+`app.stop`: the stopped page, units disabled, a reboot keeps them stopped), those in `stop_order`
+first, then the rest by name; the first one that fails ends it (the result says which were
+stopped). `{"off": true}` ends draining; stopped apps stay stopped until `app.start`.
 
 ## Idempotency and order
 

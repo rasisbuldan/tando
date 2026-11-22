@@ -612,7 +612,7 @@ nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Setting
 (only after moving the databases by hand: "Upgrading PostgreSQL"), `swap=yes|no`,
 `ufw=no`, `domain_tls=internal`; also `app_max_mb=`, `ci_max_mb=`, `ci_max_files=`,
 `ci_max_file_mb=`, `unit_drop=`, `journal_max=` (not in help.txt), control plane mode:
-`ctl_ca=<ca.pub>|off` and `ctl_krl=<file>` (docs/CONTROL-PLANE.md; not in help.txt), and the per-client limits on ports
+`ctl_ca=<ca.pub>|off` and `ctl_krl=<file>` (docs/CONTROL-PLANE.md; not in help.txt; artifact fetches read `/opt/tando/ctl/fetch-allow` and `fetch-ca.pem`, files the operator writes as root), and the per-client limits on ports
 80/443: `rate_limit=on|off|auto` (auto: on when tando owns Caddy), `conn_limit=N` (connections at
 once per client address, IPv6 /64; default 200), `conn_rate=N` (new connections per second, burst
 3x; default 100), and per app's user `conn_out=N` (connections at once, default 2048), `dns_rate=N`

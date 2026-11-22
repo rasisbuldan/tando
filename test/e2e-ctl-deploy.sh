@@ -163,6 +163,45 @@ EOF
 else
   skip "D16 a tar.zst artifact deploys (no zstd on the test server)"
 fi
+# ---- apply (a generation), export, import, drain --------------------------------------------------
+req() { ctl w "{\"v\":1,\"verb\":\"$1\",\"app\":\"$2\",\"request_id\":\"$3\",\"args\":$4}"; local rc=$?; log "$3: $(head -c 600 "$E/out")"; return $rc; }
+req apply web apply-0001 "{\"generation\":1,\"settings\":{\"memory\":\"160M\"},\"env\":{\"set\":{\"GREETING\":\"hello from the spec\"}},\"artifact\":$(art v1)}"
+check "A1 apply generation 1 (spec memory, an env value, the artifact): done; the app serves it with that memory" eval '
+  ok && [ "$(body)" = version-one ] && "$SSH" "sudo grep -qx memory=160M /opt/tando/apps/web/app.conf" &&
+  "$SSH" "sudo grep -q ^GREETING= /opt/tando/apps/web/env"'
+req apply web apply-0002 "{\"generation\":1,\"env\":{\"set\":{\"GREETING\":\"again\"}}}"
+check "A2 the same generation again (a new request id) is refused: conflict" eval '[ "$(code)" = conflict ] && "$SSH" "sudo grep -q hello /opt/tando/apps/web/env"'
+req apply web apply-0003 "{\"generation\":3,\"artifact\":$(art v2 1111111111111111111111111111111111111111111111111111111111111111)}"
+check "A3 a failing step is named; the app keeps serving what it served" eval '[ "$(code)" = failed ] && msg | grep -q "step deploy failed" && [ "$(body)" = version-one ]'
+req apply web apply-0004 "{\"generation\":2,\"artifact\":$(art v2)}"
+check "A4 an older generation than one sent (2 after 3) is refused" eval '[ "$(code)" = conflict ] && [ "$(body)" = version-one ]'
+req apply web apply-0005 "{\"generation\":3,\"artifact\":$(art v2)}"
+check "A5 the failed generation sent again with a new request id applies" eval 'ok && [ "$(body)" = version-two ]'
+ctl w '{"v":1,"verb":"app.export","app":"web","args":{"values":true}}'; cp "$E/out" "$E/export.json"
+check "A6 app.export: spec, env values for the write principal, the artifact applied" eval '
+  ok && [ "$(jv "d[\"result\"][\"env\"][\"GREETING\"]")" = "hello from the spec" ] && [ "$(jv "d[\"result\"][\"settings\"][\"memory\"]")" = 160M ] &&
+  [ "$(jv "d[\"result\"][\"artifact\"][\"sha256\"]")" = "$(shaof "$A/v2.tar.gz")" ]'
+check "A7 no env value is left under the request store" eval '! "$SSH" "sudo grep -rq \"hello from the spec\" /var/lib/tando/ctl"'
+imp=$(python3 -I -c 'import json, sys; r = json.load(open(sys.argv[1]))["result"]
+print(json.dumps({"generation": 1, "settings": r["settings"], "env": {"set": r["env"]}, "artifact": r["artifact"]}))' "$E/export.json")
+req app.import web2 import-0001 "$imp"
+check "A8 app.import of the export as another app: it serves the same release with the same env and memory" eval '
+  ok && [ "$(curl -s --max-time 20 "$(t_url web2)")" = version-two ] && "$SSH" "sudo grep -q \"^GREETING=\\\"hello from the spec\" /opt/tando/apps/web2/env" &&
+  "$SSH" "sudo grep -qx memory=160M /opt/tando/apps/web2/app.conf"'
+ctl w '{"v":1,"verb":"node.drain","request_id":"drain-0001"}'
+ctl w '{"v":1,"verb":"inventory"}'
+check "N1 node.drain: the inventory says draining" eval 'ok && [ "$(jv "d[\"result\"][\"node\"][\"draining\"]")" = True ]'
+req app.import web3 import-0002 "$imp"
+check "N2 a draining node takes no new app (import refused); its apps keep serving" eval '[ "$(code)" = forbidden ] && [ "$(body)" = version-two ]'
+cp -R "$ROOT/examples/hello" "$W/web4"; printf 'app = web4\n' >> "$W/web4/tando.conf"
+(cd "$W/web4" && "$R" deploy --yes > "$E/web4.log" 2>&1)
+check "N3 nor from the laptop CLI" eval 'grep -q draining "$E/web4.log" && ! "$SSH" "test -e /opt/tando/apps/web4"'
+ctl w '{"v":1,"verb":"node.drain","request_id":"drain-0002","args":{"stop_apps":true,"stop_order":["web2"]}}'
+check "N4 drain with stop_apps stops the apps in the order given" eval '
+  ok && [ "$(jv "d[\"result\"][\"stopped\"][0]")" = web2 ] && [ "$("$SSH" "systemctl is-active tando-web.service")" != active ]'
+ctl w '{"v":1,"verb":"node.drain","request_id":"drain-0003","args":{"off":true}}'
+ctl w '{"v":1,"verb":"app.start","app":"web","request_id":"start-0001"}'
+check "N5 drain off; app.start brings an app back" eval 'ok && [ "$(body)" = version-two ]'
 (cd "$W" && cp -R "$ROOT/examples/hello" web && printf 'app = web\n' >> web/tando.conf && cd web && "$R" deploy --yes > "$E/laptop.log" 2>&1)
 check "D17 a laptop deploy of the same app works after artifact deploys" eval 'case "$(body)" in ""|version-*) false;; esac'
 "$SSH" 'sudo systemctl stop tv-art' > /dev/null 2>&1

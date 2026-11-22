@@ -186,4 +186,6 @@ protocol words, not keys of `tando.conf`, and the file rejects them.
 
 Control plane mode (docs/CONTROL-PLANE.md) is a server setting (`tando host setup <host>
 ctl_ca=...`), not a key of this file. Its metering counts an app's `memory` (and its workers')
-as what the app is allocated.
+as what the app is allocated. An artifact deployed by the control plane carries only the code's
+keys (`recipe`, `start`, `health`, jobs, workers, ...); the resource, domain and data keys come
+from the control plane's app spec (`apply`): docs/CONTROL-PLANE.md, "Artifacts".

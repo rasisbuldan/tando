@@ -43,6 +43,19 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   node's CA with the mode's principal, or nothing; `tando doctor` and every host setup check that
   sshd still admits `tando-ctl` by certificate only. Request ids, quotas and eviction are per
   principal. The laptop CLI is unchanged.
+- Control plane: deploys from an artifact, app specs, export/import, drain
+  (docs/CONTROL-PLANE.md). `app.deploy` fetches a `.tar.gz` or `.tar.zst` (a manifest with the
+  code's `tando.conf` keys, and `release/`) over https only, with the address checked after DNS
+  (no loopback, private, link-local or metadata address unless `/opt/tando/ctl/fetch-allow` lists
+  it), exactly the declared size, the sha256 checked on the descriptor that is unpacked, a safe
+  unpack (no absolute paths, `..`, links out, hard links or devices; entry and byte limits), then
+  the laptop deploy's own activation (new agent verb `artifact-put`); nothing is built on the
+  node. `apply` takes the app spec with a `generation` (older ones refused; the failed step named;
+  env steps forward-only, the deploy undoes itself); `app.import` makes an app from it;
+  `app.export` returns the app's definition (env values only to the write principal, never stored
+  on the node); `node.drain` takes no new app (the laptop's first deploy is refused too) and can
+  stop the apps in order. Fixed: control plane verbs ran tando-agent without `/usr/local/bin` on
+  PATH (a Node installed there was not found). Tests: `test/e2e-ctl-deploy.sh`.
 - New: `node_lite = true` in tando.conf (node and next recipes, opt-in, never written by
   `tando init`): V8's `--lite-mode`: a few MB less warm (25.1 to 23.1 MB PSS measured on a
   hello-world Express app; the audit's 24 to 13 MB RSS was not reproduced), slower under load (docs/COMMANDS.md, "node_lite").
