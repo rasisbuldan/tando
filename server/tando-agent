@@ -2684,10 +2684,14 @@ origin_doctor() {
   [[ ${OS[last_ok]:-} =~ ^[0-9]+$ ]] && d+="; refreshed $(( ($(now) - OS[last_ok]) / 3600 )) h ago"
   if [[ -z $n ]]; then row check fail origin "origin=${H[origin]} but no ranges: nothing is trusted and, with the lock on, nothing can connect (tando host setup <host> origin=...)"
   elif ! caddy_ge 2 7; then row check fail origin "needs Caddy 2.7 or later (this is ${CADDY_V:-old}): the forwarded address is not used"
-  elif [[ $lock == on && ${H[tls]:-off} != off && ${H[origin_cert]:-} != yes ]]; then
-    row check warn origin "$d; with the lock on, certificates from a CA (tls=auto) renew only through the edge (HTTP-01): a name not proxied by it expires; origin_cert= avoids that"
-  elif ((${OS[fails]:-0} >= 3)); then row check warn origin "$d; ${OS[fails]} failed refreshes in a row, the last good list stays (${OS[last_error]:-unknown})"
-  else row check ok origin "$d"; fi
+  else
+    # both warnings, when both hold: the certificate one must not hide repeated refresh failures
+    local w=""
+    [[ $lock == on && ${H[tls]:-off} != off && ${H[origin_cert]:-} != yes ]] &&
+      w="with the lock on, certificates from a CA (tls=auto) renew only through the edge (HTTP-01): a name not proxied by it expires; origin_cert= avoids that"
+    ((${OS[fails]:-0} >= 3)) && w+="${w:+; }${OS[fails]} failed refreshes in a row, the last good list stays (${OS[last_error]:-unknown})"
+    if [[ -n $w ]]; then row check warn origin "$d; $w"; else row check ok origin "$d"; fi
+  fi
 }
 
 # On its default 127.0.0.1:2019 Caddy's admin API answers any local process: an app could rewrite

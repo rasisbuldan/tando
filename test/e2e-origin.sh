@@ -183,6 +183,12 @@ check "OR29 the lock's sets still hold the last good list, and the edge still wo
   [ "$(via_edge -H "CF-Connecting-IP: 203.0.113.7" | rip)" = 203.0.113.7 ]'
 check "OR30 three failures in a row: doctor warns, and the status file counts them" eval '
   upd > /dev/null 2>&1; srv "sudo grep -q ^fails=3 /opt/tando/origin.status" && srv "sudo /opt/tando/bin/tando-agent doctor" | grep -i origin | grep -qi "fail"'
+# the lock with tls=auto has its own warning (HTTP-01 through the edge): it must not hide the failures
+"$R" host setup test origin_lock=on tls=auto >&2
+srv "sudo /opt/tando/bin/tando-agent doctor" > "$E/doctor30b.out" 2>&1
+check "OR30b doctor shows both: the certificate warning and the failed refreshes" eval '
+  grep -i origin "$E/doctor30b.out" | grep -q "HTTP-01" && grep -i origin "$E/doctor30b.out" | grep -q "failed refreshes"'
+"$R" host setup test origin_lock=off tls=off >&2
 srv "printf '%s\n' $B_IP/32 192.0.2.0/24 198.51.100.0/24 > ~/lists/ips-v4"
 upd > /dev/null 2>&1
 check "OR31 a good list after failures clears the count" eval 'srv "sudo grep -q ^fails=0 /opt/tando/origin.status"'
