@@ -618,6 +618,26 @@ snapshot --json --range R` returns it as `host_metrics.monitoring`, and `monitor
 it after a week. The extended host sample itself (host.x, the slice columns, tandod.x) costs
 3.4–4.3 ms of CPU a minute at 25 apps on Linux (BenchmarkSampleMinute, fake /proc and /sys).
 
+**Where tandod's CPU goes.** `sudo /opt/tando/bin/tando-status cost` on the server asks tandod for
+its own cost by section, kept in memory since it started (no restart, nothing to switch on): one
+`costs` row (seconds running, ticks, its CPU and its programs' CPU in ms), then `cost last|total
+<calls> <wall ms> <cpu ms> <programs' cpu ms> <programs> <section>` for every check of the minute
+tick, the metrics sample, the log scan (`check logscan`: its journalctl runs are the programs),
+the health probes, the commit, the live loop and each socket verb. `last` is the last minute,
+`total` since the start. A section's cpu is the whole process's while it ran (the live loop running
+at the same moment counts in it). For a CPU profile, add `Environment=TANDOD_PROFILE=/var/lib/tando/tandod.pprof`
+in a drop-in of tandod.service (`systemctl edit tandod`), restart, wait, then `systemctl stop
+tandod` writes it (`go tool pprof`); remove the drop-in afterwards.
+
+Measured this way on the Docker test server (25 apps, 12 logging a line a second with an error
+every 20 s, one 300 MB journal; a laptop core, 4 minutes each): 153 ms of CPU a minute, of which
+the flush to disk of every logging app's error counts each minute was the largest part. Those counts (and the metrics' previous
+counters, the request log position) are now replaced atomically without the flush: a power cut
+costs a minute of counts; a new error group is still flushed. After: 80 ms a minute (the live
+loop about 20, the log scan about 30 plus 22 for its journalctl runs, the metrics sample 4). The per-app journalctl of the scan
+costs about 2 ms each; one long-lived `journalctl -f --namespace='*'` cost more (about 120 ms a
+minute for the same traffic, waking on every line), so the scan keeps its per-minute runs.
+
 **The Go tando-watch.** `tando-watch run` alone, in a transient unit (systemd's CPU accounting of
 its cgroup, children included), shell and Go interleaved, 20 runs each, median [min-max], on the
 1-CPU / 2 GB arm64 test container (apps healthy, nothing firing, no deliveries):

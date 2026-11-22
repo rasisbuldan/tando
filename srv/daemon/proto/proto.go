@@ -12,6 +12,7 @@
 //	show [n]  history [n]  health [app]  brief [app]  status [app]
 //	live [app]           the fast loop's latest point (srv/live: lhost, lapp rows)
 //	ring [app]           its last hour (rhost, rapp rows)
+//	cost                 tandod's own cost by section (cost rows: daemon/costrows.go)
 //
 // Layer: it imports internal/decimal and the standard library only, no domain package:
 // tando-watch and tando-status link it (client.go: when they ask the daemon, with what timeouts).
@@ -47,7 +48,7 @@ func (r Request) String() string {
 var ErrBad = errors.New("bad request")
 
 // argKinds: what each verb takes. "n" a count, "app" an app name (or "host" for brief).
-var argKinds = map[string]string{"ping": "", "tick": "", "show": "n", "history": "n", "health": "app", "brief": "app", "status": "app", "live": "app", "ring": "app"}
+var argKinds = map[string]string{"ping": "", "tick": "", "show": "n", "history": "n", "health": "app", "brief": "app", "status": "app", "live": "app", "ring": "app", "cost": ""}
 
 // Parse checks a request line (without its newline).
 func Parse(line string) (Request, error) {

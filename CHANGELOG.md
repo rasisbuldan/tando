@@ -6,6 +6,12 @@ first, grouped by area.
 
 ## Unreleased
 
+- Monitor: tandod spends less CPU. The log scan's error counts, the metrics' previous counters and
+  the request log position are no longer flushed to disk every minute (a new error group still
+  is); a hung app's direct liveness probes run at once (the run waits 20 s at most, not 20 s per
+  app), and up to 64 health probes run in parallel. `tando-status cost` on the server breaks
+  tandod's CPU down by section; `TANDOD_PROFILE=<file>` in its environment writes a CPU profile
+  (docs/MONITORING.md, "Where tandod's CPU goes").
 - New: `idle_stop = 6h` in tando.conf (scale to zero; `on` = 6h): the app's web process stops
   after that long without a request and its next request starts it (workers and jobs run on) (systemd socket activation and systemd-socket-proxyd
   behind Caddy; the first request waits about 0.1-0.3 s for a small app). `tando ls` says
