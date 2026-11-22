@@ -70,6 +70,7 @@ describe("state words come from state_reason", () => {
     expect(k("down").kind).toBe("fail");
     expect(k("failed").kind).toBe("fail");
     expect(k("stopped").kind).toBe("neutral");
+    expect(k("idle")).toEqual({ kind: "neutral", word: "idle" }); // idle_stop asleep, not down
     expect(k("deploying").kind).toBe("info");
     expect(k("not_deployed").word).toBe("never deployed");
     expect(k("weird").kind).toBe("stale");

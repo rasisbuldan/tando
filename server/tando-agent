@@ -1,3 +1,4 @@
+  [[ $state == inactive ]] && idle_app && state=idle   # (idle_stop) waits for its next request, as srv/status
 #!/bin/bash
 # tando-agent: the server side of tando. Installed as /opt/tando/bin/tando-agent (root, 755).
 #
@@ -8136,6 +8137,7 @@ app_row() { # name of the array with this unit's systemctl fields
   [[ $cpu =~ ^[0-9]+$ ]] || cpu=0
   [[ $state == active && $mono != 0 ]] && up=$((UPT - mono / 1000000))
   has_unit || { [[ -n ${S[current]:-} ]] && state=active; }   # static: served by Caddy
+  [[ $state == inactive ]] && idle_app && state=idle   # (idle_stop) waits for its next request, as srv/status
   [[ -n ${S[down]:-} ]] && state=failed
   [[ -n ${S[stopped]:-} ]] && state=stopped   # stopped by the user (tando stop); inactive = it died
   [[ ${S[phase]:-idle} != idle ]] && state=deploying

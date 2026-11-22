@@ -8,7 +8,7 @@ export interface AppNav { host: string; app: string; kind: Kind; word: string; n
 export interface DbNav { host: string; app: string }
 export interface Groups { servers: ServerRow[]; apps: AppNav[]; dbs: DbNav[]; multi: boolean; firing: number; pending: number }
 
-const IDLE = new Set(["stopped", "static", "not_deployed"]);
+const IDLE = new Set(["stopped", "static", "not_deployed", "idle"]);
 
 export function sidebarGroups(hosts: HostView[] | null): Groups {
   const hs = [...(hosts ?? [])].sort((a, b) => a.host.localeCompare(b.host));

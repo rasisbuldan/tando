@@ -11,6 +11,7 @@ export function appKind(a: Pick<AppRow, "state_reason" | "state">): { kind: Kind
     case "static": return { kind: "neutral", word: "static" };
     case "deploying": return { kind: "info", word: "deploying" };
     case "stopped": return { kind: "neutral", word: "stopped" };
+    case "idle": return { kind: "neutral", word: "idle" }; // idle_stop: asleep until its next request
     case "down": return { kind: "fail", word: "down" };
     case "failed": return { kind: "fail", word: "failed" };
     case "not_deployed": return { kind: "neutral", word: "never deployed" };
