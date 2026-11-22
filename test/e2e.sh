@@ -831,8 +831,8 @@ p1=$(srv "sudo sed -n 's/^port=//p' /opt/tando/apps/hello/app.conf")
 p2=$(srv "sudo sed -n 's/^port=//p' /opt/tando/apps/site/app.conf")
 u=$(srv "sudo stat -c %U /opt/tando/apps/site/shared; sudo stat -L -c %U:%G /opt/tando/apps/site/current;
   pgrep -u tando-site | wc -l" | tr '\n' ' ')
-check "9b site: own user and port (hello:$p1 site:$p2), served by Caddy, root:caddy release, no process ($u)" \
-  test -n "$p2" -a "$p1" != "$p2" -a "$u" = "tando-site root:caddy 0 "
+check "9b site: own user and no port (hello:$p1 site:$p2), served by Caddy, root:caddy release, no process ($u)" \
+  test -n "$p1" -a -z "$p2" -a "$u" = "tando-site root:caddy 0 "
 check "9f hello's user cannot read the static site's release" \
   eval '! srv "sudo -u tando-hello ls /opt/tando/apps/site/current/" > /dev/null 2>&1'
 check "9c site user cannot read hello's env" \

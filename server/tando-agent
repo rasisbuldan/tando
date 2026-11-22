@@ -2207,10 +2207,12 @@ fw_sync() {
     p=$(sed -n 's/^port=//p' "$a"); sp=$(sed -n 's/^preflight_port=//p' "$a")
     u=$(sed -n 's/^user=//p' "$a"); db=$(sed -n 's/^database=//p' "$a"); a=${a%/app.conf}; a=${a##*/}
     u=${u:-tando-$a}; [[ $p =~ ^[0-9]+$ ]] && sp=${sp:-$((p + 100))}
-    [[ $p =~ ^[0-9]+$ && $sp =~ ^[0-9]+$ ]] || continue
-    for x in "$p" "$sp"; do ((x >= lo && x <= hi || x >= PF_LO && x <= PF_HI)) || outside[$x]=1; done
+    # (a static site has no port, but its user runs its jobs: it gets the same rules, no accept)
+    [[ $p =~ ^[0-9]+$ && $sp =~ ^[0-9]+$ ]] || p="" sp=""
+    for x in $p $sp; do ((x >= lo && x <= hi || x >= PF_LO && x <= PF_HI)) || outside[$x]=1; done
     u=$(id -u "$u" 2> /dev/null) || continue
-    for x in "$p" "$sp"; do [[ ", ${own[$u]:-}, " == *", $x, "* ]] || own[$u]+="${own[$u]:+, }$x"; done
+    own[$u]=${own[$u]:-}
+    for x in $p $sp; do [[ ", ${own[$u]}, " == *", $x, "* ]] || own[$u]+="${own[$u]:+, }$x"; done
     # PostgreSQL only for apps with a database: another app could hold every connection slot
     # (connections that never answer the password request) and starve them. A deploy's settings
     # staged in confs/ count too: a release that adds the database reaches it from its pre-flight
@@ -2227,7 +2229,7 @@ fw_sync() {
     echo "  chain output {"
     echo "    type filter hook output priority 0; policy accept;"
     for u in "${!own[@]}"; do
-      echo "    oifname \"lo\" meta skuid $u tcp dport { ${own[$u]} } accept"
+      [[ -z ${own[$u]} ]] || echo "    oifname \"lo\" meta skuid $u tcp dport { ${own[$u]} } accept"
       echo "    oifname \"lo\" meta skuid $u tcp dport { $lo-$hi, $PF_LO-$PF_HI, 2019$others } reject with tcp reset"
       # (5432: PostgreSQL itself, 6432: pgbouncer in front of it)
       [[ -n ${pgu[$u]:-} ]] || echo "    oifname \"lo\" meta skuid $u tcp dport { 5432, 6432 } reject with tcp reset"
