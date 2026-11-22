@@ -414,7 +414,7 @@ live_before=$(echo "$LIVE_SQL" | pgsu tando_notes | tail -1)
 "$R" backup drill > "$E/drill.out" 2>&1; rc=$?
 live_after=$(echo "$LIVE_SQL" | pgsu tando_notes | tail -1)
 check "D11d backup drill restores the newest backup and reports it (rc=$rc)" \
-  eval 'test $rc = 0 && grep -q "tables, $live_before rows" "$E/drill.out" && grep -q "drill ok" "$E/drill.out"'
+  eval 'test $rc = 0 && grep -q "tables, $live_before rows" "$E/drill.out" && grep -q "drill .*ok" "$E/drill.out"'
 check "D11e ... the live database was not touched (rows $live_before -> $live_after) and the live data stays" \
   eval 'test "$live_before" = "$live_after" && test "$live_before" -ge 2 && page | grep -q drillrow2'
 check "D11f ... the throwaway database and directory are gone" \
@@ -433,7 +433,7 @@ idb=$(sed -n 's/^backed up [a-z0-9-]*: \([^ ]*\).*/\1/p' "$E/bk-bad.out")
 srv "sudo sh -c 'head -c 200 $BK/notes/$idb/db.dump > $BK/notes/$idb/db.cut && mv $BK/notes/$idb/db.cut $BK/notes/$idb/db.dump'"
 "$R" backup drill > "$E/drill-bad.out" 2>&1; rc=$?
 check "D11j a backup that does not restore: the drill fails, names why and exits non-zero (rc=$rc)" \
-  eval 'test $rc != 0 && grep -q "drill failed" "$E/drill-bad.out" && grep -q "pg_restore" "$E/drill-bad.out"'
+  eval 'test $rc != 0 && grep -q "drill .*failed" "$E/drill-bad.out" && grep -q "pg_restore" "$E/drill-bad.out"'
 check "D11k ... the failure is in the state (the alert reads it), the throwaway database is gone, doctor warns" \
   eval 'srv "sudo grep -qx drill_result=fail /opt/tando/apps/notes/state" &&
         test "$(echo "select count(*) from pg_database where datname like '"'"'tando_drill%'"'"'" | pgsu postgres | tail -1)" = 0 &&

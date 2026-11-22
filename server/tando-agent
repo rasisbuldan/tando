@@ -4713,7 +4713,7 @@ cmd_backup_drill() { # app [id]
     tmp=$D/shared/.drill-$$
     as_app mkdir -m 700 "$tmp" 2> /dev/null || why="could not make a directory for the drill in shared/"
     if [[ -z $why ]]; then
-      tf=$(tar -tvzf "$dir/data.tar.gz" 2> /dev/null | grep -c '^-')
+      tf=$(tar -tvzf "$dir/data.tar.gz" 2> /dev/null | grep -c '^[-h]')   # (files, and hard links, which unpack as files)
       if as_app tar -C "$tmp" --no-same-owner -xzf - < "$dir/data.tar.gz" 2> /dev/null; then
         nf=$(as_app find "$tmp" -type f | wc -l | tr -d ' ')
         DR_FILES=$nf
@@ -4726,7 +4726,7 @@ cmd_backup_drill() { # app [id]
     if ! { pgsql -c "DROP DATABASE IF EXISTS $dbn" && pgsql -c "CREATE DATABASE $dbn"; } > /dev/null 2>&1; then
       why="could not create the throwaway database $dbn"
     else
-      ttab=$(drill_pg pg_restore -l < "$dir/db.dump" 2> /dev/null | awk '$4 == "TABLE" { n++ } END { print n + 0 }')
+      ttab=$(drill_pg pg_restore -l < "$dir/db.dump" 2> /dev/null | awk '$4 == "TABLE" && $5 != "DATA" && $5 != "ATTACH" { n++ } END { print n + 0 }')
       timeout 3600 runuser -u postgres -- ${H[postgres_version]:+env "PGCLUSTER=${H[postgres_version]}/main"} \
         pg_restore --no-owner --no-acl -d "$dbn" < "$dir/db.dump" > /dev/null 2> "$D/.drill.err"; rc=$?
       if ((rc != 0)); then
@@ -4735,7 +4735,7 @@ cmd_backup_drill() { # app [id]
         ntab=$(pgsql -d "$dbn" -c "SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')")
         DR_TABLES=$ntab
         DR_ROWS=$(pgsql -d "$dbn" -c "SELECT coalesce(sum((xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint), 0) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')")
-        [[ $ntab == "$ttab" ]] || why="the dump lists $ttab tables and $ntab were restored"
+        [[ $ntab =~ ^[0-9]+$ ]] && ((ntab >= ttab)) || why="the dump lists $ttab tables and ${ntab:-no} were restored"
       fi
       rm -f "$D/.drill.err"
     fi

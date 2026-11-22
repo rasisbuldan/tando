@@ -76,7 +76,7 @@ preview_up() {
   link=$K_link
   if [ "$K_created" = 1 ]; then
     note "preview $pv of $parent: no database, no jobs, no backups; stops after ${C_idle_stop:-6h} idle; expires $(preview_when "$K_expires")"
-    note "its env: copied $K_env_copied variable(s) of $parent${K_env_skipped:+, left out $K_env_skipped}; secrets it must not get: preview_skip = NAME in tando.conf, then tando deploy"
+    note "its env: copied $K_env_copied variable(s) of $parent$([ "${K_env_skipped:-0}" = 0 ] || printf ', left out %s' "$K_env_skipped"); secrets it must not get: preview_skip = NAME in tando.conf, then tando deploy"
   else
     note "preview $pv exists: expiry now $(preview_when "$K_expires"); deploying to it"
   fi
