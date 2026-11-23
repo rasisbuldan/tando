@@ -1109,13 +1109,21 @@ job_gap() {
 #   figure (never below it). At most (RAM - reserve) / cap.
 # 0: no cap (no idle app, mem_overcommit=0, RAM not known). One read of /proc/meminfo, no fork per app.
 awake_auto() {
-  local ram avail low=0 oc=${H[mem_overcommit]:-$MEM_OVERCOMMIT} mi l
+  local ram avail low=0 oc=${H[mem_overcommit]:-$MEM_OVERCOMMIT} mi l cur=0
   [[ $oc =~ ^[0-9]{1,2}(\.[0-9]{1,2})?$ ]] || oc=$MEM_OVERCOMMIT
   mi=$(awk '/^MemTotal:/ { t = int($2 / 1024) } /^MemAvailable:/ { a = int($2 / 1024) } END { print t + 0, a + 0 }' /proc/meminfo 2> /dev/null)
   read -r ram avail <<< "$mi"
   if [[ $oc =~ ^0+(\.0+)?$ || ! $ram =~ ^[1-9][0-9]*$ ]]; then echo 0; return 0; fi
   if [[ -r /etc/systemd/system/system.slice.d/tando-low.conf ]]; then
     while IFS= read -r l; do [[ $l =~ ^MemoryLow=([0-9]+)M$ ]] && low=${BASH_REMATCH[1]}; done < /etc/systemd/system/system.slice.d/tando-low.conf
+    # what those services hold already is not in MemAvailable: only the rest of MemoryLow is
+    # still to be kept free (subtracting all of it counted their memory twice; on a 2 GB host
+    # with 486M MemoryLow that left room for no second idle app with 750 MB available)
+    if [[ -r /sys/fs/cgroup/system.slice/memory.current ]]; then
+      read -r cur < /sys/fs/cgroup/system.slice/memory.current
+      [[ $cur =~ ^[0-9]+$ ]] && cur=$((cur / 1048576)) || cur=0
+    fi
+    low=$((low > cur ? low - cur : 0))
   fi
   { mem_caps_mb "$R"/apps/*/app.conf; echo --; mem_caps_mb -a "$R"/apps/*/app.conf; } |
     awk -v lim="$(awk -v r="$ram" -v o="$oc" 'BEGIN { print int(r * o) }')" -v idle="${IDLE_MB:-2}" \

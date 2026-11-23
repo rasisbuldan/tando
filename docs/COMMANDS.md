@@ -1002,8 +1002,9 @@ number (honoured exactly). `auto` is the larger of two figures, worked out at ea
   `mem_overcommit`) beside the always-on apps' caps, at least 1. On a small server whose
   always-on caps fill that, this is 1 however much memory is free;
 - by free memory: the idle apps awake now plus `(MemAvailable - reserve - fresh x cap) / cap`,
-  where `cap` is the idle apps' mean `memory` cap, `reserve` the larger of RAM/10 and what host
-  setup keeps for Caddy, sshd, tandod and the database, and `fresh` the awake idle apps woken in
+  where `cap` is the idle apps' mean `memory` cap, `reserve` the larger of RAM/10 and the part of
+  what host setup keeps for Caddy, sshd, tandod and the database (system.slice `MemoryLow`) they do not
+  hold yet (what they hold is already outside MemAvailable), and `fresh` the awake idle apps woken in
   the last 60 s (they count at their full cap: they may not use their memory yet, so a burst of
   wakes cannot all count the same free memory). At most `(RAM - reserve) / cap`.
 

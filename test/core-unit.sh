@@ -545,10 +545,11 @@ aa() { # MemTotal-kB app.conf-contents... -> awake_auto (AA_AVAIL kB MemAvailabl
   echo "MemTotal: $m kB" > "$T/aa/meminfo"
   [ -n "${AA_AVAIL:-}" ] && echo "MemAvailable: $AA_AVAIL kB" >> "$T/aa/meminfo"
   [ -n "${AA_LOW:-}" ] && printf '[Slice]\nMemoryLow=%sM\n' "$AA_LOW" > "$T/aa/low.conf"
+  [ -n "${AA_SYSCUR:-}" ] && echo $((AA_SYSCUR * 1048576)) > "$T/aa/syscur"
   for a; do i=$((i + 1)); mkdir -p "$T/aa/apps/a$i"; printf '%b' "$a" > "$T/aa/apps/a$i/app.conf"; done
   # shellcheck disable=SC2016,SC2086
   R=$T/aa "$BASH" -c 'eval "$1"; shift; MEM_OVERCOMMIT=1.5 IDLE_MB=2 IDLE_AWAKE=20; awake_auto "$@"' _ \
-    "$(agent_fn mem_caps_mb awake_auto | sed -e "s#/proc/meminfo#$T/aa/meminfo#g" -e "s#/etc/systemd/system/system.slice.d/tando-low.conf#$T/aa/low.conf#g")" ${AA_ARGS:-}
+    "$(agent_fn mem_caps_mb awake_auto | sed -e "s#/proc/meminfo#$T/aa/meminfo#g" -e "s#/etc/systemd/system/system.slice.d/tando-low.conf#$T/aa/low.conf#g" -e "s#/sys/fs/cgroup/system.slice/memory.current#$T/aa/syscur#g")" ${AA_ARGS:-}
 }
 # 1000 MB x 1.5 = 1500; always-on 500; ten idle apps of 100 MB (2 MB each idle): (1500-500-20)/100 = 9
 idle10=""; for i in 1 2 3 4 5 6 7 8 9 10; do idle10="$idle10 memory=100M\nidle_stop=10m\n"; done
@@ -564,6 +565,7 @@ check "U18w with 1100 MB free, nothing awake: (1100-200)/256 = 3" eq "$(AA_AVAIL
 check "U18x one awake and just woken counts at its full cap: 1 + (1100-200-256)/256 = 3" eq "$(AA_AVAIL=1126400 AA_ARGS='1 1' aa 2048000 $full12 $idle3)" 3
 check "U18y memory short (300 MB free, one awake): back to the caps figure, 1" eq "$(AA_AVAIL=307200 AA_ARGS='1 0' aa 2048000 $full12 $idle3)" 1
 check "U18z the reserve is host setup's core MemoryLow when larger than RAM/10: (1100-400)/256 = 2" eq "$(AA_AVAIL=1126400 AA_LOW=400 AA_ARGS='0 0' aa 2048000 $full12 $idle3)" 2
+check "U18z2 MemoryLow already held by the services is in no MemAvailable: only the rest is reserved (400 low, 350 held: RAM/10 = 200; (1100-200)/256 = 3)" eq "$(AA_AVAIL=1126400 AA_LOW=400 AA_SYSCUR=350 AA_ARGS='0 0' aa 2048000 $full12 $idle3)" 3
 check "U18aa at most (RAM - reserve) / cap" eq "$(AA_AVAIL=4096000 AA_ARGS='0 0' aa 2048000 $full12 $idle3)" 7
 check "U18ab a refused wake never fails the unit: its start-limit count is cleared at once, and app-down and recover leave a refused app asleep" eval '
   sed -n "/^cmd_wake_admit() {/,/^}/p" "$ROOT/server/tando-agent" | grep -q "^      systemctl reset-failed \"tando-\$A.service\"" &&
