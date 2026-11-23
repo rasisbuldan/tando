@@ -49,7 +49,8 @@ check "0b the client runs under macOS /bin/bash 3.2 ($(/bin/bash -c 'echo $BASH_
 KD=$(mktemp -d /tmp/tando-ease.XXXXXX) || exit 1   # a short key path: commands are printed with it
 trap 'rm -rf "$KD"' EXIT
 mkdir -p "$E/bin"
-printf '#!/bin/bash\necho x >> "%s/ssh.count"\nexec /usr/bin/ssh "$@"\n' "$E" > "$E/bin/ssh"; chmod +x "$E/bin/ssh"
+# (ssh -O and -G only ask the local control socket or print the config: no round trip, not counted)
+printf '#!/bin/bash\ncase " $* " in *" -O "*|*" -G "*) ;; *) echo x >> "%s/ssh.count";; esac\nexec /usr/bin/ssh "$@"\n' "$E" > "$E/bin/ssh"; chmod +x "$E/bin/ssh"
 cp "$ROOT/test/server/id_test" "$KD/id"; chmod 600 "$KD/id"
 export PATH="$E/bin:$PATH"
 nssh() { cat "$E/ssh.count" 2> /dev/null | wc -l | tr -d ' '; }
