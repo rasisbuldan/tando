@@ -147,6 +147,11 @@ check "u1 uninstall stops the running tando-dash (pid $lp) and removes the binar
 check "u2 uninstall leaves the user's other files (cache/apps.vps, hosts/)" eval 'test "$(cat "$TANDO_CONFIG_DIR/cache/apps.vps")" = keep && test -d "$TANDO_CONFIG_DIR/hosts"'
 r addon uninstall dashboard > "$E/u3.out" 2>&1; rc=$?
 check "u3 uninstall again says it is not installed (rc=$rc)" eval 'test $rc = 0 && grep -q "not installed" "$E/u3.out"'
-out=$(r dashboard 2>&1)
+# (not installed means not on the PATH either: a tando-dash of the machine this runs on, found by
+# `command -v`, would be started and serve for ever. And a hang here must fail, not wait)
+npath=; oldifs=$IFS; IFS=:
+for d in $PATH; do [ -x "$d/tando-dash" ] || npath=${npath:+$npath:}$d; done
+IFS=$oldifs
+out=$(PATH=$npath perl -e 'alarm 30; exec @ARGV' "$R" dashboard 2>&1)
 check "u4 'tando dashboard' without the add-on says how to install it" eval 'printf "%s" "$out" | grep -q "tando addon install dashboard"'
 t_done
