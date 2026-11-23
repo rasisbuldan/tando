@@ -1572,8 +1572,23 @@ write_caddy() {
     [[ -x $LOGS ]] && "$LOGS" caddy-log "$A"
     # compression (compress = off turns it off): Caddy's encode handler wraps every answer of the
     # site; it leaves alone a response that has a Content-Encoding already (an app's own, a
-    # precompressed asset), a small one, one that is not text, and a websocket or event stream
-    [[ ${C[compress]:-on} == off ]] || echo "	encode zstd gzip"
+    # precompressed asset), a small one, one that is not text, and a websocket or event stream.
+    # (Caddy's own list of types has text/*, which holds text/event-stream, and Caddy 2.11
+    # compresses an event stream with it: the types are named here, without that one)
+    if [[ ${C[compress]:-on} != off ]]; then
+      echo "	encode zstd gzip {"
+      echo "		match {"
+      local ct
+      for ct in text/html text/plain text/css text/javascript text/xml text/csv text/markdown text/calendar text/vtt \
+        application/javascript application/x-javascript application/json application/ld+json application/manifest+json \
+        application/geo+json application/vnd.api+json application/xml application/xhtml+xml application/rss+xml \
+        application/atom+xml application/wasm application/x-protobuf image/svg+xml image/x-icon image/vnd.microsoft.icon \
+        font/ttf font/otf application/font application/vnd.ms-fontobject application/x-font; do
+        echo "			header Content-Type $ct*"
+      done
+      echo "		}"
+      echo "	}"
+    fi
     # a Host with a port (site.example:443) reaches the site, but Caddy before 2.7 does not log
     # it: answer 400, so nothing is served unlogged (public_port, a test setup, stays allowed)
     echo "	@tandoport {"
@@ -4169,7 +4184,7 @@ cmd_doctor() {
     ac=$(nft list counter inet tando app_conn 2> /dev/null | sed -n 's/.*packets \([0-9]*\).*/\1/p')
     ad=$(nft list counter inet tando app_db 2> /dev/null | sed -n 's/.*packets \([0-9]*\).*/\1/p')
     an=$(nft list counter inet tando app_dns 2> /dev/null | sed -n 's/.*packets \([0-9]*\).*/\1/p')
-    row check ok "app limits" "per app: ${H[conn_out]:-$CONN_OUT} conns, ${H[dns_rate]:-$DNS_RATE} DNS/s, db_pool x $DB_CONNS to the database; refused ${ac:-0}, ${an:-0}, ${ad:-0}"
+    row check ok "app limits" "${H[conn_out]:-$CONN_OUT} conns, ${H[dns_rate]:-$DNS_RATE} DNS/s, db_pool x $DB_CONNS; refused ${ac:-0}, ${an:-0}, ${ad:-0}"
   fi
   # per-client limits on the web ports (rate_limit_rules): how often they tripped since the rules loaded
   local rlc rlr

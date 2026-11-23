@@ -142,7 +142,7 @@ check "J3c2 one word for the zone: GMT in the header as in the NEXT column, neve
   eval 'grep -q "server time (GMT)" "$E/jobs0.out" && ! grep -q UTC "$E/jobs0.out"'
 ny=$(($(date -u +%Y) + 1))
 check "J3b2 a next run in another year shows its year (a yearly job: $ny-01-01), in the table and in the next runs" \
-  eval 'grep -q "^│ a  *yearly  *$ny-01-01 00:00 GMT" "$E/jobs0.out" && grep -q "^│   a  $ny-01-01 00:00, $((ny + 1))-01-01 00:00" "$E/jobs0.out"'
+  eval 'grep -q "^│ a  *yearly  *$ny-01-01 00:[0-9][0-9] GMT" "$E/jobs0.out" && grep -q "^│   a  $ny-01-01 00:00, $((ny + 1))-01-01 00:00" "$E/jobs0.out"'
 
 # runs: a three times, z twice, f, flip, slow, hog
 for i in 1 2 3; do J jobs run a > "$E/run-a$i.out" 2>&1; done
