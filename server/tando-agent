@@ -1572,8 +1572,23 @@ write_caddy() {
     [[ -x $LOGS ]] && "$LOGS" caddy-log "$A"
     # compression (compress = off turns it off): Caddy's encode handler wraps every answer of the
     # site; it leaves alone a response that has a Content-Encoding already (an app's own, a
-    # precompressed asset), a small one, one that is not text, and a websocket or event stream
-    [[ ${C[compress]:-on} == off ]] || echo "	encode zstd gzip"
+    # precompressed asset), a small one, one that is not text, and a websocket or event stream.
+    # (Caddy's own list of types has text/*, which holds text/event-stream, and Caddy 2.11
+    # compresses an event stream with it: the types are named here, without that one)
+    if [[ ${C[compress]:-on} != off ]]; then
+      echo "	encode zstd gzip {"
+      echo "		match {"
+      local ct
+      for ct in text/html text/plain text/css text/javascript text/xml text/csv text/markdown text/calendar text/vtt \
+        application/javascript application/x-javascript application/json application/ld+json application/manifest+json \
+        application/geo+json application/vnd.api+json application/xml application/xhtml+xml application/rss+xml \
+        application/atom+xml application/wasm application/x-protobuf image/svg+xml image/x-icon image/vnd.microsoft.icon \
+        font/ttf font/otf application/font application/vnd.ms-fontobject application/x-font; do
+        echo "			header Content-Type $ct*"
+      done
+      echo "		}"
+      echo "	}"
+    fi
     # a Host with a port (site.example:443) reaches the site, but Caddy before 2.7 does not log
     # it: answer 400, so nothing is served unlogged (public_port, a test setup, stays allowed)
     echo "	@tandoport {"
