@@ -75,7 +75,7 @@ ci_key_resolve() {
   SSHO=(-F /dev/null -p "$port" -i "$TMPD/deploy_key" -o IdentitiesOnly=yes -o IdentityAgent=none
         -o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$TMPD/known_hosts"
         -o GlobalKnownHostsFile=/dev/null -o HostKeyAlias=tando-deploy-host
-        -o ControlMaster=auto -o "ControlPath=$cp" -o ControlPersist=30 -o ServerAliveInterval=10
+        -o ControlMaster=auto -o "ControlPath=$cp" -o ControlPersist=30 -o ServerAliveInterval=10 -o ServerAliveCountMax=3
         -o ConnectTimeout=10 -o ClearAllForwardings=yes -o ForwardAgent=no -o RequestTTY=no
         -o LogLevel=ERROR)
   ci_key_ui

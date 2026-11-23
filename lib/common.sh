@@ -208,7 +208,7 @@ host_trust() {
 # host_check: one ssh call: login, passwordless sudo, tando installed and its version
 host_check() {
   local out
-  out=$(ssh "${SSHO[@]}" "$TARGET" 'echo login=1; sudo -n true 2> /dev/null && echo sudo=1;
+  out=$(ssh_g "$TARGET" 'echo login=1; sudo -n true 2> /dev/null && echo sudo=1;
     test -x /opt/tando/bin/tando-agent && echo agent=1; cat /opt/tando/VERSION 2> /dev/null | sed "s/^/version=/"' \
     2> "$TMPD/err" | strip)
   case $out in *login=1*) ;; *) ssh_explain "$TMPD/err" || note "tando: cannot connect to $HOST: $(strip < "$TMPD/err" | grep . | tail -1)"; return 1;; esac
@@ -359,7 +359,8 @@ host_use() {
     cp="$CTL_DIR/%C-$tag"
   fi
   SSHO=(-p "$(host_get "$1" port)" -o BatchMode=yes -o ControlMaster=auto -o "ControlPath=$cp"
-        -o ControlPersist=600 -o ServerAliveInterval=10 -o ConnectTimeout=5)
+        -o ControlPersist=600 -o ServerAliveInterval=10 -o ServerAliveCountMax=3
+        -o ConnectTimeout=5)
   [ -n "$key" ] && SSHO+=(-i "$key" -o IdentitiesOnly=yes)
   if [ "$(host_get "$1" kind)" = deploy ]; then   # a deploy key's host entry (tando ci)
     . "$TANDO_HOME/lib/cmd-ci.sh"; ci_key_ui
@@ -372,7 +373,98 @@ host_use() {
     # (GlobalKnownHostsFile: one path per option, no space that rsync -e or a string could split)
     [ -f "$CFG/known_hosts" ] && SSHO+=(-o "GlobalKnownHostsFile=$CFG/known_hosts")
   fi
+  MUX_PAT=${cp//%C/\*}   # (the control socket's name, with * for the hash ssh makes)
+  ssh_mux_heal
   return 0   # (a server already in ~/.ssh/known_hosts has no $CFG/known_hosts: not a failure)
+}
+
+# ---- a connection that cannot hang a command -------------------------------------------------
+# The shared connection (ControlPersist) outlives the command that made it: after a night asleep
+# or a reboot of the server its master can be dead (ssh drops it itself within ServerAliveInterval
+# x ServerAliveCountMax = 30 s) or alive but not answering (stopped, wedged): every later command
+# then waits on it, and no ssh option bounds that wait (ConnectTimeout is for a new connection;
+# a mux client has no timeout at all). So: a master that does not answer a local `-O check` is
+# dropped before a command uses it (ssh_mux_heal, one local round trip, once per host and run),
+# and a call that goes through ssh_g is watched while it runs (ssh_watchdog).
+
+# run_bounded seconds command...: runs it (stdin, stdout, stderr as they are); 124 when it did not
+# finish in time (it is killed). No timeout(1) on macOS; plain bash 3.2.
+run_bounded() {
+  local t=$1 pid w rc
+  shift
+  "$@" & pid=$!
+  ( sleep "$t"; kill -9 "$pid" 2> /dev/null ) > /dev/null 2>&1 < /dev/null & w=$!
+  wait "$pid" 2> /dev/null; rc=$?
+  kill "$w" 2> /dev/null; wait "$w" 2> /dev/null
+  [ "$rc" = 137 ] && rc=124   # (ssh itself never exits 137: this is our kill)
+  return "$rc"
+}
+
+# ssh_mux_state -> MUX_STATE: up (a master answers), hung (a socket answers nothing in 5 s), none
+# (no master: nothing to drop; ssh makes a new one). SSH_MUX_WAIT: seconds to wait (tests)
+ssh_mux_state() {
+  local rc
+  run_bounded "${SSH_MUX_WAIT:-5}" ssh -O check "${SSHO[@]}" "$TARGET" < /dev/null > /dev/null 2>&1; rc=$?
+  case $rc in 0) MUX_STATE=up;; 124) MUX_STATE=hung;; *) MUX_STATE=none;; esac
+}
+
+# ssh_mux_drop: take a master that does not answer out of use: its socket is removed (the next
+# ssh makes a new master; the old one is killed when its process is found, else it is idle and
+# ends by itself)
+ssh_mux_drop() {
+  local p pid
+  p=$(ssh -G "${SSHO[@]}" "$TARGET" 2> /dev/null | awk '$1 == "controlpath" { print substr($0, 13) }')
+  [ -n "$p" ] && [ -S "$p" ] || return 0
+  # (the master's process title is "ssh: <socket> [mux]"; lsof would say it too, but takes seconds)
+  for pid in $(pgrep -f "^ssh: $p \\[mux\\]" 2> /dev/null); do kill -9 "$pid" 2> /dev/null; done
+  rm -f "$p"
+}
+
+# ssh_mux_heal: before the first command of a run on this host
+ssh_mux_heal() {
+  case " ${MUX_HEALED:-} " in *" $HOST "*) return 0;; esac
+  MUX_HEALED="${MUX_HEALED:-} $HOST"
+  # no socket, no master: nothing to ask (a first call, or a stub in a test)
+  local f found=""
+  for f in "${MUX_PAT%/*}"/${MUX_PAT##*/}; do [ -S "$f" ] && found=1; done
+  [ -n "$found" ] || return 0
+  ssh_mux_state
+  [ "$MUX_STATE" = hung ] || return 0
+  ssh_mux_drop
+  note "tando: the old connection to $HOST did not answer: dropped, a new one is made"
+}
+
+# ssh_watchdog pidfile killedfile: runs beside one ssh call. Every SSH_WATCH seconds (20) the
+# master is asked; a master that is there but does not answer twice in a row (a dead server is
+# ServerAlive's: it ends the master within 30 s) is dropped and the call is killed. A call
+# without a shared connection is not touched.
+ssh_watchdog() {
+  local pid bad=0
+  while sleep "${SSH_WATCH:-20}"; do
+    pid=$(cat "$1" 2> /dev/null)
+    [ -n "$pid" ] && kill -0 "$pid" 2> /dev/null || continue
+    ssh_mux_state
+    if [ "$MUX_STATE" = hung ]; then bad=$((bad + 1)); else bad=0; fi
+    if [ "$bad" -ge 2 ]; then
+      : > "$2"; ssh_mux_drop; kill -9 "$pid" 2> /dev/null; return 0
+    fi
+  done
+}
+
+# ssh_g args...: ssh with this host's options and the watchdog. Same stdin, stdout, stderr and exit
+# status as ssh; 255 and a message when the watchdog ended the call.
+ssh_g() {
+  local pf wd rc
+  pf=$(mktemp "$TMPD/wd.XXXXXX") || { ssh "${SSHO[@]}" "$@"; return; }
+  ssh_watchdog "$pf" "$pf.killed" > /dev/null 2>&1 < /dev/null & wd=$!
+  sh -c 'echo $$ > "$1"; shift; exec ssh "$@"' _ "$pf" "${SSHO[@]}" "$@"; rc=$?
+  kill "$wd" 2> /dev/null; wait "$wd" 2> /dev/null
+  if [ -e "$pf.killed" ]; then
+    rc=255
+    note "tando: the connection to $HOST stopped answering: the command was ended (nothing more is sent). Run it again."
+  fi
+  rm -f "$pf" "$pf.killed"
+  return "$rc"
 }
 
 # ssh_wrapper: a script $TMPD/ssh-<host> that runs ssh with this host's options (SSHO) and its
@@ -948,7 +1040,8 @@ install_helpers() {
   helpers_build
   # shellcheck disable=SC2029
   # lint: allow RL04 the names are the callers' constants (tando-<word>)
-  ssh "${SSHO[@]}" "$TARGET" "echo arch=\$(uname -m); cd /opt/tando/bin 2> /dev/null && sha256sum -- $* 2> /dev/null; true" \
+  # lint: allow RL02 sha256sum runs on the server (Linux), not here
+  ssh_g "$TARGET" "echo arch=\$(uname -m); cd /opt/tando/bin 2> /dev/null && sha256sum -- $* 2> /dev/null; true" \
     > "$TMPD/probe" 2> "$TMPD/err" || return 1
   l=$(strip < "$TMPD/probe")
   case $l in *arch=x86_64*) cpu=amd64;; *arch=aarch64*|*arch=arm64*) cpu=arm64;; esac
@@ -973,7 +1066,7 @@ install_helpers() {
   done
   # shellcheck disable=SC2016,SC2029
   # lint: allow RL04 names are fixed, sizes and sums are computed here from the tree
-  for f in ${send[@]+"${send[@]}"}; do cat "$f"; done | ssh "${SSHO[@]}" "$TARGET" "sudo -n bash -c '$(install_helpers_script)' _ ${a[*]}" 2> "$TMPD/err"
+  for f in ${send[@]+"${send[@]}"}; do cat "$f"; done | ssh_g "$TARGET" "sudo -n bash -c '$(install_helpers_script)' _ ${a[*]}" 2> "$TMPD/err"
   m=${PIPESTATUS[1]}   # ssh's status (the server checks that every byte arrived)
   # killed or disconnected (not one of the script's own messages): it may have stopped between renames
   if [ "$m" -ge 128 ] && [ ${#send[@]} -gt 0 ]; then
@@ -1077,7 +1170,7 @@ agent_raw() {
   done
   local try=0
   while :; do
-    ssh "${SSHO[@]}" "$TARGET" "$s$AGENT_BIN $*" 2> "${ERRF:-$TMPD/err}" | strip
+    ssh_g "$TARGET" "$s$AGENT_BIN $*" 2> "${ERRF:-$TMPD/err}" | strip
     rc=${PIPESTATUS[0]}
     # the server turned the session away before the command started (sshd MaxSessions on the
     # shared connection, or MaxStartups): nothing ran, so trying again is safe for every verb
