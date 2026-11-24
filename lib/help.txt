@@ -47,9 +47,9 @@ Next.js: offers to add output: "standalone" to next.config (--yes adds it).
 Example: tando init && cat tando.conf
 
 @@ up
-flags: -H= --yes --force --wait
+flags: -H= --yes --force --wait --clean
 args: 0
-usage: tando up [-H host] [--yes] [--force] [--wait]
+usage: tando up [-H host] [--yes] [--force] [--wait] [--clean]
 Create the app on the server if it does not exist yet, apply tando.conf and
 deploy. Writes tando.conf first when there is none (see tando init). The app
 is created only after the build succeeded, so a failed first build leaves
@@ -58,9 +58,9 @@ nothing behind on the server.
 Example: cd my-app && tando up
 
 @@ deploy
-flags: -a= -H= --force --yes --wait --dry-run
+flags: -a= -H= --force --yes --wait --dry-run --ref= --clean
 args: 0
-usage: tando deploy [-a app] [-H host] [--force] [--yes] [--wait] [--dry-run]
+usage: tando deploy [-a app] [-H host] [--force] [--yes] [--wait] [--dry-run] [--ref ref] [--clean]
 Build here, upload the changes, start the new release on a spare port, check
 its health, switch traffic to it and check again through Caddy; any failure
 rolls back to the release that was live. The new release then has to stay up
@@ -87,6 +87,12 @@ same, and tando up creates it).
 A fresh clone without node_modules stops before the build: run npm ci (or your
 package manager's install) first; tando up runs it for you.
 Native npm packages for another platform than the server's: docs/CROSS-ARCH.md.
+Every release records the git commit, the branch and the number of uncommitted
+files it was built from (tando history, releases, status). A deploy from a dirty
+tree warns with the count; require_clean = true in tando.conf, or --clean,
+refuses it instead. --ref <branch|tag|sha> builds a clean temporary checkout of
+that ref (with its own tando.conf; local files such as .env are copied in only
+when build_files lists them) instead of the working tree, and removes it after.
 Example: tando deploy
 
 @@ rollback

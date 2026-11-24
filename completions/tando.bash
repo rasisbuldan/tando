@@ -61,8 +61,8 @@ _tando() {
   local subs="" flags="" args="" sub=${COMP_WORDS[i+1]:-}
   case $cmd in
     init) subs="" flags="$flags -H --yes" args="";;
-    up) subs="" flags="$flags -H --yes --force --wait" args="";;
-    deploy) subs="" flags="$flags -a -H --force --yes --wait --dry-run" args="";;
+    up) subs="" flags="$flags -H --yes --force --wait --clean" args="";;
+    deploy) subs="" flags="$flags -a -H --force --yes --wait --dry-run --ref --clean" args="";;
     rollback) subs="" flags="$flags -H -a" args="apps";;
     releases) subs="" flags="$flags -H --json -a" args="apps";;
     history) subs="" flags="$flags -n -H --json -a" args="apps";;

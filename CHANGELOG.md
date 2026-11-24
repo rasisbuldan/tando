@@ -18,6 +18,23 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   `AcceptEnv` of `SSH_USER_AUTH`. The request store's cap check is O(1) (a count file).
 - `tando doctor` shows the origin lock's certificate warning and repeated refresh failures together.
 
+### Where the code came from
+
+- Every release records the git commit (full sha), the branch and the number of uncommitted files
+  when the project is in a git repository. `tando releases`, `history` and `status` show the short sha
+  and a `dirty` marker; `--json` (and `snapshot`) has `commit`, `branch` and `dirty_files`. Stored in
+  the app's `state` (`git_<id>`) and as the 14th field of `history.tsv`; `tando-status` (Go) and the
+  agent's shell fallback print the same rows (a 6th field on `rel` rows, a 14th on release-command-less
+  `hist` rows with a "-" in the 13th).
+- `tando deploy` from a tree with uncommitted files prints one warning with the count and suggests
+  `--ref`; `require_clean = true` or `--clean` refuses it. Ignored files do not count.
+- `tando deploy --ref <branch|tag|sha>` builds a clean temporary checkout of that commit with its own
+  `tando.conf` (an untracked one is copied, and it says so), instead of the working tree. New
+  `build_files` lists gitignored local files (`.env.production.local`) copied into the checkout for the
+  build; never implicit, never printed. The checkout is removed after a deploy, a failure or a signal.
+- `tando --version` and the server's `VERSION` read `0.2.2+<sha>` (`-dirty`) for a git checkout that is
+  not exactly its release tag; release archives are unchanged. Versions are compared on `X.Y.Z`.
+
 ### New
 
 - Guardrails for shared servers (docs/COMMANDS.md "Profiles and guardrails"): limit profiles

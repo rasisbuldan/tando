@@ -61,7 +61,12 @@ func ReleaseRows(S kv, ids []string) [][]string {
 		if id == S.get("last_good") {
 			last = "1"
 		}
-		rows = append(rows, []string{"rel", id, S.or("status_"+id, "pending"), cur, last})
+		row := []string{"rel", id, S.or("status_"+id, "pending"), cur, last}
+		// a 6th field, the git provenance "sha:changed files:branch", only for a release that has one
+		if g := S.get("git_" + id); g != "" {
+			row = append(row, g)
+		}
+		rows = append(rows, row)
 	}
 	return rows
 }
@@ -199,14 +204,14 @@ func histCount(s string) int64 {
 // maxHistTail bounds how much of the end of a history file is read for its last n lines.
 const maxHistTail = 16 << 20
 
-// history adds `tail -n "$n" history.tsv | awk -F '\t' 'NF == 12 || NF == 13' | sed "s/^/hist\t$app\t/"`.
+// history adds `tail -n "$n" history.tsv | awk -F '\t' 'NF >= 12 && NF <= 14' | sed "s/^/hist\t$app\t/"`.
 // Each field is cleaned again (they were written cleaned by the agent's row).
 func (c *Collector) history(s *sink, name string, n int64) {
 	if n <= 0 {
 		return
 	}
 	for _, l := range tailLines(filepath.Join(c.appDir(name), "history.tsv"), n, maxHistTail) {
-		if n := strings.Count(l, "\t"); n != 11 && n != 12 { // (12: with the release command's seconds)
+		if n := strings.Count(l, "\t"); n < 11 || n > 13 { // (12: with the release command's seconds; 13: and the git provenance)
 			continue
 		}
 		// (not s.row: an empty field stays empty, as awk printed it)

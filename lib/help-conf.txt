@@ -9,6 +9,8 @@ App
 Build
   build           command run here before the upload
   out             directory to upload, inside the project (default .)
+  require_clean   true: refuse to deploy a git tree with uncommitted files (default false)
+  build_files     local files (.env ...) tando deploy --ref copies into its clean checkout for the build
   spa             true: a static single-page app; paths that are not files get index.html
   dockerfile      Dockerfile for recipe = container (default Dockerfile)
   image           ready image the server pulls (container)

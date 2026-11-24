@@ -220,6 +220,7 @@ skew_load() {
   while IFS=$TAB read -r r se sv _x; do
     [ "$r" = server ] || continue
     ui_int "$se" && [ ${#se} -le 12 ] && ui_int "${NOW:-}" && SKEW=$((10#$se - NOW))
+    sv=${sv%%+*}   # (a git build's +<sha> is not part of the version compared)
     case $sv in [0-9]*.[0-9]*.[0-9]*) case $sv in *[!0-9.]*) ;; *) SRV_VER=$sv;; esac;; esac
   done < "$TMPD/st"
   return 0
@@ -525,14 +526,29 @@ attention() {
 check_exit() { [ -n "$CHECK" ] || return 0; [ "$(attention "$TMPD/st")" = 0 ] || exit 2; }
 cmd_ls() { resolve 0; check_flag; watch_loop render_ls fetch_status; check_exit; }
 
-hist_rows() { # max -> TIME (GMT) RELEASE KIND RESULT TOTAL, newest first; the notes -> $TMPD/notes
-  local r a ts id kind res tot b u c p s v note
-  printf 'TIME (GMT)\tRELEASE\tKIND\tRESULT\tTOTAL\n'
+# prov_cell "sha:N:branch" -> "abc1234", "abc1234 dirty" (colored), or "-" (no git provenance)
+prov_cell() {
+  local sha n
+  case ${1:--} in -|"") printf -- '-'; return 0;; esac
+  sha=${1%%:*}; n=${1#*:}; n=${n%%:*}
+  printf '%s' "${sha:0:7}"
+  case $n in 0|"") ;; *) printf ' %sdirty%s' "$UI_YELLOW" "$UI_NC";; esac
+}
+# prov_split "sha:N:branch" -> PV_SHA PV_N PV_BR ("-" for what is not there), for the JSON rows
+prov_split() {
+  PV_SHA=- PV_N=- PV_BR=-
+  case ${1:--} in [0-9a-f]*:[0-9]*:?*) PV_SHA=${1%%:*}; PV_N=${1#*:}; PV_BR=${PV_N#*:}; PV_N=${PV_N%%:*};; esac
+}
+hist_rows() { # max -> TIME (GMT) RELEASE [COMMIT] KIND RESULT TOTAL, newest first; the notes -> $TMPD/notes
+  local r a ts id kind res tot b u c p s v note rc pv hp=""
+  # a COMMIT column only when a deploy shown has git provenance
+  grep "^hist$TAB" "$TMPD/st" | sort -t "$TAB" -k3,3nr | head -n "$1" | awk -F '\t' '$16 != "" && $16 != "-" { f = 1 } END { exit !f }' && hp=1
+  printf 'TIME (GMT)\tRELEASE\t%sKIND\tRESULT\tTOTAL\n' "${hp:+COMMIT$TAB}"
   : > "$TMPD/notes"
   grep "^hist$TAB" "$TMPD/st" | sort -t "$TAB" -k3,3nr | head -n "$1" |
-  while IFS=$TAB read -r r a ts id kind res tot b u c p s v note; do
+  while IFS=$TAB read -r r a ts id kind res tot b u c p s v note rc pv; do
     ui_utc_v "$ts"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$UI_RET" "$id" "$kind" "$(badge "$res")" "$(secs "$tot")"
+    printf '%s\t%s\t%s%s\t%s\t%s\n' "$UI_RET" "$id" "${hp:+$(prov_cell "$pv")$TAB}" "$kind" "$(badge "$res")" "$(secs "$tot")"
     hist_note "$id" "$kind" "$res" "$note" >> "$TMPD/notes"
   done
 }
@@ -661,31 +677,40 @@ render_status() {
   done < "$TMPD/st"
   ui_box_sep releases
   rel_rows > "$TMPD/rows"
-  ui_table "l,l,l!2,l!1" < "$TMPD/rows"
+  if [ "$(head -n 1 "$TMPD/rows" | cut -f5)" = COMMIT ]; then ui_table "l,l,l!3,l!1,l!2" < "$TMPD/rows"
+  else ui_table "l,l,l!2,l!1" < "$TMPD/rows"; fi
   ui_box_sep history
   hist_rows 5 > "$TMPD/rows"
   if [ "$(wc -l < "$TMPD/rows")" -le 1 ]; then ui_box_line "${UI_DIM}no deploy has finished yet${UI_NC}"
+  elif [ "$(head -n 1 "$TMPD/rows" | cut -f3)" = COMMIT ]; then ui_table "l,l,l!2,l,l,r" < "$TMPD/rows"
   else ui_table "l,l,l,l,r" < "$TMPD/rows"; fi
   hist_notes_box
   ui_box_close "$(watch_note)"
 }
-rel_rows() { # RELEASE STATUS DEPLOYED marks, from the rel rows of $TMPD/st
-  local r id st c g
-  printf 'RELEASE (UTC)\tSTATUS\tDEPLOYED\t\n'
-  while IFS=$TAB read -r r id st c g; do
-    [ "$r" = rel ] && printf '%s\t%s\t%s\t%s\n' "$id" "$(badge "$st")" "$(ago "$(id_epoch "$id")")" "$(marks "$c" "$g")"
+rel_rows() { # RELEASE STATUS DEPLOYED marks [COMMIT], from the rel rows of $TMPD/st
+  local r id st c g pv hp=""
+  # a COMMIT column only when a release shown has git provenance (a 6th field of the rel row)
+  awk -F '\t' '$1 == "rel" && $6 != "" && $6 != "-" { f = 1 } END { exit !f }' "$TMPD/st" && hp=1
+  printf 'RELEASE (UTC)\tSTATUS\tDEPLOYED\t%s\n' "${hp:+${TAB}COMMIT}"
+  while IFS=$TAB read -r r id st c g pv; do
+    [ "$r" = rel ] && printf '%s\t%s\t%s\t%s%s\n' "$id" "$(badge "$st")" "$(ago "$(id_epoch "$id")")" \
+      "$(marks "$c" "$g")" "${hp:+$TAB$(prov_cell "$pv")}"
   done < "$TMPD/st"
 }
 rel_json() {
-  local r id st c g
-  while IFS=$TAB read -r r id st c g; do
-    [ "$r" = rel ] && printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$(id_epoch "$id")" "$st" "$c" "$g"
-  done < "$TMPD/st" | to_json "id:s,deployed_at:n,status:s,current:b,last_good:b"
+  local r id st c g pv
+  while IFS=$TAB read -r r id st c g pv; do
+    [ "$r" = rel ] || continue
+    prov_split "$pv"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$(id_epoch "$id")" "$st" "$c" "$g" "$PV_SHA" "$PV_BR" "$PV_N"
+  done < "$TMPD/st" | to_json "id:s,deployed_at:n,status:s,current:b,last_good:b,commit:s,branch:s,dirty_files:n"
 }
-HIST_JSON="at:n,app:s,release:s,kind:s,result:s,total_s:n,build_s:n,upload_s:n,copy_s:n,preflight_s:n,switch_s:n,verify_s:n,note:s,release_s:n"
+HIST_JSON="at:n,app:s,release:s,kind:s,result:s,total_s:n,build_s:n,upload_s:n,copy_s:n,preflight_s:n,switch_s:n,verify_s:n,note:s,release_s:n,commit:s,branch:s,dirty_files:n"
+# (commit, branch, dirty_files: the git provenance of the release, null for a release without one)
 # (release_s: the seconds of the release command, null for a deploy without one)
-hist_json() { grep "^hist$TAB" "$TMPD/st" | sort -t "$TAB" -k3,3nr | cut -f2-15 |
-  awk -F '\t' -v OFS='\t' '{ print $2, $1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14 }' | to_json "$HIST_JSON"; }
+hist_json() { grep "^hist$TAB" "$TMPD/st" | sort -t "$TAB" -k3,3nr | cut -f2-16 |
+  awk -F '\t' -v OFS='\t' '{ print $2, $1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, prov($15) }
+    function prov(v,   p) { if (split(v, p, ":") < 3) return "-\t-\t-"; return p[1] "\t" substr(v, length(p[1] p[2]) + 3) "\t" p[2] }' | to_json "$HIST_JSON"; }
 # the alert rows of $TMPD/st (firing and pending; host checks have app "host") as a JSON array
 alerts_json() {
   awk -F '\t' -v OFS='\t' '$1 == "alert" { print $2, $3, $4, $5, $6 }' "$TMPD/st" | to_json "app:s,check:s,state:s,since:n,detail:s"
@@ -713,7 +738,7 @@ cmd_status() {
 
 cmd_history() {
   resolve 0
-  local r a ts id kind res tot b u c p s v note rc n=30 hasrc="" spec
+  local r a ts id kind res tot b u c p s v note rc pv n=30 hasrc="" hascm="" spec
   [ "$NLINES" != 100 ] && n=$NLINES
   [ "$n" -gt 999 ] && n=999
   agent_raw sudo history ${APP:+"$APP"} "$n" > "$TMPD/st" || exit 1
@@ -721,16 +746,18 @@ cmd_history() {
   if [ -n "$JSON" ]; then printf '{"host":%s,"history":' "$(json_str "$HOST")"; hist_json; printf '}\n'; return; fi
   : > "$TMPD/notes"
   # RELCMD (the release command's seconds, a 15th field) is a column only when a deploy shown ran one
-  awk -F '\t' '$1 == "hist" && NF >= 15 { f = 1 } END { exit !f }' "$TMPD/st" && hasrc=1
+  awk -F '\t' '$1 == "hist" && NF >= 15 && $15 != "-" { f = 1 } END { exit !f }' "$TMPD/st" && hasrc=1
+  # (and a COMMIT column when a deploy shown has git provenance: a 16th field)
+  awk -F '\t' '$1 == "hist" && $16 != "" && $16 != "-" { f = 1 } END { exit !f }' "$TMPD/st" && hascm=1
   {
-    printf 'TIME (GMT)\tAPP\tRELEASE\tKIND\tRESULT\tTOTAL\tBUILD\tUPLOAD\tCOPY\tPRE\t%sSWITCH\tVERIFY\tNOTE\n' "${hasrc:+RELCMD$TAB}"
+    printf 'TIME (GMT)\tAPP\tRELEASE\t%sKIND\tRESULT\tTOTAL\tBUILD\tUPLOAD\tCOPY\tPRE\t%sSWITCH\tVERIFY\tNOTE\n' "${hascm:+COMMIT$TAB}" "${hasrc:+RELCMD$TAB}"
     sort -t "$TAB" -k3,3nr "$TMPD/st" |
-    while IFS=$TAB read -r r a ts id kind res tot b u c p s v note rc; do
+    while IFS=$TAB read -r r a ts id kind res tot b u c p s v note rc pv; do
       [ "$r" = hist ] || continue
       hist_note "$id" "$kind" "$res" "$note" >> "$TMPD/notes"
       case $kind in deploy) ;; *) [ "$b" = 0 ] && b=-; [ "$u" = 0 ] && u=-;; esac   # not built or uploaded
       ui_utc_v "$ts"
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s%s\t%s\t%s\n' "$UI_RET" "$a" "$id" "$kind" \
+      printf '%s\t%s\t%s\t%s%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s%s\t%s\t%s\n' "$UI_RET" "$a" "$id" "${hascm:+$(prov_cell "$pv")$TAB}" "$kind" \
         "$(badge "$res")" "$(secs "$tot")" "$b" "$u" "$c" "$p" "${hasrc:+${TAB}${rc:--}}" "$s" "$v" "$note"
     done
   } > "$TMPD/rows"
@@ -738,8 +765,8 @@ cmd_history() {
   # dropped first when narrow: note, phase times, app, release; never TIME (GMT) or RESULT
   if [ "$(wc -l < "$TMPD/rows")" -le 1 ]; then ui_box_line "No deploys yet: tando up"
   else
-    spec="l,l!5,l!4,l,l,r,r!6,r!7,r!8,r!9,r!10,r!11,l:4-30!12"
-    [ -z "$hasrc" ] || spec="l,l!5,l!4,l,l,r,r!6,r!7,r!8,r!9,r!10,r!11,r!12,l:4-30!13"
+    spec="l,l!5,l!4,${hascm:+l!3,}l,l,r,r!6,r!7,r!8,r!9,r!10,r!11,l:4-30!12"
+    [ -z "$hasrc" ] || spec="l,l!5,l!4,${hascm:+l!3,}l,l,r,r!6,r!7,r!8,r!9,r!10,r!11,r!12,l:4-30!13"
     ui_table "$spec" < "$TMPD/rows"
     # the NOTE column was dropped or cut: the reasons of rollbacks and failures, whole, below
     case $UI_TABLE_SHOWN in
@@ -761,6 +788,7 @@ cmd_releases() {
   rel_rows > "$TMPD/rows"
   ui_box_open "releases $APP" "$HOST"
   if [ "$(wc -l < "$TMPD/rows")" -le 1 ]; then ui_box_line "No releases yet: tando up"
+  elif [ "$(head -n 1 "$TMPD/rows" | cut -f5)" = COMMIT ]; then ui_table "l,l,l,l,l" < "$TMPD/rows"
   else ui_table "l,l,l,l" < "$TMPD/rows"; fi
   ui_box_close "newest 5 kept; current and last good never pruned"
 }

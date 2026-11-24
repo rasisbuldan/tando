@@ -219,6 +219,14 @@ func TestVersionGuard(t *testing.T) {
 	if err := g.Check(context.Background()); err == nil {
 		t.Fatal("garbage version accepted")
 	}
+	// a git build of tando: 0.2.2+<sha>[-dirty] is version 0.2.2
+	os.WriteFile(filepath.Join(fake, "version"), []byte("tando 0.2.2+abc1234-dirty"), 0o600)
+	mu.Lock()
+	stamp = "v4b"
+	mu.Unlock()
+	if err := g.Check(context.Background()); err != nil || g.Version() != "0.2.2+abc1234-dirty" {
+		t.Fatalf("a git build: %v %q", err, g.Version())
+	}
 	for _, c := range [][2]string{{"0.2.1", "0.2.2"}, {"0.9.9", "0.10.0"}, {"1.0.0", "1.0.1"}} {
 		if !older(c[0], c[1]) || older(c[1], c[0]) {
 			t.Errorf("older %v", c)

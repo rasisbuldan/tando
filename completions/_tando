@@ -83,8 +83,8 @@ _tando() {
       local subs="" flags="" args=""
       case $line[1] in
         init) subs="" flags="-H --yes" args="" ;;
-        up) subs="" flags="-H --yes --force --wait" args="" ;;
-        deploy) subs="" flags="-a -H --force --yes --wait --dry-run" args="" ;;
+        up) subs="" flags="-H --yes --force --wait --clean" args="" ;;
+        deploy) subs="" flags="-a -H --force --yes --wait --dry-run --ref --clean" args="" ;;
         rollback) subs="" flags="-H -a" args="apps" ;;
         releases) subs="" flags="-H --json -a" args="apps" ;;
         history) subs="" flags="-n -H --json -a" args="apps" ;;

@@ -3,11 +3,11 @@
  "address": "192.0.2.10",
  "user": "nobody",
  "reachable": true,
- "checked_at": 1795274567,
+ "checked_at": 1795493079,
  "server_version": "0.2.2",
  "client_version": "0.2.2",
  "clock_skew_s": 3,
- "server_now": 1795274570,
+ "server_now": 1795493082,
  "system": {
   "hostname": "web-1",
   "cpus": 2,
@@ -152,14 +152,14 @@
    "app": "api",
    "check": "down",
    "state": "firing",
-   "since": 1795273667,
+   "since": 1795492179,
    "detail": "exited"
   },
   {
    "app": "host",
    "check": "disk",
    "state": "pending",
-   "since": 1795274447,
+   "since": 1795492959,
    "detail": "85% used"
   }
  ],
@@ -196,27 +196,36 @@
     "deployed_at": 1794910210,
     "status": "verified",
     "current": true,
-    "last_good": true
+    "last_good": true,
+    "commit": "1234567890abcdef1234567890abcdef12345678",
+    "branch": "main",
+    "dirty_files": 2
    },
    {
     "id": "20261116-101010",
     "deployed_at": 1794823810,
     "status": "verified",
     "current": false,
-    "last_good": false
+    "last_good": false,
+    "commit": null,
+    "branch": null,
+    "dirty_files": null
    },
    {
     "id": "20261115-101010",
     "deployed_at": 1794737410,
     "status": "failed",
     "current": false,
-    "last_good": false
+    "last_good": false,
+    "commit": null,
+    "branch": null,
+    "dirty_files": null
    }
   ],
   "origin": "alice@laptop:/src/shop",
   "history": [
    {
-    "at": 1795267367,
+    "at": 1795485879,
     "app": "shop",
     "release": "20261117-101010",
     "kind": "deploy",
@@ -230,10 +239,13 @@
     "verify_s": 10.5,
     "note": null,
     "release_s": 3.1,
+    "commit": "1234567890abcdef1234567890abcdef12345678",
+    "branch": "main",
+    "dirty_files": 2,
     "deployer": "ci-bot"
    },
    {
-    "at": 1795184567,
+    "at": 1795403079,
     "app": "shop",
     "release": "20261116-101010",
     "kind": "rollback",
@@ -247,10 +259,13 @@
     "verify_s": 5.5,
     "note": null,
     "release_s": null,
+    "commit": null,
+    "branch": null,
+    "dirty_files": null,
     "deployer": "alice"
    },
    {
-    "at": 1795094567,
+    "at": 1795313079,
     "app": "shop",
     "release": "20261115-101010",
     "kind": "deploy",
@@ -264,6 +279,9 @@
     "verify_s": null,
     "note": "start test failed",
     "release_s": null,
+    "commit": null,
+    "branch": null,
+    "dirty_files": null,
     "deployer": null
    }
   ],
@@ -271,12 +289,12 @@
    "range": "24h",
    "bucket_s": 600,
    "points": 144,
-   "from": 1795188600,
-   "to": 1795274400,
-   "data_since": 1795271400,
+   "from": 1795407000,
+   "to": 1795492800,
+   "data_since": 1795489800,
    "series": [
     {
-     "t": 1795188600,
+     "t": 1795407000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -289,7 +307,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795189200,
+     "t": 1795407600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -302,7 +320,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795189800,
+     "t": 1795408200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -315,7 +333,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795190400,
+     "t": 1795408800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -328,7 +346,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795191000,
+     "t": 1795409400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -341,7 +359,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795191600,
+     "t": 1795410000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -354,7 +372,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795192200,
+     "t": 1795410600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -367,7 +385,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795192800,
+     "t": 1795411200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -380,7 +398,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795193400,
+     "t": 1795411800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -393,7 +411,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795194000,
+     "t": 1795412400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -406,7 +424,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795194600,
+     "t": 1795413000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -419,7 +437,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795195200,
+     "t": 1795413600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -432,7 +450,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795195800,
+     "t": 1795414200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -445,7 +463,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795196400,
+     "t": 1795414800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -458,7 +476,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795197000,
+     "t": 1795415400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -471,7 +489,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795197600,
+     "t": 1795416000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -484,7 +502,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795198200,
+     "t": 1795416600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -497,7 +515,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795198800,
+     "t": 1795417200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -510,7 +528,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795199400,
+     "t": 1795417800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -523,7 +541,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795200000,
+     "t": 1795418400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -536,7 +554,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795200600,
+     "t": 1795419000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -549,7 +567,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795201200,
+     "t": 1795419600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -562,7 +580,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795201800,
+     "t": 1795420200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -575,7 +593,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795202400,
+     "t": 1795420800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -588,7 +606,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795203000,
+     "t": 1795421400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -601,7 +619,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795203600,
+     "t": 1795422000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -614,7 +632,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795204200,
+     "t": 1795422600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -627,7 +645,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795204800,
+     "t": 1795423200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -640,7 +658,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795205400,
+     "t": 1795423800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -653,7 +671,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795206000,
+     "t": 1795424400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -666,7 +684,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795206600,
+     "t": 1795425000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -679,7 +697,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795207200,
+     "t": 1795425600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -692,7 +710,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795207800,
+     "t": 1795426200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -705,7 +723,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795208400,
+     "t": 1795426800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -718,7 +736,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795209000,
+     "t": 1795427400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -731,7 +749,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795209600,
+     "t": 1795428000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -744,7 +762,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795210200,
+     "t": 1795428600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -757,7 +775,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795210800,
+     "t": 1795429200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -770,7 +788,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795211400,
+     "t": 1795429800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -783,7 +801,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795212000,
+     "t": 1795430400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -796,7 +814,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795212600,
+     "t": 1795431000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -809,7 +827,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795213200,
+     "t": 1795431600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -822,7 +840,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795213800,
+     "t": 1795432200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -835,7 +853,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795214400,
+     "t": 1795432800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -848,7 +866,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795215000,
+     "t": 1795433400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -861,7 +879,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795215600,
+     "t": 1795434000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -874,7 +892,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795216200,
+     "t": 1795434600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -887,7 +905,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795216800,
+     "t": 1795435200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -900,7 +918,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795217400,
+     "t": 1795435800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -913,7 +931,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795218000,
+     "t": 1795436400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -926,7 +944,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795218600,
+     "t": 1795437000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -939,7 +957,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795219200,
+     "t": 1795437600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -952,7 +970,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795219800,
+     "t": 1795438200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -965,7 +983,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795220400,
+     "t": 1795438800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -978,7 +996,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795221000,
+     "t": 1795439400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -991,7 +1009,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795221600,
+     "t": 1795440000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1004,7 +1022,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795222200,
+     "t": 1795440600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1017,7 +1035,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795222800,
+     "t": 1795441200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1030,7 +1048,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795223400,
+     "t": 1795441800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1043,7 +1061,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795224000,
+     "t": 1795442400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1056,7 +1074,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795224600,
+     "t": 1795443000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1069,7 +1087,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795225200,
+     "t": 1795443600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1082,7 +1100,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795225800,
+     "t": 1795444200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1095,7 +1113,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795226400,
+     "t": 1795444800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1108,7 +1126,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795227000,
+     "t": 1795445400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1121,7 +1139,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795227600,
+     "t": 1795446000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1134,7 +1152,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795228200,
+     "t": 1795446600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1147,7 +1165,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795228800,
+     "t": 1795447200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1160,7 +1178,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795229400,
+     "t": 1795447800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1173,7 +1191,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795230000,
+     "t": 1795448400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1186,7 +1204,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795230600,
+     "t": 1795449000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1199,7 +1217,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795231200,
+     "t": 1795449600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1212,7 +1230,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795231800,
+     "t": 1795450200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1225,7 +1243,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795232400,
+     "t": 1795450800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1238,7 +1256,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795233000,
+     "t": 1795451400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1251,7 +1269,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795233600,
+     "t": 1795452000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1264,7 +1282,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795234200,
+     "t": 1795452600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1277,7 +1295,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795234800,
+     "t": 1795453200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1290,7 +1308,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795235400,
+     "t": 1795453800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1303,7 +1321,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795236000,
+     "t": 1795454400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1316,7 +1334,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795236600,
+     "t": 1795455000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1329,7 +1347,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795237200,
+     "t": 1795455600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1342,7 +1360,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795237800,
+     "t": 1795456200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1355,7 +1373,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795238400,
+     "t": 1795456800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1368,7 +1386,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795239000,
+     "t": 1795457400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1381,7 +1399,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795239600,
+     "t": 1795458000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1394,7 +1412,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795240200,
+     "t": 1795458600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1407,7 +1425,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795240800,
+     "t": 1795459200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1420,7 +1438,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795241400,
+     "t": 1795459800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1433,7 +1451,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795242000,
+     "t": 1795460400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1446,7 +1464,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795242600,
+     "t": 1795461000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1459,7 +1477,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795243200,
+     "t": 1795461600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1472,7 +1490,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795243800,
+     "t": 1795462200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1485,7 +1503,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795244400,
+     "t": 1795462800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1498,7 +1516,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795245000,
+     "t": 1795463400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1511,7 +1529,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795245600,
+     "t": 1795464000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1524,7 +1542,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795246200,
+     "t": 1795464600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1537,7 +1555,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795246800,
+     "t": 1795465200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1550,7 +1568,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795247400,
+     "t": 1795465800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1563,7 +1581,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795248000,
+     "t": 1795466400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1576,7 +1594,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795248600,
+     "t": 1795467000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1589,7 +1607,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795249200,
+     "t": 1795467600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1602,7 +1620,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795249800,
+     "t": 1795468200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1615,7 +1633,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795250400,
+     "t": 1795468800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1628,7 +1646,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795251000,
+     "t": 1795469400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1641,7 +1659,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795251600,
+     "t": 1795470000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1654,7 +1672,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795252200,
+     "t": 1795470600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1667,7 +1685,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795252800,
+     "t": 1795471200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1680,7 +1698,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795253400,
+     "t": 1795471800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1693,7 +1711,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795254000,
+     "t": 1795472400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1706,7 +1724,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795254600,
+     "t": 1795473000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1719,7 +1737,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795255200,
+     "t": 1795473600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1732,7 +1750,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795255800,
+     "t": 1795474200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1745,7 +1763,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795256400,
+     "t": 1795474800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1758,7 +1776,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795257000,
+     "t": 1795475400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1771,7 +1789,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795257600,
+     "t": 1795476000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1784,7 +1802,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795258200,
+     "t": 1795476600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1797,7 +1815,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795258800,
+     "t": 1795477200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1810,7 +1828,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795259400,
+     "t": 1795477800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1823,7 +1841,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795260000,
+     "t": 1795478400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1836,7 +1854,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795260600,
+     "t": 1795479000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1849,7 +1867,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795261200,
+     "t": 1795479600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1862,7 +1880,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795261800,
+     "t": 1795480200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1875,7 +1893,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795262400,
+     "t": 1795480800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1888,7 +1906,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795263000,
+     "t": 1795481400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1901,7 +1919,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795263600,
+     "t": 1795482000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1914,7 +1932,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795264200,
+     "t": 1795482600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1927,7 +1945,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795264800,
+     "t": 1795483200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1940,7 +1958,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795265400,
+     "t": 1795483800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1953,7 +1971,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795266000,
+     "t": 1795484400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1966,7 +1984,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795266600,
+     "t": 1795485000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1979,7 +1997,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795267200,
+     "t": 1795485600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -1992,7 +2010,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795267800,
+     "t": 1795486200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -2005,7 +2023,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795268400,
+     "t": 1795486800,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -2018,7 +2036,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795269000,
+     "t": 1795487400,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -2031,7 +2049,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795269600,
+     "t": 1795488000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -2044,7 +2062,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795270200,
+     "t": 1795488600,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -2057,7 +2075,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795270800,
+     "t": 1795489200,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -2070,7 +2088,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795271400,
+     "t": 1795489800,
      "memory_bytes": 100000000,
      "cpu_percent": 12.0,
      "restarts": 0,
@@ -2083,7 +2101,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795272000,
+     "t": 1795490400,
      "memory_bytes": 101000000,
      "cpu_percent": 13.0,
      "restarts": 1,
@@ -2096,7 +2114,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795272600,
+     "t": 1795491000,
      "memory_bytes": null,
      "cpu_percent": null,
      "restarts": null,
@@ -2109,7 +2127,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795273200,
+     "t": 1795491600,
      "memory_bytes": 102000000,
      "cpu_percent": 14.0,
      "restarts": 0,
@@ -2122,7 +2140,7 @@
      "memory_pressure_pct": null
     },
     {
-     "t": 1795273800,
+     "t": 1795492200,
      "memory_bytes": 103000000,
      "cpu_percent": 15.0,
      "restarts": 1,
@@ -2135,7 +2153,7 @@
      "memory_pressure_pct": 2.5
     },
     {
-     "t": 1795274400,
+     "t": 1795492800,
      "memory_bytes": 104857600,
      "cpu_percent": 3.4,
      "restarts": 0,
@@ -2165,107 +2183,107 @@
     "stat": "avg_ms",
     "points": [
      {
-      "t": 1795188170,
+      "t": 1795406682,
       "avg_ms": 40
      },
      {
-      "t": 1795191770,
+      "t": 1795410282,
       "avg_ms": 42
      },
      {
-      "t": 1795195370,
+      "t": 1795413882,
       "avg_ms": null
      },
      {
-      "t": 1795198970,
+      "t": 1795417482,
       "avg_ms": 38
      },
      {
-      "t": 1795202570,
+      "t": 1795421082,
       "avg_ms": 39
      },
      {
-      "t": 1795206170,
+      "t": 1795424682,
       "avg_ms": 41
      },
      {
-      "t": 1795209770,
+      "t": 1795428282,
       "avg_ms": 40
      },
      {
-      "t": 1795213370,
+      "t": 1795431882,
       "avg_ms": 40
      },
      {
-      "t": 1795216970,
+      "t": 1795435482,
       "avg_ms": 39
      },
      {
-      "t": 1795220570,
+      "t": 1795439082,
       "avg_ms": 38
      },
      {
-      "t": 1795224170,
+      "t": 1795442682,
       "avg_ms": 37
      },
      {
-      "t": 1795227770,
+      "t": 1795446282,
       "avg_ms": 36
      },
      {
-      "t": 1795231370,
+      "t": 1795449882,
       "avg_ms": 40
      },
      {
-      "t": 1795234970,
+      "t": 1795453482,
       "avg_ms": 41
      },
      {
-      "t": 1795238570,
+      "t": 1795457082,
       "avg_ms": 42
      },
      {
-      "t": 1795242170,
+      "t": 1795460682,
       "avg_ms": 43
      },
      {
-      "t": 1795245770,
+      "t": 1795464282,
       "avg_ms": 44
      },
      {
-      "t": 1795249370,
+      "t": 1795467882,
       "avg_ms": 40
      },
      {
-      "t": 1795252970,
+      "t": 1795471482,
       "avg_ms": 39
      },
      {
-      "t": 1795256570,
+      "t": 1795475082,
       "avg_ms": 38
      },
      {
-      "t": 1795260170,
+      "t": 1795478682,
       "avg_ms": 37
      },
      {
-      "t": 1795263770,
+      "t": 1795482282,
       "avg_ms": 36
      },
      {
-      "t": 1795267370,
+      "t": 1795485882,
       "avg_ms": 35
      },
      {
-      "t": 1795270970,
+      "t": 1795489482,
       "avg_ms": 34
      }
     ]
    },
    "incidents": [
     {
-     "start": 1795224567,
-     "end": 1795224867,
+     "start": 1795443079,
+     "end": 1795443379,
      "check": "down",
      "cause": "exited with status 1"
     }
@@ -2277,7 +2295,7 @@
    "connection_limit": 20,
    "series": [
     {
-     "t": 1795188600,
+     "t": 1795407000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2304,7 +2322,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795189200,
+     "t": 1795407600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2331,7 +2349,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795189800,
+     "t": 1795408200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2358,7 +2376,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795190400,
+     "t": 1795408800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2385,7 +2403,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795191000,
+     "t": 1795409400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2412,7 +2430,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795191600,
+     "t": 1795410000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2439,7 +2457,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795192200,
+     "t": 1795410600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2466,7 +2484,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795192800,
+     "t": 1795411200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2493,7 +2511,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795193400,
+     "t": 1795411800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2520,7 +2538,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795194000,
+     "t": 1795412400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2547,7 +2565,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795194600,
+     "t": 1795413000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2574,7 +2592,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795195200,
+     "t": 1795413600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2601,7 +2619,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795195800,
+     "t": 1795414200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2628,7 +2646,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795196400,
+     "t": 1795414800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2655,7 +2673,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795197000,
+     "t": 1795415400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2682,7 +2700,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795197600,
+     "t": 1795416000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2709,7 +2727,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795198200,
+     "t": 1795416600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2736,7 +2754,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795198800,
+     "t": 1795417200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2763,7 +2781,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795199400,
+     "t": 1795417800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2790,7 +2808,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795200000,
+     "t": 1795418400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2817,7 +2835,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795200600,
+     "t": 1795419000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2844,7 +2862,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795201200,
+     "t": 1795419600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2871,7 +2889,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795201800,
+     "t": 1795420200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2898,7 +2916,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795202400,
+     "t": 1795420800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2925,7 +2943,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795203000,
+     "t": 1795421400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2952,7 +2970,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795203600,
+     "t": 1795422000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -2979,7 +2997,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795204200,
+     "t": 1795422600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3006,7 +3024,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795204800,
+     "t": 1795423200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3033,7 +3051,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795205400,
+     "t": 1795423800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3060,7 +3078,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795206000,
+     "t": 1795424400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3087,7 +3105,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795206600,
+     "t": 1795425000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3114,7 +3132,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795207200,
+     "t": 1795425600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3141,7 +3159,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795207800,
+     "t": 1795426200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3168,7 +3186,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795208400,
+     "t": 1795426800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3195,7 +3213,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795209000,
+     "t": 1795427400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3222,7 +3240,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795209600,
+     "t": 1795428000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3249,7 +3267,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795210200,
+     "t": 1795428600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3276,7 +3294,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795210800,
+     "t": 1795429200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3303,7 +3321,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795211400,
+     "t": 1795429800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3330,7 +3348,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795212000,
+     "t": 1795430400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3357,7 +3375,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795212600,
+     "t": 1795431000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3384,7 +3402,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795213200,
+     "t": 1795431600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3411,7 +3429,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795213800,
+     "t": 1795432200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3438,7 +3456,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795214400,
+     "t": 1795432800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3465,7 +3483,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795215000,
+     "t": 1795433400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3492,7 +3510,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795215600,
+     "t": 1795434000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3519,7 +3537,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795216200,
+     "t": 1795434600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3546,7 +3564,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795216800,
+     "t": 1795435200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3573,7 +3591,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795217400,
+     "t": 1795435800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3600,7 +3618,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795218000,
+     "t": 1795436400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3627,7 +3645,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795218600,
+     "t": 1795437000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3654,7 +3672,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795219200,
+     "t": 1795437600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3681,7 +3699,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795219800,
+     "t": 1795438200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3708,7 +3726,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795220400,
+     "t": 1795438800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3735,7 +3753,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795221000,
+     "t": 1795439400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3762,7 +3780,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795221600,
+     "t": 1795440000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3789,7 +3807,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795222200,
+     "t": 1795440600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3816,7 +3834,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795222800,
+     "t": 1795441200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3843,7 +3861,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795223400,
+     "t": 1795441800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3870,7 +3888,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795224000,
+     "t": 1795442400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3897,7 +3915,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795224600,
+     "t": 1795443000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3924,7 +3942,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795225200,
+     "t": 1795443600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3951,7 +3969,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795225800,
+     "t": 1795444200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -3978,7 +3996,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795226400,
+     "t": 1795444800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4005,7 +4023,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795227000,
+     "t": 1795445400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4032,7 +4050,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795227600,
+     "t": 1795446000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4059,7 +4077,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795228200,
+     "t": 1795446600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4086,7 +4104,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795228800,
+     "t": 1795447200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4113,7 +4131,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795229400,
+     "t": 1795447800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4140,7 +4158,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795230000,
+     "t": 1795448400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4167,7 +4185,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795230600,
+     "t": 1795449000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4194,7 +4212,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795231200,
+     "t": 1795449600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4221,7 +4239,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795231800,
+     "t": 1795450200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4248,7 +4266,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795232400,
+     "t": 1795450800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4275,7 +4293,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795233000,
+     "t": 1795451400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4302,7 +4320,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795233600,
+     "t": 1795452000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4329,7 +4347,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795234200,
+     "t": 1795452600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4356,7 +4374,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795234800,
+     "t": 1795453200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4383,7 +4401,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795235400,
+     "t": 1795453800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4410,7 +4428,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795236000,
+     "t": 1795454400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4437,7 +4455,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795236600,
+     "t": 1795455000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4464,7 +4482,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795237200,
+     "t": 1795455600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4491,7 +4509,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795237800,
+     "t": 1795456200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4518,7 +4536,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795238400,
+     "t": 1795456800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4545,7 +4563,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795239000,
+     "t": 1795457400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4572,7 +4590,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795239600,
+     "t": 1795458000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4599,7 +4617,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795240200,
+     "t": 1795458600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4626,7 +4644,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795240800,
+     "t": 1795459200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4653,7 +4671,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795241400,
+     "t": 1795459800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4680,7 +4698,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795242000,
+     "t": 1795460400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4707,7 +4725,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795242600,
+     "t": 1795461000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4734,7 +4752,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795243200,
+     "t": 1795461600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4761,7 +4779,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795243800,
+     "t": 1795462200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4788,7 +4806,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795244400,
+     "t": 1795462800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4815,7 +4833,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795245000,
+     "t": 1795463400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4842,7 +4860,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795245600,
+     "t": 1795464000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4869,7 +4887,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795246200,
+     "t": 1795464600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4896,7 +4914,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795246800,
+     "t": 1795465200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4923,7 +4941,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795247400,
+     "t": 1795465800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4950,7 +4968,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795248000,
+     "t": 1795466400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -4977,7 +4995,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795248600,
+     "t": 1795467000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5004,7 +5022,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795249200,
+     "t": 1795467600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5031,7 +5049,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795249800,
+     "t": 1795468200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5058,7 +5076,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795250400,
+     "t": 1795468800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5085,7 +5103,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795251000,
+     "t": 1795469400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5112,7 +5130,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795251600,
+     "t": 1795470000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5139,7 +5157,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795252200,
+     "t": 1795470600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5166,7 +5184,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795252800,
+     "t": 1795471200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5193,7 +5211,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795253400,
+     "t": 1795471800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5220,7 +5238,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795254000,
+     "t": 1795472400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5247,7 +5265,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795254600,
+     "t": 1795473000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5274,7 +5292,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795255200,
+     "t": 1795473600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5301,7 +5319,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795255800,
+     "t": 1795474200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5328,7 +5346,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795256400,
+     "t": 1795474800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5355,7 +5373,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795257000,
+     "t": 1795475400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5382,7 +5400,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795257600,
+     "t": 1795476000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5409,7 +5427,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795258200,
+     "t": 1795476600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5436,7 +5454,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795258800,
+     "t": 1795477200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5463,7 +5481,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795259400,
+     "t": 1795477800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5490,7 +5508,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795260000,
+     "t": 1795478400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5517,7 +5535,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795260600,
+     "t": 1795479000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5544,7 +5562,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795261200,
+     "t": 1795479600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5571,7 +5589,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795261800,
+     "t": 1795480200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5598,7 +5616,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795262400,
+     "t": 1795480800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5625,7 +5643,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795263000,
+     "t": 1795481400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5652,7 +5670,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795263600,
+     "t": 1795482000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5679,7 +5697,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795264200,
+     "t": 1795482600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5706,7 +5724,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795264800,
+     "t": 1795483200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5733,7 +5751,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795265400,
+     "t": 1795483800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5760,7 +5778,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795266000,
+     "t": 1795484400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5787,7 +5805,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795266600,
+     "t": 1795485000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5814,7 +5832,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795267200,
+     "t": 1795485600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5841,7 +5859,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795267800,
+     "t": 1795486200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5868,7 +5886,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795268400,
+     "t": 1795486800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5895,7 +5913,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795269000,
+     "t": 1795487400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5922,7 +5940,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795269600,
+     "t": 1795488000,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5949,7 +5967,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795270200,
+     "t": 1795488600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -5976,7 +5994,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795270800,
+     "t": 1795489200,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -6003,7 +6021,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795271400,
+     "t": 1795489800,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -6030,7 +6048,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795272000,
+     "t": 1795490400,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -6057,7 +6075,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795272600,
+     "t": 1795491000,
      "max_connections": 20,
      "active": 1,
      "idle": 3,
@@ -6084,7 +6102,7 @@
      "wal_bytes_per_s": 840.25
     },
     {
-     "t": 1795273200,
+     "t": 1795491600,
      "max_connections": null,
      "active": null,
      "idle": null,
@@ -6111,7 +6129,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795273800,
+     "t": 1795492200,
      "max_connections": 20,
      "active": 2,
      "idle": 2,
@@ -6138,7 +6156,7 @@
      "wal_bytes_per_s": null
     },
     {
-     "t": 1795274400,
+     "t": 1795492800,
      "max_connections": 20,
      "active": 1,
      "idle": 4,
@@ -6166,7 +6184,7 @@
     }
    ],
    "latest": {
-    "t": 1795274570,
+    "t": 1795493082,
     "server_version_num": 170002,
     "max_connections": 20,
     "active": 1,
@@ -6178,10 +6196,10 @@
     "xid_age": 1200200,
     "wraparound_pct": 0.05,
     "size_bytes": 12648448,
-    "stats_reset": 1795188167
+    "stats_reset": 1795406679
    },
    "top_queries": {
-    "t": 1795274507,
+    "t": 1795493019,
     "queries": [
      {
       "calls": 1200,

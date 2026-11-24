@@ -2100,9 +2100,13 @@ hist() { # id kind result note; phase seconds come from P
   # a line cut off by a crash or a full disk must not swallow this one
   [[ -s $D/history.tsv && $(tail -c1 "$D/history.tsv" | od -An -c | tr -d ' ') != '\n' ]] && echo >> "$D/history.tsv"
   # (a 13th field, the release command's seconds, only for a deploy that ran one)
+  # (a 14th field, the release's git provenance "sha:changed files:branch", when it has one: the
+  # 13th is then "-" for a deploy without a release command)
+  local pv=${S[git_$1]:-} rc=${P[t_release]:-}
+  [[ -z $pv || -n $rc ]] || rc=-
   row "$(now)" "$1" "$2" "$3" "$total" "${P[t_build]:-0}" "${P[t_upload]:-0}" \
     "${P[t_copy]:-}" "${P[t_preflight]:-}" "${P[t_switch]:-}" "${P[t_verify]:-}" "$4" \
-    ${P[t_release]:+"${P[t_release]}"} >> "$D/history.tsv" ||
+    ${rc:+"$rc"} ${pv:+"$pv"} >> "$D/history.tsv" ||
     { echo "tando-agent: could not write the history line of $1 (disk full?)" >&2; return 1; }
 }
 # hist_has id kind since: history has a line for that operation (written at or after since)
@@ -2365,7 +2369,7 @@ prune() {
     [[ $i == "${S[current]:-}" || $i == "${S[last_good]:-}" || $i == "${S[target]:-}" || $i == "${S[hold_release]:-}" ]] && keep=1
     [[ -z ${S[status_$i]:-} ]] && keep=1          # reserved by a queued activation
     if ((!keep)); then
-      rm -rf "${D:?}/releases/$i" "${D:?}/jobs/$i" "${D:?}/start/$i" "${D:?}/sums/$i" "${D:?}/sums/$i.tmp" "${D:?}/sums/$i.work"; unset "S[status_$i]" "S[seq_$i]"
+      rm -rf "${D:?}/releases/$i" "${D:?}/jobs/$i" "${D:?}/start/$i" "${D:?}/sums/$i" "${D:?}/sums/$i.tmp" "${D:?}/sums/$i.work"; unset "S[status_$i]" "S[seq_$i]" "S[git_$i]"
       [[ ${C[recipe]:-node} == container ]] && podman rmi -f "localhost/tando-$A:$i" > /dev/null 2>&1
     fi
   done
@@ -4104,7 +4108,7 @@ cmd_doctor() {
     mine=$(cksum < "$file" | cut -d' ' -f1)
     # want: the client's checksum, or a list "a,b" (a Go program: one binary per CPU)
     if [[ -z $want || ,$want, == *,"$mine",* ]]; then row check ok "$name" "$version, same as the client"
-    elif [[ -n $cver && $cver == "$version" ]]; then
+    elif [[ -n $cver && ${cver%%+*} == "${version%%+*}" ]]; then
       row check warn "$name" "the $name on <host> differs from this tando (same version $version): tando host setup <host>"
     elif [[ -n $cver ]]; then
       row check warn "$name" "$version here, $cver on the laptop: tando host setup <host>"
@@ -4858,8 +4862,12 @@ cfg_reload() {
 cmd_activate() {
   need_root; app "$1"; shift
   local token b u id base n=1
-  local conf=""
-  if (($# == 3)); then token=$1; shift; else IFS= read -r token || token=""; IFS= read -r conf || true; fi
+  local conf="" prov=""
+  if (($# == 3)); then token=$1; shift; else IFS= read -r token || token=""; IFS= read -r conf || true; IFS= read -r prov || true; fi
+  # prov: where the code came from, "<40 hex sha>:<changed files>:<branch>" (the client's git
+  # checkout; nothing when it had none). Only this form is kept: it lands in a state file and
+  # in listings, so a stranger's text never gets that far
+  [[ $prov =~ ^[0-9a-f]{40}:[0-9]{1,6}:[A-Za-z0-9._/+-]{1,100}$ ]] || prov=""
   b=${1:-0} u=${2:-0}
   # conf: the id of this deploy's settings (configure printed it); none from an older client or a
   # deploy key: the activation takes the last configure's
@@ -4923,7 +4931,8 @@ cmd_activate() {
   # (its number in deploy order is given by the activation once it holds the app's lock: activate
   # itself never waits for another activation's soak; the client sees "queued" and says for what)
   local who=() w f
-  [[ -x $LOGS ]] && read -r w f < <("$LOGS" audit-origin) && who=(-E "TANDO_AUDIT_WHO=$w" -E "TANDO_AUDIT_FROM=$f")
+  [[ -z $prov ]] || who+=(-E "TANDO_PROV=$prov")
+  [[ -x $LOGS ]] && read -r w f < <("$LOGS" audit-origin) && who+=(-E "TANDO_AUDIT_WHO=$w" -E "TANDO_AUDIT_FROM=$f")
   # ExecStopPost: whatever ends the activation (an OOM kill, SIGKILL, a full disk), recover runs
   # at once and finishes or reverts it, so no release stays half-activated. Bounds: the whole
   # activation (an hour of waiting for the app's lock, the copy, build or image pull, the release
@@ -5090,6 +5099,8 @@ cmd_run_activation() {
     S[seq]=$m
   fi
   S[seq]=$(( 10#${S[seq]:-0} + 1 )); S[seq_$id]=${S[seq]}
+  # where this release's code came from (the client's git checkout), as activate validated it
+  if [[ ${TANDO_PROV:-} =~ ^[0-9a-f]{40}:[0-9]{1,6}:[A-Za-z0-9._/+-]{1,100}$ ]]; then S[git_$id]=$TANDO_PROV; else unset "S[git_$id]"; fi
   # the reservation was given up meanwhile (recover found its unit gone: a stale one)
   [[ -d $rel && -z ${S[status_$id]:-} ]] || die "release $id was given up while it waited"
   P=([id]=$id [kind]=deploy [phase]=copy [result]=running [started]=$(now) [started_ds]=$(ds) [t_build]=$3 [t_upload]=$4); pg
@@ -8343,7 +8354,8 @@ cmd_releases() {
     cur=0 last=0
     [[ $i == "${S[current]:-}" ]] && cur=1
     [[ $i == "${S[last_good]:-}" ]] && last=1
-    row rel "$i" "${S[status_$i]:-pending}" "$cur" "$last"
+    # (a 6th field, the git provenance "sha:changed files:branch", only for a release that has one)
+    row rel "$i" "${S[status_$i]:-pending}" "$cur" "$last" ${S[git_$i]:+"${S[git_$i]}"}
   done
 }
 # the verb releases: its rows, then where the app was last deployed from (user@machine:path;
@@ -8367,7 +8379,7 @@ cmd_history() { # [app] [n]   (a lone number is the count)
   for f; do
     [[ -r $f ]] || continue
     f=${f%/history.tsv}
-    tail -n "$n" "$f/history.tsv" | awk -F '\t' 'NF == 12 || NF == 13' | sed "s/^/hist\t${f##*/}\t/"
+    tail -n "$n" "$f/history.tsv" | awk -F '\t' 'NF >= 12 && NF <= 14' | sed "s/^/hist\t${f##*/}\t/"
   done
 }
 

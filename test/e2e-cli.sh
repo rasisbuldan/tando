@@ -584,5 +584,22 @@ check "PV11 preview ls shows each name whole, its expiry and its whole link, and
   eval 'printf "%s" "$pvout" | grep -q "alpha-feature-login-d910  expires in 6d" && printf "%s" "$pvout" | grep -q "http://alpha-feature-login-d910.apps.example.org" &&
         printf "%s" "$pvout" | grep -q "alpha-pr-7  expires in 2h .*not deployed yet"'
 check "PV10 none of the preview checks reached a server (ssh/rsync calls: $(calls))" test "$(calls)" = 0
-rm -rf "${E:?}/w/hello/.tando"
+# deploy --ref and --clean (docs/COMMANDS.md, "deploy"): refused before any server call
+out=$("$R" deploy --ref 2>&1); rc=$?
+check "RF1 deploy --ref without a value is a usage error" eval 'test $rc = 2 && printf "%s" "$out" | grep -q -- "--ref needs a value"'
+out=$("$R" up --ref main 2>&1); rc=$?
+check "RF2 tando up takes no --ref" eval 'test $rc = 2 && printf "%s" "$out" | grep -q "up does not take --ref"'
+out=$(GIT_CEILING_DIRECTORIES="$E/w" "$R" deploy --ref main 2>&1); rc=$?   # (this directory is inside the tando checkout's own repository)
+check "RF3 deploy --ref outside a git repository says so (no server call)" \
+  eval 'test $rc != 0 && printf "%s" "$out" | grep -q "is not in a git repository"'
+export GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
+git init -q -b main . && printf '.tando/\n' > .gitignore && git add -A && git commit -q -m one
+out=$("$R" deploy --ref nosuch 2>&1); rc=$?
+check "RF4 an unknown ref is refused with a reason" eval 'test $rc != 0 && printf "%s" "$out" | grep -q "no such branch, tag or commit"'
+printf 'x\n' > untracked.txt; printf 'y\n' > ignored.log; printf 'ignored.log\n' >> .git/info/exclude
+out=$("$R" deploy --clean 2>&1); rc=$?
+check "RF5 deploy --clean in a tree with 1 uncommitted file (the ignored one does not count) is refused" \
+  eval 'test $rc != 0 && printf "%s" "$out" | grep -q "1 uncommitted file in this git tree" && printf "%s" "$out" | grep -q -- "--ref"'
+check "RF6 none of that reached a server (ssh/rsync calls: $(calls))" test "$(calls)" = 0
+rm -rf "${E:?}/w/hello/.tando" "${E:?}/w/hello/.git" "${E:?}/w/hello/.gitignore" "${E:?}/w/hello/untracked.txt" "${E:?}/w/hello/ignored.log"
 t_done

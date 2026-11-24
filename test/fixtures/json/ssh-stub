@@ -37,22 +37,22 @@ status_rows() {
 case $cmd in
   *"tando-agent status shop"*)
     status_rows | grep -v -e '^app	[^s]' -e '^alert	api'
-    tab rel 20261117-101010 verified 1 1
+    tab rel 20261117-101010 verified 1 1 1234567890abcdef1234567890abcdef12345678:2:main
     tab rel 20261116-101010 verified 0 0
-    tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1
+    tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1 1234567890abcdef1234567890abcdef12345678:2:main
     exit 0;;
   *"tando-agent status"*)
     status_rows
     case $cmd in *loadavg*) tab loadavg 0.42 0.37 0.30;; esac
     case $cmd in *"@releases"*)
       echo '@releases'
-      tab rel 20261117-101010 verified 1 1
+      tab rel 20261117-101010 verified 1 1 1234567890abcdef1234567890abcdef12345678:2:main
       tab rel 20261116-101010 verified 0 0
       tab rel 20261115-101010 failed 0 0
       tab origin alice@laptop:/src/shop
       echo '@history'
       # hist app at release kind result total build upload copy preflight switch verify note release_s
-      tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1
+      tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1 1234567890abcdef1234567890abcdef12345678:2:main
       tab hist shop $((T - 90000)) 20261116-101010 rollback verified 6.0 - - - - 0.5 5.5 - -
       tab hist shop $((T - 180000)) 20261115-101010 deploy failed 20.0 12.0 3.0 1.0 2.0 - - "start test failed" -
       echo '@metrics'
@@ -116,11 +116,11 @@ case $cmd in
     printf 'clock\t%s.123456\n' $((T + 3))
     exit 0;;
   *"tando-agent history"*)
-    tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1
+    tab hist shop $((T - 7200)) 20261117-101010 deploy verified 48.2 30.1 4.0 1.2 2.0 0.4 10.5 - 3.1 1234567890abcdef1234567890abcdef12345678:2:main
     tab hist api $((T - 9000)) 20261117-090909 deploy verified 30.0 20.0 3.0 1.0 2.0 0.4 3.6 "first try" -
     exit 0;;
   *"tando-agent releases"*)
-    tab rel 20261117-101010 verified 1 1; tab rel 20261116-101010 verified 0 0; exit 0;;
+    tab rel 20261117-101010 verified 1 1 1234567890abcdef1234567890abcdef12345678:2:main; tab rel 20261116-101010 verified 0 0; exit 0;;
   *"tando-agent env-log"*)
     tab envlog 1 $((T - 4000)) alice set "rotate the session key" - SESSION_SECRET -
     tab envlog 2 $((T - 90000)) alice import - DATABASE_URL,PUBLIC_BASE_URL - -

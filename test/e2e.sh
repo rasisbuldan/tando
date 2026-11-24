@@ -737,8 +737,8 @@ check "22d it ran as the app's user (uid ${uidr:-?}, not root) with the app's en
   eval '[ -n "$uidr" ] && [ "$uidr" != 0 ] && [ "$last" = "1 $uidr tando-relc hola $RD/releases/$idr1 $idr1" ]'
 COLUMNS=160 "$R" history -a relc > "$E/rh1.out" 2>&1; cat "$E/rh1.out" >&2
 hrow=$(srv "sudo tail -1 $RD/history.tsv")
-check "22e history: a RELCMD column; the deploy's line has the command's seconds as a 13th field; release_s in --json" \
-  eval 'grep -qE "PRE +RELCMD +SWITCH" "$E/rh1.out" && echo "$hrow" | awk -F "\t" "{ exit !(NF == 13 && \$13 ~ /^[0-9]+[.][0-9]\$/) }" &&
+check "22e history: a RELCMD column; the deploy's line has the command's seconds as a 13th field (a 14th, the git provenance, when the project is in a git repository); release_s in --json" \
+  eval 'grep -qE "PRE +RELCMD +SWITCH" "$E/rh1.out" && echo "$hrow" | awk -F "\t" "{ exit !((NF == 13 || NF == 14) && \$13 ~ /^[0-9]+[.][0-9]\$/) }" &&
         "$R" history -a relc --json | grep -qE "\"release_s\":[0-9]"'
 check "22e2 an app without a release command keeps the 7-step box and a history without RELCMD" \
   eval 'grep -qE "7/7 +verify" "$E/dwait.out" && ! COLUMNS=160 "$R" history -a hello | grep -q RELCMD'

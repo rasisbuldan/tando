@@ -229,7 +229,8 @@ runtimes() {
 version_notice() {
   local mine
   mine=$(cat "$TANDO_HOME/VERSION" 2> /dev/null) || return 0
-  [ -n "$1" ] && [ "$1" != "$mine" ] &&
+  # (compared on the base version: the agent's VERSION may end in +<sha> from a git checkout)
+  [ -n "$1" ] && [ "${1%%+*}" != "$mine" ] &&
     note "tando: host $HOST runs agent $1, this client is $mine: tando host setup $HOST updates it"
   return 0
 }
@@ -348,14 +349,15 @@ show_phases() {
 # target_guard: this checkout deploys where it did last time. A tando.conf that now names another
 # app or server (an edit, a pull, a pull request) asks once (--yes or --force: go on)
 target_guard() {
-  local last="" want="$HOST $APP $PWD" a
+  local dir=${REF_ORIG:-$PWD}   # (a --ref deploy builds elsewhere: the project is where it was started)
+  local last="" want="$HOST $APP $dir" a
   [ -n "${DEPLOY_KEY:-}${PREVIEW_DEPLOY:-}" ] && return 0
-  [ -f .tando/target ] && last=$(cat .tando/target 2> /dev/null)
+  [ -f "$dir/.tando/target" ] && last=$(cat "$dir/.tando/target" 2> /dev/null)
   # (the server renamed since: tando host rename left its old name as an alias of this one)
   case $last in "$HOST "*|"") ;; *) [ ! -f "$CFG/hosts/${last%% *}" ] && [ "$(host_alias "${last%% *}")" = "$HOST" ] && last="$HOST ${last#* }";; esac
   # (a copy of the directory elsewhere is a new project: only the same path counts)
-  if [ -n "$last" ] && [ "${last#* * }" = "$PWD" ] && [ "$last" != "$want" ] && [ -z "$YES$FORCE" ]; then
-    last=${last% "$PWD"}
+  if [ -n "$last" ] && [ "${last#* * }" = "$dir" ] && [ "$last" != "$want" ] && [ -z "$YES$FORCE" ]; then
+    last=${last% "$dir"}
     note "this directory last deployed ${last#* } to ${last%% *}; tando.conf now says ${APP} on ${HOST}."
     if [ -t 0 ]; then
       printf 'Deploy %s to %s? [y/N] ' "$APP" "$HOST" >&2; IFS= read -r a || a=""
@@ -364,7 +366,7 @@ target_guard() {
       die "not deployed: check tando.conf, then run again with --yes"
     fi
   fi
-  mkdir -p .tando && printf '%s\n' "$want" > .tando/target
+  mkdir -p "$dir/.tando" && printf '%s\n' "$want" > "$dir/.tando/target"
 }
 
 # dir_lock: one deploy at a time from a project directory (both would build into .tando/stage).
@@ -431,7 +433,7 @@ node_install() {
   elif [ -f bun.lock ] || [ -f bun.lockb ]; then NODE_INSTALL="bun install --frozen-lockfile"
   elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then NODE_INSTALL="npm ci"
   else NODE_INSTALL="npm install"; fi
-  if [ -z "${UP:-}${TANDO_ORIGIN:-}" ] || [ -n "${DRY_RUN:-}" ]; then
+  if { [ -z "${UP:-}${TANDO_ORIGIN:-}" ] || [ -n "${DRY_RUN:-}" ]; } && [ -z "${REF_D:-}" ]; then
     local again="tando deploy"; [ -z "${DRY_RUN:-}" ] || again="tando deploy --dry-run"
     die "node_modules is missing (a fresh clone?): run $NODE_INSTALL${NODE_INSTALL_DIR:+ in $NODE_INSTALL_DIR} first, then $again" \
       "(tando up runs it for you)"
@@ -572,6 +574,13 @@ dockerfile_port() {
 do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) when missing
   local t0 id ph n l existed=1 current=""
   BUILD_SECS=0 BUILD_SUMMARY="" STAGE_NOTE="" SWAPPED="" VENV_SHOWN="" STARTED=""
+  # where this code comes from (git commit, branch, uncommitted files); a dirty tree is refused with
+  # require_clean = true or --clean, else warned about once the box is open
+  prov_detect
+  if [ "$PROV_N" -gt 0 ] && { [ "${C_require_clean:-}" = true ] || [ -n "${CLEAN:-}" ]; }; then
+    die "$(plural "$PROV_N" "uncommitted file") in this git tree, and $([ -n "${CLEAN:-}" ] && echo "--clean is set" || echo "require_clean = true is set"):" \
+      "commit or stash them, or deploy a commit as it is: tando deploy --ref <branch|tag|sha>"
+  fi
   # Next.js without standalone output is refused (or fixed with --yes) before anything is installed
   next_standalone
   # a fresh clone: before anything is asked of the server (tando up installs the dependencies)
@@ -633,6 +642,8 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   phases_init
   ui_box_open "${DRY_RUN:+dry run: }deploy $APP" "$HOST"
   t0=$(clock)
+  [ "$PROV_N" -gt 0 ] && box_say "$UI_YELLOW" "warning: deploying $(plural "$PROV_N" "uncommitted file") (to deploy a commit: --ref <ref>)"
+  [ -z "${REF_D:-}" ] || box_say "$UI_DIM" "        building $REF ($(prov_label)) from a clean checkout; the working tree is not used"
 
   if [ -n "$NODE_INSTALL" ]; then
     local ti lock=""; ti=$(clock)
@@ -645,14 +656,17 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
       ui_box_close "dependencies could not be installed; nothing was uploaded"
       exit 1
     fi
-    local where=here; [ -z "$NODE_INSTALL_DIR" ] || where="in $NODE_INSTALL_DIR"
+    local where=here why="node_modules was missing"; [ -z "$NODE_INSTALL_DIR" ] || where="in $NODE_INSTALL_DIR"
+    [ -z "${REF_D:-}" ] || why="a clean checkout of $REF has none"
     box_say "" "        installed dependencies: $NODE_INSTALL, $where" \
-      "(node_modules was missing$lock; $(ui_dur "$(since "$ti")"))"
+      "($why$lock; $(ui_dur "$(since "$ti")"))"
   fi
   needs_build && step_start "build: running ${C_build:-$ENGINE build} here"
+  ref_cache restore
   if ! needs_build; then
     phase_line 1 build skip "" "nothing to build (no build in tando.conf)"
   elif run_build; then
+    ref_cache save
     phase_line 1 build ok "$BUILD_SECS" "$BUILD_SUMMARY"
   else
     phase_line 1 build fail "$BUILD_SECS"
@@ -696,7 +710,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   build_total=$(awk -v a="$BUILD_SECS" -v b="$stage_secs" 'BEGIN { printf "%.1f", a + b }')
   # the lease token, then the id of this deploy's settings (configure staged them on the server:
   # the activation runs with these, whatever another client configured meanwhile)
-  printf '%s\n%s\n' "$TOKEN" "${K_conf:-}" > "$TMPD/token"
+  printf '%s\n%s\n%s\n' "$TOKEN" "${K_conf:-}" "${PROV:-}" > "$TMPD/token"
   # (an activate that failed before it wrote the release id leaves the lease: given back, so the
   # next deploy need not wait for it; one with the id keeps it, end leaves that alone)
   if ! agent_raw sudo activate "$APP" "$build_total" "$UPLOAD_SECS" < "$TMPD/token" > "$TMPD/act"; then
@@ -713,6 +727,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
     return 0
   fi
   ui_box_line "        release $id"
+  [ -z "$PROV" ] || ui_box_line "        commit  $(prov_label)"
   phase_start copy
 
   # follow the activation; it runs on the server whether or not we keep watching
@@ -904,3 +919,118 @@ dry_run_report() {
 }
 
 plural() { if [ "$1" = 1 ]; then printf '1 %s' "$2"; else printf '%s %ss' "$1" "$2"; fi; }
+
+# ---- provenance: which code a release is made from; deploy --ref ---------------------------------
+
+REF_D="" REF_ORIG="" REF_SHA="" REF_BRANCH=""
+PROV="" PROV_N=0
+
+# prov_detect: PROV = "<40 hex sha>:<changed files>:<branch>" when the app directory is in a git
+# repository with a commit (else ""), PROV_N = the files git status lists (changed, staged, or
+# untracked and not ignored). With --ref: the ref's commit, no changes.
+prov_detect() {
+  local sha br n
+  PROV="" PROV_N=0
+  if [ -n "$REF_SHA" ]; then PROV="$REF_SHA:0:${REF_BRANCH:--}"; return 0; fi
+  command -v git > /dev/null 2>&1 || return 0
+  sha=$(git rev-parse --verify -q HEAD 2> /dev/null) || return 0
+  case $sha in *[!0-9a-f]*|"") return 0;; esac
+  [ ${#sha} = 40 ] || return 0
+  br=$(git symbolic-ref --short -q HEAD 2> /dev/null) || br=""
+  br=$(printf '%s' "$br" | tr -c 'A-Za-z0-9._/+\n-' '_' | cut -c1-100)
+  n=$(git status --porcelain 2> /dev/null | wc -l | tr -d ' ')
+  case $n in ""|*[!0-9]*) n=0;; esac
+  [ "$n" -le 999999 ] || n=999999
+  PROV="$sha:$n:${br:--}" PROV_N=$n
+}
+
+# prov_label: "abc1234 on main" / "abc1234 on main, dirty: 3 files" for PROV
+prov_label() {
+  local sha n br
+  sha=${PROV%%:*}; n=${PROV#*:}; br=${n#*:}; n=${n%%:*}
+  printf '%s' "${sha:0:7}"
+  [ "$br" = - ] || printf ' on %s' "$br"
+  [ "$n" = 0 ] || printf ', dirty: %s' "$(plural "$n" file)"
+}
+
+# ref_checkout: for --ref: a clean detached worktree of the ref in a temporary directory, and cd into
+# the app's directory in it (the project's path inside the repository). Its tando.conf is the one
+# committed at the ref; an untracked one is copied from the working tree, and it says so.
+ref_checkout() {
+  local top pre sha cur br="" tb
+  command -v git > /dev/null 2>&1 || die "--ref needs git"
+  REF_ORIG=$PWD
+  top=$(git rev-parse --show-toplevel 2> /dev/null) || die "--ref: $PWD is not in a git repository"
+  pre=$(git rev-parse --show-prefix 2> /dev/null)
+  case $REF in ""|-*) die "--ref needs a branch, tag or commit";; esac
+  sha=$(git rev-parse --verify --quiet "$REF^{commit}" 2> /dev/null) ||
+    die "--ref $REF: no such branch, tag or commit in this repository"
+  if git show-ref --verify --quiet "refs/heads/$REF"; then br=$REF
+  else
+    cur=$(git symbolic-ref --short -q HEAD 2> /dev/null) || cur=""
+    [ -z "$cur" ] || [ "$(git rev-parse HEAD 2> /dev/null)" != "$sha" ] || br=$cur
+  fi
+  br=$(printf '%s' "$br" | tr -c 'A-Za-z0-9._/+\n-' '_' | cut -c1-100)
+  tb=${TMPDIR:-/tmp}; case $tb in *[[:space:]]*) tb=/tmp;; esac
+  REF_D=$(mktemp -d "$tb/tando-ref.XXXXXX") || die "could not make a temporary directory for --ref"
+  if ! git worktree add -q --detach "$REF_D/w" "$sha" > "$TMPD/ref.log" 2>&1; then
+    local why; why=$(tail -1 "$TMPD/ref.log"); ref_cleanup
+    die "--ref $REF: could not check it out: $why"
+  fi
+  REF_SHA=$sha REF_BRANCH=$br
+  cd "$REF_D/w/$pre" 2> /dev/null || { ref_cleanup; die "--ref $REF: this directory ($pre) does not exist at that commit"; }
+  if [ ! -f tando.conf ]; then
+    if [ -f "$REF_ORIG/tando.conf" ] && ! git -C "$REF_ORIG" ls-files --error-unmatch tando.conf > /dev/null 2>&1; then
+      cp "$REF_ORIG/tando.conf" tando.conf || die "--ref: could not copy tando.conf"
+      note "tando.conf is not committed: using the working tree's copy for $REF"
+    else
+      ref_cleanup; die "--ref $REF: there is no tando.conf at that commit (commit it, or keep it untracked in this directory)"
+    fi
+  fi
+  [ -n "${TANDO_ORIGIN:-}" ] || TANDO_ORIGIN=$REF_ORIG   # (the server records where it was deployed from)
+}
+
+# ref_build_files: the files tando.conf's build_files names, copied from the working tree into the
+# checkout (gitignored local files the build reads, like .env.production.local); only those, only
+# regular files, their contents never printed
+ref_build_files() {
+  local f copied=""
+  for f in $C_build_files; do
+    if [ -L "$REF_ORIG/$f" ] || [ ! -f "$REF_ORIG/$f" ]; then
+      note "build_files: $f is not a file in the working tree: skipped"; continue
+    fi
+    if [ -e "$f" ]; then note "build_files: $f is committed at $REF: the committed file is used"; continue; fi
+    mkdir -p "$(dirname "$f")" && cp -p "$REF_ORIG/$f" "$f" || die "build_files: could not copy $f"
+    copied="$copied $f"
+  done
+  [ -z "$copied" ] || note "build_files:${copied} copied from the working tree into the checkout for the build"
+  return 0
+}
+
+# ref_cache restore|save: a --ref checkout starts without .next/cache; the project's copy of it
+# (.tando/ref-cache/next in the directory deploy was started in) keeps Next.js's build cache
+ref_cache() {
+  [ -n "${REF_D:-}" ] && [ "${C_recipe:-}" = next ] || return 0
+  local c=$REF_ORIG/.tando/ref-cache/next
+  case $1 in
+    restore) if [ -d "$c" ]; then mkdir -p .next/cache && rsync -a "$c/" .next/cache/ 2> /dev/null; fi;;
+    save) if [ -d .next/cache ]; then mkdir -p "$c" && rsync -a --delete .next/cache/ "$c/" 2> /dev/null; fi;;
+  esac
+  return 0
+}
+
+# ref_cleanup: (EXIT trap) the temporary checkout goes, after a deploy, a failure or Ctrl-C; the
+# build log of a failed build is kept where the project's own would be
+ref_cleanup() {
+  [ -n "${REF_D:-}" ] || return 0
+  local d=$REF_D
+  REF_D=""
+  if [ -f .tando/build.log ] && mkdir -p "$REF_ORIG/.tando" 2> /dev/null; then
+    cp .tando/build.log "$REF_ORIG/.tando/build.log" 2> /dev/null
+  fi
+  cd "$REF_ORIG" 2> /dev/null || cd /
+  git worktree remove --force "$d/w" > /dev/null 2>&1
+  rm -rf "${d:?}"
+  git worktree prune > /dev/null 2>&1
+  return 0
+}
