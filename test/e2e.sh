@@ -1038,9 +1038,11 @@ check "AS5b the shared directory holds exactly what the kept releases list ($nfi
 # CG0. precompressed copies of the hashed text files (made at link time; listed so pruning takes them)
 AD=/opt/tando/apps/skew
 check "CG0a release 8's script has a .gz in the shared directory, and its tiny stylesheet (under 1 KB) has none" \
-  eval 'srv "test -f $AD/assets/assets/index-$H8.js.gz" && srv "test -f $AD/assets/assets/style-$H8.css" && ! srv "test -e $AD/assets/assets/style-$H8.css.gz"'
-ngz=$(srv "find $AD/assets -name '*.gz' | wc -l" | tr -d ' ')
-orph=$(srv "cd $AD/assets && find . -name '*.gz' | while read -r g; do [ -f \"\${g%.gz}\" ] || echo \"\$g\"; done" | wc -l | tr -d ' ')
+  eval 'srv "sudo test -f $AD/assets/assets/index-$H8.js.gz" && srv "sudo test -f $AD/assets/assets/style-$H8.css" && ! srv "sudo test -e $AD/assets/assets/style-$H8.css.gz"'
+# (the shared directory is root:caddy 750: read as root)
+ngz=$(srv "sudo find $AD/assets -name '*.gz' | wc -l" | tr -d ' ')
+orph=$(printf '%s\n' 'cd /opt/tando/apps/skew/assets && find . -name "*.gz" | while read -r g; do [ -f "${g%.gz}" ] || echo "$g"; done' |
+  srv "sudo bash -s" | wc -l | tr -d ' ')
 listed=$(srv "sudo cat \$(sudo find $AD/assetlog -maxdepth 1 -type f ! -name '*.*') | grep -c '\\.gz\$'" | tr -d ' ')
 check "CG0b the kept releases list the .gz files ($ngz on disk, $listed listed, $orph without their file)" \
   eval '[ "$orph" = 0 ] && [ "$ngz" -ge 1 ] && [ "$listed" -ge 1 ]'
