@@ -13,6 +13,8 @@ AGENT=$R/bin/tando-agent
 PROXYD=/usr/lib/systemd/systemd-socket-proxyd   # (idle_stop: in the systemd package)
 LOGS=$R/bin/tando-logs      # logging helper (server/tando-logs)
 KEEP=5                 # releases kept per app (current and last_good are always kept too)
+SKEW_WINDOW=24h        # how long an older release's fingerprinted files stay reachable (skew_window =)
+SKEW_MAX=20            # older releases whose files are kept at most (the newest ones), whatever the window
 SOAK=30                # seconds a new release must stay up after the check through Caddy (soak =)
 UPLOAD_TIMEOUT=900     # seconds after which an unfinished upload lease is considered abandoned
 SHM_SIZE=16M           # each unit's private /dev/shm (counted in its memory)
@@ -2063,6 +2065,7 @@ switch_link() { # id: the link and the state only
   SW_MOVED=1
   sync "$D" 2> /dev/null      # the new link reaches the disk before anything depends on it
   fp link.moved
+  assets_turn "${S[current]:-}" "$1"
   st current "$1"
 }
 # runs_release id: the app's process runs that release now (its working directory)
@@ -2187,9 +2190,17 @@ releases_by_seq() {
 #   $D/assetlog/<id>.spec   "<dir in the release><TAB><URL prefix>" lines, made after every file is in
 #                           place: Caddy serves a prefix only from then on (and while the release is kept)
 #   $D/assetlog/<id>.cc     the Cache-Control the app itself sent for one of them, when it sent one
-# Nothing in $D/assets is removed while a kept release lists it: assets_gc (prune) removes what no
-# kept release lists. A kill at any point leaves files nobody lists (gc takes them), never a
-# release without its files: they are linked before the switch, and the app answers what is missing.
+#   $D/assetlog/<id>.end    when release <id> last stopped being the live one (assets_turn, at the
+#                           switch away from it): its skew window runs from then
+# Skew protection: a release's record stays for skew_window (default 24h; off: none) after it
+# stopped serving, whether its directory is still kept or was pruned (the hard links hold the
+# bytes), for at most the SKEW_MAX newest older releases; the live release's always stays. The
+# live release's files are its own: a name in both with other bytes is the newer file (above), and
+# a path the live release does not have is answered from an older release only when one lists it.
+# assets_expire drops the records whose window ended (at every prune, and every 15 minutes by
+# tando-assetsweep.timer: assets-sweep), assets_gc then removes what no record lists. A kill at any
+# point leaves files nobody lists (gc takes them), never a release without its files: they are
+# linked before the switch, and the app answers what is missing.
 
 # assets_hashed dir: every file under dir has a content hash in its name (Vite and Rollup
 # index-DiwrgTda.js, webpack main.3f2a1c0b.js, Astro index.BkJmRqZs.js): the last dash, dot or
@@ -2316,8 +2327,9 @@ assets_link() {
   ASSETS_DONE=$id
   return 0
 }
-# assets_gc: after a prune: the records of releases that are gone, then every file of $D/assets
-# that no kept release lists (and the directories that are empty then)
+# assets_gc: after a prune: the records of releases that are gone (but those still in their skew
+# window: a record with its .end), then every file of $D/assets that no record lists (and the
+# directories that are empty then)
 assets_gc() {
   local L=$D/assetlog f i keep
   [[ -d $L ]] || return 0
@@ -2325,7 +2337,7 @@ assets_gc() {
   for f in "$L"/*; do
     [[ -e $f ]] || continue
     i=${f##*/}; i=${i%%.*}
-    valid_id "$i" && [[ -d $D/releases/$i ]] || rm -f "$f"
+    valid_id "$i" && { [[ -d $D/releases/$i ]] || [[ -f $L/$i && -f $L/$i.spec && -f $L/$i.end ]]; } || rm -f "$f"
   done
   [[ -d $D/assets ]] || return 0
   keep=$(mktemp "$L/.keep.XXXXXX") || return 0
@@ -2336,7 +2348,45 @@ assets_gc() {
   fi
   rm -f "$keep"
 }
-# assets_mounts: the URL prefixes Caddy serves from $D/assets (those of every kept release)
+# assets_turn old new: the live release changes from old to new (switch_link): old's skew window
+# starts now, new's record has none (it serves). A kill before it leaves old without an .end:
+# assets_expire starts its window then.
+assets_turn() {
+  local L=$D/assetlog
+  [[ -d $L ]] || return 0
+  valid_id "$2" && rm -f "$L/$2.end"
+  if [[ -n $1 && $1 != "$2" && -f $L/$1 ]] && valid_id "$1"; then
+    { printf '%s\n' "$(now)" > "$L/$1.end.tmp" && mv -f "$L/$1.end.tmp" "$L/$1.end"; } 2> /dev/null
+  fi
+  return 0
+}
+# assets_window: the app's skew window in seconds (skew_window; off: 0)
+assets_window() {
+  local w=${C[skew_window]:-$SKEW_WINDOW}
+  [[ $w == off ]] && { echo 0; return 0; }
+  preview_secs "$w" || preview_secs "$SKEW_WINDOW"
+}
+# assets_expire: the records of the older releases whose skew window ended, and of those past the
+# SKEW_MAX newest, go (their .spec and .end with them; assets_gc then takes the files no record
+# lists). The live release's (the state's and the link's) never. A record without an .end (a kill
+# before assets_turn, a release from before skew_window) starts its window now. 0 when one went.
+assets_expire() {
+  local L=$D/assetlog f i e t w n=0 rc=1 cur=${S[current]:-} lk
+  [[ -d $L ]] || return 1
+  lk=$(cur_link); t=$(now); w=$(assets_window)
+  while read -r e i; do
+    n=$((n + 1))
+    if ((n > SKEW_MAX || e + w <= t)); then rm -f "$L/$i" "$L/$i.spec" "$L/$i.end"; rc=0; fi
+  done < <(for f in "$L"/*; do
+             i=${f##*/}
+             [[ $i != *.* ]] && valid_id "$i" && [[ -f $f && $i != "$cur" && $i != "$lk" ]] || continue
+             [[ -f $L/$i.end ]] || printf '%s\n' "$t" > "$L/$i.end"
+             e=$(< "$L/$i.end"); [[ $e =~ ^[0-9]{1,11}$ ]] || e=$t
+             echo "$e $i"
+           done | sort -k1,1nr -k2,2r)
+  return $rc
+}
+# assets_mounts: the URL prefixes Caddy serves from $D/assets (those of every recorded release)
 assets_mounts() {
   local f
   for f in "$D"/assetlog/*.spec; do [[ -f $f ]] && cut -f2 "$f"; done | sort -u
@@ -2372,7 +2422,65 @@ prune() {
   # settings staged by a configure a day ago or more (a deploy whose upload never came)
   [[ -d $D/confs ]] && find "$D/confs" -maxdepth 1 -type f -mmin +1440 ! -name "${S[staged]:-none}" -delete 2> /dev/null
   save "$D/state" S
+  # the older releases' files whose skew window ended; a URL prefix none names any more leaves the site
+  local m0; m0=$(assets_mounts)
+  assets_expire
   assets_gc
+  [[ $(assets_mounts) == "$m0" ]] || write_caddy || true
+}
+
+# assets-sweep (tando-assetsweep.timer, every 15 minutes): the skew window of the older releases
+# ends on time also when no deploy comes (a deploy's prune does the same): for every app with
+# shared files, under its lock (an app busy with something else waits for the next run), the
+# records whose window ended go, their files, and a URL prefix no record names leaves its site.
+cmd_assets_sweep() {
+  need_root
+  local a n=0 bad=0 m0
+  for a in "$R"/apps/*/assetlog; do
+    [[ -d $a ]] || continue
+    a=${a%/assetlog}; a=${a##*/}
+    valid_app "$a" && [[ -f $R/apps/$a/app.conf ]] || continue
+    ( app "$a"
+      lockfile "$D/lock"; exec 9>"$D/lock"; flock -n 9 || exit 2
+      lock_mark assets-sweep
+      [[ ${S[phase]:-idle} == idle ]] || exit 2
+      m0=$(assets_mounts)
+      assets_expire || exit 2
+      assets_gc
+      [[ $(assets_mounts) == "$m0" ]] || write_caddy || exit 1
+      exit 0 )
+    case $? in
+      0) n=$((n + 1));;
+      2) ;;
+      *) bad=$((bad + 1)); echo "tando-agent: the skew window of $a could not be applied to its site" >&2;;
+    esac
+  done
+  echo "expired=$n"; echo "failed=$bad"
+}
+assets_sched_install() {
+  WIC_CHANGED=0
+  write_if_changed /etc/systemd/system/tando-assetsweep.service <<EOF
+[Unit]
+Description=tando: end the skew window of older releases' fingerprinted files
+
+[Service]
+Type=oneshot
+ExecStart=$AGENT assets-sweep
+EOF
+  write_if_changed /etc/systemd/system/tando-assetsweep.timer <<EOF
+[Unit]
+Description=tando: end the skew window of older releases' files every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  ((WIC_CHANGED)) && systemctl daemon-reload
+  systemctl -q is-enabled tando-assetsweep.timer 2> /dev/null && systemctl -q is-active tando-assetsweep.timer ||
+    systemctl enable -q --now tando-assetsweep.timer
 }
 
 # soak_why: how the app fell over in the soak, for the history note, the client and the alert:
@@ -3909,6 +4017,7 @@ EOF
   caddy_install_staged || die "$WC_WHY; the sites are as they were: run tando host setup again once that is fixed"
   ((OC_CHANGED)) && { caddy_reload || die "Caddy did not load the new origin certificate: ${CADDY_ERR:-}"; }
   origin_sched_install || die "could not set up the origin ranges timer (tando-origin.timer)"
+  assets_sched_install || die "could not set up the skew window timer (tando-assetsweep.timer)"
   fw_sync || die "the per-app loopback rules could not be loaded (above); run tando host setup again"
   # active (it loaded nothing the first time: no firewall.nft yet), so that a restart of nftables,
   # which flushes every rule, restarts it too (PartOf) and the rules come back
@@ -4350,7 +4459,7 @@ name_free() {
     d-*|m-*) NAME_WHY="$1 is reserved (tando-$1 is the deploy user or settings group of an app ${1#?-})";;
     rx-*|adopt-*|unadopt-*) NAME_WHY="$1 is reserved (tando-$1 is a unit tando uses for the app ${1#*-})";;
     *-backup) NAME_WHY="$1 is reserved (tando-$1 is the backup unit of an app ${1%-backup})";;
-    watch|watch-fallback|host|host-boot|host-window|metrics|offsite|recover|firewall|down|backups|previews|drill)
+    watch|watch-fallback|host|host-boot|host-window|metrics|offsite|recover|firewall|down|backups|previews|drill|assetsweep)
       NAME_WHY="$1 is reserved (tando-$1 is one of tando's own units)";;
   esac
   [[ -z $NAME_WHY ]]
@@ -4453,7 +4562,7 @@ cmd_configure() {
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" "C[priority]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" "C[db_pool]" "C[db_direct]" \
     "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]" "C[idle_stop]" \
-    "C[tmp_size]" "C[io]" "C[disk]" "C[response_timeout]" "C[body_max]" "C[cold_timeout]" "C[preview_skip]" "C[preview_ttl]" "C[preview_env]" "C[preview_release]" "C[node_lite]"
+    "C[tmp_size]" "C[io]" "C[disk]" "C[response_timeout]" "C[body_max]" "C[cold_timeout]" "C[preview_skip]" "C[preview_ttl]" "C[preview_env]" "C[preview_release]" "C[node_lite]" "C[skew_window]"
   local line
   while IFS= read -r line; do
     k=${line%%=*} v=${line#*=}; [[ $line == *=* ]] || { k=$line v=""; }
@@ -4536,6 +4645,9 @@ cmd_configure() {
       disk) [[ $v =~ ^[1-9][0-9]{0,5}[MG]$ ]] || die "bad disk: $v (like 2G)";;
       # the fingerprinted files of the release (assets_spec): off, a directory in the release and
       # optionally the URL prefix they are served under
+      # skew protection (assets_expire): how long an older release's fingerprinted files stay
+      skew_window) [[ $v == off ]] || { preview_secs "$v" > /dev/null && (($(preview_secs "$v") <= 7776000)); } ||
+                     die "bad skew_window: $v (like 24h, 30m or 7d, 90 days at most; or off)";;
       assets) [[ $v == off || $v =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*(\ *,\ *(/[A-Za-z0-9_.~-]+)+/?)?$ && /$v/ != */../* && /$v/ != */./* ]] ||
                 die "bad assets: $v (off, or a directory in the release like assets, and optionally a URL prefix: assets, /static/)";;
       hold) [[ $v =~ ^[1-9][0-9]{0,2}$ ]] || die "bad hold: $v (seconds)";;
@@ -8890,10 +9002,10 @@ CONF_KEYS_A=(recipe image container_port build_memory start start_shell release 
   memory health_timeout soak cpu tasks max_conns max_requests stop_timeout hold log_max log_keep
   log_rate access_log request_log_max health_expect health_fails health_recover job_timeout job_spread
   job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk response_timeout body_max cold_timeout node_lite
-  mail_out)
+  mail_out skew_window)
 CONF_KEYS=" ${CONF_KEYS_A[*]} "
 # what a record of the first agent that recorded every setting knew (conf=1 without keys=)
-CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk response_timeout body_max cold_timeout node_lite mail_out } job.* "
+CONF_KEYS1="${CONF_KEYS% job_spread job_missed assets compress priority db_pool db_direct idle_stop tmp_size io disk response_timeout body_max cold_timeout node_lite mail_out skew_window } job.* "
 conf_key() {
   case $1 in job.*|worker.*) return 0;; *[[:space:]]*|'') return 1;; esac
   [[ $CONF_KEYS == *" $1 "* ]]
@@ -9927,6 +10039,7 @@ case $verb in
   preview-ls) cmd_preview_ls "$@";;
   preview-rm) cmd_preview_rm "$@";;
   preview-sweep) cmd_preview_sweep;;   # tando-previews.service, hourly
+  assets-sweep) cmd_assets_sweep;;     # tando-assetsweep.service, every 15 minutes
   backup-ls) cmd_backup_ls "$@";;
   backup-cat) cmd_backup_cat "$@";;
   backup-restore) cmd_backup_restore "$@";;

@@ -291,7 +291,8 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
 - **Records** (`$D/assetlog/`, root only): `<id>` lists the files release `<id>` put in the shared
   directory, `<id>.spec` the `<dir><TAB><url prefix>` lines (written last: Caddy serves a prefix
   only when every file of the release is in place), `<id>.cc` the `Cache-Control` the app itself
-  sent for one of its files, when it sent one.
+  sent for one of its files, when it sent one, `<id>.end` when the release last stopped being the
+  live one (its skew window runs from then; the live release has none).
 - **When:** `assets_link` runs at the start of `switch_to`, before the link moves: for a deploy,
   after the pre-flight passed and the backup and release command ran; for a rollback and a revert,
   for the release going live (a file of the same name with other bytes, which a fingerprint rules
@@ -307,10 +308,11 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
   like any other file (so `assets_gc` removes it with its file), and the assets `file_server` has
   `precompressed gzip`: Caddy sends the .gz as it is (about 0.3 ms). No .zst: a visitor that accepts
   zstd and gzip is sent the .gz.
-- **Pruning:** `prune` ends with `assets_gc`: records of releases that are gone are removed, then
-  every file of the shared directory that no kept release lists. Releases are kept as before (5, and
-  current, last_good and the target), so the files of the last releases stay and nothing grows without
-  bound. A failed or cut-off deploy's release is dropped the same way.
+- **Pruning:** `prune` ends with `assets_expire` and `assets_gc` (see "Skew protection" below): the
+  records whose skew window ended go, records of releases that are gone and were never live go, then
+  every file of the shared directory that no record lists. A failed or cut-off deploy's release that
+  never went live is dropped the same way; one that was live (a failed soak) keeps its files for the
+  window, like any release that stopped serving.
 - **Crash safety:** the files are linked before the link moves, and the serving release's files are
   never removed while it is kept (its list is in the union). A kill leaves files nobody lists (or a
   `*.tmp` list): the next prune takes them; the kill's own recovery is that of any kill before the
@@ -324,6 +326,52 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
   Not in the stopped and down pages.
 - **Cost:** hard links use no data blocks beyond the first copy; deploy time and measurements
   are in the changelog entry.
+
+### Skew protection
+
+The shared directory is what keeps a page of an older release working after a switch (Vercel calls
+it skew protection); `skew_window` (tando.conf, default `24h`, `off`, at most `90d`) says for how
+long. A release's record (and so its files and its URL prefix) stays while the release is live,
+and for `skew_window` after it stopped being live, measured from that switch:
+
+- **Start of the window:** `switch_link`, which every switch goes through (a deploy, a rollback, a
+  revert, a recovery), calls `assets_turn old new`: it writes `<old>.end` (now) and removes
+  `<new>.end`. So after a rollback from N+1 to N, N+1's files are reachable for the window too, and
+  N's are live again (with N's bytes for a name both have). A record without an `.end` that is not
+  live (a kill between the link and `assets_turn`, a release from before this agent) gets one when
+  `assets_expire` first sees it: its window starts then.
+- **Kept beyond the release:** the window does not keep the release. `prune` keeps 5 releases as
+  before; a pruned release's record stays while its window runs (`assets_gc` keeps a record whose
+  release is gone only when it has an `.end`), and the hard links in the shared directory hold its
+  files' bytes after the release directory is gone. Nothing else of it (server code, `.env`,
+  `.next/server`) was ever in the shared directory.
+- **End of the window:** `assets_expire` drops the records of releases that are not live whose
+  `.end` is older than the window, and of those past the newest `SKEW_MAX` (20) older releases
+  whatever the window (a CI that deploys every few minutes must not keep a day of builds);
+  `assets_gc` then removes the files no record lists. It runs at every `prune` (the end of every
+  deploy) and from `tando-assetsweep.timer` every 15 minutes (`tando-agent assets-sweep`: each
+  app's lock taken without waiting, skipped when busy or in the middle of an operation), so a window
+  ends within 15 minutes of its time also when no deploy comes. When the set of URL prefixes
+  changed (the last record naming one went), the site is written again; otherwise Caddy's file
+  matcher, which looks at the disk on every request, needs no reload. `skew_window = off` ends
+  every older release's window at the deploy's prune: from then only the live release's files are
+  answered from the shared directory (as immutable), the rest by the app.
+- **What wins:** the live release. Its files are in the shared directory (hard links of its own), a
+  name it shares with an older release with other bytes is replaced by its file when it goes live,
+  and a path under a prefix that no record lists is the app's (a node app's proxy, a static site's
+  `file_server`, so its `404.html`): an older release only fills paths the live one does not have.
+- **Confinement:** Caddy's file matcher and `file_server` join the cleaned request path to
+  `$D/assets` (`../` and its encodings stay inside it); the directory holds only hard links of
+  plain root-owned files under the release's asset directory (`find -type f -user root`: no
+  symlink, no file the app may write), made `o+r`, in directories `root:root 755`; each app has
+  its own, so one app's site never answers another app's files. e2e-skew tries traversals.
+- **Next.js build ids:** a page of an older build asks for `/_next/static/<old build id>/...`
+  and its chunks; those are in the shared directory for the window. Data requests that go to the
+  server (`/_next/data/<build id>/...` of the pages router, RSC requests of the app router) are
+  the live server's: Next answers an unknown build id with a 404 that its client turns into a full
+  page load of the new release, which is the right outcome. `NEXT_DEPLOYMENT_ID` (Next's own skew
+  handling, a `?dpl=` query on its assets) needs nothing from tando: the query is not part of the
+  path Caddy looks up.
 
 ## Trust boundaries
 - Loopback: Caddy's admin API is on a unix socket in /run/caddy (caddy and root only), never on

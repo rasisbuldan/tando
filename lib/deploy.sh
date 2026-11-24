@@ -58,6 +58,7 @@ configure() {
     [ -n "${C_io:-}" ] && printf 'io=%s\n' "$C_io"
     [ -n "${C_disk:-}" ] && printf 'disk=%s\n' "$C_disk"
     [ -n "${C_assets:-}" ] && printf 'assets=%s\n' "$C_assets"
+    [ -n "${C_skew_window:-}" ] && printf 'skew_window=%s\n' "$C_skew_window"
     [ "${C_compress:-}" = off ] && printf 'compress=off\n'   # (on is the default; an older agent knows no compress)
     [ -n "$C_job_timeout" ] && printf 'job_timeout=%s\n' "$C_job_timeout"
     [ -n "$C_job_spread" ] && printf 'job_spread=%s\n' "$C_job_spread"

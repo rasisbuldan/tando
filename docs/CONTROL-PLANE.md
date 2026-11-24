@@ -195,7 +195,7 @@ compressed as `.tar.gz` or `.tar.zst` (zstd needs the `zstd` package on the node
 `settings` are the `tando.conf` keys of the code, and only those: `recipe` (node, next, static
 or workerd: an artifact is already built, so recipes that build or pull on the node, python and
 container, are not deployed from one), `start`, `start_shell`, `health`, `health_expect`,
-`health_timeout`, `path`, `spa`, `compress`, `data`, `writable`, `assets`, `release`,
+`health_timeout`, `path`, `spa`, `compress`, `data`, `writable`, `assets`, `skew_window`, `release`,
 `release_shell`, `release_timeout`, `node_lite`, `job_timeout`, `job_spread`, `job_missed`,
 `job.<name>` (and its `.timeout`, `.spread`, `.missed`, `.cron`), `worker.<name>` (and its
 `.stop_timeout`). Resources, domains, data and schedules of the node (`memory`, `cpu`, `domain`,

@@ -54,6 +54,7 @@ Limits
 Assets
   compress        off: send answers as they are (default on: text is gzip or zstd compressed)
   assets          off, or <dir>[, <url prefix>]: hashed files kept across releases (next and static: found by themselves)
+  skew_window     how long an older release's hashed files stay reachable, like 24h, 7d (default 24h; off)
 Data
   data            directory that survives deploys ($TANDO_DATA_DIR)
   backup          daily | off (daily when data or database is set)

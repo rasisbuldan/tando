@@ -487,6 +487,7 @@ C_logs=""   # log_max, log_keep, log_rate, access_log as key=value lines (checke
 C_image="" C_container_port="" C_build_memory="" C_dockerfile="" C_node="" C_domain="" C_www=""
 C_compress=""   # on (default) or off: Caddy compresses text answers (checked by the server too)
 C_assets=""   # fingerprinted files served from Caddy: off, or <dir>[, <url prefix>] (checked by the server too)
+C_skew_window=""   # how long an older release's fingerprinted files stay reachable: a time like 24h, or off
 C_job_timeout=""   # seconds a scheduled job may run (the server's default: 3600)
 C_job_spread="" C_job_missed=""   # the spread of a job's start (default: a sixth of its period, at most 600 s), run or skip a run missed while the server was off
 C_workers=""       # worker.<name> = <command> and their .memory, .stop_timeout as key=value lines
@@ -798,6 +799,9 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 999 ] || die "$f:$n: stop_timeout is 1 to 999 seconds (got \"$v\")";;
       compress) C_compress=$v
         case $v in on|off) ;; *) die "$f:$n: compress must be on or off (got \"$v\")";; esac;;
+      skew_window) C_skew_window=$v
+        case $v in off|[1-9][smhd]|[1-9][0-9][smhd]|[1-9][0-9][0-9][smhd]|[1-9][0-9][0-9][0-9][smhd]) ;;
+          *) die "$f:$n: skew_window is a time like 24h, 30m or 7d, or off (got \"$v\")";; esac;;
       assets) C_assets=$v
         case $v in off) ;;
           *[!A-Za-z0-9_./,\ ~-]*|""|/*|*..*) die "$f:$n: assets is off, or a directory in the release like assets and optionally the URL prefix: assets, /static/ (got \"$v\")";; esac

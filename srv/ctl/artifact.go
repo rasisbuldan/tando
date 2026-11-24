@@ -40,7 +40,7 @@ var codeKeys = map[string]bool{
 	"health_timeout": true, "path": true, "spa": true, "compress": true, "data": true,
 	"writable": true, "assets": true, "release": true, "release_shell": true,
 	"release_timeout": true, "node_lite": true, "job_timeout": true, "job_spread": true,
-	"job_missed": true,
+	"job_missed": true, "skew_window": true,
 }
 
 // specKeys are the settings of the app spec (apply), kept across an artifact deploy.

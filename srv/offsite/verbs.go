@@ -682,6 +682,7 @@ var confKeys = map[string]bool{
 	"job_timeout": true, "job_spread": true, "job_missed": true, "assets": true, "compress": true,
 	"priority": true, "idle_stop": true, "tmp_size": true, "io": true, "disk": true,
 	"response_timeout": true, "body_max": true, "cold_timeout": true, "spa": true, "node_lite": true, "mail_out": true,
+	"skew_window": true,
 }
 
 func (o Offsite) drOpen(host string) (*session, error) {

@@ -20,6 +20,15 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 
 ### New
 
+- Skew protection with a time window (docs/CONFIG.md `skew_window`, docs/ARCHITECTURE.md "Skew
+  protection"): after a switch (a deploy, a rollback, a revert), the fingerprinted files of the
+  release that stopped serving (Next.js `/_next/static/...`, Vite `/assets/index-<hash>.js`, what
+  `assets =` names) stay reachable for `skew_window` (default `24h`, at most `90d`, `off`), also
+  when the release itself is pruned (the hard links in the shared directory hold them), for at most
+  the 20 newest older releases. The live release's files always win; an older release only answers
+  paths the live one does not have. The window ends at the next deploy or within 15 minutes
+  (`tando-assetsweep.timer`, installed by `tando host setup`). Before, the files were kept exactly
+  as long as their release (the last 5), however old. New suite `test/e2e-skew.sh`.
 - Guardrails for shared servers (docs/COMMANDS.md "Profiles and guardrails"): limit profiles
   (`host setup profile.<name>=...`, `profile = <name>`) with mandatory CPU, task and job limits,
   worker counts and job frequency; `mail_out = off`; a per-app outbound connection rate
@@ -311,6 +320,11 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 Run `tando host setup <host>` on each server after updating tando; it applies the items below.
 Steps and checks: docs/release-notes/0.3.0.md.
 
+- The fingerprinted files of an older release are reachable for `skew_window` (default 24 hours)
+  after it stopped serving, not as long as the release is kept: an app that deploys once a week
+  and relied on last week's files keeps them with `skew_window = 7d`. A release kept from before
+  the update gets its window from the first deploy or sweep after it. `assetsweep` is a reserved
+  app name (tando's own `tando-assetsweep` units).
 - An app's `/tmp` and `/var/tmp` are a 64 MB tmpfs in its memory (was: a private directory on
   the disk), from its next deploy or host setup. An app that writes large temporary files (uploads
   to the system temp directory) sets `tmp_size = 512M`, or `memory =` higher with it. New caps per

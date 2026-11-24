@@ -1021,15 +1021,17 @@ check "AS4 after a rollback the page is release 2's and its file answers with it
   eval '[ $rc = 0 ] && get skew | grep -q "release 2" && src=$(get skew | grep -o "/assets/index-[^ >]*\.js") &&
         [ "$(curl -s "http://skew.localhost:$HP$src" | cksum)" = "$(cksum < "$E/ref/rel2.js")" ]'
 "$R" deploy > "$E/as4.out" 2>&1
-# pruning: five more releases push release 1 out
+# pruning: five more releases push release 1 out; its skew window (skew_window, 24h) still runs
+id1=$(srv "sudo ls -tr /opt/tando/apps/skew/assetlog | grep -v '[.]' | head -1")   # (the oldest record: release 1's)
 for n in 4 5 6 7 8; do site_release "$W/skew" $n; "$R" deploy > "$E/as$n.out" 2>&1; done
 # shellcheck disable=SC2034  # read in the eval of a check below
 H8=$AS_H
 nrel=$(srv "sudo ls /opt/tando/apps/skew/releases | wc -l" | tr -d ' ')
 code1=$(curl -s -o /dev/null -w '%{http_code}' "http://skew.localhost:$HP/assets/index-$H1.js")
-on1=$(srv "sudo find /opt/tando/apps/skew/assets /opt/tando/apps/skew/assetlog -name '*$H1*' | wc -l" | tr -d ' ')
-check "AS5 release 1 was pruned (kept $nrel releases): its file answers $code1 and is gone from disk ($on1 left)" \
-  eval '[ "$code1" = 404 ] && [ "$on1" = 0 ] && [ "$(curl -s -o /dev/null -w "%{http_code}" "http://skew.localhost:$HP/assets/index-$H8.js")" = 200 ]'
+check "AS5 release 1 ($id1) was pruned (kept $nrel releases) but is in its skew window: its file answers $code1 with its bytes" \
+  eval '[ "$code1" = 200 ] && ! srv "test -d /opt/tando/apps/skew/releases/$id1" &&
+        [ "$(curl -s "http://skew.localhost:$HP/assets/index-$H1.js" | cksum)" = "$(cksum < "$E/ref/rel1.js")" ] &&
+        [ "$(curl -s -o /dev/null -w "%{http_code}" "http://skew.localhost:$HP/assets/index-$H8.js")" = 200 ]'
 nfiles=$(srv "sudo find /opt/tando/apps/skew/assets -type f | wc -l" | tr -d ' ')
 nlist=$(srv "sudo cat \$(sudo find /opt/tando/apps/skew/assetlog -maxdepth 1 -type f ! -name '*.*') | sort -u | wc -l" | tr -d ' ')
 check "AS5b the shared directory holds exactly what the kept releases list ($nfiles files, $nlist listed)" test "$nfiles" = "$nlist" -a "$nfiles" -ge 2
@@ -1040,8 +1042,8 @@ check "CG0a release 8's script has a .gz in the shared directory, and its tiny s
 ngz=$(srv "find $AD/assets -name '*.gz' | wc -l" | tr -d ' ')
 orph=$(srv "cd $AD/assets && find . -name '*.gz' | while read -r g; do [ -f \"\${g%.gz}\" ] || echo \"\$g\"; done" | wc -l | tr -d ' ')
 listed=$(srv "sudo cat \$(sudo find $AD/assetlog -maxdepth 1 -type f ! -name '*.*') | grep -c '\\.gz\$'" | tr -d ' ')
-check "CG0b the kept releases list the .gz files ($ngz on disk, $listed listed, $orph without their file), and release 1's went with it when it was pruned" \
-  eval '[ "$orph" = 0 ] && [ "$ngz" -ge 1 ] && [ "$listed" -ge 1 ] && [ -z "$(srv "find $AD/assets -name \"*$H1*\"")" ]'
+check "CG0b the kept releases list the .gz files ($ngz on disk, $listed listed, $orph without their file)" \
+  eval '[ "$orph" = 0 ] && [ "$ngz" -ge 1 ] && [ "$listed" -ge 1 ]'
 curl -s -m 5 -H 'Accept-Encoding: gzip' -D "$E/cg.h" -o "$E/cg.gz" "http://skew.localhost:$HP/assets/index-$H8.js"
 check "CG0c a visitor that accepts gzip gets the precompressed file: Content-Encoding gzip, Vary, the immutable header, and after gunzip the same bytes" \
   eval 'tr -d "\r" < "$E/cg.h" | grep -qi "^content-encoding: gzip" && tr -d "\r" < "$E/cg.h" | grep -qi "^vary: .*accept-encoding" &&
@@ -1050,6 +1052,18 @@ check "CG0c a visitor that accepts gzip gets the precompressed file: Content-Enc
 check "CG0d one that does not accept it gets the plain bytes, no Content-Encoding" \
   eval 'h=$(curl -s -m 5 -H "Accept-Encoding: identity" -D - -o "$E/cg.id" "http://skew.localhost:$HP/assets/index-$H8.js" | tr -d "\r"); ! echo "$h" | grep -qi "^content-encoding" &&
         [ "$(cksum < "$E/cg.id")" = "$(cksum < "$E/ref/rel8.js")" ]'
+# the skew window ends: a deploy with skew_window = 1s takes release 1's files (and its .gz) away
+cd "$W/skew" || exit 2
+printf 'skew_window = 1s\n' >> tando.conf; site_release "$W/skew" 9; "$R" deploy > "$E/as9.out" 2>&1; rc=$?
+as1_gone() { [ "$(curl -s -o /dev/null -w '%{http_code}' "http://skew.localhost:$HP/assets/index-$H1.js")" = 404 ]; }
+until_ 30 as1_gone   # (the deploy's prune runs after its result is written: the client may be back first)
+code1=$(curl -s -o /dev/null -w '%{http_code}' "http://skew.localhost:$HP/assets/index-$H1.js")
+on1=$(srv "sudo find $AD/assets $AD/assetlog -name '*$H1*' -o -name '$id1*'" | wc -l | tr -d ' ')
+nfiles=$(srv "sudo find $AD/assets -type f | wc -l" | tr -d ' ')
+nlist=$(srv "sudo cat \$(sudo find $AD/assetlog -maxdepth 1 -type f ! -name '*.*') | sort -u | wc -l" | tr -d ' ')
+check "AS5c after its skew window release 1's file answers $code1 and is gone from disk with its .gz and record ($on1 left; rc=$rc)" \
+  eval '[ $rc = 0 ] && [ "$code1" = 404 ] && [ "$on1" = 0 ] && [ "$nfiles" = "$nlist" ] &&
+        [ "$(curl -s -o /dev/null -w "%{http_code}" "http://skew.localhost:$HP/assets/index-$AS_H.js")" = 200 ]'
 # detection says nothing about names that are not hashed: no mount, no header
 mkdir -p "$W/plain/assets"; printf 'app = plain\nrecipe = static\n' > "$W/plain/tando.conf"
 echo "x" > "$W/plain/assets/app.js"; echo "x" > "$W/plain/assets/logo-large.png"; echo "<h1>plain</h1>" > "$W/plain/index.html"
