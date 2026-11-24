@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"tando/srv/internal/decimal"
@@ -31,6 +32,7 @@ func (c *Collector) Releases(ctx context.Context, w io.Writer, name string) erro
 			s.row("mig", id, m, a.state.get("prerelease_"+id))
 		}
 	}
+	skewRows(s, a.dir, a.state, a.conf, c.hostConf())
 	// where it was last deployed from (user@machine:path; tando-dash deploys from that folder)
 	if o := a.conf.get("origin"); o != "" {
 		s.row("origin", o)
@@ -59,6 +61,89 @@ func migRows(s *sink, name string, st kv) {
 	for _, id := range ids {
 		s.row("mig", name, id, st.get("migrated_"+id), st.get("prerelease_"+id))
 	}
+}
+
+// skewRows is the agent's skew_rows: "skew <id> <until epoch>" for each pruned release (no
+// directory under releases/, not current) whose shared files stay for its skew window, newest
+// first; nothing where assetlog/ cannot be read (as a user).
+func skewRows(s *sink, dir string, S, C, H kv) {
+	L := filepath.Join(dir, "assetlog")
+	ents, err := os.ReadDir(L)
+	if err != nil {
+		return
+	}
+	var ids []string
+	for _, e := range ents {
+		n := e.Name()
+		if strings.Contains(n, ".") || !valid.ID(n) || !e.Type().IsRegular() || n == S.get("current") {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, "releases", n)); err == nil { // ([[ -e ]] follows links)
+			continue
+		}
+		ids = append(ids, n)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
+	w := skewWindow(C, H)
+	for _, id := range ids {
+		b, err := os.ReadFile(filepath.Join(L, id+".end"))
+		if err != nil {
+			continue
+		}
+		e := strings.TrimRight(string(b), "\n")
+		if len(e) < 1 || len(e) > 11 || !decimal.IsDigits(e) {
+			continue
+		}
+		n, _ := strconv.ParseInt(e, 10, 64)
+		s.row("skew", id, strconv.FormatInt(n+w, 10))
+	}
+}
+
+// skewWindow is the agent's assets_window: skew_window (default 24h; off: 0) and at most the
+// host's skew_window_max (default 7d), in seconds
+func skewWindow(C, H kv) int64 {
+	w := C.get("skew_window")
+	if w == "" {
+		w = "24h"
+	}
+	if w == "off" {
+		return 0
+	}
+	s, ok := skewSecs(w)
+	if !ok {
+		s, _ = skewSecs("24h")
+	}
+	mx := H.get("skew_window_max")
+	if mx == "" {
+		mx = "7d"
+	}
+	m, ok := skewSecs(mx)
+	if !ok {
+		m, _ = skewSecs("7d")
+	}
+	if s < m {
+		return s
+	}
+	return m
+}
+
+// skewSecs is the agent's preview_secs: 7d, 12h, 30m, 90s (1 to 4 digits, no leading 0)
+func skewSecs(v string) (int64, bool) {
+	if len(v) < 2 || len(v) > 5 || v[0] < '1' || v[0] > '9' || !decimal.IsDigits(v[:len(v)-1]) {
+		return 0, false
+	}
+	n, _ := strconv.ParseInt(v[:len(v)-1], 10, 64)
+	switch v[len(v)-1] {
+	case 's':
+		return n, true
+	case 'm':
+		return n * 60, true
+	case 'h':
+		return n * 3600, true
+	case 'd':
+		return n * 86400, true
+	}
+	return 0, false
 }
 
 // releaseIDs are the names in releases/ that are release ids (`for i in "$D"/releases/*;

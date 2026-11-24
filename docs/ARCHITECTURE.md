@@ -316,7 +316,7 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
 - **Pruning:** `prune` ends with `assets_expire` and `assets_gc` (see "Skew protection" below): the
   records whose skew window ended go, records of releases that are gone and were never live go, then
   every file of the shared directory that no record lists. A failed or cut-off deploy's release
-  (`drop_release`), and a pruned one that never verified, lose their record outright: also one that
+  (`drop_release`), and a pruned one that never served (not verified, rolledback or superseded), lose their record outright: also one that
   was live for a moment (a failed soak or start) gets no window, so failed deploys cannot pin disk.
 - **Crash safety:** the files are linked before the link moves, and the serving release's files are
   never removed while it is kept (its list is in the union). A kill leaves files nobody lists (or a
@@ -387,7 +387,15 @@ files: that release is kept), and `off` is the behaviour from before the window 
   tries traversals.
 - **Disk:** the shared directory counts in the app's disk: the deploy's `app_max_mb` check
   (`du` over incoming, releases and assets: a file hard-linked from a kept release counts once)
-  and the `disk` alert (srv/watch `checkAppDisk`).
+  and the `disk` alert (srv/watch `checkAppDisk`). Over the limit, the deploy first runs
+  `assets_expire` with its own settings (a `skew_window = off` or shorter in it frees the pruned
+  releases' files) and measures again; a refusal says how many MB are the pruned releases' shared
+  files and what frees them. `tando releases` lists those releases (`skew <id> <until>` rows of
+  the agent's releases verb, the same from srv/status).
+- **Revert:** going back to the fallback after a failed switch links the fallback's files again
+  first (`assets_link`, or its `.spec` removed when that fails), on every branch: a stopped app's
+  `switch_link`, a restart, a site rewrite. A name the failed release replaced with other bytes is
+  the fallback's again before anything serves it.
 - **Purge:** `tando assets purge <release>` (`assets-purge`, under the app's lock) drops one
   release's record now, whatever its window, and `assets_gc` the files no other record lists:
   for a file that should never have been public. The live release is refused.

@@ -61,6 +61,9 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   `7d`). A failed deploy gets no window; the shared files count in `app_max_mb` and the `disk`
   alert; only the live release's URL prefixes are served from them (an older release never answers
   for a prefix the live one dropped); `tando assets purge <release>` drops one release's copies now.
+  `tando releases` (and `--json`, `pruned_assets`) lists the pruned releases still holding shared
+  files and when their window ends; a deploy over `app_max_mb` says how much of it they are, and
+  `skew_window = off` in that deploy frees them before its size check.
   New suite `test/e2e-skew.sh`.
 - Guardrails for shared servers (docs/COMMANDS.md "Profiles and guardrails"): limit profiles
   (`host setup profile.<name>=...`, `profile = <name>`) with mandatory CPU, task and job limits,

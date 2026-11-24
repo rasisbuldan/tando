@@ -815,12 +815,25 @@ cmd_releases() {
   agent_raw sudo releases "$APP" > "$TMPD/st" || exit 1
   NOW=$(now)
   if [ -n "$JSON" ]; then
-    printf '{"host":%s,"app":%s,"releases":' "$(json_str "$HOST")" "$(json_str "$APP")"; rel_json; printf '}\n'; return
+    printf '{"host":%s,"app":%s,"releases":' "$(json_str "$HOST")" "$(json_str "$APP")"; rel_json
+    # pruned_assets: pruned releases whose shared fingerprinted files stay for skew_window, and until when
+    printf ',"pruned_assets":'; awk -F '\t' '$1 == "skew" { print $2 "\t" $3 }' "$TMPD/st" | to_json "id:s,until:n"; printf '}\n'; return
   fi
   rel_rows > "$TMPD/rows"
   ui_box_open "releases $APP" "$HOST"
   if [ "$(wc -l < "$TMPD/rows")" -le 1 ]; then ui_box_line "No releases yet: tando up"
   else ui_table "$(rel_spec | sed 's/![0-9]*//g')" < "$TMPD/rows"; fi
+  # the pruned releases whose shared files a page loaded before still gets (skew_window)
+  if grepq "^skew$TAB" "$TMPD/st"; then
+    ui_box_sep "shared files of pruned releases (skew_window; tando assets purge <id>)"
+    local r id u
+    while IFS=$TAB read -r r id u; do
+      [ "$r" = skew ] || continue
+      ui_int "$u" || continue
+      if [ "$u" -gt "$NOW" ]; then ui_box_line "$id  its window ends in $(ui_dur $((u - NOW)))"
+      else ui_box_line "$id  ending (at the next sweep or deploy)"; fi
+    done < "$TMPD/st"
+  fi
   ui_box_close "newest 5 kept; current and last good never pruned"
 }
 

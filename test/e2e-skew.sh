@@ -224,11 +224,45 @@ DK=$W/dk; mkdir -p "$DK/assets"; printf 'app = dk\nrecipe = static\n' > "$DK/tan
 head -c 12582912 /dev/urandom > "$DK/assets/big-R1abcdef.bin"
 (cd "$DK" && "$R" up --yes > "$E/dk1.log" 2>&1)
 for n in 2 3 4 5 6; do rm -f "$DK"/assets/*; echo "dk $n" > "$DK/assets/small-R${n}abcdef.txt"; deploy dk "$DK" dk$n; done
+DK1=$("$SSH" "sudo ls /opt/tando/apps/dk/assetlog" | grep -v '[.]' | sort | head -1)
+# shellcheck disable=SC2034  # read in the eval of a check below
+rl=$(cd "$DK" && "$R" releases 2>&1)
+# shellcheck disable=SC2034  # read in the eval of a check below
+rj=$(cd "$DK" && "$R" releases --json 2>&1)
+check "K29a tando releases lists the pruned v1 ($DK1) still holding shared files, with until when (text and --json)" \
+  eval 'echo "$rl" | grep -q "shared files of pruned releases" && echo "$rl" | grep -q "$DK1  its window ends in " &&
+        echo "$rj" | grep -q "\"pruned_assets\":\[{\"id\":\"$DK1\",\"until\":[0-9]*}"'
 "$R" host setup test app_max_mb=10 > "$E/hs-max.log" 2>&1
 rm -f "$DK"/assets/*; echo "dk 7" > "$DK/assets/small-R7abcdef.txt"; deploy dk "$DK" dk7; rc=$?
+check "K29 the pruned v1's 12 MB of shared files count in app_max_mb (10 MB): the next deploy is refused, and says why and what frees them (rc=$rc)" \
+  eval '[ $rc != 0 ] && tr -d "\n│ " < "$E/dk7.log" | grep -q "limitof10MB" && tr -d "\n│ " < "$E/dk7.log" | grep -q "sharedfilesprunedreleaseskeepforskew_window" &&
+        [ "$(code dk /assets/big-R1abcdef.bin)" = 200 ]'
+# the way out the message names: skew_window = off in the next deploy frees them before its size check
+printf 'skew_window = off\n' >> "$DK/tando.conf"; deploy dk "$DK" dk8; rc=$?
 "$R" host setup test app_max_mb=8192 > "$E/hs-max2.log" 2>&1
-check "K29 the pruned v1's 12 MB of shared files count in app_max_mb (10 MB): the next deploy is refused (rc=$rc)" \
-  eval '[ $rc != 0 ] && tr -d "\n│ " < "$E/dk7.log" | grep -q "limitof10MB" && [ "$(code dk /assets/big-R1abcdef.bin)" = 200 ]'
+check "K29b with skew_window = off the next deploy goes through under the same limit (rc=$rc): v1's shared files are gone" \
+  eval '[ $rc = 0 ] && [ "$(code dk /assets/big-R1abcdef.bin)" = 404 ] && [ "$(body dk /assets/small-R7abcdef.txt)" = "dk 7" ]'
+# a failed deploy to a stopped app: the fallback's shared files come back (a name both have, under
+# an explicit assets =, is the fallback's bytes again once the app is started)
+NE=$W/ne; mkdir -p "$NE/pub"
+cat > "$NE/server.js" <<'JS'
+const http = require("http"), fs = require("fs"), path = require("path");
+const V = fs.readFileSync(path.join(__dirname, "VER"), "utf8").trim();
+const c = path.join(process.env.TANDO_DATA_DIR, "starts-" + V);
+let n = 0; try { n = +fs.readFileSync(c, "utf8"); } catch (e) {}
+fs.writeFileSync(c, String(n + 1));
+if (fs.existsSync(path.join(__dirname, "FAIL")) && n >= 1) process.exit(1);   // the pre-flight passes, the live start fails
+http.createServer((q, r) => r.end("ne " + V)).listen(process.env.PORT, "127.0.0.1");
+JS
+printf 'app = ne\nrecipe = node\nstart = node server.js\nmemory = 128M\ndata = data\nassets = pub, /pub/\n' > "$NE/tando.conf"
+echo v1 > "$NE/VER"; echo CFG-V1 > "$NE/pub/config.js"; rm -f "$NE/FAIL"
+(cd "$NE" && "$R" up --yes > "$E/ne1.log" 2>&1); rc=$?
+(cd "$NE" && "$R" stop > "$E/ne-stop.log" 2>&1)
+echo v2 > "$NE/VER"; echo CFG-V2-FAILED > "$NE/pub/config.js"; touch "$NE/FAIL"
+deploy ne "$NE" ne2; rc2=$?
+(cd "$NE" && "$R" start > "$E/ne-start.log" 2>&1); rc3=$?
+check "K31 a failed deploy to a stopped app (rc=$rc/$rc2/$rc3): after tando start the shared file is the live release's (CFG-V1)" \
+  eval '[ $rc = 0 ] && [ $rc2 != 0 ] && [ $rc3 = 0 ] && [ "$(body ne /)" = "ne v1" ] && [ "$(body ne /pub/config.js)" = CFG-V1 ]'
 # an app named like tando's own timer from before (tando-assetsweep): host setup leaves its units alone
 cp -R "$ROOT/examples/hello" "$W/aw"; printf 'app = assetsweep\n' >> "$W/aw/tando.conf"
 (cd "$W/aw" && "$R" up --yes > "$E/aw.log" 2>&1); rc=$?
@@ -258,5 +292,5 @@ out2=$(cd "$SV" && cp "$E/bad.conf" tando.conf && "$R" deploy 2>&1; cp "$E/good.
 check "K26 skew_window = 2x and 91d are refused with what it takes" \
   eval 'echo "$out" | grep -q "skew_window is a time like 24h" && echo "$out2" | grep -q "skew_window is at most 90d"'
 
-for a in sv nx pv dk assetsweep; do "$R" destroy "$a" --purge --yes > /dev/null 2>&1; done
+for a in sv nx pv dk ne assetsweep; do "$R" destroy "$a" --purge --yes > /dev/null 2>&1; done
 t_done

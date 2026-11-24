@@ -121,6 +121,11 @@ Example: `tando rollback 20261113-171103`
 Releases kept on the server, newest first, with state and age. Ids are UTC deploy times. A
 `COMMIT` column (the short sha, `dirty` when the deploy had uncommitted files) appears when a
 listed release recorded one (see "deploy"); `--json` has `commit`, `branch` and `dirty_files`.
+Below the table, the pruned releases whose shared fingerprinted files still answer (`skew_window`,
+docs/ARCHITECTURE.md "Skew protection") and when their window ends; `--json` has them as
+`pruned_assets` (`id`, `until`: epoch seconds). Their files count in `app_max_mb`; a deploy
+refused over it says how much is theirs, and `skew_window = off` (or shorter) in that deploy's
+tando.conf frees them before its size check; `tando assets purge <id>` frees one at once.
 Example: `tando releases --json`
 
 ### history

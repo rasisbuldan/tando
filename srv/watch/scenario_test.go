@@ -389,6 +389,27 @@ func TestDiskGuard(t *testing.T) {
 	}
 }
 
+// TestDiskCountsSharedAssets: the app's disk is also its shared fingerprinted files (assets/, which
+// a pruned release keeps for its skew window), measured in the same du as releases (one count of
+// a file hard-linked from both)
+func TestDiskCountsSharedAssets(t *testing.T) {
+	f := hostWithHog(t)
+	for _, d := range []string{"releases", "assets"} {
+		os.MkdirAll(f.path("opt/apps/hog/"+d), 0o755)
+	}
+	f.du = "100"
+	f.settings("disk_every=0")
+	f.tick()
+	dus := f.called("du")
+	if len(dus) != 1 {
+		t.Fatalf("%d du runs, want 1", len(dus))
+	}
+	args := strings.Join(dus[0], " ")
+	if !strings.Contains(args, " "+f.path("opt/apps/hog/assets")) || !strings.Contains(args, " "+f.path("opt/apps/hog/releases")) {
+		t.Errorf("du does not measure assets and releases together: %s", args)
+	}
+}
+
 func TestLogscanThresholds(t *testing.T) {
 	logs := func(f *fakeHost) {
 		f.write("opt/bin/tando-logs", "#!fake\n")

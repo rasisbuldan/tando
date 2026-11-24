@@ -582,14 +582,16 @@ app_units() {
 
 # drop_release id: a release that failed takes no disk (its history line stays)
 drop_release() {
-  valid_id "$1" && [[ $(cur_link) != "$1" ]] && rm -rf "${D:?}/sums/$1" "${D:?}/sums/$1.tmp" "${D:?}/sums/$1.work"
-  valid_id "$1" && [[ -d $D/releases/$1 && $(cur_link) != "$1" ]] || return 0
-  rm -rf --one-file-system "${D:?}/releases/$1"; rm -f "$D/jobs/$1" "$D/start/$1"
+  valid_id "$1" && [[ $(cur_link) != "$1" ]] || return 0
+  rm -rf "${D:?}/sums/$1" "${D:?}/sums/$1.tmp" "${D:?}/sums/$1.work"
   # (a release that failed gets no skew window, even one that was live for a moment: its shared
-  # files go with it, so failed deploys cannot pin disk outside the releases kept)
+  # files go with it, so failed deploys cannot pin disk outside the releases kept. Its records
+  # first, also when its directory is gone already: a kill between the two leaves none behind)
   if [[ -e $D/assetlog/$1 || -e $D/assetlog/$1.tmp || -e $D/assetlog/$1.spec ]]; then
     rm -f "$D/assetlog/$1" "$D/assetlog/$1".*; assets_expire; assets_gc
   fi
+  [[ -d $D/releases/$1 ]] || return 0
+  rm -rf --one-file-system "${D:?}/releases/$1"; rm -f "$D/jobs/$1" "$D/start/$1"
   [[ ${C[recipe]:-} == container ]] && podman rmi -f "localhost/tando-$A:$1" > /dev/null 2>&1
   return 0
 }
@@ -2469,7 +2471,7 @@ prune() {
 # it mounts the live release's prefixes only (assets_mounts). Exit 1 when an app failed.
 cmd_assets_sweep() {
   need_root
-  local a n=0 bad=0
+  local a n=0 bad=0 r
   for a in "$R"/apps/*/assetlog; do
     [[ -d $a ]] || continue
     a=${a%/assetlog}; a=${a##*/}
@@ -2477,9 +2479,11 @@ cmd_assets_sweep() {
     ( app "$a"
       lockfile "$D/lock"; exec 9>"$D/lock"; flock -n 9 || exit 2
       lock_mark assets-sweep
-      assets_expire || exit 2
+      # (assets_gc every time, not only after an expiry: it also takes the files a cut-off link
+      # or purge left that no record lists; a find and a sort of one directory)
+      assets_expire; r=$?
       assets_gc || exit 1
-      exit 0 )
+      exit $((r ? 2 : 0)) )
     case $? in
       0) n=$((n + 1));;
       2) ;;
@@ -2666,6 +2670,12 @@ revert() { # kind why [note] [soaked 0|1] [result: rolledback, or failed when it
   fi
   # the fallback's settings first (app.conf, the unit file), so it restarts as it was deployed
   if ((back)) && [[ -n $fb && $id != "$fb" ]]; then { fp bad.start_back && start_back "$fb" && conf_put; } || back=0; fi
+  # the fallback's shared files again, whichever branch below brings it back (a stopped app's
+  # switch_link, a restart, a site rewrite): a name the failed release replaced with other bytes
+  # is the fallback's once more. Not all shared: no prefix is mounted for it (the app answers).
+  if ((back)) && [[ -n $fb && $id != "$fb" ]]; then
+    ASSETS_DONE=""; assets_link "$fb" || rm -f "$D/assetlog/$fb.spec"
+  fi
   if ((!back)); then :
   elif [[ -n $fb ]]; then
     if [[ -n ${S[pre_stopped]:-} ]]; then
@@ -5324,8 +5334,21 @@ cmd_run_activation() {
   local used max=$(( ${H[app_max_mb]:-8192} * 1048576 ))
   # (and the shared fingerprinted files, which a pruned release keeps for its skew window)
   used=$(du -sbc "$D/incoming" "$D/releases" "$D/assets" 2> /dev/null | awk 'END { print $1 }'); [[ $used =~ ^[0-9]+$ ]] || used=0
+  # over it: the pruned releases' shared files whose window this deploy's settings end (a shorter
+  # skew_window, or off) go first, then it is measured again
+  if ((used > max)) && [[ -d $D/assetlog ]]; then
+    assets_expire; assets_gc
+    used=$(du -sbc "$D/incoming" "$D/releases" "$D/assets" 2> /dev/null | awk 'END { print $1 }'); [[ $used =~ ^[0-9]+$ ]] || used=0
+  fi
   # (refused for its size: the upload is cleared, so incoming/ does not keep holding it)
-  ((used <= max)) || { find "$D/incoming" -mindepth 1 -delete 2> /dev/null; fail "the upload and the releases kept use $((used / 1048576)) MB, over this server's limit of $((max / 1048576)) MB per app (host setup app_max_mb=N); the upload was cleared"; }
+  if ((used > max)); then
+    local own sh=""
+    own=$(du -sbc "$D/incoming" "$D/releases" 2> /dev/null | awk 'END { print $1 }'); [[ $own =~ ^[0-9]+$ ]] || own=$used
+    ((used - own >= 1048576)) &&
+      sh=" ($(((used - own) / 1048576)) MB of it the shared files pruned releases keep for skew_window: tando releases lists them; skew_window = off or shorter in tando.conf frees them at the next deploy, tando assets purge <release> at once)"
+    find "$D/incoming" -mindepth 1 -delete 2> /dev/null
+    fail "the upload, the releases kept and their shared files use $((used / 1048576)) MB$sh, over this server's limit of $((max / 1048576)) MB per app (host setup app_max_mb=N); the upload was cleared"
+  fi
 
   t=$(ds)
   import_release
@@ -8589,8 +8612,23 @@ cmd_releases_verb() {
   for i in $(releases_by_seq | tac); do
     if [[ -n ${S[migrated_$i]:-} ]]; then row mig "$i" "${S[migrated_$i]}" "${S[prerelease_$i]:--}"; fi
   done
+  skew_rows
   [[ -n ${C[origin]:-} ]] && row origin "${C[origin]}"
   return 0
+}
+# skew_rows: the pruned releases whose shared files stay for their skew window (assets_expire), as
+# "skew <id> <until epoch>", newest first; only where the records can be read (as root).
+# srv/status (verb_releases.go, skewRows) makes the same rows.
+skew_rows() {
+  local L=$D/assetlog f e w x
+  [[ -d $L && -r $L && -x $L ]] || return 0
+  w=$(assets_window)
+  for f in $(for x in "$L"/*; do echo "${x##*/}"; done | LC_ALL=C sort -r); do
+    [[ $f != *.* ]] && valid_id "$f" && [[ -f $L/$f && ! -e $D/releases/$f && $f != "${S[current]:-}" && -f $L/$f.end && -r $L/$f.end ]] || continue
+    e=$(< "$L/$f.end")
+    [[ $e =~ ^[0-9]{1,11}$ ]] || continue
+    row skew "$f" $((10#$e + w))
+  done
 }
 
 cmd_history() { # [app] [n]   (a lone number is the count)
