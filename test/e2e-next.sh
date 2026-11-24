@@ -69,7 +69,7 @@ npm ci --no-audit --no-fund > "$E/npm.out" 2>&1 || { cat "$E/npm.out" >&2; exit 
 "$R" host setup test public_port=$HP >&2
 "$R" up > "$E/up1.out" 2>&1; rc=$?; cat "$E/up1.out" >&2
 check "N2a up: /demo/api/version answers 1 (rc=$rc)" test $rc = 0 -a "$(version)" = 1
-B1=$(find .next/static -mindepth 1 -maxdepth 1 -type d ! -name chunks -exec basename {} \;)   # release 1's build id: its _next/static/<id>/ files go with it
+B1=$(find .next/static -mindepth 1 -maxdepth 1 -type d ! -name chunks -exec basename {} \;)   # release 1's build id: its _next/static/<id>/ files outlive it for skew_window
 check "N2b the page renders under the base path" eval 'curl -s "$(url /demo)" | grep -q "tando next example v"'
 loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$(url /)")
 check "N2c / redirects to the base path ($loc)" test "$loc" = "$(url /demo)"
@@ -286,8 +286,10 @@ check "N12b release 6's build files answer 200 after release 8 is live, with Nex
         [ "$(curl -s "$(url "/demo/_next/static/$B6/_buildManifest.js")" | cksum)" = "$(cksum < "$E/b6.js")" ]'
 # shellcheck disable=SC2034  # h is read in the eval of the check
 h=$(ah "/demo/_next/static/$B1/_buildManifest.js"); on1=$(srv "sudo find $A/assets $A/assetlog -name '*$B1*' | wc -l" | tr -d ' ')
-check "N12c release 1 was pruned: its build file is a 404 and is gone from the shared directory ($on1 files)" \
-  eval 'echo "$h" | head -1 | grep -q " 404" && [ "$on1" = 0 ]'
+nrel=$(srv "sudo ls $A/releases | wc -l" | tr -d ' ')
+# (skew_window, default 24h: a pruned release keeps its files for the window; its end is e2e-skew's)
+check "N12c release 1 was pruned ($nrel releases kept) but is in its skew window: its build file still answers 200 from the shared directory ($on1 files)" \
+  eval 'echo "$h" | head -1 | grep -q " 200" && [ "$on1" -ge 1 ] && [ "$nrel" -le 6 ]'
 check "N12d what Caddy serves is a hard link of the live release's file (no second copy)" \
   eval '[ "$(srv "sudo stat -c %h $A/assets/demo/_next/static/$B8/_buildManifest.js")" -ge 2 ]'
 check "N12e pages and API routes get no caching header from tando" \
