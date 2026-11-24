@@ -801,7 +801,10 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         case $v in on|off) ;; *) die "$f:$n: compress must be on or off (got \"$v\")";; esac;;
       skew_window) C_skew_window=$v
         case $v in off|[1-9][smhd]|[1-9][0-9][smhd]|[1-9][0-9][0-9][smhd]|[1-9][0-9][0-9][0-9][smhd]) ;;
-          *) die "$f:$n: skew_window is a time like 24h, 30m or 7d, or off (got \"$v\")";; esac;;
+          *) die "$f:$n: skew_window is a time like 24h, 30m or 7d, 90d at most, or off (got \"$v\")";; esac
+        case $v in   # (the server's own ceiling, skew_window_max, may be lower: it clamps)
+          *d) [ "${v%d}" -le 90 ];; *h) [ "${v%h}" -le 2160 ];; *m) [ "${v%m}" -le 129600 ];; *) true;;
+        esac || die "$f:$n: skew_window is at most 90d (got \"$v\")";;
       assets) C_assets=$v
         case $v in off) ;;
           *[!A-Za-z0-9_./,\ ~-]*|""|/*|*..*) die "$f:$n: assets is off, or a directory in the release like assets and optionally the URL prefix: assets, /static/ (got \"$v\")";; esac

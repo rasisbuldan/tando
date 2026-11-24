@@ -28,8 +28,8 @@ _tando_plugins() { # plugin commands next to the tando on PATH
     f=${f##*/cmd-}; printf '%s\n' "${f%.sh}"
   done
 }
-_tando_commands="init up deploy rollback releases history status ls snapshot logs start stop restart top env 
-  jobs db backup restore host domain doctor version destroy unlock recipes ci preview alerts 
+_tando_commands="init up deploy rollback releases assets history status ls snapshot logs start stop restart top 
+  env jobs db backup restore host domain doctor version destroy unlock recipes ci preview alerts 
   health errors requests audit adopt help addon cheat dashboard go link menubar next open ssh"
 
 _tando() {
@@ -65,6 +65,7 @@ _tando() {
     deploy) subs="" flags="$flags -a -H --force --yes --wait --dry-run" args="";;
     rollback) subs="" flags="$flags -H -a" args="apps";;
     releases) subs="" flags="$flags -H --json -a" args="apps";;
+    assets) subs="purge" flags="$flags -a -H" args="";;
     history) subs="" flags="$flags -n -H --json -a" args="apps";;
     status) subs="" flags="$flags --watch --follow -H --json --check -a" args="apps";;
     ls) subs="" flags="$flags -H --all --all-rows --watch --follow --json --check" args="";;

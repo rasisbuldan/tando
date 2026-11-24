@@ -26,7 +26,7 @@ Configure  env · jobs [run|log|pause] · db · backup [drill|offsite] · restor
 Observe    ls · health · errors · alerts · requests · audit
 Servers    host add|ls|setup|link|status|care|update|reboot|rename|rm · domain
 CI         ci setup|ls|revoke|rotate|github|hook · preview up|ls|rm
-More       init · destroy · unlock · recipes · adopt
+More       init · destroy · unlock · recipes · adopt · assets purge
 
 tando help <command>: details and an example.  Settings: tando help conf
 Something wrong? tando doctor
@@ -106,6 +106,20 @@ usage: tando releases [app] [-H host] [--json]
 The releases kept on the server, newest first, with their state and age.
 Release ids are the UTC time of the deploy (20261113-171442 = 17:14:42 UTC).
 Example: tando releases --json
+
+@@ assets
+flags: -a= -H=
+subs: purge=1
+usage: tando assets purge <release> [-a app] [-H host]
+The fingerprinted files of a release (Next.js /_next/static, a Vite assets/
+directory, what assets = names) stay reachable after newer releases replaced
+it: while it is kept, and for skew_window after it was pruned (tando help
+conf). purge takes one release's shared copies away now, for a file that should
+never have been public. Not the live release's: deploy one without the file
+first. A kept release still has the file in its own directory (a rollback to
+it shares it again); a file another release also has stays until that one is
+purged too.
+Example: tando assets purge 20261113-171442
 
 @@ history
 flags: -a= -H= -n= --json

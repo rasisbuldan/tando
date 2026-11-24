@@ -610,7 +610,7 @@ working with the note `host <old> was renamed to <new>`; `--drop-alias <old>` re
 nftables, Caddy, the firewall unit, timers and journals; safe to re-run. Settings: `apps_domain=`,
 `tls=`, `public_port=`, `node=`, `python=yes`, `podman=yes`, `postgres=yes`, `postgres_version=N`
 (only after moving the databases by hand: "Upgrading PostgreSQL"), `swap=yes|no`,
-`ufw=no`, `domain_tls=internal`; also `app_max_mb=`, `ci_max_mb=`, `ci_max_files=`,
+`ufw=no`, `domain_tls=internal`; also `app_max_mb=`, `skew_window_max=` (default `7d`: the longest `skew_window` an app gets), `ci_max_mb=`, `ci_max_files=`,
 `ci_max_file_mb=`, `unit_drop=`, `journal_max=` (not in help.txt), control plane mode:
 `ctl_ca=<ca.pub>|off` and `ctl_krl=<file>` (docs/CONTROL-PLANE.md; not in help.txt; artifact fetches read `/opt/tando/ctl/fetch-allow` and `fetch-ca.pem`, files the operator writes as root, and `ctl_artifact_max_mb=N`, default 512), and the per-client limits on ports
 80/443: `rate_limit=on|off|auto` (auto: on when tando owns Caddy), `conn_limit=N` (connections at
@@ -727,6 +727,17 @@ Example: `tando destroy -a old-app --purge`
 ### unlock
 `tando unlock [app] [-H host]`. Clears the upload lease of a deploy whose terminal went away.
 Example: `tando unlock`
+
+### assets
+
+`tando assets purge <release> [-a app]`: the shared copies of one release's fingerprinted files
+(Next.js `/_next/static`, a Vite `assets/`, what `assets =` names) go now. They are kept while the
+release is kept, and for `skew_window` after it was pruned (docs/CONFIG.md; docs/ARCHITECTURE.md,
+"Skew protection"), so a page loaded before a deploy keeps working; purge is for a file that should
+never have been public (a leaked key in a bundle). The live release cannot be purged: deploy one
+without the file first. A file another release's record also lists stays until that release is
+purged too; a kept release still holds the file in its own directory, and a rollback to it shares
+it again. One audit line (`assets-purge`).
 
 ### recipes
 `tando recipes`. What `init` detects, how each recipe runs, what it needs on the server.

@@ -310,9 +310,9 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
   zstd and gzip is sent the .gz.
 - **Pruning:** `prune` ends with `assets_expire` and `assets_gc` (see "Skew protection" below): the
   records whose skew window ended go, records of releases that are gone and were never live go, then
-  every file of the shared directory that no record lists. A failed or cut-off deploy's release that
-  never went live is dropped the same way; one that was live (a failed soak) keeps its files for the
-  window, like any release that stopped serving.
+  every file of the shared directory that no record lists. A failed or cut-off deploy's release
+  (`drop_release`), and a pruned one that never verified, lose their record outright: also one that
+  was live for a moment (a failed soak or start) gets no window, so failed deploys cannot pin disk.
 - **Crash safety:** the files are linked before the link moves, and the serving release's files are
   never removed while it is kept (its list is in the union). A kill leaves files nobody lists (or a
   `*.tmp` list): the next prune takes them; the kill's own recovery is that of any kill before the
@@ -320,8 +320,11 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
 - **Caddy:** `@tandoassets` (GET, HEAD, the prefixes, and the file exists in `$D/assets`) is a
   `handle` with `Cache-Control: public, max-age=31536000, immutable` and `file_server`; the
   request guards (a Host with a port, a Host that is not the site's) become `handle` blocks before
-  it, because `handle` comes before `respond` in Caddy's order and they must answer first. A site
-  with no mounts is exactly as before. The header is the app's own when the app sent one for a sample
+  it, because `handle` comes before `respond` in Caddy's order and they must answer first. The
+  prefixes are the live release's only (`assets_mounts`), and only when all its files were shared
+  (its `.spec` is written last; a link that failed removes it): a prefix the live release has not
+  (`assets = off`, another directory, a tree over 20000 files) is the app's, never an older
+  release's bytes. A site with no mounts is exactly as before. The header is the app's own when the app sent one for a sample
   file in the pre-flight (`<id>.cc`), so an app that caches its assets another way keeps that.
   Not in the stopped and down pages.
 - **Cost:** hard links use no data blocks beyond the first copy; deploy time and measurements
@@ -332,8 +335,9 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
 The shared directory is what keeps a page of an older release working after a switch (Vercel calls
 it skew protection). A release's record (and so its files and its URL prefix) stays while the
 release is kept (`prune`: the last 5, current, last_good, the target), as before; `skew_window`
-(tando.conf, default `24h`, `off`, at most `90d`) only adds to that: a release that was pruned
-keeps its record for `skew_window` after it stopped being live, measured from that switch. The
+(tando.conf, default `24h`, `off`, at most `90d`, clamped to the host's `skew_window_max`,
+default `7d`) only adds to that: a release that was pruned keeps its record for `skew_window`
+after it stopped being live, measured from that switch. The
 window never shortens what the kept releases give (a weekly deploy still serves last week's
 files: that release is kept), and `off` is the behaviour from before the window existed:
 
@@ -349,15 +353,18 @@ files: that release is kept), and `off` is the behaviour from before the window 
   files' bytes after the release directory is gone. Nothing else of it (server code, `.env`,
   `.next/server`) was ever in the shared directory.
 - **End of the window:** `assets_expire` looks only at records of releases that were pruned (no
-  directory under `releases/`): it drops those whose `.end` is older than the window, and those
-  past the newest `SKEW_MAX` (20) pruned releases whatever the window (a CI that deploys every few
-  minutes must not keep a day of builds). A kept release's record is never dropped by it;
-  `assets_gc` then removes the files no record lists. It runs at every `prune` (the end of every
-  deploy) and from `tando-assetsweep.timer` every 15 minutes (`tando-agent assets-sweep`: each
-  app's lock taken without waiting, skipped when busy or in the middle of an operation), so a window
-  ends within 15 minutes of its time also when no deploy comes. When the set of URL prefixes
-  changed (the last record naming one went), the site is written again; otherwise Caddy's file
-  matcher, which looks at the disk on every request, needs no reload. `skew_window = off`: a
+  directory under `releases/`): it drops those whose `.end` is older than the window (an `.end`
+  that cannot be read counts as long ago), and those past the newest `SKEW_MAX` (20) pruned
+  releases whatever the window (a CI that deploys every few minutes must not keep a day of
+  builds). A kept release's record is never dropped by it; `assets_gc` then removes the files no
+  record lists. It runs at every `prune` (the end of every deploy), at `drop_release`, and from
+  `tando--assetsweep.timer` every 15 minutes (`tando-agent assets-sweep`: each app's lock taken
+  without waiting, skipped while another verb holds it; an app stuck in a phase is swept too,
+  since only pruned releases' records go; the unit exits 1 when an app failed), so a window ends
+  within 15 minutes of its time also when no deploy comes. The site does not change (it mounts
+  the live release's prefixes only), and Caddy's file matcher looks at the disk on every request.
+  The unit's name has two dashes: an app name starts with a letter, so no app's units
+  (`tando-<app>...`) can be or contain it. `skew_window = off`: a
   pruned release's files go at the prune that removes it, so the kept releases' files are what is
   shared (the behaviour before the window). Why not "the live release's only": a rollback target
   is one of the kept releases, and a page loaded before a rollback or a quick second deploy would
@@ -369,8 +376,16 @@ files: that release is kept), and `off` is the behaviour from before the window 
 - **Confinement:** Caddy's file matcher and `file_server` join the cleaned request path to
   `$D/assets` (`../` and its encodings stay inside it); the directory holds only hard links of
   plain root-owned files under the release's asset directory (`find -type f -user root`: no
-  symlink, no file the app may write), made `o+r`, in directories `root:root 755`; each app has
-  its own, so one app's site never answers another app's files. e2e-skew tries traversals.
+  symlink, no file the app may write), at most 20000 per tree (root's work per deploy stays
+  bounded), made `o+r`, under `$D/assets` `root:caddy 750` (Caddy reads it, other apps' users do
+  not); each app has its own, so one app's site never answers another app's files. e2e-skew
+  tries traversals.
+- **Disk:** the shared directory counts in the app's disk: the deploy's `app_max_mb` check
+  (`du` over incoming, releases and assets: a file hard-linked from a kept release counts once)
+  and the `disk` alert (srv/watch `checkAppDisk`).
+- **Purge:** `tando assets purge <release>` (`assets-purge`, under the app's lock) drops one
+  release's record now, whatever its window, and `assets_gc` the files no other record lists:
+  for a file that should never have been public. The live release is refused.
 - **Next.js build ids:** a page of an older build asks for `/_next/static/<old build id>/...`
   and its chunks; those are in the shared directory for the window. Data requests that go to the
   server (`/_next/data/<build id>/...` of the pages router, RSC requests of the app router) are

@@ -28,8 +28,12 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   in the shared directory hold them), for at most the 20 newest pruned releases. A burst of deploys
   no longer takes a page's files away minutes after it loaded. The live release's files always
   win; an older release only answers paths the live one does not have. The window ends at the
-  next deploy or within 15 minutes (`tando-assetsweep.timer`, installed by `tando host setup`).
-  `off` keeps the behaviour from before. New suite `test/e2e-skew.sh`.
+  next deploy or within 15 minutes (`tando--assetsweep.timer`, installed by `tando host setup`).
+  `off` keeps the behaviour from before; the server caps it (`host setup skew_window_max=`, default
+  `7d`). A failed deploy gets no window; the shared files count in `app_max_mb` and the `disk`
+  alert; only the live release's URL prefixes are served from them (an older release never answers
+  for a prefix the live one dropped); `tando assets purge <release>` drops one release's copies now.
+  New suite `test/e2e-skew.sh`.
 - Guardrails for shared servers (docs/COMMANDS.md "Profiles and guardrails"): limit profiles
   (`host setup profile.<name>=...`, `profile = <name>`) with mandatory CPU, task and job limits,
   worker counts and job frequency; `mail_out = off`; a per-app outbound connection rate
@@ -321,10 +325,11 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
 Run `tando host setup <host>` on each server after updating tando; it applies the items below.
 Steps and checks: docs/release-notes/0.3.0.md.
 
-- `assetsweep` is a reserved app name (tando's own `tando-assetsweep` units, the `skew_window`
-  sweep). A pruned release's fingerprinted files now stay in `/opt/tando/apps/<app>/assets/` for
+- A pruned release's fingerprinted files now stay in `/opt/tando/apps/<app>/assets/` for
   `skew_window` (24 hours by default) before they go: a little more disk for an app that deploys
-  often (at most 20 pruned releases; `skew_window = off` as before).
+  often (at most 20 pruned releases; `skew_window = off` as before). `tando host setup` installs
+  `tando--assetsweep.timer` (every 15 minutes). The shared directory `/opt/tando/apps/<app>/assets/`
+  becomes `root:caddy 750` at the app's next deploy.
 - An app's `/tmp` and `/var/tmp` are a 64 MB tmpfs in its memory (was: a private directory on
   the disk), from its next deploy or host setup. An app that writes large temporary files (uploads
   to the system temp directory) sets `tmp_size = 512M`, or `memory =` higher with it. New caps per

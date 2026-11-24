@@ -60,6 +60,7 @@ lib/cmd-domain.sh        lint ui-test e2e-cli e2e-ease e2e
 lib/cmd-errors.sh        lint ui-test e2e-cli e2e-logs
 lib/cmd-go.sh            lint ui-test e2e-cli e2e-ease e2e-bootstrap e2e-trial
 lib/cmd-link.sh          lint ui-test e2e-cli e2e-ease
+lib/cmd-assets.sh        lint ui-test e2e-cli e2e-skew
 lib/cmd-logx.sh          lint ui-test e2e-cli e2e-logs e2e-workers
 lib/cmd-next.sh          lint ui-test e2e-cli e2e-ease
 lib/cmd-open.sh          lint ui-test e2e-cli e2e-ease

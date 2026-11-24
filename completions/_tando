@@ -26,6 +26,7 @@ _tando() {
     'deploy:Build here, upload the changes, start the new release on a spare port, check'
     'rollback:Go back to the previous verified release, or to the release <id> (tando'
     'releases:The releases kept on the server, newest first, with their state and age.'
+    'assets:The fingerprinted files of a release (Next.js /_next/static, a Vite assets/'
     'history:Deploys and rollbacks with their result and phase times, newest first. Without'
     'status:One app in detail - state, release, memory, cpu, the last 16 minutes, logs,'
     'ls:The apps of a server - state, when deployed, memory, cpu, uptime and link.'
@@ -87,6 +88,7 @@ _tando() {
         deploy) subs="" flags="-a -H --force --yes --wait --dry-run" args="" ;;
         rollback) subs="" flags="-H -a" args="apps" ;;
         releases) subs="" flags="-H --json -a" args="apps" ;;
+        assets) subs="purge" flags="-a -H" args="" ;;
         history) subs="" flags="-n -H --json -a" args="apps" ;;
         status) subs="" flags="--watch --follow -H --json --check -a" args="apps" ;;
         ls) subs="" flags="-H --all --all-rows --watch --follow --json --check" args="" ;;

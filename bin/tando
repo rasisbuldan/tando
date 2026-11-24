@@ -654,7 +654,7 @@ main() {
   [ "$cmd" = ssh ] && ssh_dashdash "$@"
   # a command that changes a server marks it busy while it runs (host_use; tando host rename)
   case $cmd in
-    up|deploy|rollback|start|stop|restart|destroy|unlock|domain|adopt|restore|link|go) BUSY_CMD="$cmd $*";;
+    up|deploy|rollback|start|stop|restart|destroy|unlock|domain|adopt|restore|link|go|assets) BUSY_CMD="$cmd $*";;
     env|backup|db|jobs) case ${ARGS[1]:-ls} in ls|log) ;; *) BUSY_CMD="$cmd $*";; esac;;
     host) case ${ARGS[1]:-ls} in setup|update|reboot|care) BUSY_CMD="$cmd $*";; esac;;
   esac

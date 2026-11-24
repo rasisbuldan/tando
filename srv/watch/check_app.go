@@ -103,7 +103,7 @@ func checkOffsite(t *tick, a *appTick) {
 	}
 }
 
-// checkAppDisk: the app's own files (shared/, data_dir, releases, incoming) and its PostgreSQL
+// checkAppDisk: the app's own files (shared/, data_dir, releases, incoming, assets) and its PostgreSQL
 // database against app_max_mb, the files measured every disk_every minutes (du as root, one file
 // system, no links followed), the database as the server last gave its size. Over the
 // cap: an alert. Over it while its file system is disk_stop_pct full: the app is stopped (503
@@ -115,7 +115,9 @@ func checkAppDisk(t *tick, a *appTick) {
 	t.vs.set("du."+a.name, decimal.Itoa(t.now))
 	d := t.w.appDir(a.name)
 	var dirs []string
-	for _, f := range []string{filepath.Join(d, "shared"), filepath.Join(d, "releases"), filepath.Join(d, "incoming"), a.conf["data_dir"]} {
+	// (assets: the shared fingerprinted files a pruned release keeps for its skew window; du counts
+	// a file hard-linked from a kept release once)
+	for _, f := range []string{filepath.Join(d, "shared"), filepath.Join(d, "releases"), filepath.Join(d, "incoming"), filepath.Join(d, "assets"), a.conf["data_dir"]} {
 		if fsinfo.DirNoFollow(f) { // (data_dir is the app's choice: never a link)
 			dirs = append(dirs, f)
 		}
