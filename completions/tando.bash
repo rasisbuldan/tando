@@ -63,7 +63,7 @@ _tando() {
     init) subs="" flags="$flags -H --yes" args="";;
     up) subs="" flags="$flags -H --yes --force --wait --clean" args="";;
     deploy) subs="" flags="$flags -a -H --force --yes --wait --dry-run --ref --clean" args="";;
-    rollback) subs="" flags="$flags -H -a" args="apps";;
+    rollback) subs="" flags="$flags -H --yes -a" args="apps";;
     releases) subs="" flags="$flags -H --json -a" args="apps";;
     assets) subs="purge" flags="$flags -a -H" args="";;
     history) subs="" flags="$flags -n -H --json -a" args="apps";;

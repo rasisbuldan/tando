@@ -75,14 +75,14 @@ printf 'port=4192\nrecipe=node\ndomains=a.odd.test|off  b.odd.test|redirect\nbac
 # 14th field, after "-" or the release command's seconds; a 15th field is no record)
 printf 'current=20261103-000000-2\nseq_20261103-000000=x\nseq_20261103-000000-2=007\nnoequals\n=novalue\nstatus_20261103-000000-2=verified\ngit_20261103-000000-2=0123456789abcdef0123456789abcdef01234567:3:feat/x\nmigrated_20261103-000000-2=?\nmigrated_20261103-000000=\nmigrated_20261103-000001=yes\nprerelease_20261103-000001=x\ty\nstopped=1' \
   > $R/odd/state
-# shared-file records (skew_rows): of pruned releases (one with an .end, one with a bad .end, one
-# without), of a kept release and of the current one; only the first is a skew row
+# shared-file records (skew_rows): of pruned releases (one with an .end, one with a bad .end), of a
+# kept release and of the current one; only the first is a skew row (a verb's recovery may run
+# assets_expire on the app: the bad one goes then, the others stay as they are)
 install -d -m 700 $R/odd/assetlog
-for i in 20261101-000000 20261102-000000 20261102-000001 20261103-000000 20261103-000000-2; do : > $R/odd/assetlog/$i; done
+for i in 20261102-000000 20261102-000001 20261103-000000 20261103-000000-2; do : > $R/odd/assetlog/$i; : > $R/odd/assetlog/$i.spec; done
 echo 1800000000 > $R/odd/assetlog/20261102-000000.end
 echo 1800000100 > $R/odd/assetlog/20261103-000000.end
 echo x1 > $R/odd/assetlog/20261102-000001.end
-: > $R/odd/assetlog/20261101-000000.spec
 printf '1\t20261103-000000\tdeploy\tok\t1\t0\t0\t-\t-\t-\t-\tfirst\nshort\tline\n\n2\t20261103-000000-2\tdeploy\tfailed\t1\t0\t0\t-\t-\t-\t-\tbad \303\251 note\n3\t20261103-000000-2\trollback\tok\t1\t0\t0\t-\t-\t-\t-\tlast\n4\t20261103-000000-2\tdeploy\tok\t1\t0\t0\t-\t-\t-\t-\twith git\t-\t0123456789abcdef0123456789abcdef01234567:3:feat/x\n5\t20261103-000000-2\tdeploy\tok\t1\t0\t0\t-\t-\t-\t-\twith git and release\t2.5\t0123456789abcdef0123456789abcdef01234567:0:-\n6\t20261103-000000-2\tdeploy\tok\t1\t0\t0\t-\t-\t-\t-\ttoo many\t-\tx\ty\n' \
   > $R/odd/history.tsv
 printf 'id=20261103-000001\nresult=failed\nphase=done\nmessage=it went down\n' > $R/odd/activation
@@ -349,8 +349,9 @@ T_UNTIL_STEP=0.2 t_until 10 srv 'sudo test -S /run/tandod/tandod.sock' > /dev/nu
 check "0b tandod runs and answers status (all apps and one app)" eval '[ "$(how)" = "via tandod" ] && [ "$(how web)" = "via tandod" ]'
 compare_all
 # (the comparison above is not empty for skew rows: the odd app has one, from both)
-check "0c releases has the skew row of a pruned release's shared files (until its .end + 24h), not the others" \
-  eval '[ "$(srv "sudo /opt/tando/bin/tando-agent releases odd" | grep "^skew")" = "$(printf "skew\t20261102-000000\t1800086400")" ]'
+sk=$(srv "sudo -n /opt/tando/bin/tando-agent releases odd" 2>&1 | grep "^skew" | tr '\t' ' ')
+check "0c releases has the skew row of a pruned release's shared files (until its .end + 24h), not the others ($sk)" \
+  test "$sk" = "skew 20261102-000000 1800086400"
 mid_activation
 fresh
 srv 'sudo systemctl stop tandod'
