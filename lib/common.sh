@@ -491,7 +491,8 @@ C_skew_window=""   # how long an older release's fingerprinted files stay reacha
 C_job_timeout=""   # seconds a scheduled job may run (the server's default: 3600)
 C_job_spread="" C_job_missed=""   # the spread of a job's start (default: a sixth of its period, at most 600 s), run or skip a run missed while the server was off
 C_workers=""       # worker.<name> = <command> and their .memory, .stop_timeout as key=value lines
-C_release="" C_release_shell="" C_release_timeout=""   # the release command (lib/deploy.sh; checked by the server too)
+C_require_clean="" C_build_files=""   # deploy only from committed code; local files a tando deploy --ref build needs (client only)
+C_release="" C_release_shell="" C_release_timeout="" C_release_backup=""   # the release command (lib/deploy.sh; checked by the server too)
 C_cpu="" C_tasks="" C_max_conns="" C_max_requests="" C_stop_timeout="" C_hold=""   # limits (checked by the server too)
 C_node_lite=""    # true: Node runs with V8 --lite-mode (less memory, about half the speed; node and next apps)
 C_idle_stop=""     # scale to zero: stop after this long without a connection (10m, 30s, 2h, off)
@@ -730,6 +731,14 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         case $v in node|next|static|python|container|workerd) ;;
           *) die "$f:$n: recipe must be node, next, static, python, container or workerd (got \"$v\")";; esac;;
       build) C_build=$v;;
+      require_clean) C_require_clean=$v
+        case $v in true|false) ;; *) die "$f:$n: require_clean must be true or false (got \"$v\")";; esac;;
+      build_files) C_build_files=$(printf '%s' "$v" | tr ',' ' ' | tr -s ' ')   # local files, copied into a --ref checkout
+        for x in $C_build_files; do
+          case $x in
+            ""|/*|../*|*/../*|*/..|..|*[!A-Za-z0-9_./-]*) die "$f:$n: build_files lists file names inside the project, like .env .env.production.local (got \"$x\")";;
+          esac
+        done;;
       out) C_out=$v   # inside the project: a tando.conf cannot publish files from elsewhere
         case /$v/ in //*|*/../*) die "$f:$n: out must be a directory inside the project (got \"$v\")";; esac;;
       start) C_start=$v;;
@@ -740,6 +749,8 @@ conf_load() { # [file]; a file already loaded in this run is not read again
         case $v in true|false) ;; *) die "$f:$n: release_shell must be true or false (got \"$v\")";; esac;;
       release_timeout) C_release_timeout=$v
         ui_int "$v" && [ "$v" -ge 1 ] && [ "$v" -le 3600 ] || die "$f:$n: release_timeout is 1 to 3600 seconds (got \"$v\")";;
+      release_backup) C_release_backup=$v
+        case $v in on|off) ;; *) die "$f:$n: release_backup is on or off (got \"$v\")";; esac;;
       health) C_health=$v;;
       spa) C_spa=$v
         case $v in true|false) ;; *) die "$f:$n: spa must be true or false (got \"$v\")";; esac;;
@@ -887,8 +898,8 @@ ${JOB_CRON:+$k.cron=$JOB_CRON
       *['|&;<>$`"()*?~{}#'\'\\]*) die "$f: release has shell syntax (quotes, &&, |, \$VAR ...) but runs without a shell:" \
         "set release_shell = true to run it with sh -c, or put it in a script";;
     esac
-  elif [ -n "$C_release_shell$C_release_timeout" ]; then
-    die "$f: release_shell and release_timeout need release = <command>"
+  elif [ -n "$C_release_shell$C_release_timeout$C_release_backup" ]; then
+    die "$f: release_shell, release_timeout and release_backup need release = <command>"
   fi
   # a job's setting needs the job
   local jt

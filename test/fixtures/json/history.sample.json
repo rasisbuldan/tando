@@ -2,7 +2,7 @@
  "host": "web-1",
  "history": [
   {
-   "at": 1795240125,
+   "at": 1795485878,
    "app": "shop",
    "release": "20261117-101010",
    "kind": "deploy",
@@ -15,10 +15,13 @@
    "switch_s": 0.4,
    "verify_s": 10.5,
    "note": null,
-   "release_s": 3.1
+   "release_s": 3.1,
+   "commit": "1234567890abcdef1234567890abcdef12345678",
+   "branch": "main",
+   "dirty_files": 2
   },
   {
-   "at": 1795238325,
+   "at": 1795484078,
    "app": "api",
    "release": "20261117-090909",
    "kind": "deploy",
@@ -31,7 +34,10 @@
    "switch_s": 0.4,
    "verify_s": 3.6,
    "note": "first try",
-   "release_s": null
+   "release_s": null,
+   "commit": null,
+   "branch": null,
+   "dirty_files": null
   }
  ]
 }

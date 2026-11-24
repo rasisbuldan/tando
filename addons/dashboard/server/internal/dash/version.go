@@ -88,6 +88,7 @@ func (g *Guard) probe(ctx context.Context) (string, error) {
 
 func parseVer(s string) ([3]int, bool) {
 	var out [3]int
+	s, _, _ = strings.Cut(s, "+") // 0.2.2+abc1234-dirty: a git build; the version is X.Y.Z
 	s, _, _ = strings.Cut(s, "-")
 	p := strings.Split(s, ".")
 	if len(p) != 3 {

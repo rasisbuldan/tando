@@ -123,7 +123,12 @@ appended.
 /opt/tando/apps/<app>/app.conf       port, recipe, start, health, path, data, writable, backup, database,
                                      job.*, domains (domain|www ...), origin (user@machine:dir)
 /opt/tando/apps/<app>/state          current, last_good, phase, target, kind, prev, fallback, status_<id>,
-                                     last_backup, applied (checksum of the last configure)
+                                     last_backup, applied (checksum of the last configure),
+                                     git_<id> (where a release's code came from:
+                                     <sha>:<uncommitted files>:<branch>, given by the client at
+                                     activate on stdin as a `prov=` line (lines 3 on are keyed, in no
+                                     order: `prov=`, `force=1`), and passed to the activation as
+                                     TANDO_PROV; also the 14th field of history.tsv)
 /opt/tando/apps/<app>/activation     progress of the latest activation (phase, result, t_* seconds)
 /opt/tando/apps/<app>/upload         upload lease: token, who, started, id
 /opt/tando/apps/<app>/{incoming,releases/<id>,current,shared,env,history.tsv,lock,lease.lock}

@@ -66,13 +66,16 @@ printf '%s\n' adopted_from=legacy-next caddy=external check_url=https://legacy.e
   health=/api/health health_timeout=60 memory=512M next_cache=release path=/app port=4190 preflight_port=4191 \
   recipe=next start='node server.js' user=www-data 'job.sync=*:0/15 | node sync.js' > $R/legacy/app.conf
 printf '%s\n' current=20261102-120000 last_good=20261102-120000 phase=idle seq_20261101-120000=1 \
-  seq_20261102-120000=2 status_20261101-120000=verified status_20261102-120000=verified > $R/legacy/state
+  seq_20261102-120000=2 status_20261101-120000=verified status_20261102-120000=verified \
+  migrated_20261101-120000=no migrated_20261102-120000=yes prerelease_20261102-120000=20261102-110000-predeploy > $R/legacy/state
 install -d -m 751 $R/odd $R/odd/releases/20261103-000000 $R/odd/releases/20261103-000000-2 $R/odd/releases/junk \
   $R/odd/releases/20261103-000001
 printf 'port=4192\nrecipe=node\ndomains=a.odd.test|off  b.odd.test|redirect\nbackup=daily\n' > $R/odd/app.conf
-printf 'current=20261103-000000-2\nseq_20261103-000000=x\nseq_20261103-000000-2=007\nnoequals\n=novalue\nstatus_20261103-000000-2=verified\nstopped=1' \
+# (git_<id>: the release's provenance, "sha:changed files:branch"; the history lines 4 to 6 carry it as the
+# 14th field, after "-" or the release command's seconds; a 15th field is no record)
+printf 'current=20261103-000000-2\nseq_20261103-000000=x\nseq_20261103-000000-2=007\nnoequals\n=novalue\nstatus_20261103-000000-2=verified\ngit_20261103-000000-2=0123456789abcdef0123456789abcdef01234567:3:feat/x\nmigrated_20261103-000000-2=?\nmigrated_20261103-000000=\nmigrated_20261103-000001=yes\nprerelease_20261103-000001=x\ty\nstopped=1' \
   > $R/odd/state
-printf '1\t20261103-000000\tdeploy\tok\t1\t0\t0\t-\t-\t-\t-\tfirst\nshort\tline\n\n2\t20261103-000000-2\tdeploy\tfailed\t1\t0\t0\t-\t-\t-\t-\tbad \303\251 note\n3\t20261103-000000-2\trollback\tok\t1\t0\t0\t-\t-\t-\t-\tlast' \
+printf '1\t20261103-000000\tdeploy\tok\t1\t0\t0\t-\t-\t-\t-\tfirst\nshort\tline\n\n2\t20261103-000000-2\tdeploy\tfailed\t1\t0\t0\t-\t-\t-\t-\tbad \303\251 note\n3\t20261103-000000-2\trollback\tok\t1\t0\t0\t-\t-\t-\t-\tlast\n4\t20261103-000000-2\tdeploy\tok\t1\t0\t0\t-\t-\t-\t-\twith git\t-\t0123456789abcdef0123456789abcdef01234567:3:feat/x\n5\t20261103-000000-2\tdeploy\tok\t1\t0\t0\t-\t-\t-\t-\twith git and release\t2.5\t0123456789abcdef0123456789abcdef01234567:0:-\n6\t20261103-000000-2\tdeploy\tok\t1\t0\t0\t-\t-\t-\t-\ttoo many\t-\tx\ty\n' \
   > $R/odd/history.tsv
 printf 'id=20261103-000001\nresult=failed\nphase=done\nmessage=it went down\n' > $R/odd/activation
 printf 'log line one\n\033[31mred\033[0m\nunterminated' > $R/odd/activation.log
@@ -361,6 +364,17 @@ check "8c status <app> has the backup alert's threshold (backupcfg web 50 on)" g
 "$R" ls --json > "$E/mon.json" 2>&1
 check "8d ls --json: reachable, checked_at, server and client versions, skew, alerts and per-app alerts_firing" \
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["reachable"] is True and d["checked_at"] > 0 and d["server_version"] and abs(d["clock_skew_s"]) <= 30 and isinstance(d["alerts"], list) and all("alerts_firing" in a and "cpu_percent" in a for a in d["apps"])' "$E/mon.json"
+# git provenance (the odd app's hand-written state and history): the Go verbs show it as the shell does
+# (the comparisons above are exact); here that it is shown at all
+sha=0123456789abcdef0123456789abcdef01234567
+srv 'sudo /opt/tando/bin/tando-agent releases odd' > "$E/prov.rel" 2>&1
+srv 'sudo /opt/tando/bin/tando-agent history odd' > "$E/prov.hist" 2>&1
+srv 'sudo /opt/tando/bin/tando-agent releases legacy' > "$E/prov.web" 2>&1
+check "9a releases: the release with git_<id> has the provenance as a 6th field; a release without has 5 fields" \
+  eval 'awk -F "\t" -v s="$sha:3:feat/x" '"'"'$1 == "rel" && $6 == s && NF == 6 { a = 1 } END { exit !a }'"'"' "$E/prov.rel" &&
+        awk -F "\t" '"'"'$1 == "rel" { n++; if (NF != 5) bad = 1 } END { exit !(n > 0 && !bad) }'"'"' "$E/prov.web"'
+check "9b history: a 14th field is a record, with \"-\" for no release command; a 15th is not" \
+  awk -F '\t' -v s="$sha" '$1 == "hist" && $15 == "-" && $16 == s ":3:feat/x" { a = 1 } $1 == "hist" && $15 == "2.5" && $16 == s ":0:-" { b = 1 } $1 == "hist" && $14 == "too many" { c = 1 } END { exit !(a && b && !c) }' "$E/prov.hist"
 log "compared $N cases"
 srv 'sudo rm -rf /var/tmp/tando-status-cmp'
 t_done

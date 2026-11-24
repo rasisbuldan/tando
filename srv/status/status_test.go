@@ -266,11 +266,13 @@ func TestHistory(t *testing.T) {
 	eq(t, lone, rows("hist\tapi\t"+line("20261101-000009"), "hist\tweb\t"+line("20261101-000003")))
 	none, _ := h.out(func(c *Collector, b *bytes.Buffer) error { return c.History(context.Background(), b, "web", "0") })
 	eq(t, none, "")
-	// a deploy that ran a release command has a 13th field, its seconds; 11 or 14 fields: no record
+	// a deploy that ran a release command has a 13th field, its seconds, and a release with git
+	// provenance a 14th ("-" for no release command); 11 or 15 fields: no record
 	rel := line("20261101-000004") + "\t0.3"
-	h.write("root/apps/web/history.tsv", rel+"\n"+rel+"\textra\n"+strings.TrimSuffix(line("20261101-000005"), "\tnote")+"\n")
+	prov := line("20261101-000006") + "\t-\t" + strings.Repeat("a", 40) + ":2:main"
+	h.write("root/apps/web/history.tsv", rel+"\n"+rel+"\t-\textra\n"+prov+"\n"+prov+"\textra\n"+strings.TrimSuffix(line("20261101-000005"), "\tnote")+"\n")
 	thirteen, _ := h.out(func(c *Collector, b *bytes.Buffer) error { return c.History(context.Background(), b, "web", "") })
-	eq(t, thirteen, rows("hist\tweb\t"+rel))
+	eq(t, thirteen, rows("hist\tweb\t"+rel, "hist\tweb\t"+prov))
 	big, _ := h.out(func(c *Collector, b *bytes.Buffer) error {
 		return c.History(context.Background(), b, "nosuch", "99999999999999999999999")
 	})
@@ -417,5 +419,15 @@ func TestReleasesOrigin(t *testing.T) {
 	h.app("api", "port=4101\n", "")
 	if o, _ = h.out(func(c *Collector, b *bytes.Buffer) error { return c.Releases(context.Background(), b, "api") }); strings.Contains(o, "origin") {
 		t.Fatalf("no origin: %q", o)
+	}
+}
+
+// a release with git provenance has a 6th field, "sha:changed files:branch"; one without has none
+func TestReleaseRowsProvenance(t *testing.T) {
+	sha := strings.Repeat("c", 40)
+	S := parseKV([]byte("seq_20261101-000001=1\nseq_20261101-000002=2\ngit_20261101-000002=" + sha + ":3:main\n"))
+	rows := ReleaseRows(S, []string{"20261101-000001", "20261101-000002"})
+	if len(rows) != 2 || len(rows[0]) != 6 || rows[0][5] != sha+":3:main" || len(rows[1]) != 5 {
+		t.Errorf("rows: %v", rows)
 	}
 }

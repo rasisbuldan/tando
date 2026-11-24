@@ -20,7 +20,7 @@ TANDO_HOME=$(cd "$(dirname "$self")/.." && pwd -P)
 # (rsync splits its -e command on spaces: a $TMPDIR with a space would break the ssh wrapper)
 _tb=${TMPDIR:-/tmp}; case $_tb in *[[:space:]]*) _tb=/tmp;; esac
 TMPD=$(mktemp -d "$_tb/tando.XXXXXX") || exit 1; unset _tb
-trap 'ui_frame_cleanup; rm -rf "$TMPD"; [ -z "${BUSY_F:-}" ] || rm -f "$BUSY_F"' EXIT
+trap 'ref_cleanup; ui_frame_cleanup; rm -rf "$TMPD"; [ -z "${BUSY_F:-}" ] || rm -f "$BUSY_F"' EXIT
 trap 'echo >&2; exit 130' INT   # Ctrl-C at a prompt: the next line starts clean
 trap 'exit 143' TERM
 ui_init
@@ -28,7 +28,7 @@ ui_init
 . "$TANDO_HOME/lib/args.sh"
 
 # the flags every command shares (lib/args.sh has already refused the ones a command does not take)
-WATCH="" LIVE="" FOLLOW="" NLINES=100 ARGS=() ALL="" PURGE="" SHOW="" NOTE="" HELP="" JSON="" YES="" FORCE="" DRY_RUN="" VERBOSE="" CHECK="" ALLROWS=""
+WATCH="" LIVE="" FOLLOW="" NLINES=100 ARGS=() ALL="" PURGE="" SHOW="" NOTE="" HELP="" JSON="" YES="" FORCE="" DRY_RUN="" VERBOSE="" CHECK="" ALLROWS="" REF="" CLEAN=""
 parse() {
   while [ $# -gt 0 ]; do
     case $1 in
@@ -46,6 +46,8 @@ parse() {
       --verbose) VERBOSE=1; shift;;   # doctor: every program on its own row
       --check) CHECK=1; shift;;       # ls, status: exit 2 when something needs attention
       --dry-run) DRY_RUN=1; shift;;   # deploy: build and stage, upload nothing (lib/deploy.sh)
+      --ref) REF=$2; [ -z "${PLUGIN:-}" ] || ARGS+=("$1" "$2"); shift 2;;   # deploy: build a git ref from a clean checkout (lib/deploy.sh); ci github has its own --ref
+      --clean) CLEAN=1; [ -z "${PLUGIN:-}" ] || ARGS+=("$1"); shift;;       # deploy, up: refuse uncommitted changes
       --json|--yes|--force|--wait)   # plugins read these from ARGS themselves
         # --wait: deploy/up wait out the soak (lib/deploy.sh); domain add polls DNS (lib/cmd-domain.sh)
         case $1 in --json) JSON=1;; --yes) YES=1;; --force) FORCE=1;; --wait) WAIT_VERIFIED=1 DNS_WAIT=1;; esac
@@ -66,7 +68,7 @@ install_agent() {
     die "could not install tando on $HOST: $(agent_msgs < "$TMPD/err" | tail -2 | tr '\n' ' ')"
   HELPERS_INSTALLED=1
   # the agent ships with the client: record the version it came with
-  client_version | ssh "${SSHO[@]}" "$TARGET" 'sudo -n tee /opt/tando/VERSION > /dev/null' ||
+  client_version_full | ssh "${SSHO[@]}" "$TARGET" 'sudo -n tee /opt/tando/VERSION > /dev/null' ||
     die "could not write /opt/tando/VERSION"
   . "$TANDO_HOME/lib/cmd-ci.sh"; ci_install_gate   # the CI gate (srv/gate, a Go binary) and sshd drop-in
 }
@@ -78,8 +80,37 @@ client_version() {
   printf '%s\n' "$v"
 }
 
+# client_build: "+<short sha>" (and "-dirty") for a tando that runs from, or was installed from, a
+# git checkout that is not exactly its release tag; nothing for a release build. install.sh writes it
+# to $TANDO_HOME/BUILD; a checkout run in place has none, so it asks git. The version itself
+# (VERSION, client_version) stays X.Y.Z: everything that compares versions compares that.
+client_build() {
+  local b="" v
+  if [ -f "$TANDO_HOME/BUILD" ]; then b=$(head -n 1 "$TANDO_HOME/BUILD" 2> /dev/null)
+  else v=$(client_version); b=$(build_suffix "$TANDO_HOME" "$v")
+  fi
+  case $b in +[0-9a-f]*) case $b in *[!0-9a-f+dirty-]*) b="";; esac;; *) b="";; esac
+  printf '%s' "$b"
+}
+# build_suffix dir version: "+<short sha>[-dirty]" when dir is a git checkout that is not exactly
+# the tag v<version> with a clean tree; "" otherwise (no git, not a checkout)
+build_suffix() {
+  local d=$1 sha dirty="" tag="" top
+  command -v git > /dev/null 2>&1 || return 0
+  # (the directory is itself the top of a checkout: an install inside some other repository is not one)
+  top=$(git -C "$d" rev-parse --show-toplevel 2> /dev/null) || return 0
+  [ "$top" = "$(cd "$d" && pwd -P)" ] || return 0
+  sha=$(git -C "$d" rev-parse --short=7 HEAD 2> /dev/null) || return 0
+  [ -n "$sha" ] || return 0
+  [ -z "$(git -C "$d" status --porcelain --untracked-files=no 2> /dev/null)" ] || dirty=-dirty
+  git -C "$d" describe --exact-match --tags --match "v$2" HEAD > /dev/null 2>&1 && tag=1
+  [ -n "$tag" ] && [ -z "$dirty" ] && return 0
+  printf '+%s%s' "$sha" "$dirty"
+}
+client_version_full() { printf '%s%s\n' "$(client_version)" "$(client_build)"; }
+
 cmd_version() {
-  echo "tando $(client_version)"
+  echo "tando $(client_version_full)"
   [ -n "$HOST" ] || [ -f tando.conf ] || [ "$(ls "$CFG"/hosts 2> /dev/null | wc -l)" -eq 1 ] || return 0
   resolve 0
   agent_raw info > "$TMPD/o" 2> /dev/null || { echo "agent ($HOST): unreachable"; return 0; }
@@ -228,7 +259,7 @@ cmd_host() {
       case "$K_postgres $feats " in yes*|*" postgres "*|*" data "*) total=$((total + 1));; esac
       # a data node: its postgres install and its own step (role=data counted once above as a feature)
       case "$K_role $feats " in *" data "*) ;; data*) total=$((total + 1));; esac
-      ui_step 1 $total agent ok "$(client_version) in /opt/tando/bin"
+      ui_step 1 $total agent ok "$(client_version_full) in /opt/tando/bin"
       case " $* " in *" apps_domain="*) ;; *)
         if [ -z "$K_apps_domain" ] && ip=$(public_ip "${TARGET#*@}"); then
           sargs+=("apps_domain=$(printf '%s' "$ip" | tr . -).sslip.io")
@@ -298,11 +329,59 @@ cmd_up() {
     exit 1
   fi
 }
-cmd_deploy() { conf_load || no_conf; resolve 1; do_deploy; }
+cmd_deploy() {
+  if [ -n "$REF" ]; then ref_checkout; fi   # (cd into a clean checkout of the ref: its tando.conf is read)
+  conf_load || no_conf
+  [ -z "$REF" ] || ref_build_files
+  resolve 1
+  do_deploy
+}
+
+# rollback_schema_check [id]: a rollback to a release older than one whose release command changed
+# the database schema (the server records it: "mig" rows of `releases`) leaves code that may not run
+# on the schema it finds. Says so, names the pre-release backup that matches the target's data and
+# the command that restores it (never run for you: data written since would be lost), and asks;
+# --yes goes on with the warning. Without an answer from the server it says nothing: the rollback does.
+rollback_schema_check() {
+  local want=${1:-} mid bk to
+  agent_raw sudo releases "$APP" < /dev/null > "$TMPD/rl" 2> /dev/null || return 0
+  # the rows are newest first: from the current release down to the target; the oldest release in
+  # that stretch that migrated is the one whose pre-release backup holds the target's data
+  read -r to mid bk < <(awk -F '\t' -v want="$want" '
+    $1 == "rel" { n++; id[n] = $2; st[n] = $3; if ($4 == 1) cur = n }
+    $1 == "mig" { m[$2] = $3; b[$2] = $4 }
+    END {
+      if (!cur) exit
+      t = 0
+      for (i = cur + 1; i <= n && !t; i++) if (want == "" ? st[i] == "verified" : id[i] == want) t = i
+      if (!t) exit
+      for (i = cur; i < t; i++) if (m[id[i]] == "yes") { mid = id[i]; bk = b[id[i]] }
+      if (mid != "") print id[t], mid, (bk == "" ? "-" : bk)
+    }' "$TMPD/rl") || true
+  [ -n "${mid:-}" ] || return 0
+  note "warning: the database schema of $APP is newer than the code of $to."
+  note "  Release $mid ran a release command that changed the schema; $to is older, so it may not run on it."
+  note "  The rollback switches the code only: tando never restores data by itself (what was written since would be lost)."
+  if [ "$bk" != - ]; then
+    note "  Backup $bk was taken just before that release command; it holds the data as $to knew it."
+    note "  To put it back after the rollback (this discards what was written since): tando backup restore $bk -a $APP"
+  else
+    note "  No pre-release backup was taken for it (release_backup = off, or --force)."
+  fi
+  [ -n "${YES:-}" ] && { note "  --yes: rolling back anyway."; return 0; }
+  if [ -t 0 ] && [ -t 2 ]; then
+    printf 'Roll back to %s anyway? [y/N] ' "$to" >&2
+    local a; IFS= read -r a || a=""
+    case $a in y|Y|yes) return 0;; esac
+    die "not confirmed; nothing was changed"
+  fi
+  die "not rolled back: run again with --yes to roll back anyway"
+}
 
 cmd_rollback() {
   resolve 1
   local id=${ROLLBACK_ID:-}   # pos_app took it out of the arguments
+  rollback_schema_check "$id"
   agent_wait sudo rollback "$APP" $id < /dev/null > "$TMPD/o" || bail 1
   kv_read "$TMPD/o" current from link
   ui_box_open "rollback $APP" "$HOST"

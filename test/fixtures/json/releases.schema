@@ -2,8 +2,11 @@
 app:string
 host:string
 releases:array
+releases[].branch:null-or-string
+releases[].commit:null-or-string
 releases[].current:bool
 releases[].deployed_at:null-or-number
+releases[].dirty_files:null-or-number
 releases[].id:string
 releases[].last_good:bool
 releases[].status:null-or-string

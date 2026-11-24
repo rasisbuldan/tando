@@ -131,6 +131,15 @@ done
 for f in VERSION README.md CHANGELOG.md LICENSE install.sh uninstall.sh; do
   [ -f "$src/$f" ] && { run cp "$src/$f" "$new/" || die "copy failed"; }
 done
+# BUILD: "+<short sha>[-dirty]" when this is a git checkout that is not exactly its release tag
+# (tando --version and the server's VERSION show 0.2.2+abc1234; versions are compared without it).
+# A release archive has no .git: no BUILD file, the version is plain.
+rm -f "$new/BUILD"
+if [ -e "$src/.git" ] && command -v git > /dev/null 2>&1 && bsha=$(git -C "$src" rev-parse --short=7 HEAD 2> /dev/null) && [ -n "$bsha" ]; then
+  bd=""; [ -z "$(git -C "$src" status --porcelain --untracked-files=no 2> /dev/null)" ] || bd=-dirty
+  if git -C "$src" describe --exact-match --tags --match "v$ver" HEAD > /dev/null 2>&1 && [ -z "$bd" ]; then :
+  else printf '+%s%s\n' "$bsha" "$bd" | run tee "$new/BUILD" > /dev/null || die "copy failed"; fi
+fi
 # the Go server programs: a release has them in server/linux-<cpu>/ (copied above); a checkout
 # builds them into dist/server/linux-<cpu>/ (scripts/build-server.sh, which needs Go) and keeps
 # the shell programs they replaced in server/legacy/, which are not installed

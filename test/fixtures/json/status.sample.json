@@ -3,7 +3,7 @@
  "address": "192.0.2.10",
  "user": "nobody",
  "reachable": true,
- "checked_at": 1795247325,
+ "checked_at": 1795493077,
  "server_version": "0.2.2",
  "client_version": "0.2.2",
  "clock_skew_s": 3,
@@ -38,19 +38,25 @@
    "deployed_at": 1794910210,
    "status": "verified",
    "current": true,
-   "last_good": true
+   "last_good": true,
+   "commit": "1234567890abcdef1234567890abcdef12345678",
+   "branch": "main",
+   "dirty_files": 2
   },
   {
    "id": "20261116-101010",
    "deployed_at": 1794823810,
    "status": "verified",
    "current": false,
-   "last_good": false
+   "last_good": false,
+   "commit": null,
+   "branch": null,
+   "dirty_files": null
   }
  ],
  "history": [
   {
-   "at": 1795240125,
+   "at": 1795485877,
    "app": "shop",
    "release": "20261117-101010",
    "kind": "deploy",
@@ -63,7 +69,10 @@
    "switch_s": 0.4,
    "verify_s": 10.5,
    "note": null,
-   "release_s": 3.1
+   "release_s": 3.1,
+   "commit": "1234567890abcdef1234567890abcdef12345678",
+   "branch": "main",
+   "dirty_files": 2
   }
  ],
  "alerts": [
@@ -71,7 +80,7 @@
    "app": "host",
    "check": "disk",
    "state": "pending",
-   "since": 1795247205,
+   "since": 1795492957,
    "detail": "85% used"
   }
  ],

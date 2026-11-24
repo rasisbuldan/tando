@@ -24,11 +24,41 @@ func (c *Collector) Releases(ctx context.Context, w io.Writer, name string) erro
 	for _, r := range ReleaseRows(a.state, c.releaseIDs(a.dir)) {
 		s.row(r...)
 	}
+	// did the release command change the schema: "mig <id> yes|no|? <pre-release backup id or ->",
+	// for the releases that have a record (cmd_releases_verb)
+	for _, id := range reverse(bySeq(a.state, c.releaseIDs(a.dir))) {
+		if m := a.state.get("migrated_" + id); m != "" {
+			s.row("mig", id, m, a.state.get("prerelease_"+id))
+		}
+	}
 	// where it was last deployed from (user@machine:path; tando-dash deploys from that folder)
 	if o := a.conf.get("origin"); o != "" {
 		s.row("origin", o)
 	}
 	return s.to(w)
+}
+
+func reverse(ids []string) []string {
+	r := make([]string, len(ids))
+	for i, id := range ids {
+		r[len(ids)-1-i] = id
+	}
+	return r
+}
+
+// migRows are the history verb's "mig <app> <id> yes|no|? <backup id or ->" rows of an app: the
+// releases with a schema record in its state, in the order of their ids (as the agent's sort).
+func migRows(s *sink, name string, st kv) {
+	var ids []string
+	for k, v := range st.m {
+		if strings.HasPrefix(k, "migrated_") && len(k) > 9 && k[9] >= '0' && k[9] <= '9' && v != "" {
+			ids = append(ids, strings.TrimPrefix(k, "migrated_"))
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		s.row("mig", name, id, st.get("migrated_"+id), st.get("prerelease_"+id))
+	}
 }
 
 // releaseIDs are the names in releases/ that are release ids (`for i in "$D"/releases/*;
@@ -61,7 +91,12 @@ func ReleaseRows(S kv, ids []string) [][]string {
 		if id == S.get("last_good") {
 			last = "1"
 		}
-		rows = append(rows, []string{"rel", id, S.or("status_"+id, "pending"), cur, last})
+		row := []string{"rel", id, S.or("status_"+id, "pending"), cur, last}
+		// a 6th field, the git provenance "sha:changed files:branch", only for a release that has one
+		if g := S.get("git_" + id); g != "" {
+			row = append(row, g)
+		}
+		rows = append(rows, row)
 	}
 	return rows
 }
@@ -199,19 +234,27 @@ func histCount(s string) int64 {
 // maxHistTail bounds how much of the end of a history file is read for its last n lines.
 const maxHistTail = 16 << 20
 
-// history adds `tail -n "$n" history.tsv | awk -F '\t' 'NF == 12 || NF == 13' | sed "s/^/hist\t$app\t/"`.
+// history adds `tail -n "$n" history.tsv | awk -F '\t' 'NF >= 12 && NF <= 14' | sed "s/^/hist\t$app\t/"`.
 // Each field is cleaned again (they were written cleaned by the agent's row).
 func (c *Collector) history(s *sink, name string, n int64) {
+	hf := filepath.Join(c.appDir(name), "history.tsv")
+	if f, err := os.Open(hf); err != nil { // (the shell: [[ -r history.tsv ]] || continue)
+		return
+	} else {
+		f.Close()
+	}
 	if n <= 0 {
+		migRows(s, name, loadKV(filepath.Join(c.appDir(name), "state")))
 		return
 	}
-	for _, l := range tailLines(filepath.Join(c.appDir(name), "history.tsv"), n, maxHistTail) {
-		if n := strings.Count(l, "\t"); n != 11 && n != 12 { // (12: with the release command's seconds)
+	for _, l := range tailLines(hf, n, maxHistTail) {
+		if n := strings.Count(l, "\t"); n < 11 || n > 13 { // (12: with the release command's seconds; 13: and the git provenance)
 			continue
 		}
 		// (not s.row: an empty field stays empty, as awk printed it)
 		s.fields(append([]string{"hist", name}, strings.Split(l, "\t")...)...)
 	}
+	migRows(s, name, loadKV(filepath.Join(c.appDir(name), "state")))
 }
 
 // tailLines is tail -n n: the last n lines of the file (a last line without a newline counts),

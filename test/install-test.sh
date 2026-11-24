@@ -48,6 +48,7 @@ check_tree() {
   # srv/, dist/ and scripts/ are read only in a checkout (where srv/go.mod exists: lib/common.sh)
   for p in $(grep -rhoE 'TANDO_HOME/[A-Za-z_.-]+' bin lib | sed 's|TANDO_HOME/||' | sort -u); do
     case $p in srv|dist|scripts) [ ! -e "$home/srv" ] && continue;; esac
+    [ "$p" = BUILD ] && continue   # (+<sha> of a git checkout: install.sh writes it only for one)
     [ -e "$home/$p" ] || missing="$missing $p"
   done
   check "$L.1 every \$TANDO_HOME path the code uses is installed${missing:+ (missing:$missing)}" test -z "$missing"
@@ -125,7 +126,7 @@ ln -s ../lib/node_modules/tando-cli/bin/tando "$E/npm/bin/tando"
 ln -s "$E/deb/usr/lib/tando/bin/tando" "$E/abs/tando"
 for l in hb/bin/tando deb/usr/bin/tando npm/bin/tando abs/tando; do
   out=$(cd / && TANDO_CONFIG_DIR=$E/cfg "$E/$l" version 2>&1 | head -1)
-  [ "$out" = "tando $v" ] || bad="$bad $l"
+  case $out in "tando $v"|"tando $v+"*) ;; *) bad="$bad $l";; esac   # (a checkout's version has +<sha>)
   out=$(cd / && TANDO_CONFIG_DIR=$E/cfg "$E/$l" host --help 2>&1)
   [ -n "$out" ] || bad="$bad $l(help)"
 done

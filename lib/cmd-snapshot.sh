@@ -261,7 +261,8 @@ snap_history() {
       k = (kind = $5) SUBSEP $4
       d = (k in who) ? who[k] : "-"
       if (d !~ /^[A-Za-z0-9._@-]+$/) d = "-"
-      print $3, $2, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, d }' \
+      print $3, $2, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, prov($16), d }
+    function prov(v,   p) { if (split(v, p, ":") < 3) return "-\t-\t-"; return p[1] "\t" substr(v, length(p[1]) + length(p[2]) + 3) "\t" p[2] }' \
     "$TMPD/s.audit" "$TMPD/s.history" | sort -t "$TAB" -k1,1nr | to_json "$HIST_JSON,deployer:s"
 }
 

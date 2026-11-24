@@ -40,7 +40,9 @@ alert report a drill that failed. What it checks and when it runs: docs/PREVIEWS
 `/var/backups/tando/<app>/<YYYYMMDD-HHMMSS>-<kind>/` (root 700): `data.tar.gz`, `db.dump`, `meta`.
 Kinds: `daily` (timer), `manual` (`tando backup now`), `predeploy` (before a deploy switches a release
 in), `safety` (before a restore), `final` (on `tando destroy`). Kept: the newest 7 daily and the newest
-of each of the 4 weeks before them, the newest 5 of each other kind, every final.
+of each of the 4 weeks before them, the newest 5 of each other kind, every final. A `predeploy` backup
+taken before a release command (docs/COMMANDS.md, "Migrations") carries `release=<release id>` in its
+`meta`, shows as `pre-release <id>` in `tando backup ls`, and only the newest 3 of those are kept.
 
 ## Offsite: Cloudflare R2, step by step
 

@@ -35,6 +35,7 @@ pgsu() { # db: statements on stdin as the superuser
   srv "sudo -u postgres psql -X -At -d $1" 2>&1
 }
 oom_adj() { srv "cat /proc/$1/oom_score_adj"; }
+flat() { tr -d '│\n' < "$1" | tr -s ' '; }
 pg_rows() { srv "sudo $AGENT doctor" 2> /dev/null | grep "postgresql $1"; }   # the doctor row "postgresql <name>"
 
 if [ "${1:-}" != --no-reset ] && { [ "$TN" = tando-testvm ] || [ "${TANDO_TEST_OWNED:-}" = 1 ]; }; then
@@ -647,6 +648,7 @@ if (!process.env.DATABASE_URL) { console.error('DATABASE_URL is not set'); proce
 (async () => {
   const c = new Client({ connectionString: process.env.DATABASE_URL });
   await c.connect();
+  if (fs.existsSync('SCHEMA')) await c.query(fs.readFileSync('SCHEMA', 'utf8'));   // a schema change on request
   if (fs.existsSync('MIGRATE')) {
     await c.query('CREATE TABLE IF NOT EXISTS half (x int)');
     await c.query('DELETE FROM notes');
@@ -679,6 +681,104 @@ check "R3 the failure names the pre-deploy backup (${bk:-none}), which holds the
 check "R4 the owner restores it by hand (rc=$rc): the rows the command deleted are back ($(page))" \
   eval '[ $rc = 0 ] && [ "$(page)" = "notes v4 db=3 file=3" ] &&
         [ "$(psql_as tando_notes "$pw" tando_notes "SELECT count(*) FROM migrated")" = 1 ]'
+
+
+# M. migration safety: the pre-release backup (labelled, bounded, off on request, refusing the deploy
+# when it fails), the schema fingerprint (migrated yes or no), and the rollback warning
+rm -f MIGRATE
+relinfo() { # id field: a field of that release in releases --json
+  "$R" releases --json 2> /dev/null | python3 -c 'import sys, json
+for r in json.load(sys.stdin)["releases"]:
+    if r["id"] == sys.argv[1]: print(r[sys.argv[2]])' "$1" "$2"
+}
+newest() { "$R" releases --json 2> /dev/null | python3 -c 'import sys, json; print(json.load(sys.stdin)["releases"][0]["id"])'; }
+prerel_n() { srv "sudo sh -c \"grep -l '^release=' $BK/notes/*/meta 2> /dev/null | wc -l\"" | tr -d ' '; }
+hnow() { perl -MTime::HiRes=time -e 'printf "%.2f", time'; }
+rel4=$(newest)
+# the v4 deploy (R1) created a table: migrated, with a pre-release backup that names its release
+bk4=$(relinfo "$rel4" pre_release_backup)
+check "M1 R1's release ($rel4): migrated = yes, its pre-release backup $bk4 is labelled in its meta (release=$rel4) and in backup ls"   eval '[ "$(relinfo "$rel4" migrated)" = yes ] && srv "sudo grep -qx release=$rel4 $BK/notes/$bk4/meta" &&
+        "$R" backup ls | grep -q "$bk4: pre-release backup of $rel4" && "$R" backup ls --json | grep -q "\"label\":\"pre-release $rel4\""'
+# a deploy whose command changes data only: migrated = no
+echo 6 > VERSION
+t0=$(hnow); "$R" deploy > "$E/m2.out" 2>&1; rc=$?; t1=$(hnow); cat "$E/m2.out" >&2
+rel6=$(newest)
+check "M2 a release command that changes rows only (rc=$rc): migrated = no ($(relinfo "$rel6" migrated)), v6 serves; releases and history show the column"   eval '[ $rc = 0 ] && [ "$(relinfo "$rel6" migrated)" = no ] && [ "$(page)" = "notes v6 db=3 file=3" ] &&
+        "$R" releases | tr -s " " | grep -q "MIGRATED" && "$R" history | tr -s " " | grep -q "MIGRATED"'
+# a schema change: migrated = yes (SCHEMA is run by migrate.js before its own statements)
+echo 'ALTER TABLE migrated ADD COLUMN IF NOT EXISTS extra text' > SCHEMA; echo 7 > VERSION
+t2=$(hnow); "$R" deploy > "$E/m3.out" 2>&1; rc=$?; t3=$(hnow); cat "$E/m3.out" >&2
+rel7=$(newest); bk7=$(relinfo "$rel7" pre_release_backup)
+check "M3 a release command that adds a column (rc=$rc): migrated = yes, backup $bk7 taken before it ($(srv "sudo ls $BK/notes" | grep -c predeploy) predeploy backups)"   eval '[ $rc = 0 ] && [ "$(relinfo "$rel7" migrated)" = yes ] && [ -n "$bk7" ] && [ "$bk7" != "$bk4" ] && srv "sudo test -s $BK/notes/$bk7/db.dump"'
+check "M4 only the last 3 pre-release backups are kept (R1's $bk4 went; $(prerel_n) of them left); the older kinds keep their 5"   eval '[ "$(prerel_n)" = 3 ] && ! srv "sudo test -d $BK/notes/$bk4"'
+# the rollback across the migration warns, names the backup, prints the restore command
+"$R" rollback "$rel6" < /dev/null > "$E/m5.out" 2>&1; rc=$?; cat "$E/m5.out" >&2
+check "M5 rollback to $rel6 (older than $rel7, which migrated) without --yes and without a terminal (rc=$rc): refused, the warning names $bk7 and the restore command, v7 still serves"   eval '[ $rc != 0 ] && flat "$E/m5.out" | grep -q "schema of notes is newer than the code of $rel6" &&
+        flat "$E/m5.out" | grep -q "tando backup restore $bk7 -a notes" && [ "$(page)" = "notes v7 db=3 file=3" ]'
+"$R" rollback "$rel6" --yes > "$E/m6.out" 2>&1; rc=$?; cat "$E/m6.out" >&2
+check "M6 ... with --yes it goes on, with the same warning (rc=$rc): v6 serves, nothing restored (the column stays: $(psql_as tando_notes "$pw" tando_notes "SELECT count(*) FROM information_schema.columns WHERE table_name = 'migrated' AND column_name = 'extra'"))"   eval '[ $rc = 0 ] && flat "$E/m6.out" | grep -q "tando backup restore $bk7 -a notes" && [ "$(page)" = "notes v6 db=3 file=3" ]'
+"$R" rollback "$rel4" --yes > "$E/m7.out" 2>&1; rc=$?
+check "M7 rollback from v6 to $rel4 spans no migration: no warning (rc=$rc)"   eval '[ $rc = 0 ] && ! flat "$E/m7.out" | grep -q "is newer than the code"'
+# release_backup = off: no backup before the command (the schema is still fingerprinted)
+echo 'release_backup = off' >> tando.conf; rm -f SCHEMA; echo 8 > VERSION
+last=$(srv "sudo ls $BK/notes" | tail -1)
+t4=$(hnow); "$R" deploy > "$E/m8.out" 2>&1; rc=$?; t5=$(hnow); cat "$E/m8.out" >&2
+rel8=$(newest)
+check "M8 release_backup = off (rc=$rc): no backup was taken (newest still $last), migrated = $(relinfo "$rel8" migrated), pre-release backups $(prerel_n)"   eval '[ $rc = 0 ] && [ "$(srv "sudo ls $BK/notes" | tail -1)" = "$last" ] && [ "$(relinfo "$rel8" migrated)" = no ] && [ "$(prerel_n)" = 3 ]'
+log "pre-release backup cost on a small database: deploy with the backup $(echo "$t3 - $t2" | bc)s, without (release_backup = off) $(echo "$t5 - $t4" | bc)s; a release without a schema change took $(echo "$t1 - $t0" | bc)s"
+echo "pre-release backup: deploy v7 (backup, schema change) $(echo "$t3 - $t2" | bc)s, v6 (backup) $(echo "$t1 - $t0" | bc)s, v8 (release_backup = off) $(echo "$t5 - $t4" | bc)s" >> "$E/pgmem"
+sed -i.bak '/^release_backup/d' tando.conf; rm -f tando.conf.bak
+tb0=$(hnow); "$R" backup now > /dev/null 2>&1; tb1=$(hnow)
+log "a backup of this small database and data (what the deploy adds before its release command): $(echo "$tb1 - $tb0" | bc)s with ssh"
+echo "backup now (small database, with ssh): $(echo "$tb1 - $tb0" | bc)s" >> "$E/pgmem"
+# a backup that fails refuses the deploy; --force goes on without it (and the schema is then unknown)
+srv 'sudo tee /usr/local/bin/pg_dump > /dev/null && sudo chmod 755 /usr/local/bin/pg_dump' <<'FAILDUMP'
+#!/bin/sh
+echo "pg_dump: test stand-in: refusing" >&2
+exit 1
+FAILDUMP
+echo 9 > VERSION
+"$R" deploy > "$E/m9.out" 2>&1; rc=$?; cat "$E/m9.out" >&2
+check "M9 the pre-release backup fails (pg_dump stand-in): the deploy is refused (rc=$rc), it says why and how to go on, v8 serves"   eval '[ $rc != 0 ] && flat "$E/m9.out" | grep -q "pre-deploy backup failed" && flat "$E/m9.out" | grep -q "up --force" &&
+        flat "$E/m9.out" | grep -q "release_backup = off" && [ "$(page)" = "notes v8 db=3 file=3" ]'
+"$R" deploy --force > "$E/m10.out" 2>&1; rc=$?; cat "$E/m10.out" >&2
+rel9=$(newest)
+check "M10 deploy --force goes on without the backup (rc=$rc): v9 serves, migrated = $(relinfo "$rel9" migrated) (unknown: the schema could not be read either)"   eval '[ $rc = 0 ] && [ "$(page)" = "notes v9 db=3 file=3" ] && [ "$(relinfo "$rel9" migrated)" = None ]'
+srv 'sudo rm -f /usr/local/bin/pg_dump'
+printf 'release_backup = maybe\n' >> tando.conf
+out=$("$R" deploy 2>&1); sed -i.bak '/^release_backup/d' tando.conf; rm -f tando.conf.bak
+# shellcheck disable=SC2034  # (read in the check's eval)
+out2=$(printf 'check=1\nrecipe=node\nstart=node server.js\nhealth=/health\nmemory=128M\nrelease=true\nrelease_backup=maybe\n' | srv "sudo $AGENT configure relc" 2>&1)
+# shellcheck disable=SC2034
+out3=$(printf 'check=1\nrecipe=node\nstart=node server.js\nhealth=/health\nmemory=128M\nrelease_backup=off\n' | srv "sudo $AGENT configure relc" 2>&1)
+check "M11 release_backup is validated by the client and the server, and needs a release command" \
+  eval 'echo "$out" | grep -q "release_backup is on or off" && echo "$out2" | grep -q "bad release_backup" && echo "$out3" | grep -q "need release"'
+rm -f SCHEMA
+
+# M12-M15. the same with SQLite (database = sqlite: the file is inside data; the schema is read with sqlite3)
+srv 'sudo apt-get install -y -qq sqlite3 > /dev/null 2>&1; command -v sqlite3' > /dev/null
+cd "$W/hsql" || exit 2
+printf '#!/bin/sh\nif [ -f SCHEMA ]; then sqlite3 "$DATABASE_PATH" < SCHEMA; fi\nexit 0\n' > migrate.sh
+printf 'release = sh migrate.sh\n' >> tando.conf
+echo 'create table if not exists t (a int);' > SCHEMA; echo 2 > VERSION
+"$R" deploy > "$E/s1.out" 2>&1; rc=$?; cat "$E/s1.out" >&2
+hs1=$(newest); hb1=$(relinfo "$hs1" pre_release_backup)
+check "M12 sqlite: a release command that creates a table (rc=$rc): migrated = $(relinfo "$hs1" migrated), pre-release backup $hb1 labelled and holding the data" \
+  eval '[ $rc = 0 ] && [ "$(relinfo "$hs1" migrated)" = yes ] && srv "sudo grep -qx release=$hs1 $BK/hsql/$hb1/meta" && srv "sudo test -s $BK/hsql/$hb1/data.tar.gz"'
+echo 3 > VERSION
+"$R" deploy > "$E/s2.out" 2>&1; rc=$?; cat "$E/s2.out" >&2
+hs2=$(newest)
+check "M13 sqlite: the same schema again (rc=$rc): migrated = $(relinfo "$hs2" migrated)" \
+  eval '[ $rc = 0 ] && [ "$(relinfo "$hs2" migrated)" = no ]'
+echo 'alter table t add column b text;' > SCHEMA; echo 4 > VERSION
+"$R" deploy > "$E/s3.out" 2>&1; rc=$?; cat "$E/s3.out" >&2
+hs3=$(newest); hb3=$(relinfo "$hs3" pre_release_backup)
+check "M14 sqlite: a new column (rc=$rc): migrated = $(relinfo "$hs3" migrated), backup $hb3" \
+  eval '[ $rc = 0 ] && [ "$(relinfo "$hs3" migrated)" = yes ] && [ -n "$hb3" ]'
+"$R" rollback "$hs2" --yes > "$E/s4.out" 2>&1; rc=$?; cat "$E/s4.out" >&2
+check "M15 sqlite: rollback to $hs2 across the migration (rc=$rc) warns and prints: tando backup restore $hb3 -a hsql" \
+  eval '[ $rc = 0 ] && flat "$E/s4.out" | grep -q "schema of hsql is newer than the code of $hs2" && flat "$E/s4.out" | grep -q "tando backup restore $hb3 -a hsql"'
+cd "$W/notes" || exit 2
 
 # G5-G7. per app: db_direct = true (PostgreSQL's own port), db_pool (pgbouncer's pool and the
 # role's limit), and the pools together against max_connections

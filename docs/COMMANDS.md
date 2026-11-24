@@ -51,7 +51,7 @@ the app was last deployed from another directory. `--wait`: as for `deploy`.
 Example: `cd my-app && tando up`
 
 ### deploy
-`tando deploy [-a app] [-H host] [--force] [--yes] [--wait] [--dry-run]`. Arguments: none.
+`tando deploy [-a app] [-H host] [--force] [--yes] [--wait] [--dry-run] [--ref ref] [--clean]`. Arguments: none.
 Build here, upload changes, start the release on a spare port, health-check, switch, check again
 through Caddy, then a soak (30 s, `soak = N`) in which a crash rolls back. Returns once live;
 `--wait` (or `TANDO_WAIT=1`) waits for the soak. `--force`: another directory deployed last;
@@ -72,6 +72,30 @@ the lockfile. Nothing is uploaded: no lease, no configure, no runtime install, n
 server is only asked for its platform and whether the app exists (`configure check`). An app that
 does not exist yet is staged all the same (`tando up` creates it). The last deploy target of the
 directory is not changed.
+**Where the code comes from.** When the project directory is in a git repository, every release
+records the commit (full sha), the branch (none on a detached HEAD or for a tag) and how many files
+were uncommitted (`git status`: changed, staged, or untracked and not ignored) when it was built.
+The server keeps it with the release (`git_<id>` in the app's `state`, a 14th field of its
+`history.tsv` line); `tando releases`, `history` and `status` show the short sha and, for a deploy
+from an unclean tree, `dirty`; `--json` of the same (and `snapshot`) has `commit`, `branch` and
+`dirty_files` (null for a release without one: no git, a deploy key, an older client). The deploy box
+names it on the release line (`release 20261124-035747  b964845 on main, dirty: 2 files`).
+A deploy from a tree with uncommitted files prints one warning with the count and `--ref`. With
+`require_clean = true` in tando.conf, or `--clean` (also `tando up --clean`), it is refused instead,
+before anything is built. Files that `.gitignore` ignores do not count.
+`--ref <branch|tag|sha>`: build a commit instead of the working tree. tando checks the ref out into
+a clean temporary directory (`git worktree add --detach`, in `$TMPDIR`), builds and stages there with
+the `tando.conf` committed at that ref (an untracked `tando.conf` is copied from the working tree,
+and it says so), and removes the directory afterwards, also after a failed build, `Ctrl-C` or
+`kill`; the working tree is not read or touched, and its dirtiness is not a reason to refuse. A
+Node project's dependencies are installed in the checkout with the lockfile's command, as for a fresh
+clone (`npm ci` and so on: the package manager's own cache keeps it fast); Next.js's `.next/cache` is
+kept in the project's `.tando/ref-cache/` between runs. Local files the build needs that git does
+not hold (`.env.production.local`) are copied into the checkout only when `build_files` in tando.conf
+lists them (see docs/CONFIG.md); nothing is copied implicitly and their contents are never printed.
+A failed build's log is written to the project's `.tando/build.log` as usual. The release records
+the ref's commit, no uncommitted files, and the branch when `<ref>` is a local branch (or the commit
+is the checked-out branch's). `--ref` is for `deploy` (an app that exists), not `up`.
 A fresh clone (dependencies in package.json, no node_modules) stops before anything else with the
 lockfile's install command (`npm ci`, `pnpm install --frozen-lockfile`, `yarn install
 --frozen-lockfile`, `bun install --frozen-lockfile`); `tando up` and the pre-push hook run it.
@@ -82,23 +106,29 @@ Note: `-a` is accepted but not in the usage line (docs/DEV-NOTES.md, mismatch 8)
 Example: `tando deploy`
 
 ### rollback
-`tando rollback [app] [id] [-H host]`. Arguments: 0-2, in either order.
+`tando rollback [app] [id] [-H host] [--yes]`. Arguments: 0-2, in either order.
 Back to the previous verified release, or to `<id>` (`tando releases` lists them).
 A stopped app (`tando stop`) is treated as a deploy to it is: when the release rolled back to passes
 its health check it goes live and the app runs; when it fails, the app is left as it was: its
 release, stopped.
+Rolling back to a release older than one whose release command changed the database schema warns
+(the schema is newer than that code), names the pre-release backup and prints the restore command;
+it asks first, `--yes` goes on. Nothing is restored by itself ("Migrations", below).
 Example: `tando rollback 20261113-171103`
 
 ### releases
 `tando releases [app] [-H host] [--json]`. Arguments: 0-1 (the app).
-Releases kept on the server, newest first, with state and age. Ids are UTC deploy times.
+Releases kept on the server, newest first, with state and age. Ids are UTC deploy times. A
+`COMMIT` column (the short sha, `dirty` when the deploy had uncommitted files) appears when a
+listed release recorded one (see "deploy"); `--json` has `commit`, `branch` and `dirty_files`.
 Example: `tando releases --json`
 
 ### history
 `tando history [app] [-n N] [-H host] [--json]`. Flags also `-a`. Arguments: 0-1.
 Deploys and rollbacks with result and phase times. Outside a project and without an app: every app
 of the server. `RELCMD` is the time of the release command, shown when a listed deploy ran one
-(`release_s` in `--json`).
+(`release_s` in `--json`). `COMMIT` is the git commit the release was built from (`dirty`: with
+uncommitted files), shown when a listed deploy has one (`commit`, `branch`, `dirty_files` in `--json`).
 Example: `tando history -n 10`
 
 ## Run
@@ -388,6 +418,8 @@ statement, the error's position selected in the editor, notices, CSV download). 
 Example: `tando db studio shop`
 
 ### backup
+(`ls` marks a backup taken before a release command: `predeploy (pre-release <release id>)`; in
+`--json` it is `label`.)
 `tando backup ls [app] [--json]` · `tando backup now [app]` · `tando backup restore <id> [--yes]` ·
 `tando backup drill [app]` · `tando backup pull <id> <file>`. Flags: `-a -H --yes`. Subcommands: ls (default, 0-1), now (0-1),
 drill (0-1), restore (1), pull (2).
@@ -681,7 +713,12 @@ Example: `tando doctor vps`
 
 ### version
 `tando version [-H host]`. Client version and the server's agent version. `tando --version`
-prints the client version only.
+prints the client version only. From a git checkout that is not exactly the release tag `v<VERSION>`
+(or a clean tree on it) the string is `0.2.2+<short sha>`, with `-dirty` when tracked files have
+changes; `install.sh` records it in `BUILD` next to `VERSION`, and `host setup` writes it to the
+server's `VERSION`. Versions are compared on `X.Y.Z` alone (the version notice, `tando next`,
+`doctor`, the clock/version line): `VERSION` itself stays `X.Y.Z`, and a release archive has no
+suffix.
 Example: `tando version -H vps`
 
 ## CI
@@ -781,6 +818,7 @@ after the command are accepted and show the same help (`tando help alerts notifi
 Example: `tando help deploy`
 
 ## The release command
+(Migrations: the backup before it, the schema record and the rollback warning are in "Migrations" below.)
 
 `release = <command>` in tando.conf: a command tando runs on the server once per deploy, before
 the new release takes traffic. It is meant for database migrations.
@@ -812,8 +850,8 @@ release_timeout = 120              # seconds, 1 to 3600; default 300
   taken just before it: `tando backup restore <id>` puts it back when you decide to (what the backup holds comes back;
   a table the command created after it is not dropped).
 - **`tando rollback` does not undo a migration.** It switches the code back; the database stays as
-  the command left it. Write migrations the previous release can still run with (add a column
-  first, remove it a deploy later).
+  the command left it. See "Migrations" below: it warns, names the backup and prints the restore
+  command.
 - **It must be safe to run twice.** It runs on every deploy, of unchanged code too (with a release
   command a deploy is never "already live"), and again when a deploy is repeated after a failure.
   It does not run on `tando rollback`, `restart`, `env set` or an automatic rollback.
@@ -825,6 +863,44 @@ release_timeout = 120              # seconds, 1 to 3600; default 300
   for `container` (the release is an image: run the migration in its entrypoint).
 - With a deploy key (CI) the command is the one of the admin's last `tando up` or `tando deploy`,
   like every other setting.
+
+## Migrations
+
+For an app with `database = postgres` or `database = sqlite` and a `release` command, tando makes a
+database migration recoverable and visible. Nothing here restores data by itself.
+
+- **Backup before the command.** The pre-deploy backup that is taken before every deploy is, for such
+  an app, the pre-release backup: taken right before `release` runs, labelled `pre-release <release id>`
+  (`tando backup ls`: `predeploy (pre-release 20261113-171442)`, `--json`: `label`), holding the data
+  directory and the database. Only the newest 3 of them are kept per app, so the disk stays bounded
+  (the other backup kinds keep their own counts: docs/BACKUP.md); the backup is written by root, so the
+  file system's root reserve still takes it on a disk an app filled. It adds the time of a backup: on a
+  small database (a few rows) about a second; it grows with the size of the database and data.
+  `release_backup = off` in tando.conf takes none. Not for previews (`tando preview`), which have no
+  release command unless `preview_release = on`, and not for an app without a database (its
+  data-only pre-deploy backup is unchanged).
+- **If the backup fails, the deploy is refused**, nothing is switched, and the message says why and how
+  to go on: `tando up --force` deploys without it (and the schema is then recorded as unknown),
+  `release_backup = off` stops taking it.
+- **Did it migrate?** Before and after the command tando fingerprints the schema (PostgreSQL: a hash of
+  `pg_dump --schema-only`; SQLite: a hash of `sqlite_master`, read with `sqlite3`, which must be installed
+  on the server, as for consistent SQLite backups; without it the answer is "unknown"). The result,
+  `migrated` yes, no or unknown (`?`), is kept with the release and shown by `tando releases` and
+  `tando history` (a MIGRATED column; `--json`: `migrated` `"yes"`, `"no"` or null, and
+  `pre_release_backup` for releases). Data written by the command does not count, only the schema.
+  `CREATE TABLE IF NOT EXISTS` of what exists is "no".
+- **Rolling back across a migration.** `tando rollback` to a release older than one that migrated warns
+  that the database schema is newer than the code it rolls back to, names the pre-release backup that holds
+  the data as the older code knew it, and prints the exact command to put it back:
+  `tando backup restore <backup id> -a <app>`. It asks first; `--yes` (and no terminal: scripts, CI)
+  goes on with the warning, without `--yes` and without a terminal it stops. tando never restores by
+  itself: the live release has been writing since, and restoring the backup discards what was written.
+  Whether to restore, and when, is yours: often the older code runs on the newer schema (see below),
+  and then the rollback alone is right.
+- **Expand and contract.** Make a migration the previous release can live with: first add the column or
+  table (expand) and deploy code that works with and without it; later, in another deploy, when no
+  release that needs the old shape can be rolled back to, remove or rename the old column (contract).
+  A rollback then never meets a schema it cannot run on, and the backup above is for disasters.
 
 ## Limits and load
 

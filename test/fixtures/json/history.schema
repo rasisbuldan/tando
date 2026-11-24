@@ -2,8 +2,11 @@
 history:array
 history[].app:string
 history[].at:null-or-number
+history[].branch:null-or-string
 history[].build_s:null-or-number
+history[].commit:null-or-string
 history[].copy_s:null-or-number
+history[].dirty_files:null-or-number
 history[].kind:null-or-string
 history[].note:null-or-string
 history[].preflight_s:null-or-number

@@ -191,3 +191,9 @@ app.metrics.series[].oom_kills:null-or-number
 app.metrics.series[].tasks:null-or-number
 app.metrics.series[].tasks_max:null-or-number
 app.metrics.series[].memory_pressure_pct:null-or-number
+app.releases[].commit:null-or-string
+app.releases[].branch:null-or-string
+app.releases[].dirty_files:null-or-number
+app.history[].commit:null-or-string
+app.history[].branch:null-or-string
+app.history[].dirty_files:null-or-number

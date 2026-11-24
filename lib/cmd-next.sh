@@ -51,7 +51,7 @@ nx_probe() {
 
 # nx_ready: the server is set up by this client's version (nothing for host setup to do)
 nx_ready() {
-  [ "$K_version" = "$(client_version)" ] && [ "$K_sum" = "$(agent_sum)" ] && [ "$K_caddy" = 1 ] && [ "$K_watch" = 1 ]
+  [ "${K_version%%+*}" = "$(client_version)" ] && [ "$K_sum" = "$(agent_sum)" ] && [ "$K_caddy" = 1 ] && [ "$K_watch" = 1 ]
 }
 
 # nx_app app: its row of $TMPD/nx into N_state N_rel N_link N_doms N_bk N_last N_db (fails if none)
@@ -83,7 +83,7 @@ nx_items() {
   NX_T=() NX_C=()
   if ! nx_ready; then
     if [ -z "$K_version" ]; then nx_add "$HOST is not set up for tando yet" "tando host setup $HOST"
-    elif [ "$K_version" != "$(client_version)" ]; then
+    elif [ "${K_version%%+*}" != "$(client_version)" ]; then
       nx_add "$HOST runs tando $K_version, this laptop $(client_version): update the server" "tando host setup $HOST"
     elif [ "$K_caddy" != 1 ] || [ "$K_watch" != 1 ]; then
       nx_add "$HOST's setup did not finish (Caddy or the alert checks are missing)" "tando host setup $HOST"
