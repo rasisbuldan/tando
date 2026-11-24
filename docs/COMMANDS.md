@@ -82,11 +82,14 @@ Note: `-a` is accepted but not in the usage line (docs/DEV-NOTES.md, mismatch 8)
 Example: `tando deploy`
 
 ### rollback
-`tando rollback [app] [id] [-H host]`. Arguments: 0-2, in either order.
+`tando rollback [app] [id] [-H host] [--yes]`. Arguments: 0-2, in either order.
 Back to the previous verified release, or to `<id>` (`tando releases` lists them).
 A stopped app (`tando stop`) is treated as a deploy to it is: when the release rolled back to passes
 its health check it goes live and the app runs; when it fails, the app is left as it was: its
 release, stopped.
+Rolling back to a release older than one whose release command changed the database schema warns
+(the schema is newer than that code), names the pre-release backup and prints the restore command;
+it asks first, `--yes` goes on. Nothing is restored by itself ("Migrations", below).
 Example: `tando rollback 20261113-171103`
 
 ### releases
@@ -388,6 +391,8 @@ statement, the error's position selected in the editor, notices, CSV download). 
 Example: `tando db studio shop`
 
 ### backup
+(`ls` marks a backup taken before a release command: `predeploy (pre-release <release id>)`; in
+`--json` it is `label`.)
 `tando backup ls [app] [--json]` · `tando backup now [app]` · `tando backup restore <id> [--yes]` ·
 `tando backup drill [app]` · `tando backup pull <id> <file>`. Flags: `-a -H --yes`. Subcommands: ls (default, 0-1), now (0-1),
 drill (0-1), restore (1), pull (2).
@@ -770,6 +775,7 @@ after the command are accepted and show the same help (`tando help alerts notifi
 Example: `tando help deploy`
 
 ## The release command
+(Migrations: the backup before it, the schema record and the rollback warning are in "Migrations" below.)
 
 `release = <command>` in tando.conf: a command tando runs on the server once per deploy, before
 the new release takes traffic. It is meant for database migrations.
@@ -801,8 +807,8 @@ release_timeout = 120              # seconds, 1 to 3600; default 300
   taken just before it: `tando backup restore <id>` puts it back when you decide to (what the backup holds comes back;
   a table the command created after it is not dropped).
 - **`tando rollback` does not undo a migration.** It switches the code back; the database stays as
-  the command left it. Write migrations the previous release can still run with (add a column
-  first, remove it a deploy later).
+  the command left it. See "Migrations" below: it warns, names the backup and prints the restore
+  command.
 - **It must be safe to run twice.** It runs on every deploy, of unchanged code too (with a release
   command a deploy is never "already live"), and again when a deploy is repeated after a failure.
   It does not run on `tando rollback`, `restart`, `env set` or an automatic rollback.
@@ -814,6 +820,44 @@ release_timeout = 120              # seconds, 1 to 3600; default 300
   for `container` (the release is an image: run the migration in its entrypoint).
 - With a deploy key (CI) the command is the one of the admin's last `tando up` or `tando deploy`,
   like every other setting.
+
+## Migrations
+
+For an app with `database = postgres` or `database = sqlite` and a `release` command, tando makes a
+database migration recoverable and visible. Nothing here restores data by itself.
+
+- **Backup before the command.** The pre-deploy backup that is taken before every deploy is, for such
+  an app, the pre-release backup: taken right before `release` runs, labelled `pre-release <release id>`
+  (`tando backup ls`: `predeploy (pre-release 20261113-171442)`, `--json`: `label`), holding the data
+  directory and the database. Only the newest 3 of them are kept per app, so the disk stays bounded
+  (the other backup kinds keep their own counts: docs/BACKUP.md); the backup is written by root, so the
+  file system's root reserve still takes it on a disk an app filled. It adds the time of a backup: on a
+  small database (a few rows) about a second; it grows with the size of the database and data.
+  `release_backup = off` in tando.conf takes none. Not for previews (`tando preview`), which have no
+  release command unless `preview_release = on`, and not for an app without a database (its
+  data-only pre-deploy backup is unchanged).
+- **If the backup fails, the deploy is refused**, nothing is switched, and the message says why and how
+  to go on: `tando up --force` deploys without it (and the schema is then recorded as unknown),
+  `release_backup = off` stops taking it.
+- **Did it migrate?** Before and after the command tando fingerprints the schema (PostgreSQL: a hash of
+  `pg_dump --schema-only`; SQLite: a hash of `sqlite_master`, read with `sqlite3`, which must be installed
+  on the server, as for consistent SQLite backups; without it the answer is "unknown"). The result,
+  `migrated` yes, no or unknown (`?`), is kept with the release and shown by `tando releases` and
+  `tando history` (a MIGRATED column; `--json`: `migrated` `"yes"`, `"no"` or null, and
+  `pre_release_backup` for releases). Data written by the command does not count, only the schema.
+  `CREATE TABLE IF NOT EXISTS` of what exists is "no".
+- **Rolling back across a migration.** `tando rollback` to a release older than one that migrated warns
+  that the database schema is newer than the code it rolls back to, names the pre-release backup that holds
+  the data as the older code knew it, and prints the exact command to put it back:
+  `tando backup restore <backup id> -a <app>`. It asks first; `--yes` (and no terminal: scripts, CI)
+  goes on with the warning, without `--yes` and without a terminal it stops. tando never restores by
+  itself: the live release has been writing since, and restoring the backup discards what was written.
+  Whether to restore, and when, is yours: often the older code runs on the newer schema (see below),
+  and then the rollback alone is right.
+- **Expand and contract.** Make a migration the previous release can live with: first add the column or
+  table (expand) and deploy code that works with and without it; later, in another deploy, when no
+  release that needs the old shape can be rolled back to, remove or rename the old column (contract).
+  A rollback then never meets a schema it cannot run on, and the backup above is for disasters.
 
 ## Limits and load
 

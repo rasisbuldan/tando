@@ -18,6 +18,17 @@ databases; scale to zero; faster deploys. Several defaults change: read "On upgr
   `AcceptEnv` of `SSH_USER_AUTH`. The request store's cap check is O(1) (a count file).
 - `tando doctor` shows the origin lock's certificate warning and repeated refresh failures together.
 
+### Migration safety
+
+- Database migrations (docs/COMMANDS.md "Migrations"): for an app with `database = postgres|sqlite`
+  and a `release` command, the backup taken before the command is labelled `pre-release <release id>`
+  (the newest 3 kept; `release_backup = off` takes none; a failed backup refuses the deploy,
+  `tando up --force` goes on). tando fingerprints the schema before and after the command and records
+  `migrated` yes/no/unknown with the release (`tando releases`, `tando history`, `--json`). `tando
+  rollback` to a release older than one that migrated warns that the schema is newer than the code,
+  names the backup that matches and prints `tando backup restore <id> -a <app>` (`--yes` goes on;
+  nothing is restored by itself). `backup ls --json` rows gain `label`.
+
 ### New
 
 - Guardrails for shared servers (docs/COMMANDS.md "Profiles and guardrails"): limit profiles

@@ -130,6 +130,7 @@ Runs on the server once per deploy, before the switch (migrations). Not for `sta
 | `release` | text | none | | The command, run in the new release as the app's user. | `release = node scripts/migrate.js` |
 | `release_shell` | bool | `false` | | Run it with `sh -c`; needed for `&&`, pipes, `$VARS` and quotes. | `release_shell = true` |
 | `release_timeout` | number | `300` | seconds | Longest it may run, 1 to 3600; over it the deploy fails and nothing is switched. | `release_timeout = 120` |
+| `release_backup` | `on` or `off` | `on` | | With `database = postgres` or `sqlite`: a backup, labelled `pre-release <release id>`, taken just before the command; the last 3 are kept. If it fails the deploy is refused (`tando up --force` goes on). `off` takes none. docs/COMMANDS.md, "Migrations". | `release_backup = off` |
 
 ## Jobs
 

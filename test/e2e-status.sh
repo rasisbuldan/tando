@@ -66,11 +66,12 @@ printf '%s\n' adopted_from=legacy-next caddy=external check_url=https://legacy.e
   health=/api/health health_timeout=60 memory=512M next_cache=release path=/app port=4190 preflight_port=4191 \
   recipe=next start='node server.js' user=www-data 'job.sync=*:0/15 | node sync.js' > $R/legacy/app.conf
 printf '%s\n' current=20261102-120000 last_good=20261102-120000 phase=idle seq_20261101-120000=1 \
-  seq_20261102-120000=2 status_20261101-120000=verified status_20261102-120000=verified > $R/legacy/state
+  seq_20261102-120000=2 status_20261101-120000=verified status_20261102-120000=verified \
+  migrated_20261101-120000=no migrated_20261102-120000=yes prerelease_20261102-120000=20261102-110000-predeploy > $R/legacy/state
 install -d -m 751 $R/odd $R/odd/releases/20261103-000000 $R/odd/releases/20261103-000000-2 $R/odd/releases/junk \
   $R/odd/releases/20261103-000001
 printf 'port=4192\nrecipe=node\ndomains=a.odd.test|off  b.odd.test|redirect\nbackup=daily\n' > $R/odd/app.conf
-printf 'current=20261103-000000-2\nseq_20261103-000000=x\nseq_20261103-000000-2=007\nnoequals\n=novalue\nstatus_20261103-000000-2=verified\nstopped=1' \
+printf 'current=20261103-000000-2\nseq_20261103-000000=x\nseq_20261103-000000-2=007\nnoequals\n=novalue\nstatus_20261103-000000-2=verified\nmigrated_20261103-000000-2=?\nmigrated_20261103-000000=\nmigrated_20261103-000001=yes\nprerelease_20261103-000001=x\ty\nstopped=1' \
   > $R/odd/state
 printf '1\t20261103-000000\tdeploy\tok\t1\t0\t0\t-\t-\t-\t-\tfirst\nshort\tline\n\n2\t20261103-000000-2\tdeploy\tfailed\t1\t0\t0\t-\t-\t-\t-\tbad \303\251 note\n3\t20261103-000000-2\trollback\tok\t1\t0\t0\t-\t-\t-\t-\tlast' \
   > $R/odd/history.tsv

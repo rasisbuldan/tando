@@ -536,6 +536,16 @@ hist_rows() { # max -> TIME (GMT) RELEASE KIND RESULT TOTAL, newest first; the n
     hist_note "$id" "$kind" "$res" "$note" >> "$TMPD/notes"
   done
 }
+# hist_migcol: a history table (header, APP and RELEASE columns) with a MIGRATED column before its
+# last one, from the "mig <app> <id> yes|no|? <backup>" rows of $TMPD/st
+hist_migcol() {
+  awk -F '\t' -v OFS='\t' -v st="$TMPD/st" '
+    BEGIN { while ((getline l < st) > 0) { split(l, f, "\t"); if (f[1] == "mig") m[f[2] SUBSEP f[3]] = f[4] } }
+    NR == 1 { for (i = 1; i <= NF; i++) { if ($i == "APP") ia = i; if ($i == "RELEASE") ir = i } }
+    { v = (NR == 1) ? "MIGRATED" : ((m[$ia SUBSEP $ir] == "") ? "-" : m[$ia SUBSEP $ir])
+      line = ""; for (i = 1; i < NF; i++) line = line $i OFS
+      print line v OFS $NF }'
+}
 # hist_note id kind result note: "id: note" for a rollback or a failure that has a reason
 hist_note() {
   case ${4:--} in -|"") return 0;; esac
@@ -661,7 +671,7 @@ render_status() {
   done < "$TMPD/st"
   ui_box_sep releases
   rel_rows > "$TMPD/rows"
-  ui_table "l,l,l!2,l!1" < "$TMPD/rows"
+  if grepq "^mig$TAB" "$TMPD/st"; then ui_table "l,l,l!2,l!1,l!3" < "$TMPD/rows"; else ui_table "l,l,l!2,l!1" < "$TMPD/rows"; fi
   ui_box_sep history
   hist_rows 5 > "$TMPD/rows"
   if [ "$(wc -l < "$TMPD/rows")" -le 1 ]; then ui_box_line "${UI_DIM}no deploy has finished yet${UI_NC}"
@@ -669,23 +679,33 @@ render_status() {
   hist_notes_box
   ui_box_close "$(watch_note)"
 }
-rel_rows() { # RELEASE STATUS DEPLOYED marks, from the rel rows of $TMPD/st
-  local r id st c g
-  printf 'RELEASE (UTC)\tSTATUS\tDEPLOYED\t\n'
+rel_rows() { # RELEASE STATUS DEPLOYED marks, from the rel rows of $TMPD/st; MIGRATED when the server sent mig rows
+  local r id st c g mig="" m
+  grepq "^mig$TAB" "$TMPD/st" && mig=1
+  printf 'RELEASE (UTC)\tSTATUS\tDEPLOYED\t%s\n' "${mig:+${TAB}MIGRATED}"
   while IFS=$TAB read -r r id st c g; do
-    [ "$r" = rel ] && printf '%s\t%s\t%s\t%s\n' "$id" "$(badge "$st")" "$(ago "$(id_epoch "$id")")" "$(marks "$c" "$g")"
+    [ "$r" = rel ] || continue
+    m=""; [ -z "$mig" ] || { m=$(awk -F '\t' -v id="$id" '$1 == "mig" && $2 == id { print $3 }' "$TMPD/st"); m=$TAB${m:--}; }
+    printf '%s\t%s\t%s\t%s%s\n' "$id" "$(badge "$st")" "$(ago "$(id_epoch "$id")")" "$(marks "$c" "$g")" "$m"
   done < "$TMPD/st"
 }
 rel_json() {
-  local r id st c g
+  local r id st c g m
+  # migrated: "yes", "no", or null when the server has no record (a release without a release command
+  # on a database, or from before it recorded); pre_release_backup: the backup taken before its release command
   while IFS=$TAB read -r r id st c g; do
-    [ "$r" = rel ] && printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$(id_epoch "$id")" "$st" "$c" "$g"
-  done < "$TMPD/st" | to_json "id:s,deployed_at:n,status:s,current:b,last_good:b"
+    [ "$r" = rel ] || continue
+    m=$(awk -F '\t' -v id="$id" '$1 == "mig" && $2 == id { print ($3 == "?" ? "-" : $3) "\t" $4 }' "$TMPD/st")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$(id_epoch "$id")" "$st" "$c" "$g" "${m:--$TAB-}"
+  done < "$TMPD/st" | to_json "id:s,deployed_at:n,status:s,current:b,last_good:b,migrated:s,pre_release_backup:s"
 }
 HIST_JSON="at:n,app:s,release:s,kind:s,result:s,total_s:n,build_s:n,upload_s:n,copy_s:n,preflight_s:n,switch_s:n,verify_s:n,note:s,release_s:n"
 # (release_s: the seconds of the release command, null for a deploy without one)
+# (migrated: yes, no, or null; the server's "mig" rows)
 hist_json() { grep "^hist$TAB" "$TMPD/st" | sort -t "$TAB" -k3,3nr | cut -f2-15 |
-  awk -F '\t' -v OFS='\t' '{ print $2, $1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14 }' | to_json "$HIST_JSON"; }
+  awk -F '\t' -v OFS='\t' -v st="$TMPD/st" '
+    BEGIN { while ((getline l < st) > 0) { split(l, f, "\t"); if (f[1] == "mig") m[f[2] SUBSEP f[3]] = (f[4] == "?" ? "-" : f[4]) } }
+    { print $2, $1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, (m[$1 SUBSEP $3] == "" ? "-" : m[$1 SUBSEP $3]) }' | to_json "$HIST_JSON,migrated:s"; }
 # the alert rows of $TMPD/st (firing and pending; host checks have app "host") as a JSON array
 alerts_json() {
   awk -F '\t' -v OFS='\t' '$1 == "alert" { print $2, $3, $4, $5, $6 }' "$TMPD/st" | to_json "app:s,check:s,state:s,since:n,detail:s"
@@ -713,7 +733,7 @@ cmd_status() {
 
 cmd_history() {
   resolve 0
-  local r a ts id kind res tot b u c p s v note rc n=30 hasrc="" spec
+  local r a ts id kind res tot b u c p s v note rc n=30 hasrc="" hasmig="" spec
   [ "$NLINES" != 100 ] && n=$NLINES
   [ "$n" -gt 999 ] && n=999
   agent_raw sudo history ${APP:+"$APP"} "$n" > "$TMPD/st" || exit 1
@@ -734,12 +754,16 @@ cmd_history() {
         "$(badge "$res")" "$(secs "$tot")" "$b" "$u" "$c" "$p" "${hasrc:+${TAB}${rc:--}}" "$s" "$v" "$note"
     done
   } > "$TMPD/rows"
+  # MIGRATED (yes, no, ?): did the deploy's release command change the schema; a column of its own,
+  # before the last one, when the server sent mig rows (hist_migcol)
+  grepq "^mig$TAB" "$TMPD/st" && { hist_migcol < "$TMPD/rows" > "$TMPD/rows2" && mv "$TMPD/rows2" "$TMPD/rows"; hasmig=1; }
   ui_box_open "history${APP:+ $APP}" "$HOST"
   # dropped first when narrow: note, phase times, app, release; never TIME (GMT) or RESULT
   if [ "$(wc -l < "$TMPD/rows")" -le 1 ]; then ui_box_line "No deploys yet: tando up"
   else
     spec="l,l!5,l!4,l,l,r,r!6,r!7,r!8,r!9,r!10,r!11,l:4-30!12"
     [ -z "$hasrc" ] || spec="l,l!5,l!4,l,l,r,r!6,r!7,r!8,r!9,r!10,r!11,r!12,l:4-30!13"
+    [ -z "$hasmig" ] || spec="${spec%,*},l!3,${spec##*,}"
     ui_table "$spec" < "$TMPD/rows"
     # the NOTE column was dropped or cut: the reasons of rollbacks and failures, whole, below
     case $UI_TABLE_SHOWN in
@@ -761,6 +785,7 @@ cmd_releases() {
   rel_rows > "$TMPD/rows"
   ui_box_open "releases $APP" "$HOST"
   if [ "$(wc -l < "$TMPD/rows")" -le 1 ]; then ui_box_line "No releases yet: tando up"
+  elif grepq "^mig$TAB" "$TMPD/st"; then ui_table "l,l,l,l,l" < "$TMPD/rows"
   else ui_table "l,l,l,l" < "$TMPD/rows"; fi
   ui_box_close "newest 5 kept; current and last good never pruned"
 }
@@ -1237,15 +1262,15 @@ follow_paint() {
 }
 
 cmd_backup_ls() {
-  local r id kind created size what where off="" err=""
+  local r id kind created size what where lbl l off="" err=""
   agent_raw sudo backup-ls "$APP" > "$TMPD/st" || exit 1
   NOW=$(now)
   if [ -n "$JSON" ]; then
     # {"host", "app", "backups": [{id, kind, created, size_bytes, holds, where}], "offsite_error"};
     # where: local, both, offsite, local+pending, local+uploading, local+failed (null: no offsite)
     printf '{"host":%s,"app":%s,"backups":' "$(json_str "$HOST")" "$(json_str "$APP")"
-    awk -F '\t' -v OFS='\t' '$1 == "backup" { print $2, $3, $4, $5, $6, $7 }' "$TMPD/st" |
-      to_json "id:s,kind:s,created:n,size_bytes:n,holds:s,where:s"
+    awk -F '\t' -v OFS='\t' '$1 == "backup" { print $2, $3, $4, $5, $6, $7, ($8 == "-" ? "" : $8) }' "$TMPD/st" |
+      to_json "id:s,kind:s,created:n,size_bytes:n,holds:s,where:s,label:s"
     err=$(awk -F '\t' '$1 == "offsite-error" { e = $2 } END { print e }' "$TMPD/st")
     printf ',"offsite_error":%s' "$( [ -n "$err" ] && json_str "$err" || printf null)"
     # the last restore drill (tando backup drill): null when none ran
@@ -1258,10 +1283,11 @@ cmd_backup_ls() {
     return 0
   fi
   # WHERE (a 7th field from an agent with offsite copies): local, both, offsite, local+pending ...
-  grep -v '^drill	' "$TMPD/st" | grepq -E '	(offsite|both|local\+[a-z]+)$' && off=1
+  grep -v '^drill	' "$TMPD/st" | grepq -E '	(offsite|both|local\+[a-z]+)(	[^	]*)?$' && off=1
+  : > "$TMPD/lbls"
   {
     printf 'TIME (GMT)\tBACKUP\tKIND\tSIZE\tHOLDS%s\n' "${off:+	WHERE}"
-    while IFS=$TAB read -r r id kind created size what where; do
+    while IFS=$TAB read -r r id kind created size what where lbl; do
       [ "$r" = offsite-error ] && { err=$id; continue; }
       [ "$r" = backup ] || continue
       ui_utc_v "$created"
@@ -1271,6 +1297,7 @@ cmd_backup_ls() {
         local+pending|local+uploading) where="local, uploading";;
         local+failed) where="local, ${UI_YELLOW}upload failed${UI_NC}";;
       esac
+      [ "${lbl:--}" = - ] || printf '%s: %s backup of %s\n' "$id" "${lbl%% *}" "${lbl#* }" >> "$TMPD/lbls"
       printf '%s\t%s\t%s\t%s\t%s%s\n' "$UI_RET" "$id" "$kind" "$(ui_bytes "$size")" "$what" "${off:+	$where}"
     done < "$TMPD/st"
   } > "$TMPD/rows"
@@ -1278,6 +1305,8 @@ cmd_backup_ls() {
   if [ "$(wc -l < "$TMPD/rows")" -gt 1 ]; then
     if [ -n "$off" ]; then ui_table "l,l,l!2,r,l!1,l" < "$TMPD/rows"; else ui_table "l,l,l!2,r,l!1" < "$TMPD/rows"; fi
   else ui_box_line "No backups. Apps with data = <dir> or database = ... in tando.conf are backed up daily."; fi
+  # the backups taken before a release command, with the release they belong to (the KIND column may be dropped when narrow)
+  [ ! -s "$TMPD/lbls" ] || while IFS= read -r l; do ui_box_line "${UI_DIM}$l${UI_NC}"; done < "$TMPD/lbls"
   [ -n "$err" ] && ui_box_wrap "${UI_YELLOW}offsite storage did not answer:${UI_NC} $err"
   # the last restore drill: the proof that a backup restores (tando backup drill, monthly on the host)
   local dr dat dres dbk dfiles dtab drows dsecs dwhy

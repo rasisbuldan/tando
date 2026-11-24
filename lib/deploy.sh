@@ -17,6 +17,7 @@ configure() {
     [ -n "$C_release" ] && printf 'release=%s\n' "$C_release"
     [ -n "$C_release_shell" ] && printf 'release_shell=%s\n' "$C_release_shell"
     [ -n "$C_release_timeout" ] && printf 'release_timeout=%s\n' "$C_release_timeout"
+    [ -n "$C_release_backup" ] && printf 'release_backup=%s\n' "$C_release_backup"
     printf 'health=%s\nmemory=%s\n' "${C_health:-/}" "${C_memory:-256M}"
     [ -n "$C_timeout" ] && printf 'health_timeout=%s\n' "$C_timeout"
     # soak: seconds a new release must stay up after going live (TANDO_SOAK: tests use a short one)
@@ -696,7 +697,7 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   build_total=$(awk -v a="$BUILD_SECS" -v b="$stage_secs" 'BEGIN { printf "%.1f", a + b }')
   # the lease token, then the id of this deploy's settings (configure staged them on the server:
   # the activation runs with these, whatever another client configured meanwhile)
-  printf '%s\n%s\n' "$TOKEN" "${K_conf:-}" > "$TMPD/token"
+  printf '%s\n%s\n%s\n' "$TOKEN" "${K_conf:-}" "${FORCE:+force=1}" > "$TMPD/token"
   # (an activate that failed before it wrote the release id leaves the lease: given back, so the
   # next deploy need not wait for it; one with the id keeps it, end leaves that alone)
   if ! agent_raw sudo activate "$APP" "$build_total" "$UPLOAD_SECS" < "$TMPD/token" > "$TMPD/act"; then

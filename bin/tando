@@ -300,9 +300,51 @@ cmd_up() {
 }
 cmd_deploy() { conf_load || no_conf; resolve 1; do_deploy; }
 
+# rollback_schema_check [id]: a rollback to a release older than one whose release command changed
+# the database schema (the server records it: "mig" rows of `releases`) leaves code that may not run
+# on the schema it finds. Says so, names the pre-release backup that matches the target's data and
+# the command that restores it (never run for you: data written since would be lost), and asks;
+# --yes goes on with the warning. Without an answer from the server it says nothing: the rollback does.
+rollback_schema_check() {
+  local want=${1:-} mid bk to
+  agent_raw sudo releases "$APP" < /dev/null > "$TMPD/rl" 2> /dev/null || return 0
+  # the rows are newest first: from the current release down to the target; the oldest release in
+  # that stretch that migrated is the one whose pre-release backup holds the target's data
+  read -r to mid bk < <(awk -F '\t' -v want="$want" '
+    $1 == "rel" { n++; id[n] = $2; st[n] = $3; if ($4 == 1) cur = n }
+    $1 == "mig" { m[$2] = $3; b[$2] = $4 }
+    END {
+      if (!cur) exit
+      t = 0
+      for (i = cur + 1; i <= n && !t; i++) if (want == "" ? st[i] == "verified" : id[i] == want) t = i
+      if (!t) exit
+      for (i = cur; i < t; i++) if (m[id[i]] == "yes") { mid = id[i]; bk = b[id[i]] }
+      if (mid != "") print id[t], mid, (bk == "" ? "-" : bk)
+    }' "$TMPD/rl") || true
+  [ -n "${mid:-}" ] || return 0
+  note "warning: the database schema of $APP is newer than the code of $to."
+  note "  Release $mid ran a release command that changed the schema; $to is older, so it may not run on it."
+  note "  The rollback switches the code only: tando never restores data by itself (what was written since would be lost)."
+  if [ "$bk" != - ]; then
+    note "  Backup $bk was taken just before that release command; it holds the data as $to knew it."
+    note "  To put it back after the rollback (this discards what was written since): tando backup restore $bk -a $APP"
+  else
+    note "  No pre-release backup was taken for it (release_backup = off, or --force)."
+  fi
+  [ -n "${YES:-}" ] && { note "  --yes: rolling back anyway."; return 0; }
+  if [ -t 0 ] && [ -t 2 ]; then
+    printf 'Roll back to %s anyway? [y/N] ' "$to" >&2
+    local a; IFS= read -r a || a=""
+    case $a in y|Y|yes) return 0;; esac
+    die "not confirmed; nothing was changed"
+  fi
+  die "not rolled back: run again with --yes to roll back anyway"
+}
+
 cmd_rollback() {
   resolve 1
   local id=${ROLLBACK_ID:-}   # pos_app took it out of the arguments
+  rollback_schema_check "$id"
   agent_wait sudo rollback "$APP" $id < /dev/null > "$TMPD/o" || bail 1
   kv_read "$TMPD/o" current from link
   ui_box_open "rollback $APP" "$HOST"
