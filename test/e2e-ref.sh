@@ -6,7 +6,7 @@
 # of that commit, build_files, removed after a deploy, a failure and a signal); and the version
 # string of a git build (0.2.2+<sha>), which nothing compares but its base.
 #   R1  provenance of a clean deploy: the state file, history, releases, status, --json
-#   R2  a dirty tree: one warning with the count (ignored files do not count), shown as dirty
+#   R2  a dirty tree: one warning with the count (ignored files and other directories of a monorepo do not count), shown as dirty
 #   R3  --clean and require_clean = true refuse, nothing is deployed
 #   R4  --ref: a branch, a tag, a full sha: the committed content although the tree differs
 #   R5  --ref: the tando.conf of that commit; an untracked one is copied and said so
@@ -106,6 +106,13 @@ check "R2c releases, history and status mark it dirty" \
   eval 'grep -q "${C2:0:7} dirty" "$E/rel3.out" && grep -q "${C2:0:7} dirty" "$E/his3.out" && grep -q "${C2:0:7} dirty" "$E/sta3.out"'
 check "R2d the dirty release's state line on the server says 2 files" \
   eval 'srv "sudo grep -E \"^git_.*=$C2:2:main\$\" /opt/tando/apps/refdemo/state" > /dev/null'
+
+# the dirty count is the app directory's: a monorepo's other directories do not count
+M=$E/mono; rm -rf "$M"; mkdir -p "$M/app" "$M/other"; printf 'a\n' > "$M/app/a.txt"; printf 'o\n' > "$M/other/o.txt"
+git -C "$M" init -q -b main && git -C "$M" add -A && git -C "$M" commit -q -m m1
+printf 'o2\n' > "$M/other/o.txt"; printf 'n\n' > "$M/other/new.txt"; printf 'a2\n' > "$M/app/new.txt"
+check "R2e a monorepo: 3 files changed in the repo, 1 in the app directory: PROV_N is 1" \
+  eval '[ "$(cd "$M/app" && bash -c ". \"$ROOT/lib/ui.sh\"; . \"$ROOT/lib/common.sh\"; . \"$ROOT/lib/deploy.sh\"; prov_detect; echo \$PROV_N" 2> /dev/null)" = 1 ]'
 
 # ---- R3. --clean and require_clean refuse
 n1=$(nrel)

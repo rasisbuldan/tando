@@ -355,3 +355,29 @@ func TestHostFacts(t *testing.T) {
 		}
 	}
 }
+
+// TestMigRows: the releases verb's "mig <id> yes|no|? <backup>" rows (after the rel rows) and the
+// history verb's "mig <app> <id> ..." rows: only the releases with a record, in the order the
+// agent prints them.
+func TestMigRows(t *testing.T) {
+	h := newHost(t)
+	h.app("web", "port=4100\n", "current=20261114-170102\nseq_20261114-170101=1\nseq_20261114-170102=2\n"+
+		"status_20261114-170101=verified\nstatus_20261114-170102=verified\n"+
+		"migrated_20261114-170101=no\nmigrated_20261114-170102=yes\nprerelease_20261114-170102=20261114-170100-predeploy\n"+
+		"migrated_20261114-170103=?\nmigrated_20261114-170104=\nmigrated_x=yes\n")
+	h.write("root/apps/web/releases/20261114-170101/x", "")
+	h.write("root/apps/web/releases/20261114-170102/x", "")
+	h.write("root/apps/web/history.tsv", "")
+	got, err := h.out(func(c *Collector, b *bytes.Buffer) error { return c.Releases(context.Background(), b, "web") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, got, rows("rel\t20261114-170102\tverified\t1\t0", "rel\t20261114-170101\tverified\t0\t0",
+		"mig\t20261114-170102\tyes\t20261114-170100-predeploy", "mig\t20261114-170101\tno\t-"))
+	got, err = h.out(func(c *Collector, b *bytes.Buffer) error { return c.History(context.Background(), b, "web", "5") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, got, rows("mig\tweb\t20261114-170101\tno\t-", "mig\tweb\t20261114-170102\tyes\t20261114-170100-predeploy",
+		"mig\tweb\t20261114-170103\t?\t-"))
+}

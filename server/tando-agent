@@ -2369,7 +2369,7 @@ prune() {
     [[ $i == "${S[current]:-}" || $i == "${S[last_good]:-}" || $i == "${S[target]:-}" || $i == "${S[hold_release]:-}" ]] && keep=1
     [[ -z ${S[status_$i]:-} ]] && keep=1          # reserved by a queued activation
     if ((!keep)); then
-      rm -rf "${D:?}/releases/$i" "${D:?}/jobs/$i" "${D:?}/start/$i" "${D:?}/sums/$i" "${D:?}/sums/$i.tmp" "${D:?}/sums/$i.work"; unset "S[status_$i]" "S[seq_$i]" "S[git_$i]"
+      rm -rf "${D:?}/releases/$i" "${D:?}/jobs/$i" "${D:?}/start/$i" "${D:?}/sums/$i" "${D:?}/sums/$i.tmp" "${D:?}/sums/$i.work"; unset "S[status_$i]" "S[seq_$i]" "S[git_$i]" "S[migrated_$i]" "S[prerelease_$i]"
       [[ ${C[recipe]:-node} == container ]] && podman rmi -f "localhost/tando-$A:$i" > /dev/null 2>&1
     fi
   done
@@ -4456,7 +4456,7 @@ cmd_configure() {
     "C[request_log_max]" "C[health_expect]" "C[health_fails]" "C[health_recover]" \
     "C[cpu]" "C[tasks]" "C[max_conns]" "C[max_requests]" "C[stop_timeout]" "C[hold]" "C[priority]" \
     "C[db_statement_timeout]" "C[db_idle_tx_timeout]" "C[db_temp_limit]" "C[db_pool]" "C[db_direct]" \
-    "C[release]" "C[release_shell]" "C[release_timeout]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]" "C[idle_stop]" \
+    "C[release]" "C[release_shell]" "C[release_timeout]" "C[release_backup]" "C[job_timeout]" "C[assets]" "C[job_spread]" "C[job_missed]" "C[spa]" "C[compress]" "C[idle_stop]" \
     "C[tmp_size]" "C[io]" "C[disk]" "C[response_timeout]" "C[body_max]" "C[cold_timeout]" "C[preview_skip]" "C[preview_ttl]" "C[preview_env]" "C[preview_release]" "C[node_lite]"
   local line
   while IFS= read -r line; do
@@ -4474,6 +4474,7 @@ cmd_configure() {
       release) [[ -n $v && ${#v} -le 1000 ]] || die "bad release command (empty, or longer than 1000 characters)";;
       release_shell) [[ $v =~ ^(true|false)$ ]] || die "release_shell must be true or false";;
       release_timeout) [[ $v =~ ^[1-9][0-9]{0,3}$ ]] && ((v <= 3600)) || die "bad release_timeout: $v (seconds, 1 to 3600)";;
+      release_backup) [[ $v == on || $v == off ]] || die "bad release_backup: $v (on or off)";;
       health) [[ $v =~ ^/[A-Za-z0-9._~/?=\&%-]*$ ]] || die "bad health path: $v";;
       path) [[ $v =~ ^(/[A-Za-z0-9._~-]+)+$ ]] || die "bad path: $v (like /shop)";;
       spa) [[ $v =~ ^(true|false)$ ]] || die "spa must be true or false";;
@@ -4863,7 +4864,13 @@ cmd_activate() {
   need_root; app "$1"; shift
   local token b u id base n=1
   local conf="" prov=""
-  if (($# == 3)); then token=$1; shift; else IFS= read -r token || token=""; IFS= read -r conf || true; IFS= read -r prov || true; fi
+  local conf="" prov="" force="" line
+  if (($# == 3)); then token=$1; shift; else IFS= read -r token || token=""; IFS= read -r conf || true
+    # lines 3 on: keyed, in no set order (prov=<provenance>, force=1); anything else is ignored
+    while IFS= read -r line || [[ -n $line ]]; do
+      case $line in prov=*) prov=${line#prov=} ;; force=1) force=1 ;; esac
+    done
+  fi
   # prov: where the code came from, "<40 hex sha>:<changed files>:<branch>" (the client's git
   # checkout; nothing when it had none). Only this form is kept: it lands in a state file and
   # in listings, so a stranger's text never gets that far
@@ -4933,6 +4940,8 @@ cmd_activate() {
   local who=() w f
   [[ -z $prov ]] || who+=(-E "TANDO_PROV=$prov")
   [[ -x $LOGS ]] && read -r w f < <("$LOGS" audit-origin) && who+=(-E "TANDO_AUDIT_WHO=$w" -E "TANDO_AUDIT_FROM=$f")
+  # --force: a failed pre-release backup does not stop this deploy (run_activation)
+  [[ -z $force ]] || who+=(-E "TANDO_FORCE_BACKUP=1")
   # ExecStopPost: whatever ends the activation (an OOM kill, SIGKILL, a full disk), recover runs
   # at once and finishes or reverts it, so no release stays half-activated. Bounds: the whole
   # activation (an hour of waiting for the app's lock, the copy, build or image pull, the release
@@ -5203,15 +5212,28 @@ cmd_run_activation() {
   # the backup is of what the live release has, by its settings (LC): a database or data directory
   # this release adds has nothing in it yet to keep (and the app's user may reach PostgreSQL only
   # from this deploy on)
-  local bk="" brc=0
+  local bk="" brc=0 prerel=0 fp0=""
   # shellcheck disable=SC2034  # NC2 is read by conf_copy through its nameref
   local -A NC2=(); conf_copy C NC2; conf_copy LC C; app_vars
-  if has_backup_data; then
+  # a release command on an app with a database (and not a preview, which does not migrate unless
+  # preview_release asks): its backup is the pre-release backup, tagged with this release's id, and
+  # the schema before it is fingerprinted. release_backup = off: no backup before the command
+  [[ -n ${NC2[release]:-} && -z ${NC2[preview_of]:-} && ( ${C[database]:-} == postgres || ${C[database]:-} == sqlite ) ]] && prerel=1
+  ((!prerel)) || fp0=$(schema_fp)
+  if has_backup_data && ! { ((prerel)) && [[ ${NC2[release_backup]:-on} == off ]]; }; then
     # (in this shell, not $(...): backup_take records last_backup in the state)
+    BK_RELEASE=""; ((!prerel)) || BK_RELEASE=$id
     { fp sw.backup && backup_take predeploy > /dev/null 2> "$D/backup.err"; } && bk=$BK_ID || brc=1
+    BK_RELEASE=""
   fi
   conf_copy NC2 C; app_vars
-  ((!brc)) || fail "the pre-deploy backup failed, so the release was not switched in: $(tail -c 300 "$D/backup.err" | tr '\n' ' ')"
+  if ((brc)); then
+    if ((prerel)) && [[ -n ${TANDO_FORCE_BACKUP:-} ]]; then
+      echo "tando-agent: the pre-release backup failed; going on (--force): $(tail -c 300 "$D/backup.err" | tr '\n' ' ')" >&2
+    else
+      fail "the pre-deploy backup failed, so the release was not switched in: $(tail -c 300 "$D/backup.err" | tr '\n' ' ')${prerel:+ (tando up --force goes on without it; release_backup = off in tando.conf stops taking it)}"
+    fi
+  fi
   # the release command (migrations): after the pre-flight passed and the backup was taken, before
   # the switch. Its time is its own phase; the switch phase is what came before it plus the switch
   if [[ -n ${C[release]:-} ]]; then
@@ -5222,6 +5244,13 @@ cmd_run_activation() {
     t=$(ds); st phase release; pg phase release
     fp rel.run
     run_release "$bk"
+    if ((prerel)); then   # did the command change the schema? (recorded with the release: rollback warns)
+      local fp1; fp1=$(schema_fp)
+      if [[ $fp0 == "?" || $fp1 == "?" ]]; then st "migrated_$id" "?"
+      elif [[ $fp0 == "$fp1" ]]; then st "migrated_$id" no
+      else st "migrated_$id" yes; fi
+      st "prerelease_$id" "$bk"
+    fi
     pg t_release "$(el "$t")" phase switch
     t=$(( $(ds) - sw )); st phase switch
   fi
@@ -5274,7 +5303,7 @@ cmd_run_activation() {
 # shell syntax in a command that runs without a shell would reach the program as literal words
 release_ok() {
   [[ -n ${C[release]:-} ]] || {
-    [[ -z ${C[release_shell]:-}${C[release_timeout]:-} ]] || die "release_shell and release_timeout need release = <command>"
+    [[ -z ${C[release_shell]:-}${C[release_timeout]:-}${C[release_backup]:-} ]] || die "release_shell, release_timeout and release_backup need release = <command>"
     return 0; }
   case ${C[recipe]:-node} in
     static) die "release is not supported for a static site: it has no process to run a command as (a build step belongs in build =)";;
@@ -5302,6 +5331,26 @@ cmd_exec_release() {
   if [[ ${C[release_shell]:-} == true ]]; then exec /bin/sh -c "${C[release]}"; fi
   read -ra argv <<< "${C[release]}"
   exec "${argv[@]}"
+}
+
+# schema_fp: a fingerprint of the app's database schema (no data), for "did the release command
+# change it": PostgreSQL: sha256 of pg_dump --schema-only (the app's role, as a backup); SQLite:
+# sha256 of sqlite_master's sql (sqlite3 as the app, as a backup). "none": no database yet;
+# "?": it could not be read (no sqlite3, a dump that failed): then migrated is unknown
+schema_fp() {
+  (
+    local out
+    if [[ ${C[database]:-} == postgres ]]; then
+      db_creds > /dev/null 2>&1 || { echo none; exit 0; }
+      out=$(as_app_pg timeout 120 pg_dump -s --no-owner --no-privileges -h "$DB_HOST" -p "$DB_PORT" -U "$DB_ROLE" -d "$DB_ROLE" < /dev/null 2> /dev/null) || { echo "?"; exit 0; }
+      out=$(grep -Ev '^(--|\\restrict |\\unrestrict )' <<< "$out")
+    else
+      [[ -f $ADATA/app.sqlite ]] || { echo none; exit 0; }
+      command -v sqlite3 > /dev/null || { echo "?"; exit 0; }
+      out=$(as_app_unit -p "WorkingDirectory=$ADATA" sqlite3 -readonly app.sqlite "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name" < /dev/null 2> /dev/null) || { echo "?"; exit 0; }
+    fi
+    printf '%s' "$out" | sha256sum | cut -c1-16
+  ) 2> /dev/null || echo "?"
 }
 
 # run_release [backup id]: inside run-activation (uses id, rel, t and fail from there). Returns
@@ -5940,6 +5989,7 @@ make_writable() { # release dir
 # its sandbox too: as_app_unit), and root only writes their output stream into its own 700 directory.
 
 BK=/var/backups/tando
+PRERELEASE_KEEP=3   # pre-release backups kept per app (release command + database); the disk stays bounded
 
 has_backup_data() { [[ -n ${C[data]:-} || -n ${C[data_dir]:-} || ${C[database]:-} == postgres ]]; }
 # (adopt: the full backup `tando adopt` took before it changed anything; its data restores like
@@ -6024,7 +6074,9 @@ backup_take() { # kind -> prints the backup id (and sets BK_ID); the caller hold
   fi
   # seq: its place in the order backups were taken (backup_prune goes by it: a name is the wall
   # clock's, and a clock set back gives a new backup an older name)
-  { printf 'kind=%s\ncreated=%s\nseq=%s\n' "$kind" "$(now)" "$(bk_seq)" && { [[ -z ${BK_WARN:-} ]] || printf 'warning=%s\n' "$BK_WARN"; }; } > "$tmp/meta" &&
+  # release=<id>: the pre-release backup of that release (BK_RELEASE; backup_prune keeps the last 3)
+  { printf 'kind=%s\ncreated=%s\nseq=%s\n' "$kind" "$(now)" "$(bk_seq)" && { [[ -z ${BK_WARN:-} ]] || printf 'warning=%s\n' "$BK_WARN"; } &&
+      { [[ -z ${BK_RELEASE:-} ]] || printf 'release=%s\n' "$BK_RELEASE"; }; } > "$tmp/meta" &&
     sync -f "$tmp/meta" && mv "$tmp" "$dir" || { rm -rf "$tmp"; echo "could not write the backup (disk full?)" >&2; return 1; }
   st last_backup "$(now)"
   backup_prune "$id"
@@ -6068,6 +6120,11 @@ backup_prune() { # [id just taken: never pruned, whatever its name says after a 
           week=$(date -d "${i:0:8}" +%G-%V)
           if [[ $weeks != *" $week "* ]] && ((nweeks < 4)); then weeks+="$week "; nweeks=$((nweeks + 1)); keep=1; fi
         fi;;
+      predeploy)
+        # a pre-release backup (it names its release): the newest PRERELEASE_KEEP; the others of the kind, 5
+        if [[ -n $(sed -n 's/^release=//p' "$BK/$A/$i/meta" 2> /dev/null | head -1) ]]; then
+          count[prerelease]=$(( ${count[prerelease]:-0} + 1 )); (( count[prerelease] <= PRERELEASE_KEEP )) && keep=1
+        else count[$kind]=$(( ${count[$kind]:-0} + 1 )); (( count[$kind] <= 5 )) && keep=1; fi;;
       *) count[$kind]=$(( ${count[$kind]:-0} + 1 )); (( count[$kind] <= 5 )) && keep=1;;
     esac
     [[ $i == "${1:-}" ]] && keep=1
@@ -6122,7 +6179,7 @@ app_or_gone() {
 }
 cmd_backup_ls() {
   need_root; app_or_gone "$1"
-  local i size created where
+  local i size created where lbl
   # the last restore drill (tando backup drill): at, result, backup, files, tables, rows, seconds, why
   local -A DS=(); load "$R/apps/$A/state" DS
   [[ ${DS[drill_at]:-} =~ ^[0-9]+$ ]] && row drill "${DS[drill_at]}" "${DS[drill_result]:-fail}" "${DS[drill_id]:-}" \
@@ -6140,8 +6197,10 @@ cmd_backup_ls() {
       where=$(sed -n 's/^state=//p' "$BK/$A/$i/offsite" 2> /dev/null)
       case $where in uploaded) where=both;; "") where=local;; *) where=local+$where;; esac
     fi
+    # 8th field: its label, "pre-release <release id>" for the backup taken before a release command
+    lbl=$(sed -n 's/^release=//p' "$BK/$A/$i/meta" 2> /dev/null | head -1)
     row backup "$i" "${i#*-*-}" "$created" "$size" \
-      "$([[ -f $BK/$A/$i/data.tar.gz ]] && echo data)$([[ -f $BK/$A/$i/db.dump ]] && echo ' db')" "$where"
+      "$([[ -f $BK/$A/$i/data.tar.gz ]] && echo data)$([[ -f $BK/$A/$i/db.dump ]] && echo ' db')" "$where" "${lbl:+pre-release $lbl}"
   done
   # the ones only in the bucket (rows "offsite <id> <kind> <created> <size> <local 1|0>")
   if [[ -f $R/offsite.conf && -x $R/bin/tando-offsite ]]; then
@@ -8362,6 +8421,12 @@ cmd_releases() {
 # tando-dash deploys from that folder). Not in status (cmd_status lists the releases too).
 cmd_releases_verb() {
   cmd_releases "$@"
+  # did the release command change the schema: "mig <id> yes|no|? <pre-release backup id or ->",
+  # for the releases that have a record (a release command on an app with a database)
+  local i
+  for i in $(releases_by_seq | tac); do
+    if [[ -n ${S[migrated_$i]:-} ]]; then row mig "$i" "${S[migrated_$i]}" "${S[prerelease_$i]:--}"; fi
+  done
   [[ -n ${C[origin]:-} ]] && row origin "${C[origin]}"
   return 0
 }
@@ -8380,6 +8445,11 @@ cmd_history() { # [app] [n]   (a lone number is the count)
     [[ -r $f ]] || continue
     f=${f%/history.tsv}
     tail -n "$n" "$f/history.tsv" | awk -F '\t' 'NF >= 12 && NF <= 14' | sed "s/^/hist\t${f##*/}\t/"
+    # (then, apart from the hist rows, the releases with a schema record: "mig <app> <id> yes|no|? <backup id or ->")
+    local -A MS=() ; local k; load "$f/state" MS
+    for k in $(printf '%s\n' "${!MS[@]}" | grep '^migrated_[0-9]' | sort); do
+      if [[ -n ${MS[$k]} ]]; then row mig "${f##*/}" "${k#migrated_}" "${MS[$k]}" "${MS[prerelease_${k#migrated_}]:--}"; fi
+    done
   done
 }
 
@@ -8897,7 +8967,7 @@ rel_conf() {
 }
 # conf_key key: a setting of tando.conf (what configure takes from the client): it belongs to a
 # release. The rest of app.conf is the server's own (port, created, domains, origin, adopt's)
-CONF_KEYS_A=(recipe image container_port build_memory start start_shell release release_shell release_timeout
+CONF_KEYS_A=(recipe image container_port build_memory start start_shell release release_shell release_timeout release_backup
   health path data writable backup database db_statement_timeout db_idle_tx_timeout db_temp_limit
   memory health_timeout soak cpu tasks max_conns max_requests stop_timeout hold log_max log_keep
   log_rate access_log request_log_max health_expect health_fails health_recover job_timeout job_spread

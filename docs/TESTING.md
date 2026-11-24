@@ -410,7 +410,7 @@ done
 e2e-ci section 11 covers preview apps through the gate (the key makes, deploys and removes
 `alpha-<branch>` only; attacks on other names and apps; revoke and rotate reach the previews; expiry
 sweep), section 12 the previews key, the creation race (fault point pv.checked) and a destroyed
-parent; e2e-data D11d-D11r the restore drill (counts, live data untouched, an app's index function
+parent; e2e-data M1-M15 migration safety (docs/COMMANDS.md "Migrations": the labelled and bounded pre-release backup, `release_backup = off`, a failed backup refusing the deploy and `--force`, `migrated` yes/no for PostgreSQL and SQLite, the rollback warning with the restore command); e2e-data D11d-D11r the restore drill (counts, live data untouched, an app's index function
 and `format()` in its dump never run as a superuser, a corrupt backup fails and alerts through the
 state, another app's database and an unmarked `tdrill_` database are never dropped, an archive
 larger than the free disk is refused, the schedule and `backup_drill=off`); e2e-cli PV1-PV10 the preview

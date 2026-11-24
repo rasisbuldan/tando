@@ -69,6 +69,7 @@ Release command (not static, not container)
   release         command run on the server before every switch
   release_shell   true: run it with sh -c (default false)
   release_timeout seconds, 1-3600 (default 300)
+  release_backup  on (default) | off: a backup of the database and data just before the release command
 Jobs
   job.<name>      <schedule> | <command>, like daily | node nightly.js or */15 * * * * | node sync.js
                   (cron or systemd calendar syntax, the server's time zone)

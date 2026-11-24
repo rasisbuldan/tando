@@ -96,13 +96,16 @@ when build_files lists them) instead of the working tree, and removes it after.
 Example: tando deploy
 
 @@ rollback
-flags: -a= -H=
+flags: -a= -H= --yes
 args: 0-2
-usage: tando rollback [app] [id] [-H host]
+usage: tando rollback [app] [id] [-H host] [--yes]
 Go back to the previous verified release, or to the release <id> (tando
 releases lists them). app and id may come in either order: a release id
 (20261113-171442) is the id, any other word the app. Undo it with
 tando rollback <the id you came from>.
+To a release older than one whose release command changed the database schema:
+a warning naming the pre-release backup and the restore command; --yes goes on
+(nothing is restored by itself; docs/COMMANDS.md, Migrations).
 Example: tando rollback 20261113-171103
 
 @@ releases

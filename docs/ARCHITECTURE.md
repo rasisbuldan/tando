@@ -126,7 +126,8 @@ appended.
                                      last_backup, applied (checksum of the last configure),
                                      git_<id> (where a release's code came from:
                                      <sha>:<uncommitted files>:<branch>, given by the client at
-                                     activate on stdin, line 3, and passed to the activation as
+                                     activate on stdin as a `prov=` line (lines 3 on are keyed, in no
+                                     order: `prov=`, `force=1`), and passed to the activation as
                                      TANDO_PROV; also the 14th field of history.tsv)
 /opt/tando/apps/<app>/activation     progress of the latest activation (phase, result, t_* seconds)
 /opt/tando/apps/<app>/upload         upload lease: token, who, started, id

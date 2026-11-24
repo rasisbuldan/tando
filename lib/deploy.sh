@@ -17,6 +17,7 @@ configure() {
     [ -n "$C_release" ] && printf 'release=%s\n' "$C_release"
     [ -n "$C_release_shell" ] && printf 'release_shell=%s\n' "$C_release_shell"
     [ -n "$C_release_timeout" ] && printf 'release_timeout=%s\n' "$C_release_timeout"
+    [ -n "$C_release_backup" ] && printf 'release_backup=%s\n' "$C_release_backup"
     printf 'health=%s\nmemory=%s\n' "${C_health:-/}" "${C_memory:-256M}"
     [ -n "$C_timeout" ] && printf 'health_timeout=%s\n' "$C_timeout"
     # soak: seconds a new release must stay up after going live (TANDO_SOAK: tests use a short one)
@@ -710,7 +711,8 @@ do_deploy() { # needs resolve 1; with UP=1 the app is created (after the build) 
   build_total=$(awk -v a="$BUILD_SECS" -v b="$stage_secs" 'BEGIN { printf "%.1f", a + b }')
   # the lease token, then the id of this deploy's settings (configure staged them on the server:
   # the activation runs with these, whatever another client configured meanwhile)
-  printf '%s\n%s\n%s\n' "$TOKEN" "${K_conf:-}" "${PROV:-}" > "$TMPD/token"
+  # (lines 3 on are keyed and in no set order: prov=<where the code came from>, force=1)
+  { printf '%s\n%s\n' "$TOKEN" "${K_conf:-}"; [ -z "${PROV:-}" ] || printf 'prov=%s\n' "$PROV"; [ -z "${FORCE:-}" ] || echo force=1; } > "$TMPD/token"
   # (an activate that failed before it wrote the release id leaves the lease: given back, so the
   # next deploy need not wait for it; one with the id keeps it, end leaves that alone)
   if ! agent_raw sudo activate "$APP" "$build_total" "$UPLOAD_SECS" < "$TMPD/token" > "$TMPD/act"; then
@@ -926,7 +928,7 @@ REF_D="" REF_ORIG="" REF_SHA="" REF_BRANCH=""
 PROV="" PROV_N=0
 
 # prov_detect: PROV = "<40 hex sha>:<changed files>:<branch>" when the app directory is in a git
-# repository with a commit (else ""), PROV_N = the files git status lists (changed, staged, or
+# repository with a commit (else ""), PROV_N = the files git status lists in the app directory (changed, staged, or
 # untracked and not ignored). With --ref: the ref's commit, no changes.
 prov_detect() {
   local sha br n
@@ -938,7 +940,7 @@ prov_detect() {
   [ ${#sha} = 40 ] || return 0
   br=$(git symbolic-ref --short -q HEAD 2> /dev/null) || br=""
   br=$(printf '%s' "$br" | tr -c 'A-Za-z0-9._/+\n-' '_' | cut -c1-100)
-  n=$(git status --porcelain 2> /dev/null | wc -l | tr -d ' ')
+  n=$(git status --porcelain -- . 2> /dev/null | wc -l | tr -d ' ')
   case $n in ""|*[!0-9]*) n=0;; esac
   [ "$n" -le 999999 ] || n=999999
   PROV="$sha:$n:${br:--}" PROV_N=$n
