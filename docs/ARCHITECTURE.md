@@ -330,9 +330,12 @@ app's own (it creates and owns what is in it, root never writes there) and Caddy
 ### Skew protection
 
 The shared directory is what keeps a page of an older release working after a switch (Vercel calls
-it skew protection); `skew_window` (tando.conf, default `24h`, `off`, at most `90d`) says for how
-long. A release's record (and so its files and its URL prefix) stays while the release is live,
-and for `skew_window` after it stopped being live, measured from that switch:
+it skew protection). A release's record (and so its files and its URL prefix) stays while the
+release is kept (`prune`: the last 5, current, last_good, the target), as before; `skew_window`
+(tando.conf, default `24h`, `off`, at most `90d`) only adds to that: a release that was pruned
+keeps its record for `skew_window` after it stopped being live, measured from that switch. The
+window never shortens what the kept releases give (a weekly deploy still serves last week's
+files: that release is kept), and `off` is the behaviour from before the window existed:
 
 - **Start of the window:** `switch_link`, which every switch goes through (a deploy, a rollback, a
   revert, a recovery), calls `assets_turn old new`: it writes `<old>.end` (now) and removes
@@ -345,17 +348,20 @@ and for `skew_window` after it stopped being live, measured from that switch:
   release is gone only when it has an `.end`), and the hard links in the shared directory hold its
   files' bytes after the release directory is gone. Nothing else of it (server code, `.env`,
   `.next/server`) was ever in the shared directory.
-- **End of the window:** `assets_expire` drops the records of releases that are not live whose
-  `.end` is older than the window, and of those past the newest `SKEW_MAX` (20) older releases
-  whatever the window (a CI that deploys every few minutes must not keep a day of builds);
+- **End of the window:** `assets_expire` looks only at records of releases that were pruned (no
+  directory under `releases/`): it drops those whose `.end` is older than the window, and those
+  past the newest `SKEW_MAX` (20) pruned releases whatever the window (a CI that deploys every few
+  minutes must not keep a day of builds). A kept release's record is never dropped by it;
   `assets_gc` then removes the files no record lists. It runs at every `prune` (the end of every
   deploy) and from `tando-assetsweep.timer` every 15 minutes (`tando-agent assets-sweep`: each
   app's lock taken without waiting, skipped when busy or in the middle of an operation), so a window
   ends within 15 minutes of its time also when no deploy comes. When the set of URL prefixes
   changed (the last record naming one went), the site is written again; otherwise Caddy's file
-  matcher, which looks at the disk on every request, needs no reload. `skew_window = off` ends
-  every older release's window at the deploy's prune: from then only the live release's files are
-  answered from the shared directory (as immutable), the rest by the app.
+  matcher, which looks at the disk on every request, needs no reload. `skew_window = off`: a
+  pruned release's files go at the prune that removes it, so the kept releases' files are what is
+  shared (the behaviour before the window). Why not "the live release's only": a rollback target
+  is one of the kept releases, and a page loaded before a rollback or a quick second deploy would
+  break for no gain in disk (the kept releases hold the same bytes anyway).
 - **What wins:** the live release. Its files are in the shared directory (hard links of its own), a
   name it shares with an older release with other bytes is replaced by its file when it goes live,
   and a path under a prefix that no record lists is the app's (a node app's proxy, a static site's

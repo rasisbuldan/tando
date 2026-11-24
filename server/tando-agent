@@ -13,8 +13,8 @@ AGENT=$R/bin/tando-agent
 PROXYD=/usr/lib/systemd/systemd-socket-proxyd   # (idle_stop: in the systemd package)
 LOGS=$R/bin/tando-logs      # logging helper (server/tando-logs)
 KEEP=5                 # releases kept per app (current and last_good are always kept too)
-SKEW_WINDOW=24h        # how long an older release's fingerprinted files stay reachable (skew_window =)
-SKEW_MAX=20            # older releases whose files are kept at most (the newest ones), whatever the window
+SKEW_WINDOW=24h        # how long a pruned release's fingerprinted files stay reachable (skew_window =)
+SKEW_MAX=20            # pruned releases whose files are kept at most (the newest ones), whatever the window
 SOAK=30                # seconds a new release must stay up after the check through Caddy (soak =)
 UPLOAD_TIMEOUT=900     # seconds after which an unfinished upload lease is considered abandoned
 SHM_SIZE=16M           # each unit's private /dev/shm (counted in its memory)
@@ -2192,9 +2192,10 @@ releases_by_seq() {
 #   $D/assetlog/<id>.cc     the Cache-Control the app itself sent for one of them, when it sent one
 #   $D/assetlog/<id>.end    when release <id> last stopped being the live one (assets_turn, at the
 #                           switch away from it): its skew window runs from then
-# Skew protection: a release's record stays for skew_window (default 24h; off: none) after it
-# stopped serving, whether its directory is still kept or was pruned (the hard links hold the
-# bytes), for at most the SKEW_MAX newest older releases; the live release's always stays. The
+# Skew protection: a release's record stays while the release is kept (prune: KEEP, current,
+# last_good, ...), and after it was pruned for skew_window (default 24h; off: none) from when it
+# stopped serving (the hard links hold the bytes), for at most the SKEW_MAX newest pruned releases.
+# The window only extends what the kept releases give, never shortens it. The
 # live release's files are its own: a name in both with other bytes is the newer file (above), and
 # a path the live release does not have is answered from an older release only when one lists it.
 # assets_expire drops the records whose window ended (at every prune, and every 15 minutes by
@@ -2366,10 +2367,12 @@ assets_window() {
   [[ $w == off ]] && { echo 0; return 0; }
   preview_secs "$w" || preview_secs "$SKEW_WINDOW"
 }
-# assets_expire: the records of the older releases whose skew window ended, and of those past the
-# SKEW_MAX newest, go (their .spec and .end with them; assets_gc then takes the files no record
-# lists). The live release's (the state's and the link's) never. A record without an .end (a kill
-# before assets_turn, a release from before skew_window) starts its window now. 0 when one went.
+# assets_expire: the window only adds to what prune keeps. A release still on disk (kept by prune:
+# KEEP, current, last_good, ...) keeps its record whatever its window. Of the pruned ones, the
+# records whose skew window ended, and those past the SKEW_MAX newest pruned ones, go (their .spec
+# and .end with them; assets_gc then takes the files no record lists). A pruned record without an
+# .end (a kill before assets_turn) starts its window now. skew_window = off: a pruned release's
+# files go at once, as before skew_window existed. 0 when one went.
 assets_expire() {
   local L=$D/assetlog f i e t w n=0 rc=1 cur=${S[current]:-} lk
   [[ -d $L ]] || return 1
@@ -2379,7 +2382,7 @@ assets_expire() {
     if ((n > SKEW_MAX || e + w <= t)); then rm -f "$L/$i" "$L/$i.spec" "$L/$i.end"; rc=0; fi
   done < <(for f in "$L"/*; do
              i=${f##*/}
-             [[ $i != *.* ]] && valid_id "$i" && [[ -f $f && $i != "$cur" && $i != "$lk" ]] || continue
+             [[ $i != *.* ]] && valid_id "$i" && [[ -f $f && $i != "$cur" && $i != "$lk" && ! -d $D/releases/$i ]] || continue
              [[ -f $L/$i.end ]] || printf '%s\n' "$t" > "$L/$i.end"
              e=$(< "$L/$i.end"); [[ $e =~ ^[0-9]{1,11}$ ]] || e=$t
              echo "$e $i"

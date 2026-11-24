@@ -9,8 +9,10 @@
 #   (3) traversal (../, encoded) never reaches anything outside the shared directory, and the
 #       shared directory holds nothing but the releases' asset trees; one app's site never answers
 #       another app's files
-#   (4) the window ends: the sweep (tando-assetsweep.timer) after the window, and skew_window = off
-#       at the next deploy; a URL prefix no record names leaves the site; at most 20 older releases
+#   (4) the window only extends what prune keeps: a pruned release's files stay for the window, a
+#       kept release's whatever its window; the sweep (tando-assetsweep.timer) ends a pruned one's
+#       window, skew_window = off is the old behaviour (kept releases only); a URL prefix no record
+#       names leaves the site; at most 20 pruned releases
 #   (5) after a rollback the newer release's files stay reachable
 #
 #   test/e2e-skew.sh [--reset]     --reset: recreate the server first (only one this suite owns)
@@ -145,39 +147,55 @@ SV3=$(cur sv)
 check "K21 v3 (files under _astro/) is live; v1's and v2's files still answer, the site mounts both prefixes (rc=$rc)" \
   eval '[ $rc = 0 ] && [ "$(code sv /_astro/index-R3abcdef.js)" = 200 ] && [ "$(code sv /assets/index-R1abcdef.js)" = 200 ] &&
         [ "$(code sv /assets/index-R2abcdef.js)" = 200 ] && site_has "/assets/*" && site_has "/_astro/*"'
+# five more releases: prune (5 kept) takes v1 and v2 away; their window keeps their files
+for n in 4 5 6 7 8; do sv_release $n _astro; deploy sv "$SV" sv$n; [ $n = 4 ] && SV4=$(cur sv); done
+check "K21b v1 and v2 were pruned (kept: $("$SSH" "sudo ls /opt/tando/apps/sv/releases | wc -l" | tr -d ' ')), but in their window their files answer with their bytes" \
+  eval '! "$SSH" "sudo test -e /opt/tando/apps/sv/releases/$SV1 -o -e /opt/tando/apps/sv/releases/$SV2" &&
+        [ "$(body sv /assets/index-R1abcdef.js | cksum)" = "$(cksum < "$E/sv1.js")" ] &&
+        [ "$(body sv /assets/index-R2abcdef.js | cksum)" = "$(cksum < "$E/sv2.js")" ]'
 out=$("$SSH" "sudo $AGENT assets-sweep" 2>&1)
 check "K22 a sweep inside the window changes nothing ($(echo $out))" \
   eval '[ "$(code sv /assets/index-R1abcdef.js)" = 200 ] && echo "$out" | grep -q "^failed=0"'
-# the window of v1 and v2 ended two days ago
+# the window only adds: a release still kept whose window ended two days ago keeps its files
+"$SSH" "sudo sh -c 'echo \$((\$(date +%s) - 172800)) > /opt/tando/apps/sv/assetlog/$SV4.end'"
+"$SSH" "sudo $AGENT assets-sweep" > /dev/null 2>&1
+check "K22b a kept release ($SV4, v4) older than the window still serves its files after a sweep" \
+  eval '"$SSH" "sudo test -d /opt/tando/apps/sv/releases/$SV4 -a -f /opt/tando/apps/sv/assetlog/$SV4" &&
+        [ "$(body sv /_astro/index-R4abcdef.js | cksum)" = "$(cksum < "$E/sv4.js")" ]'
+# the window of the pruned v1 and v2 ended two days ago
 "$SSH" "sudo sh -c 'for i in $SV1 $SV2; do echo \$((\$(date +%s) - 172800)) > /opt/tando/apps/sv/assetlog/\$i.end; done'"
 out=$("$SSH" "sudo $AGENT assets-sweep" 2>&1)
-check "K23 after the window the sweep takes v1's and v2's files: 404, gone from disk ($(echo $out))" \
+check "K23 after the window the sweep takes the pruned v1's and v2's files: 404, gone from disk ($(echo $out))" \
   eval '[ "$(code sv /assets/index-R1abcdef.js)" = 404 ] && [ "$(code sv /assets/index-R2abcdef.js)" = 404 ] &&
         [ -z "$("$SSH" "sudo find /opt/tando/apps/sv/assets /opt/tando/apps/sv/assetlog -name \*R1abcdef\* -o -name \*R2abcdef\* -o -name $SV1\* -o -name $SV2\*")" ] &&
-        [ "$(body sv /_astro/index-R3abcdef.js | cksum)" = "$(cksum < "$E/sv3.js")" ]'
+        [ "$(body sv /_astro/index-R8abcdef.js | cksum)" = "$(cksum < "$E/sv8.js")" ]'
 check "K23b the /assets/ prefix no record names left the site; Caddy accepts it" \
   eval '! site_has "/assets/*" && site_has "/_astro/*" &&
         "$SSH" "sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile" > /dev/null 2>&1'
-check "K23c the releases themselves are still kept (the window is not the releases' keep)" \
-  "$SSH" "sudo test -d /opt/tando/apps/sv/releases/$SV1 -a -d /opt/tando/apps/sv/releases/$SV2"
-# at most SKEW_MAX (20) older releases: 22 records of releases that are gone, ended 1 to 22 s ago
+# at most SKEW_MAX (20) pruned releases: 22 records of releases that are gone, ended 1 to 22 s ago
 "$SSH" "sudo bash -c 'L=/opt/tando/apps/sv/assetlog; t=\$(date +%s); for k in \$(seq 1 22); do i=20200101-0000\$(printf %02d \$k);
   : > \$L/\$i; cp \$L/$SV3.spec \$L/\$i.spec; echo \$((t - k)) > \$L/\$i.end; done'"
 "$SSH" "sudo $AGENT assets-sweep" > /dev/null 2>&1
 left=$("$SSH" "sudo ls /opt/tando/apps/sv/assetlog | grep -c '^20200101-0000[0-9]*\$'")
-check "K24 at most 20 older releases keep their files: of 22 the two oldest go ($left left)" \
+nkept=$("$SSH" "sudo ls /opt/tando/apps/sv/releases | wc -l" | tr -d ' ')
+nrec=$("$SSH" "sudo ls /opt/tando/apps/sv/assetlog | grep -v '[.]' | grep -vc '^20200101-'")
+check "K24 at most 20 pruned releases keep their files: of 22 the two oldest go ($left left); the kept releases' records all stay ($nrec of $nkept)" \
   eval '[ "$left" = 20 ] && ! "$SSH" "sudo test -e /opt/tando/apps/sv/assetlog/20200101-000021 -o -e /opt/tando/apps/sv/assetlog/20200101-000022" &&
-        "$SSH" "sudo test -f /opt/tando/apps/sv/assetlog/$SV3 -a ! -e /opt/tando/apps/sv/assetlog/$SV3.end"'
+        [ "$nrec" = "$nkept" ]'
 "$SSH" "sudo rm -f /opt/tando/apps/sv/assetlog/20200101-*"
-# skew_window = off: the next deploy's prune ends every older release's window
+# skew_window = off: the behaviour from before the window: the kept releases' files, no more
 nx_release 3; printf 'skew_window = off\n' >> "$NX/tando.conf"; deploy nx "$NX" nx3; rc=$?
+check "K25 skew_window = off never shortens: v1 and v2 are still kept, their files still answer (rc=$rc)" \
+  eval '[ $rc = 0 ] && [ "$(body nx /_next/static/chunks/main-N1c0ffee.js)" = "nx chunk of release 1" ] &&
+        [ "$(body nx /_next/static/build2x/_buildManifest.js)" = "self.__BUILD_MANIFEST={b:2}" ] &&
+        [ "$(body nx /_next/static/chunks/main-N3c0ffee.js)" = "nx chunk of release 3" ] && immutable nx /_next/static/chunks/main-N3c0ffee.js'
+for n in 4 5 6 7 8; do nx_release $n; deploy nx "$NX" nx$n; done
 # (the deploy's prune runs after its result is written: the client may be back before it ends)
 nx_old_gone() { [ "$(body nx /_next/static/chunks/main-N1c0ffee.js)" = next-404 ] && [ "$(body nx /_next/static/build2x/_buildManifest.js)" = next-404 ]; }
-check "K25 skew_window = off: after the deploy v1's and v2's files are the app's (404 from v3), v3's answer (rc=$rc)" \
-  eval '[ $rc = 0 ] && t_until 30 nx_old_gone &&
-        [ "$(body nx /_next/static/chunks/main-N3c0ffee.js)" = "nx chunk of release 3" ] && immutable nx /_next/static/chunks/main-N3c0ffee.js'
-check "K25b only the live release's record is left" \
-  eval '[ "$("$SSH" "sudo ls /opt/tando/apps/nx/assetlog | grep -vc \"[.]\"")" = 1 ]'
+nx_recs() { [ "$("$SSH" "sudo ls /opt/tando/apps/nx/assetlog | grep -v '[.]' | sort")" = "$("$SSH" "sudo ls /opt/tando/apps/nx/releases | sort")" ]; }
+check "K25b skew_window = off: once v1 and v2 are pruned their files are the app's (404 from v8), v8's answer" \
+  eval 't_until 30 nx_old_gone && [ "$(body nx /_next/static/chunks/main-N8c0ffee.js)" = "nx chunk of release 8" ]'
+check "K25c skew_window = off: the records are exactly the kept releases'" t_until 30 nx_recs
 # a bad value: the client refuses it before anything is built
 printf 'app = sv\nrecipe = static\nskew_window = 2x\n' > "$E/bad.conf"
 out=$(cd "$SV" && cp tando.conf "$E/good.conf" && cp "$E/bad.conf" tando.conf && "$R" deploy 2>&1; cp "$E/good.conf" tando.conf)
